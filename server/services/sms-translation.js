@@ -110,7 +110,7 @@ async function translateInbound(inbound) {
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
   const code = languageCodeOf(languageCode);
-  const name = code && code !== 'en' ? languageNameOf(code) : null;
+  const name = code && !code.startsWith('en') ? languageNameOf(code) : null;
   if (!name) return { ok: false, reason: 'language_not_supported' };
   return { ok: true, isEnglish: false, english, language: name, languageCode: code, model: out.model };
 }
@@ -151,13 +151,25 @@ const LANGUAGE_DISPLAY = new Intl.DisplayNames(['en'], { type: 'language', fallb
 function languageNameOf(code) {
   let name;
   try { name = LANGUAGE_DISPLAY.of(code); } catch { return null; }
-  return typeof name === 'string' && /^[A-Za-z][A-Za-z ()'-]{1,40}$/.test(name) && name.toLowerCase() !== code ? name : null;
+  return typeof name === 'string' && /^[A-Za-z][A-Za-z ()'-]{1,40}$/.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
 }
 
-// "es", "es-MX", "PT_br" -> "es" / "pt"; anything else -> null
+// "es", "es-MX", "PT_br" -> "es" / "pt"; a script subtag is kept because it
+// changes the written language ("zh-Hant" stays "zh-Hant", never "zh");
+// anything else -> null
 function languageCodeOf(value) {
-  const m = /^([a-z]{2,3})(?:[-_][a-z0-9]+)?$/i.exec(String(value || '').trim());
-  return m ? m[1].toLowerCase() : null;
+  const m = /^([a-z]{2,3})(?:[-_]([a-z]{4}))?(?:[-_][a-z0-9]{2,8})*$/i.exec(String(value || '').trim());
+  if (!m) return null;
+  return m[2] ? `${m[1].toLowerCase()}-${m[2][0].toUpperCase()}${m[2].slice(1).toLowerCase()}` : m[1].toLowerCase();
+}
+
+// The written language matches when the base language does and, when the
+// customer's text named a script, the reply is in that same script.
+function sameWrittenLanguage(asked, written) {
+  if (!asked || !written) return false;
+  const [askedBase, askedScript] = asked.split('-');
+  const [writtenBase, writtenScript] = written.split('-');
+  return askedBase === writtenBase && (!askedScript || askedScript === writtenScript);
 }
 
 async function meaningCheck({ englishReply, backTranslation }) {
@@ -208,7 +220,8 @@ function trimZeros(n) {
 
 // A phone number is one value, its groups in order ("941-555-1234" never
 // matches "555-941-1234"); spacing and punctuation may differ.
-const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
+// An international number ("+44 20 7946 0958") is one value the same way.
+const PHONE_RE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}\b|(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
 
 const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g;
 
@@ -366,15 +379,16 @@ function lintFailures(text, context = null) {
   }).failures.map((f) => f.rule);
 }
 
-// The checks draftShadowReply runs on a converged draft before it may leave
-// the shadow lane: a copied redaction placeholder, an amount the billing facts
-// do not hold, and the comms-lint verdict (same options). Banned product-safety
-// copy is the drafter's own loop's (validateComplianceCopy, LABEL FACTS aware),
-// so it is not re-judged here without that provenance.
+// The checks draftShadowReply WITHHOLDS a converged draft on: a copied
+// redaction placeholder and an amount the billing facts do not hold. Its
+// comms-lint verdict only demotes a draft to a person's card (flags shown), so
+// the trial records it beside the answer (checks.english_lint) rather than
+// holding: an approved LABEL FACTS timing trips the re-entry rule there too.
+// Banned product-safety copy is the drafter's own LABEL FACTS-aware loop's.
 function postDraftFault(englishReply, context) {
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
   if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
-  return lintFailures(englishReply, context).length ? 'reply_failed_comms_lint' : null;
+  return null;
 }
 
 // What the translation ADDED, read back in English: banned product-safety copy
@@ -382,11 +396,12 @@ function postDraftFault(englishReply, context) {
 // the translator wrote in). Judged as a difference, so an approved LABEL FACTS
 // timing the English carried is never held for being carried over. The SMS
 // length rule is the translated text's own (checked above), not its read-back's.
-function translationAddedFault(englishReply, backTranslation) {
+function translationAddedFault(englishReply, backTranslation, context) {
   const { hasBannedCustomerCopy } = require('./sms-shadow-drafter');
   if (hasBannedCustomerCopy(backTranslation) && !hasBannedCustomerCopy(englishReply)) return 'banned_copy';
-  const before = new Set(lintFailures(englishReply));
-  const added = lintFailures(backTranslation).filter((r) => r !== 'sms-segment-limit' && !before.has(r));
+  // the customer's billing lane arms the plan-total rule (a translation adding "per month" to a balance)
+  const before = new Set(lintFailures(englishReply, context));
+  const added = lintFailures(backTranslation, context).filter((r) => r !== 'sms-segment-limit' && !before.has(r));
   return added.length ? 'failed_comms_lint' : null;
 }
 
@@ -429,18 +444,18 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
     facts_block: draft?.factsBlock || null,
     ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
   });
-  const checks = { inbound_parity: inboundParity, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows };
+  const checks = { inbound_parity: inboundParity, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
   if (!draft?.parsed) return { stop: 'draft_unparseable', fields, checks };
   if (!englishReply) return { skip: 'no_reply_needed', fields, checks };
   if (!draft.converged) return { stop: 'english_checks_not_passed', fields, checks };
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
   const fault = postDraftFault(englishReply, liveContext);
   if (fault) return { stop: fault, fields, checks };
-  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, fields, checks };
+  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks };
 }
 
 // Steps 3-4: translate, then check the exact stored text.
-async function translateAndCheck({ englishReply, language, languageCode }) {
+async function translateAndCheck({ englishReply, language, languageCode, context }) {
   const translated = await translateReply({ englishReply, language });
   if (!translated.ok) return { stop: `reply_translation_failed:${translated.reason}` };
   const fields = { reply_translated: translated.text };
@@ -458,8 +473,8 @@ async function translateAndCheck({ englishReply, language, languageCode }) {
   // every model input is compared whole, never clipped (the reply and its translation are capped above)
   if (back.text.length > 2 * MAX_TEXT) return { stop: 'back_translation_too_long', fields, checks: { token_parity: parity } };
   // the translation must be in the customer's language, not merely "not English" (Spanish asked, Portuguese written)
-  if (!languageCode || back.languageCode !== languageCode) return { stop: 'translation_in_other_language', fields, checks: { token_parity: parity, language: { asked: languageCode, written: back.languageCode } } };
-  const backFault = translationAddedFault(englishReply, back.text);
+  if (!sameWrittenLanguage(languageCode, back.languageCode)) return { stop: 'translation_in_other_language', fields, checks: { token_parity: parity, language: { asked: languageCode, written: back.languageCode } } };
+  const backFault = translationAddedFault(englishReply, back.text, context);
   if (backFault) return { stop: `back_translation_${backFault}`, fields, checks: { token_parity: parity } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
@@ -492,7 +507,7 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     if (en.english) return null;
     if (en.skip) return await save('skipped', en.skip, en.fields, en.checks);
     if (en.stop) return await save('held', en.stop, en.fields, en.checks);
-    const tr = await translateAndCheck({ englishReply: en.englishReply, language: en.language, languageCode: en.languageCode });
+    const tr = await translateAndCheck({ englishReply: en.englishReply, language: en.language, languageCode: en.languageCode, context: en.context });
     const fields = { ...en.fields, ...tr.fields };
     const checks = { ...en.checks, ...tr.checks };
     if (tr.stop) return await save('held', tr.stop, fields, checks);

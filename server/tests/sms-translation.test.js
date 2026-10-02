@@ -104,6 +104,11 @@ describe('tokenParity', () => {
     expect(tokenParity('We have 123 Main St Apt 4 on file.', 'Tenemos registrado 123 Main St, Apto 4.')).toMatchObject({ ok: true });
   });
 
+  test('an international phone number is one ordered value too', () => {
+    expect(tokenParity('Call +44 20 7946 0958.', 'Llame al +44 7946 20 0958.')).toMatchObject({ ok: false });
+    expect(tokenParity('Call +44 20 7946 0958.', 'Llame al +44 20 7946 0958.')).toMatchObject({ ok: true });
+  });
+
   test('links and emails must come through exactly', () => {
     const en = 'Pick a time here: https://portal.example.com/l/abc12 or email contact@example.com.';
     expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc12 o escriba a contact@example.com.').ok).toBe(true);
@@ -259,6 +264,22 @@ describe('runTranslationTrial', () => {
     mockDraft.mockResolvedValueOnce({ parsed: { reply: withLabel }, converged: true, passes: 1 });
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row.hold_reason).not.toBe('back_translation_banned_copy');
+  });
+
+  test('a Traditional Chinese text answered in Simplified Chinese is held; the script reaches the translator', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language: 'Chinese', language_code: 'zh-Hant' }, translated: '謝謝！您的技術人員會在到達前約30分鐘傳訊息。下次服務：10月14日星期二下午2點。', backLang: 'zh-Hans' });
+    const row = await runTranslationTrial({ inboundMessage: '請問狗狗什麼時候可以出去？', customer, smsLogId: 's1' });
+    expect(mockDispatch.mock.calls.map(([, p]) => p.system).join('\n')).toContain('into Traditional Chinese');
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'translation_in_other_language' });
+  });
+
+  test('an English lint failure is recorded beside the answer, not a hold (live demotes it to a card)', async () => {
+    const withTime = 'Thanks! Pets can go back out in 2 hours. Next visit: Tuesday, Oct 14 at 2 PM.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Las mascotas pueden salir en 2 horas. Próxima visita: martes 14 de octubre, 14 h.', back: withTime });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: withTime }, converged: true, passes: 1 });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row.hold_reason).not.toBe('reply_failed_comms_lint');
+    expect(Array.isArray(row.checks.english_lint)).toBe(true);
   });
 
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {
