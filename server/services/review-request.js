@@ -6970,23 +6970,32 @@ const ReviewService = {
       }
       // An overdue bill, or an overdue-payment reminder in the last 3 days:
       // the ask waits for it to clear, for up to PAYMENT_HOLD_MAX_WAIT_MS
-      // from when this step was first held, then the step is dropped.
+      // from when this step was first held (payment_hold_step / _since,
+      // which no other deferral rewrites), then the step is dropped, even if
+      // the hold cleared in between: past its window it would go out late.
       const payment = await Holds.paymentHold(seq.customer_id);
-      if (payment) {
-        const prior = parseDecision(seq.decision);
-        const sameHold = prior?.reason === "payment_hold" && prior.detail?.step === seq.current_step && prior.detail?.heldSince;
-        const heldSince = sameHold ? new Date(prior.detail.heldSince) : new Date();
+      const heldBefore = seq.payment_hold_step === seq.current_step && seq.payment_hold_since ? new Date(seq.payment_hold_since) : null;
+      const heldSince = heldBefore || (payment ? new Date() : null);
+      if (heldSince) {
         const dropAt = new Date(heldSince.getTime() + PAYMENT_HOLD_MAX_WAIT_MS);
-        const detail = { step: seq.current_step, hold: payment.reason, heldSince: heldSince.toISOString(), ...(payment.invoiceId ? { invoiceId: payment.invoiceId } : {}) };
+        const detail = { step: seq.current_step, hold: payment ? payment.reason : "cleared_after_window", heldSince: heldSince.toISOString(), ...(payment?.invoiceId ? { invoiceId: payment.invoiceId } : {}) };
         if (Date.now() >= dropAt.getTime()) return skipStep("ask_dropped_payment_hold", detail);
-        let retryAt = payment.until ? new Date(payment.until)
-          : new Date(Date.now() + (payment.reason === "payment_lookup_unavailable" ? 30 * 60 * 1000 : DAY_MS));
-        if (stepForSpacing.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
-        if (retryAt > dropAt) retryAt = dropAt;
-        await db("review_sequences")
-          .where({ id: seq.id, status: "active" })
-          .update({ next_run_at: retryAt, decision: sequenceDecision({ reason: "payment_hold", nextEvalAt: retryAt, detail }), updated_at: new Date() });
-        return { ran: false, deferred: true, reason: "payment_hold", retryAt };
+        if (payment) {
+          let retryAt = payment.until ? new Date(payment.until)
+            : new Date(Date.now() + (payment.reason === "payment_lookup_unavailable" ? 30 * 60 * 1000 : DAY_MS));
+          if (stepForSpacing.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
+          if (retryAt > dropAt) retryAt = dropAt;
+          await db("review_sequences")
+            .where({ id: seq.id, status: "active" })
+            .update({
+              next_run_at: retryAt,
+              payment_hold_step: seq.current_step,
+              payment_hold_since: heldSince,
+              decision: sequenceDecision({ reason: "payment_hold", nextEvalAt: retryAt, detail }),
+              updated_at: new Date(),
+            });
+          return { ran: false, deferred: true, reason: "payment_hold", retryAt };
+        }
       }
     }
 

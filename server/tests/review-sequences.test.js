@@ -7795,13 +7795,34 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     const retryIn = new Date(seqRow(mock).next_run_at).getTime() - Date.now();
     expect(retryIn).toBeGreaterThan(23 * 3600000);
     expect(retryIn).toBeLessThanOrEqual(3 * 86400000);
-    // A later run keeps the first hold time; once it is three days old the step is dropped.
-    seqRow(mock).decision = JSON.stringify({ ...held, detail: { ...held.detail, heldSince: new Date(Date.now() - 3 * 86400000 - 60000).toISOString() } });
+    // The hold's start rides its own columns, not the decision another deferral rewrites.
+    expect(seqRow(mock).payment_hold_step).toBe(1);
+    const since = new Date(seqRow(mock).payment_hold_since).getTime();
+    seqRow(mock).decision = JSON.stringify({ reason: 'spacing_lookup_unavailable' });
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(new Date(seqRow(mock).payment_hold_since).getTime()).toBe(since);
+    // Once the first hold is three days old the step is dropped.
+    seqRow(mock).payment_hold_since = new Date(Date.now() - 3 * 86400000 - 60000);
     const later = await ReviewService._runSequenceStep('seq-hold');
     expect(later).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
     expect(decisionOf(mock)).toMatchObject({ reason: 'ask_dropped_payment_hold', detail: { step: 1, hold: 'overdue_invoice' } });
+  });
+
+  test('a step held past its window is dropped even when the bill was paid in between (it would go out late)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const mock = book({ payment_hold_step: 1, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisionOf(mock)).toMatchObject({ detail: { hold: 'cleared_after_window' } });
+    // A hold recorded for an EARLIER step never touches this one.
+    const other = book({ payment_hold_step: 0, payment_hold_since: new Date(Date.now() - 6 * 86400000) });
+    db.mockImplementation(other);
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
   test('a payment reminder in the last three days holds the ask until three days after that reminder', async () => {

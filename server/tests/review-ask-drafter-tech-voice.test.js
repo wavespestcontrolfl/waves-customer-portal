@@ -64,7 +64,7 @@ function builder(table) {
     orderBy() { return q; },
     limit() { return q; },
     modify(fn) { fn(q); return q; },
-    async select() { return rows; },
+    async select() { if (rows instanceof Error) throw rows; return rows; },
     async first() { return rows[0]; },
   };
   q.where = jest.fn((arg) => { if (typeof arg === 'function') arg(q); return q; });
@@ -164,6 +164,13 @@ describe('draftTechVoice', () => {
     mockRepeatCheck.mockResolvedValueOnce({ ok: false });
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
+  });
+
+  test('an unreadable touch history is not "nothing sent before": no draft, the fixed template sends', async () => {
+    mockTables.review_requests = new Error('db down');
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
+    expect(mockRepeatCheck).not.toHaveBeenCalled();
   });
 
   test('the first touch has nothing to repeat: no repeat check is asked', async () => {

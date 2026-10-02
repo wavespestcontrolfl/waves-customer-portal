@@ -542,8 +542,10 @@ async function priorSequenceTouches(sequenceId, sequenceStep) {
       return { step: r.sequence_step, channel: r.channel, body: String(body).slice(0, 600) };
     }).filter((t) => t.body);
   } catch (err) {
+    // Unread history is not "nothing sent before": the repeat check cannot
+    // run, so the draft is abandoned (the caller's catch sends the template).
     logger.warn(`[review-drafter] tech voice: prior touch read failed (sequenceId=${sequenceId} errType=${err?.name || "Error"})`);
-    return [];
+    throw err;
   }
 }
 
