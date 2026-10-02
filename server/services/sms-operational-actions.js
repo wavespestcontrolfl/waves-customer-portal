@@ -757,11 +757,22 @@ const RESOLVED_EMAIL_CUSTOMER_ID_SQL = 'COALESCE(e.customer_id, cc.email_custome
 // sourced branch, kept to compatible column names) — an SMS row's output
 // shape is byte-identical to before. `channel` distinguishes the two for a
 // reader (e.g. the customer-profile panel's own label).
-async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date() }) {
+// `channels` (optional, additive): read only these sources ('sms' / 'email') so a
+// caller that renders one channel's rows is not bounded by the other's.
+// `lane` (optional, additive): 'request' = asks the customer is waiting on
+// (sms_context.basis 'request'); 'promise' = Waves-owned promises (party waves,
+// any other basis) — so a caller rendering one lane is not bounded by the other.
+const SMS_COMMITMENT_LANES = {
+  request: (b) => b.whereRaw("cc.sms_context->>'basis' = 'request'"),
+  promise: (b) => b.where('cc.party', 'waves').whereRaw("COALESCE(cc.sms_context->>'basis', '') <> 'request'"),
+};
+async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date(), channels = null, lane = null }) {
+  const byLane = (b) => { if (SMS_COMMITMENT_LANES[lane]) SMS_COMMITMENT_LANES[lane](b); };
   const smsRows = conn('call_commitments as cc')
     .join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id')
     .where({ 's.customer_id': customerId, 'cc.status': 'open' }).whereNull('c.deleted_at')
+    .modify(byLane)
     .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       'cc.sms_log_id', conn.raw('NULL::uuid as email_id'), 's.created_at as sms_started_at',
       's.customer_id', conn.raw("'sms' as channel"));
@@ -771,10 +782,14 @@ async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, no
     .whereExists(function availableCustomer() {
       this.select(1).from('customers as c').whereRaw(`c.id = ${RESOLVED_EMAIL_CUSTOMER_ID_SQL}`).whereNull('c.deleted_at');
     })
+    .modify(byLane)
     .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       conn.raw('NULL::uuid as sms_log_id'), 'cc.email_id', 'e.received_at as sms_started_at',
       conn.raw('?::uuid as customer_id', [customerId]), conn.raw("'email' as channel"));
-  const rows = await conn.unionAll([smsRows, emailRows], true)
+  const wanted = Array.isArray(channels) ? channels : ['sms', 'email'];
+  const parts = [wanted.includes('sms') && smsRows, wanted.includes('email') && emailRows].filter(Boolean);
+  if (!parts.length) return [];
+  const rows = await conn.unionAll(parts, true)
     .orderByRaw('due_at ASC NULLS LAST, sms_started_at ASC, id ASC')
     .limit(Math.max(1, Math.min(201, Number(limit) || 20)))
     .offset(Math.max(0, Number(offset) || 0));
