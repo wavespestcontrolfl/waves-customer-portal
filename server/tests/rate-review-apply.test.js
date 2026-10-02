@@ -928,6 +928,22 @@ describe('applyDueRateChanges — monthly_membership', () => {
     expect(mockDb.store.customer_plan_rates).toEqual([expect.objectContaining({ family_key: 'unattributed', monthly_rate: 36.33, source: 'annual_review' })]);
     expect(customer1().monthly_rate).toBe(36.33);
   });
+  test('priced off the scalar, then the ledger split it across lines before the apply (pest + lawn under the same total) → held, nothing written', async () => {
+    const book = monthlyBook({ source: 'monthly_rate', ledger: [
+      { id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '20.00', source: 'estimate_accept' },
+      { id: 'cpr-2', customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '13.33', source: 'estimate_accept' },
+    ] });
+    const out = await runApply(book, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(out.holds.map((h) => h.reason)).toEqual(['rate_moved_since_notice']);
+    expect(mockDb.store.customer_plan_rates.map((r) => Number(r.monthly_rate))).toEqual([20, 13.33]);
+    expect(customer1().monthly_rate).toBe('33.33');
+  });
+  test('priced off the scalar and the family slice still carries the whole scalar → applied', async () => {
+    const out = await runApply(monthlyBook({ source: 'monthly_rate' }), JAN);
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+    expect(customer1().monthly_rate).toBe(36.33);
+  });
   test('legacy account with an EMPTY ledger: the blind-scalar-writer reset seeds one unattributed slice equal to the new scalar', async () => {
     const book = monthlyBook({ source: 'monthly_rate', ledger: [] });
     const out = await runApply(book, JAN);

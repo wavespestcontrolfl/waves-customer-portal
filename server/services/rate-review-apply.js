@@ -752,11 +752,25 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
 
 async function applyMonthly(trx, ctx) {
   const { notice, customer } = ctx;
-  const { family } = await loadFamilySlices(trx, customer.id, notice.family_key);
+  const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
   const source = ctx.metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
   const currentCents = source === 'ledger_slice' ? cents(sumSlices(family)) : cents(customer.monthly_rate);
   if (currentCents !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { currentCents, source });
+  // A notice ranked from the whole scalar named the account's ONE plan line
+  // at that rate. If the ledger has since split the scalar across lines
+  // (pest $60 + lawn $40 under an unchanged $100), the family's own slice
+  // is no longer the noticed rate — moving it would raise a different
+  // amount than the letter quoted. Hold unless this family's slice (or a
+  // lone unattributed slice) still carries the whole scalar.
+  if (source !== 'ledger_slice' && all.length > 0) {
+    const familyKeys = new Set(family.map((r) => r.family_key));
+    const outside = all.filter((r) => !familyKeys.has(r.family_key) && r.family_key !== PlanRateLedger.UNATTRIBUTED);
+    const carried = family.length > 0 ? cents(sumSlices(family)) : cents(sumSlices(all));
+    if (outside.length > 0 || carried !== currentCents) {
+      throw hold('rate_moved_since_notice', { currentCents, source, ledger: all.map((r) => r.family_key) });
+    }
+  }
   const deltaMonthly = dollars(Number(notice.noticed_new_cents) - Number(notice.noticed_current_cents));
   const moved = await moveMonthlySlice(trx, { customer, familyKey: notice.family_key, deltaMonthly, requireSlice: source === 'ledger_slice' });
   return { lane: LANE_MONTHLY, before: { monthly_rate: moved.oldScalar }, after: { monthly_rate: moved.newScalar }, deltaMonthly };
