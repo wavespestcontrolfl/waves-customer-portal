@@ -264,12 +264,16 @@ async function loadQueueReasons() {
   }
 }
 
+// Returns the attention reasons plus the feed's own `unavailableSources` (a
+// backing table missing mid-migration leaves the feed available but partial;
+// agent-activity.js folds that into the field instead of failing), so a
+// consumer can say the Activity half of "needs attention" is incomplete.
 async function loadActivityReasons(windowHours) {
-  if (!gateEnvValue('GATE_AGENT_ACTIVITY')) return [];
+  if (!gateEnvValue('GATE_AGENT_ACTIVITY')) return { reasons: [], unavailableSources: [] };
   try {
     const { getActivity } = require('../agent-activity');
     const feed = await getActivity({ windowHours });
-    if (!feed.available) return [];
+    if (!feed.available) return { reasons: [], unavailableSources: [] };
     const counts = new Map();
     for (const item of feed.items || []) {
       const laneId = SOURCE_LANE.activity[item.kind];
@@ -277,7 +281,7 @@ async function loadActivityReasons(windowHours) {
       const key = `${laneId}:${item.status}`;
       counts.set(key, (counts.get(key) || 0) + 1);
     }
-    return [...counts].map(([key, n]) => {
+    const reasons = [...counts].map(([key, n]) => {
       const [laneId, status] = key.split(':');
       return {
         laneId,
@@ -286,9 +290,10 @@ async function loadActivityReasons(windowHours) {
         detail: `${n} ${status} run${n === 1 ? '' : 's'} in the Activity feed`,
       };
     });
+    return { reasons, unavailableSources: Array.isArray(feed.unavailableSources) ? feed.unavailableSources : [] };
   } catch (err) {
     logger.warn(`[agent-control] hub read: activity unavailable: ${err.message}`);
-    return [];
+    return { reasons: [], unavailableSources: [] };
   }
 }
 
@@ -515,14 +520,21 @@ function basisFor(window, cost = null) {
 }
 
 async function loadHub(window, now) {
-  const [ledger, queueReasons, activityReasons, cost] = await Promise.all([
+  const [ledger, queueReasons, activity, cost] = await Promise.all([
     loadLedger(window, now),
     loadQueueReasons(),
     loadActivityReasons(window.key === '30d' ? 168 : 24),
     loadCost(window),
   ]);
   const { lanes } = modelSwitchboard.getSwitchboard();
-  return { ledger, cost, laneRows: buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activityReasons], cost }) };
+  return {
+    ledger,
+    cost,
+    laneRows: buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activity.reasons], cost }),
+    // Activity tables the feed could not read (partial migration): the
+    // Activity half of the attention reasons is incomplete for these.
+    activityUnavailableSources: activity.unavailableSources,
+  };
 }
 
 /**
@@ -565,6 +577,8 @@ module.exports = {
   readAreas,
   readLanes,
   readGateOn,
+  // One snapshot for a consumer that renders both views (ops/agents/agents-report.js).
+  loadHub,
   // exported for tests
   resolveWindow,
   buildLanes,

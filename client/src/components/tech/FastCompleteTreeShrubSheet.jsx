@@ -91,6 +91,26 @@ const PHOTO_SLOTS = [
   { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, 6 to 12 inches away; top and underside if there are insects or sooty mold.' },
 ];
 const MAX_PHOTOS = PHOTO_SLOTS.length;
+const SLOT_KEYS = new Set(PHOTO_SLOTS.map((slot) => slot.key));
+
+// Last visit's photo per slot, as the server signed it: only a known slot with
+// an http(s) URL is kept, so anything odd simply shows nothing.
+function lastPhotosFrom(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [key, photo] of Object.entries(value)) {
+    if (SLOT_KEYS.has(key) && typeof photo?.url === 'string' && /^https?:\/\//i.test(photo.url)) {
+      out[key] = { url: photo.url, takenAt: typeof photo.takenAt === 'string' ? photo.takenAt : null };
+    }
+  }
+  return out;
+}
+
+const shortDate = (iso) => {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+};
 
 const flagsOf = (product) => product?.tsFlags || {};
 
@@ -227,6 +247,7 @@ function contextFrom(data, service) {
     products,
     rows: monthRows(data, products, lastVisit),
     lastVisit,
+    lastVisitPhotos: lastPhotosFrom(data?.lastVisitPhotos),
     warnings: (Array.isArray(data?.warnings) ? data.warnings : [])
       .filter(Boolean)
       .map((warning) => ({ ...warning, message: warningText(warning) }))
@@ -238,7 +259,7 @@ function contextFrom(data, service) {
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false,
-  visitIdentity: null, visit: null, lastVisit: {},
+  visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
 function useTreeShrubContext({ base, request, service }) {
@@ -353,6 +374,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
       photoType: 'after',
       sortOrder: index,
       capturedAt: photo.capturedAt || null,
+      // The slot the shot was taken for; the server keeps it only if it is one
+      // of the five, and shows it beside the same slot on the next visit.
+      slot: photo.slotKey,
     })),
     // Only a preview of THIS photo set: its signature pins the exact photos.
     ...(result?.scores && result.signature ? {
@@ -498,7 +522,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
-          <PhotosSection photos={photos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
+          <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
           <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
@@ -560,7 +584,10 @@ function usePhotoSlots({ base, request }) {
   // A read that comes back after the photos changed describes photos that are
   // no longer there; only the latest request may land.
   const readSequence = useRef(0);
-  const list = useMemo(() => PHOTO_SLOTS.map((slot) => slots[slot.key]).filter(Boolean), [slots]);
+  const list = useMemo(
+    () => PHOTO_SLOTS.filter((slot) => slots[slot.key]).map((slot) => ({ ...slots[slot.key], slotKey: slot.key })),
+    [slots],
+  );
 
   // Any photo change drops the read and its tiles: the signature pins the
   // exact photo set.
@@ -624,7 +651,7 @@ function usePhotoSlots({ base, request }) {
   return { slots, list, busy: busyKeys.size > 0, busyKeys, errors, preview, analysis, setPhoto, addPhoto, analyze, toggleRejected };
 }
 
-function PhotosSection({ photos, previewCurrent, locked }) {
+function PhotosSection({ photos, lastPhotos, previewCurrent, locked }) {
   const count = photos.list.length;
   const result = previewCurrent ? photos.preview.result : null;
   return (
@@ -639,6 +666,7 @@ function PhotosSection({ photos, previewCurrent, locked }) {
             key={slot.key}
             slot={slot}
             photo={photos.slots[slot.key]}
+            last={lastPhotos?.[slot.key]}
             busy={photos.busyKeys.has(slot.key)}
             error={photos.errors[slot.key]}
             locked={locked}
@@ -678,8 +706,10 @@ function PhotosSection({ photos, previewCurrent, locked }) {
   );
 }
 
-function PhotoSlot({ slot, photo, busy, error, locked, onFile, onClear }) {
+function PhotoSlot({ slot, photo, last, busy, error, locked, onFile, onClear }) {
   const inputRef = useRef(null);
+  // An expired or broken link shows nothing rather than a broken image.
+  const [lastBroken, setLastBroken] = useState(false);
   const captionId = useId();
   return (
     <div className="tech-ts-slot">
@@ -706,6 +736,18 @@ function PhotoSlot({ slot, photo, busy, error, locked, onFile, onClear }) {
         }}
       />
       <div className="tech-ts-slot-actions">
+        {last && !lastBroken && (
+          <figure className="tech-ts-slot-last">
+            <img
+              className="tech-ts-slot-last-image"
+              src={last.url}
+              alt={`${slot.label}, last visit`}
+              loading="lazy"
+              onError={() => setLastBroken(true)}
+            />
+            <figcaption className="tech-visit-muted">{`Last time${shortDate(last.takenAt) ? ` · ${shortDate(last.takenAt)}` : ''}`}</figcaption>
+          </figure>
+        )}
         <Button
           type="button"
           variant="secondary"

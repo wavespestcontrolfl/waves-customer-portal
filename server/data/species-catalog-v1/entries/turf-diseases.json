@@ -346,7 +346,8 @@
     "peak_months": [
       6,
       7,
-      8
+      8,
+      9
     ],
     "service": {
       "line": "lawn",
@@ -372,8 +373,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
-      "approval_hash": "11a0e7ef6d26798d287622869de9f2a9539721c383381f9c2cea34f65f1e5e5c"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS). Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "5693113728ab48f4e823f28e6764941aa9ac302dafa91b918e4e7b9401b7fd4a"
     },
     "condition": {
       "hosts": [

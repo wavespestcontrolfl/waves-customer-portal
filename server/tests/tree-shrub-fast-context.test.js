@@ -3,11 +3,16 @@
 // palm-spacing warnings. Synthetic data; a table-keyed fake knex (filters are
 // not interpreted — the SQL scoping is exercised by the Postgres lane).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/photos', () => ({
+  getViewUrl: jest.fn(async (key, ttl) => `https://signed.example.test/${key}?ttl=${ttl}`),
+}));
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const PhotoService = require('../services/photos');
+const logger = require('../services/logger');
 const {
   buildTreeShrubFastContext,
   treeShrubFastIneligibleReason,
@@ -28,10 +33,11 @@ const visit = (extra = {}) => ({
 
 // Rows the fake serves per table name. A value that is an Error rejects.
 function fakeKnex(tables) {
+  const calls = [];
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = () => chain;
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
     const settle = () => (data instanceof Error ? Promise.reject(data) : Promise.resolve(Array.isArray(data) ? data : []));
     chain.first = async () => {
       if (data instanceof Error) throw data;
@@ -42,6 +48,7 @@ function fakeKnex(tables) {
     return chain;
   });
   knex.raw = (sql) => ({ sql });
+  knex.calls = calls;
   return knex;
 }
 
@@ -421,5 +428,93 @@ describe('buildTreeShrubFastContext', () => {
       }],
     }));
     expect(ctx.warnings).toEqual([expect.objectContaining({ type: 'rotation', productId: 'kphite', daysAgo: 10, group: 'FRAC P07' })]);
+  });
+  describe('lastVisitPhotos', () => {
+    const records = [
+      { id: 'rec-2', status: 'completed', service_date: '2026-09-02', typed_values: {} },
+      { id: 'rec-1', status: 'completed', service_date: '2026-07-01', typed_values: {} },
+    ];
+    const photo = (id, slot, extra = {}) => ({
+      id, s3_key: `service-photos/rec-2/${id}.jpg`, ai_tags: slot ? { slot } : { captionSource: 'ai' },
+      captured_at: '2026-09-02T14:05:00.000Z', created_at: '2026-09-02T14:06:00.000Z', ...extra,
+    });
+    const run = (service_photos, extra = {}) => {
+      const knex = fakeKnex({ scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records, service_photos, ...extra });
+      return buildTreeShrubFastContext('visit-1', knex).then((ctx) => ({ ctx, knex }));
+    };
+    beforeEach(() => { PhotoService.getViewUrl.mockClear(); logger.warn.mockClear(); });
+
+    test('per-slot photos from the last completed record, signed with a short-lived URL, never a raw key', async () => {
+      const { ctx, knex } = await run([
+        photo('p1', 'front_beds'),
+        photo('p2', 'whole_palm', { captured_at: null, created_at: '2026-09-02T14:10:00.000Z' }),
+        photo('p3', null),
+        photo('p4', 'not_a_slot'),
+        photo('p5', '__proto__'),
+        { ...photo('p6', 'leaf_close_up'), ai_tags: JSON.stringify({ slot: 'leaf_close_up' }) },
+        { ...photo('p7', 'oldest_fronds'), s3_key: null },
+      ]);
+      expect(ctx.lastVisitPhotos).toEqual({
+        front_beds: { url: 'https://signed.example.test/service-photos/rec-2/p1.jpg?ttl=3600', takenAt: '2026-09-02T14:05:00.000Z' },
+        whole_palm: { url: 'https://signed.example.test/service-photos/rec-2/p2.jpg?ttl=3600', takenAt: '2026-09-02T14:10:00.000Z' },
+        leaf_close_up: { url: 'https://signed.example.test/service-photos/rec-2/p6.jpg?ttl=3600', takenAt: '2026-09-02T14:05:00.000Z' },
+      });
+      // Scoped to the last completed record only (not rec-1), and to photos that carry tags.
+      const photoCalls = knex.calls.filter(([table]) => table === 'service_photos');
+      expect(photoCalls).toContainEqual(['service_photos', 'where', 'service_record_id', 'rec-2']);
+      expect(photoCalls).toContainEqual(['service_photos', 'whereNotNull', 'ai_tags']);
+      expect(JSON.stringify(photoCalls)).not.toContain('rec-1');
+      // The history read it rides on is scoped to this property and bounded by the visit date.
+      expect(knex.calls).toContainEqual(['service_records as sr', 'where', 'ss.property_id', 'prop-1']);
+      expect(knex.calls).toContainEqual(['service_records as sr', 'where', 'sr.service_date', '<=', '2026-10-01']);
+    });
+
+    test('newest photo wins when a slot repeats', async () => {
+      // The query orders newest first; the first row seen for a slot is the one shown.
+      const { ctx } = await run([photo('new', 'front_beds'), photo('old', 'front_beds', { captured_at: '2026-09-02T13:00:00.000Z' })]);
+      expect(ctx.lastVisitPhotos.front_beds.url).toContain('/new.jpg');
+    });
+
+    test('no slotted photos (prod today, or a full-form last visit) is an empty object', async () => {
+      expect((await run([])).ctx.lastVisitPhotos).toEqual({});
+      expect((await run([photo('p1', null)])).ctx.lastVisitPhotos).toEqual({});
+    });
+
+    test('no completed record, or an unresolved property, reads no photos', async () => {
+      const none = await run([photo('p1', 'front_beds')], { 'service_records as sr': [] });
+      expect(none.ctx.lastVisitPhotos).toEqual({});
+      expect(none.knex.calls.some(([table]) => table === 'service_photos')).toBe(false);
+      const knex = fakeKnex({ scheduled_services: visit({ property_id: null }), products_catalog: catalog, 'service_records as sr': records, service_photos: [photo('p1', 'front_beds')] });
+      const ctx = await buildTreeShrubFastContext('visit-1', knex);
+      expect(ctx.lastVisitPhotos).toEqual({});
+      expect(knex.calls.some(([table]) => table === 'service_photos')).toBe(false);
+    });
+
+    test('an incomplete record never supplies photos', async () => {
+      const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': [{ id: 'rec-inc', status: 'incomplete', service_date: '2026-09-20', typed_values: {} }] });
+      expect(ctx.lastVisitPhotos).toEqual({});
+    });
+
+    test('a failed photo read degrades to {} with a warning and the rest of the context stands', async () => {
+      const { ctx } = await run(new Error('connection to 10.0.0.1 refused'));
+      expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisitPhotos: {} });
+      expect(ctx.lastVisit.serviceRecordId).toBe('rec-2');
+      expect(ctx.products.length).toBeGreaterThan(0);
+      const warned = logger.warn.mock.calls.map(([message]) => message).join('\n');
+      expect(warned).toContain('last visit photos unavailable');
+      expect(warned).not.toContain('10.0.0.1');
+    });
+
+    test('a photo that will not sign loses only its own thumbnail', async () => {
+      PhotoService.getViewUrl.mockRejectedValueOnce(Object.assign(new Error('signer down'), { code: 'SignerDown' }));
+      const { ctx } = await run([photo('p1', 'front_beds'), photo('p2', 'whole_palm')]);
+      expect(Object.keys(ctx.lastVisitPhotos)).toEqual(['whole_palm']);
+      expect(logger.warn.mock.calls.map(([m]) => m).join('\n')).toContain('not signed');
+    });
+
+    test('a failed history read means no photos either', async () => {
+      const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': new Error('boom') });
+      expect(ctx.lastVisitPhotos).toEqual({});
+    });
   });
 });

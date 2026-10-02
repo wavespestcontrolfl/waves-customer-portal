@@ -1099,6 +1099,8 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
+      // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
         providerPreSendCheck: (() => {
@@ -1106,6 +1108,7 @@ router.post('/sms', async (req, res, next) => {
           return checks.composeProviderPreSendChecks(
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
           );
         })(),
       } : {}),
