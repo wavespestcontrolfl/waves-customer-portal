@@ -31,7 +31,11 @@ const COLUMNS = ['id', 'title', 'status', 'astro_status', 'astro_live_url'];
 // service key, project type, or the label of a visit with no catalog link),
 // never the lawn or tree, shrub & palm lines (another lane owns those
 // completions), and never a visit that completes through a project
-// (/complete refuses it).
+// (/complete refuses it). Nor a visit whose completion sends the customer no
+// report (an internal-only consultation such as the Waves Assessment, or a
+// profile whose delivery is internal-only or disabled): the post could
+// never be seen. That posture is the completion's own
+// (resolveCompletionDeliveryPosture, from the same profile).
 const NO_POST_LINES = new Set(['lawn', 'tree_shrub', 'palm']);
 const NO_POST_SERVICE_KEYS = new Set(['wdo_inspection', 'termite_pretreatment', 'termite_slab_pretreat']);
 const NO_POST_PROJECT_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
@@ -40,6 +44,15 @@ function blogPostAllowedFor({ serviceType, profile }) {
   if (NO_POST_LINES.has(detectServiceLine(serviceType))) return false;
   if (NO_POST_SERVICE_KEYS.has(profile?.serviceKey) || NO_POST_PROJECT_TYPES.has(profile?.projectType)) return false;
   if (profile?.requiresProject || profile?.projectBacked) return false;
+  const { resolveCompletionDeliveryPosture } = require('../service-completion-profiles');
+  const posture = resolveCompletionDeliveryPosture({
+    typedFindingsType: profile?.findingsType || null,
+    completionMode: profile?.completionMode,
+    profileDeliveryMode: profile?.deliveryMode,
+    specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+    profileCategory: profile?.category,
+  });
+  if (posture.suppressCustomerComms) return false;
   return !NO_POST_LABEL_RE.test(String(serviceType || ''));
 }
 

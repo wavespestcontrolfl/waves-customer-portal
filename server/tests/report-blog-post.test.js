@@ -97,6 +97,22 @@ describe('blogPostAllowedFor', () => {
   ])('%s carries none', (serviceType, profile) => {
     expect(blogPostAllowedFor({ serviceType, profile })).toBe(false);
   });
+
+  // The customer never gets a report there, so the post could never be seen
+  // (resolveCompletionDeliveryPosture, the completion's own). Codex #5547.
+  test.each([
+    ['Waves Assessment', { serviceKey: 'waves_assessment', completionMode: 'internal_only' }],
+    ['Mosquito Misting Consultation', { serviceKey: 'mosquito_misting_assessment', completionMode: 'internal_only' }],
+    ['Pest Control', { serviceKey: 'pest_general', deliveryMode: 'disabled' }],
+    ['Pest Control', { serviceKey: 'pest_general', deliveryMode: 'internal_only' }],
+    ['Rodent Trapping Service', { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping', deliveryMode: 'internal_only' }],
+  ])('%s with a report the customer never gets carries none', (serviceType, profile) => {
+    expect(blogPostAllowedFor({ serviceType, profile })).toBe(false);
+  });
+
+  test('a typed service that auto-sends its report carries one', () => {
+    expect(blogPostAllowedFor({ serviceType: 'Rodent Trapping Service', profile: { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping', deliveryMode: 'auto_send' } })).toBe(true);
+  });
 });
 
 describe('reportBlogLink', () => {
@@ -328,6 +344,17 @@ describe('completion freeze contract', () => {
 
   test('the resolved post is frozen into structured_notes.blogPost', () => {
     expect(block).toContain('...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),');
+  });
+
+  test('a repoint under the lock to a service that carries none drops the post before the record is written (Codex #5547)', () => {
+    const resolve = block.indexOf('frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);');
+    const drop = block.indexOf('if (structuredNotes.blogPost && (!primaryFreezeTrusted');
+    expect(resolve).toBeGreaterThan(0);
+    expect(drop).toBeGreaterThan(resolve);
+    expect(drop).toBeLessThan(block.indexOf('structured_notes: serializeJsonb(structuredNotes),'));
+    const dropBlock = block.slice(drop, drop + 500);
+    expect(dropBlock).toMatch(/blogPostAllowedFor\(\{\s*serviceType: lockedSvcRow \? lockedSvcRow\.service_type : svc\.service_type,\s*profile: frozenCompletionProfile,/);
+    expect(dropBlock).toContain('delete structuredNotes.blogPost;');
   });
 });
 

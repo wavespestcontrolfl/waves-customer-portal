@@ -6420,6 +6420,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
           }
+          // The blog post was judged on the pre-lock identity (Codex #5547):
+          // a repoint since to a service that carries none (WDO, pre-treat,
+          // a report the customer never gets) drops it, and so does an
+          // identity the re-resolve could not establish.
+          if (structuredNotes.blogPost && (!primaryFreezeTrusted
+            || !require('../services/service-report/report-blog-post').blogPostAllowedFor({
+              serviceType: lockedSvcRow ? lockedSvcRow.service_type : svc.service_type,
+              profile: frozenCompletionProfile,
+            }))) {
+            delete structuredNotes.blogPost;
+          }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the
           // pre-lock profile, and an update-details repoint committing in
