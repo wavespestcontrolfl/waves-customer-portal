@@ -976,7 +976,7 @@ function ReportFlowForm({
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} />
-        <CollectPayment result={submission.done.response} visit={ctx.visit} onOverlay={onOverlay} />
+        <CollectPayment result={submission.done.response} />
       </SavedView>
     );
   }

@@ -17,15 +17,6 @@ vi.mock('./TechTreatmentZoneModal', () => ({
     </div>
   ),
 }));
-vi.mock('../schedule/MobilePaymentSheet', () => ({
-  default: ({ amount, invoiceId, onChargeSuccess, onClose }) => (
-    <div role="dialog" aria-label="Payment sheet">
-      <span>{`Collect $${amount} on ${invoiceId}`}</span>
-      <button type="button" onClick={() => { onChargeSuccess?.({}); onClose?.(); }}>Charge card</button>
-      <button type="button" onClick={onClose}>Close payment</button>
-    </div>
-  ),
-}));
 vi.mock('./TechServicePhotosModal', () => ({
   default: ({ onClose }) => (
     <div role="dialog" aria-label="Photo manager">
@@ -468,7 +459,8 @@ describe('complete and send', () => {
     expect(body.products.map((product) => product.applicationArea)).toEqual(['Outside', 'Outside', 'Outside']);
   });
 
-  test('a bill the pay link did not reach opens the payment sheet, as Dispatch does', async () => {
+  test('a bill the pay link did not reach can be paid now on the tech\'s phone', async () => {
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => null);
     const request = makeRequest({
       complete: [{
         success: true, completionSmsStatus: 'blocked', completionSmsError: 'customer opted out of texts',
@@ -478,25 +470,21 @@ describe('complete and send', () => {
     await openSheet(request);
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    expect(await screen.findByText('Collect $95 on inv-1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Close payment' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Collect payment ($95.00)' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Charge card' }));
-    expect(await screen.findByText('Payment collected.')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Take payment now ($95.00)' }));
+    expect(opened).toHaveBeenCalledWith('/pay/tok-1', '_blank', 'noopener,noreferrer');
   });
 
   test.each([
     ['the pay link went with the report', { completionSmsStatus: 'sent', completionSmsType: 'service_report_v1_with_invoice', invoiceStatus: 'sent' }],
     ['the bill is paid', { completionSmsStatus: 'sent', invoiceStatus: 'paid', invoiceTotal: 0 }],
     ['nothing is owed now', { completionSmsStatus: 'sent', invoicePaymentActionRequired: false }],
-  ])('no payment sheet when %s', async (_label, extra) => {
+  ])('no pay-now offer when %s', async (_label, extra) => {
     const request = makeRequest({ complete: [{ success: true, invoiceId: 'inv-1', invoiceToken: 'tok-1', invoiceTotal: 95, invoicePaymentActionRequired: true, ...extra }] });
     await openSheet(request);
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(screen.queryByRole('dialog', { name: 'Payment sheet' })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Collect payment/ })).toBeNull();
+    expect(screen.queryByTestId('fast-complete-collect')).toBeNull();
   });
 
   test('a re-service sends the report text with no pay link and no review ask', async () => {

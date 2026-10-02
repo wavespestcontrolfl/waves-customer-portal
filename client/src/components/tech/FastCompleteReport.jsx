@@ -12,7 +12,6 @@ import {
   PROMISE_MARKS, STILL_LEFT_MAX, currentMark, promiseCountLabel, promiseSourceLabel, toggledMarks,
 } from '../schedule/PromiseCheck';
 import { Chip, ChoiceSection } from './FastCompleteParts';
-import MobilePaymentSheet from '../schedule/MobilePaymentSheet';
 import { Button, Field, Input, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -512,42 +511,20 @@ export function collectibleBill(result) {
   return owed && !linkWent ? { invoiceId: result.invoiceId, invoiceToken: result.invoiceToken, amount } : null;
 }
 
-// The office's payment sheet (card on file, card, cash, check, Tap to Pay,
-// send the invoice) over the saved sheet, opened once on its own as Dispatch
-// opens it; "Collect payment" opens it again.
-export function CollectPayment({ result, visit, onOverlay }) {
+// Collect it on the spot: the customer's own pay page for this invoice (the
+// page the report's pay link opens: card, Apple Pay, bank), opened in a new
+// tab on the tech's phone. It works for every tech role and never stacks a
+// second dialog over the sheet; otherwise the office's follow-ups take it.
+export function CollectPayment({ result }) {
   const bill = useMemo(() => collectibleBill(result), [result]);
-  const [settled, setSettled] = useState('');
-  const opened = useRef(false);
-  const open = useCallback(() => {
-    if (!bill) return;
-    const close = () => onOverlay(null);
-    onOverlay(
-      <MobilePaymentSheet
-        key={bill.invoiceId}
-        service={{ customerId: visit?.customerId, customerName: visit?.customerName }}
-        invoiceId={bill.invoiceId}
-        invoiceToken={bill.invoiceToken}
-        amount={bill.amount}
-        desktopVisible
-        onClose={close}
-        onInvoiceSent={() => { setSettled('The invoice went to the customer.'); close(); }}
-        onChargeSuccess={() => setSettled('Payment collected.')}
-        onPrepaidRecorded={() => setSettled('Payment recorded.')}
-      />,
-    );
-  }, [bill, visit, onOverlay]);
-  useEffect(() => {
-    if (bill && !opened.current) {
-      opened.current = true;
-      open();
-    }
-  }, [bill, open]);
   if (!bill) return null;
-  if (settled) return <p className="tech-visit-muted">{settled}</p>;
+  const openPayPage = () => window.open(`/pay/${encodeURIComponent(bill.invoiceToken)}`, '_blank', 'noopener,noreferrer');
   return (
-    <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={open}>
-      Collect payment ({money(bill.amount)})
-    </Button>
+    <div data-testid="fast-complete-collect">
+      <p className="tech-visit-muted">The pay link did not reach the customer. They can pay now on your phone, or the office follows up.</p>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={openPayPage}>
+        Take payment now ({money(bill.amount)})
+      </Button>
+    </div>
   );
 }
