@@ -203,6 +203,32 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
   });
 
+  it("entering Today while another page's check still hangs restarts it as the bounded field check (pre-push P1)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn((_url, options = {}) => new Promise((_, reject) => {
+      options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })));
+    function Go() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/today")}>to today</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/schedule"]}>
+          <Go />
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+              <Route path="/admin/today" element={<div>Saved route content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await act(async () => { screen.getByRole("button", { name: "to today" }).click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTH_CHECK_TIMEOUT_MS + 100); });
+    expect(await screen.findByText("Saved route content")).toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

@@ -276,12 +276,14 @@ export default function AdminLayoutV2() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  // Entering Today after a failed check elsewhere (no signal on another
-  // page) re-runs it, so the field workspace can still open from its pass
-  // (Codex #5573 r9).
+  // Entering Today after a failed or still-pending check elsewhere (no
+  // signal on another page) re-runs it as the bounded field check, so the
+  // workspace can still open from its pass (Codex #5573 r9).
   const onFieldNow = isFieldPath(location.pathname);
   useEffect(() => {
-    if (!onFieldNow || authStatus !== "error") return;
+    // A still-pending non-field check has no time bound: restart it as the
+    // field check too (pre-push P1).
+    if (!onFieldNow || authStatus === "ready") return;
     setAuthStatus("checking");
     setVerifyRun((n) => n + 1);
   }, [onFieldNow]);
