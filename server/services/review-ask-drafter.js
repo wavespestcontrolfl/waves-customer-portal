@@ -156,9 +156,12 @@ function normalizeSmsPunctuation(text) {
 // A review ask anywhere in the text plus a satisfaction condition in ANY
 // sentence: "If you were happy with the visit. Would you leave a Google
 // review?" splits them on purpose and is still conditioned.
+// "If everything looks good", "if all went well", "if it turned out fine":
+// a condition on how the visit went, not only on the customer's feelings.
+const SATISFACTION_STATE_RE = /\bif\b[^.!?]*\b(?:look(?:s|ed)?|went|go(?:es)?|turn(?:s|ed)?\s+out|is|are|was|were|seem(?:s|ed)?|feel(?:s)?)\s+(?:all\s+)?(?:good|great|fine|ok(?:ay)?|right|well|better)\b|\bif\s+all(?:'s|\s+is)\s+(?:well|good)\b/i;
 function satisfactionConditioned(text) {
   if (!/review/i.test(text)) return false;
-  return String(text).split(/(?<=[.!?])\s+/).some((s) => SATISFACTION_CONDITION_RE.test(s));
+  return String(text).split(/(?<=[.!?])\s+/).some((s) => SATISFACTION_CONDITION_RE.test(s) || SATISFACTION_STATE_RE.test(s));
 }
 
 function neutralityReject(text) {

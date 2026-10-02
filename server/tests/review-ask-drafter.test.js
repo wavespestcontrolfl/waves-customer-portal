@@ -49,6 +49,10 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(Drafter.verifyEmailIntro('Aaron, if you were happy with the visit, a review would help.', { firstName: 'Aaron' })).toBe('satisfaction_condition');
     // #5524 r4: the older writer's SMS must name a Google review too.
     expect(verify('Aaron, would you leave us a review? {review_url}')).toBe('missing_google_review');
+    // #5524 r10: a condition on how the visit went is a satisfaction condition too.
+    expect(verify('Aaron, if everything looks good, would you leave a Google review? {review_url}')).toBe('satisfaction_condition');
+    expect(verify('Aaron, if all went well, a Google review helps: {review_url}')).toBe('satisfaction_condition');
+    expect(verify('Aaron, if you get a chance, a Google review would be great: {review_url}')).toBeNull();
     // #5511 GitHub r2: the condition and the ask split across sentences.
     expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us. If anything still looks off, just reply. Otherwise leave a Google review.', { firstName: 'Aaron' })).toBe('steers_from_review');
     expect(verify("Aaron, text me if something's not right. Google review: {review_url}")).toBe('steers_from_review');

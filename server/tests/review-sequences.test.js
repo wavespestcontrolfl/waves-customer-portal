@@ -22,6 +22,9 @@ const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
 const mockDraftTechVoice = jest.fn(async () => null);
 jest.mock('../services/review-ask-drafter', () => ({
+  // The real verifiers: the send path re-checks a reused older draft with them.
+  verifyDraftBody: jest.requireActual('../services/review-ask-drafter').verifyDraftBody,
+  verifyEmailIntro: jest.requireActual('../services/review-ask-drafter').verifyEmailIntro,
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
   draftTechVoice: (...a) => mockDraftTechVoice(...a),
@@ -5426,8 +5429,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.template_key).toBe('friendly_ask');
   });
 
+  test('#5524 r10: a draft saved before the neutral-copy rules is dropped on retry, never resent', async () => {
+    const staleDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const mock = makeMock(reminderStepFixture('seq-st2', { id: 'st2-1', first_name: 'Stan', last_name: 'P', phone: '+19410000063', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: 'rr-st2', sequence_id: 'seq-st2', sequence_step: 1, customer_id: 'st2-1', channel: 'sms', custom_body: staleDraft, template_key: 'soft_reminder_personalized', status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).not.toMatch(/earned it|just reply/i);
+  });
+
   test('a retried reminder step reuses the previously persisted draft instead of re-drafting', async () => {
-    const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const priorDraft = 'Hi Stan, hope the ants stayed gone. A quick Google review: {review_url}';
     const mock = makeMock(reminderStepFixture('seq-rt', { id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       // A prior attempt already drafted + persisted for this step (send deferred).
       review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 1, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],

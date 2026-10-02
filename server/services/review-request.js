@@ -4721,7 +4721,14 @@ const ReviewService = {
           const sameDay = techVoice
             ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
             : !priorTechVoice;
-          if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
+          // A draft from the older personalized writer is re-checked against
+          // today's rules before reuse (neutral wording, Google named): one
+          // saved before them ("Reply if anything's off") is dropped and the
+          // step drafts afresh.
+          const reusable = prior?.custom_body && sameDay && (priorTechVoice
+            || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
+              { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
+          if (reusable) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
 
@@ -4786,7 +4793,11 @@ const ReviewService = {
           const sameDay = techVoice
             ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
             : !priorTechVoice;
-          if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
+          // Same re-check for an older personalized email intro.
+          const reusable = prior?.custom_body && sameDay && (priorTechVoice
+            || require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
+              { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null);
+          if (reusable) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
           const Drafter = require("./review-ask-drafter");
