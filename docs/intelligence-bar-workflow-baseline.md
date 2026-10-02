@@ -1,0 +1,91 @@
+# Intelligence Bar ten-workflow baseline (PR 1)
+
+PR 1 of the ten-workflow scope (`intelligence-bar-operator-scope-20261002.md`, Part 2). It runs the 100 development cases of the committed manifests (`server/tests/fixtures/ib-workflows/W1.json` to `W10.json`) through the real bearer auth, the real Intelligence Bar route, the real tools and the real domain code, against an isolated PostgreSQL. It changes no runtime behavior.
+
+Owner decision 2026-10-02: the 200 workflow cases merge on harness execution, green CI and no P0. Codex wording findings on case data go on the known-limitations list below instead of blocking. This harness is therefore the judge of the cases: a manifest line the real tools cannot carry out is a defect to fix in the manifest or the case script, and the run proves the fix.
+
+## What was measured
+
+- **The execution layer only.** The model is scripted: for each case the harness issues the tool calls a correct model would make (and, for guard cases, the calls a naive model would make). The numbers say whether target resolution, proposal cards, confirmation, domain rules, receipts and recovery behave as the contract says. They say nothing about language understanding. The live-model run is PR 5.
+- **Owner-direct is on where the case says so.** `#5563` is merged. Each case's `mode` sets `GATE_IB_OWNER_DIRECT` for that case (`owner_direct_on` true, `owner_direct_off` false), so a card-free owner write is an ordinary scored case. Each write step is driven the way the manifest says: `card: true` must show one card (and write nothing) before the confirm; `card: false` must execute inside the turn with a receipt on the task. For an owner-direct case the route takes no target refusals, so the operator's own wording is run as written.
+- **The manifest's calls are the contract, and the harness checks them.** For every dev case step that names a `call`, the harness asserts that the script issued the same tool with every input key the manifest names present and equal, after fixture keys (`cust-pellham`, `murphy-lead-3`, ...) are replaced by the ids the case seeded and dates are moved onto the test clock. The script may pass more keys. A manifest call that omits an input the tool requires is a defect too (`required` is read from the action registry; a declared capability gap can relax it, for example the server-rendered reschedule notice needs no `message`). A repeated identical call in a later step is the operator confirming the earlier card (a click, not a model call) and counts only when the case confirmed a card. A mismatch is the `contract` failure point, and the suite fails on any of them: it is case data to fix, never a baseline row. The tool, enum values and input shapes are then checked a second time by real execution (the action registry validates every call the route receives).
+- **Dates come from a test clock.** The manifests are written against one calendar whose "today" is Friday 2026-10-02 (`CLOCK_ANCHOR`). The route reads the real clock, so literal dates would be past dates from the next week on. `clockDate()` moves a manifest date forward by whole weeks until the anchor is not in the past: weekday, order and gaps are kept, and while the real date is the anchor the manifest date is used as written. Case scripts take their dates from the manifest call.
+- **Persisted columns are checked against the migrated schema.** A suite test reads every `table[row].column` a dev case names and fails when the table or column does not exist, so a manifest line cannot assert a column the writer never fills.
+- **Dev partition only.** Held-out cases are filtered out before anything reads them and are never executed or used for scripting.
+- **Providers are stubbed at the adapter.** The SMS provider adapter, SendGrid (only while a case asks, for the double-opt-in confirmation a customer email change re-sends) and the Stripe read API are stubs that record every submission; any other outbound request is blocked and recorded. No customer record, number, address or gate code is real: every name is synthetic.
+- **Independent read-back.** Each case verifies with its own database queries (rows, sends, receipts), not from the tool's own result.
+
+Timings from the scripted run (median 7 ms to the first tool result, 29 ms to a verified completion) measure the execution layer, not a model, and are not a basis for the PR 5 cost plan.
+
+## Results
+
+| Workflow | Pass | Fail | Not runnable |
+|---|---:|---:|---:|
+| W1 What needs my attention | 10 | 0 | 0 |
+| W2 Customer situation before a call | 8 | 2 | 0 |
+| W3 Lead name and contact details | 9 | 1 | 0 |
+| W4 Second property labeled rental | 9 | 1 | 0 |
+| W5 Book one service | 7 | 3 | 0 |
+| W6 Move an appointment, then notify | 3 | 2 | 5 |
+| W7 Draft, revise, send an SMS | 7 | 2 | 1 |
+| W8 Lawn estimate, change cadence | 7 | 2 | 1 |
+| W9 What they owe | 3 | 1 | 6 |
+| W10 Record stock that arrived | 4 | 6 | 0 |
+| **Total** | **67** | **20** | **13** |
+
+**Not runnable** means the manifest says the case's target behavior needs a capability that does not exist on this branch: its `requires` array names a gap key from `CAPABILITY_GAPS` (`server/tests/fixtures/ib-workflows/execution-matrix.js`). It is never counted as a pass or a fail, and the case is still probed with the nearest existing tools so the report shows what the path does today. The reason recorded for each case is the gap key itself: `invoice_payment_reader` 6 (W9, PR 3a, `#5586`), `reschedule_notice_send` 5 (W6, PR 3c), `series_reschedule_writer` 1 (W6-dev-06, also needs the notice), `secondary_number_customer_link` 1 (W7-dev-03), `estimate_measurement_selector` 1 (W8-dev-05). When a gap lands, add its key to `BUILT_GAPS` in `server/tests/helpers/ib-workflow-capability.js`; its cases are scored from then on and the snapshot diff shows what changed.
+
+Ten of the 20 failing cases fail only at target resolution (W2-dev-09, W4-dev-06, W6-dev-08, W8-dev-10 with the gate off or a non-owner admin; W10-dev-01, 02, 03, 07, 08, 10 on inventory wording). They passed every later stage on the control wording.
+
+## Failures, by point and code, and who owns the fix
+
+| Point and code | Cases | What happens | Owner |
+|---|---|---|---|
+| `target_resolution` `product_target_not_established` | W10-dev-01, 02, 03, 07, 08, 10 | The receipt wordings name the product, but the procurement grounding only accepts a narrow grammar for `update_restock_request` ("Receive restock request ...", "mark the restock request for ...") and refuses with "Choose the exact product or restock request". Owner-direct does not relax it. W10-dev-07 is a reorder-plus-receipt wording read as one product name. Every later stage passes on the control wording. | PR 2 series (inventory grammar and target grounding). Not yet a named slice; recommend one. |
+| `target_resolution` `customer_target_not_established`, `lead_target_not_established` | W2-dev-09 (admin, no page), W4-dev-06, W6-dev-08, W8-dev-10 (gate off), W3-dev-06 (gate off, lead) | Without owner-direct, a family wording ("the Pellhams", "the Murphy lead") with the page open or closed resolves no task target. Owner-direct cases no longer hit this. | PR 2 series (target from page context and family wording), only matters for non-owner logins and the gate-off path. |
+| `confirm` `superseded_pending_card_still_executable` | W3-dev-06 | With the gate off, two pending cards for the same lead: the superseded one can still be confirmed. | PR 2a (stale cards). |
+| `confirm` `obsolete_booking_proposal_still_executable`, `read_back` `final_booking_wrong`, `side_effect` `nine_am_row_exists` | W5-dev-07 | After "make it 10 instead", the earlier 9 AM card can still be confirmed and commits the old value. | PR 2a (stale cards). |
+| `domain_rule` `commercial_account_booked_on_price` | W5-dev-06 | A commercial account is booked on a stated price through a card; the contract refuses. | PR 3b (booking service extraction). |
+| `domain_rule` `taken_slot_double_booked` | W5-dev-09 | The card confirms onto a slot another booking took after the card was shown. The overlap is only a warning on a partially completed result; the contract re-checks and refuses. | PR 3b. |
+| `receipt` `unknown_outcome_not_recorded`, `receipt` `unknown_outcome_retry_allowed`, `recovery` `resend_before_reconciliation` | W7-dev-05 | A send whose provider outcome is unknown is reported as a blocked send, not as unknown, and a retry is allowed before reconciliation (risk of a double send). | PR 2a (resume and double-send). |
+| `proposal` `card_shown_for_a_send_that_will_be_blocked` | W7-dev-06, W6-dev-09 | A card is offered to text an opted-out number; the send is blocked only afterwards. | PR 2a (refusal reported at proposal, not after). |
+| `domain_rule` `sent_quote_revision_offered`, `side_effect` `sent_quote_changed` | W8-dev-07 | A quote already sent is offered for in-place revision and changes on confirm; the contract honors a sent quote. | A PR 3 series estimate slice. Not yet named in the plan; recommend one. |
+| `tool_result` `intent_not_linkable_to_customer` | W9-dev-03 | The processor reader returns intents by amount; no customer reader exposes the processor customer id, so an intent cannot be tied to a customer. | PR 3a (W9 reader). |
+| `tool_result` `schedule_view_window_has_no_end` | W2-dev-05 | The schedule view with a one-day window returns the start only. | PR 2 series or PR 3 (unowned). |
+| Probes behind the missing W9 reader: `failed_card_attempt_not_readable`, `recorded_payment_not_readable`, `remaining_balance_wrong` (150 reported, 50 owed), `payment_and_credit_not_named_by_type`, `dispute_hold_not_readable`, `payment_method_not_readable` | W9-dev-02, 04, 05, 06, 09 | The nearest existing readers cannot state what the contract needs. The balance reader ignores a partial card payment. | PR 3a. |
+| Probe: `series_partially_moved` | W6-dev-06 | A series move that cannot be done in one operation can leave only some visits moved. | PR 3c. |
+| Probes: `no_card_for_secondary_number`, `card_does_not_name_the_number`, `sent_to_wrong_number` | W7-dev-03 | A text to the household member's number is refused with `target_relationship_mismatch`: the sender clears the customer link when the number is not the customer's primary phone. | W7 follow-up (secondary contact numbers). |
+
+Things the baseline found that match the contract (worth keeping): the owner's lead edit, contact-field edit and unlabelled property edits commit directly with a receipt; an email or pipeline-stage change, a labelled property add and a grouped visit move keep their card; a customer email change moves the pending opt-in to the new address, rotates its tokens and re-sends one opt-in to the new address only; a rental cannot be made primary until it is reclassified (and both edits are direct, each with its own receipt); a retried request with the same request key replays the saved task and writes nothing twice; W5 and W6 store the flat 60-minute `window_end` for a booking and keep a moved visit's stored block length; a recurring or add-on W5 request books nothing; a missing lawn measurement is refused without a card; a closed Talak restock request is reported closed with no stock change; two catalog rows matching "sample granule" are reported as a question with both rows; a technician cannot write stock; a price or measurement change between card and confirm is refused as `preview_changed` and recomputed.
+
+## Known limitations of the case data
+
+Case-accuracy findings that are not fixed. They do not block merge; each is one line.
+
+- **W7 persisted state is not observed.** The harness stubs the SMS provider adapter above the writer of `sms_log`, so `sms_log.status` is never read here. The manifests now say `sent` for a provider-accepted text and `sending` with `metadata.provider_outcome_uncertain = true` for an unknown outcome (both from the repo's PostgreSQL test and `settleReplyHoldingReservation`), checked only by reading code; the observed durable record is `messaging_audit_log` and the receipt state `provider_accepted`.
+- **Held-out cases were edited mechanically, not executed.** The same defect classes were fixed by rule in the held-out partition (W3 phone and `crm_notes`, W5 `service_type`, W7 stored status, W10 jug and entered-unit lines, W6 and W8 column names) without running or reading them for scripting. Expect further defects of these kinds there; the manifest test checks their shape only.
+- **Row-reference checks are per column, not per value.** Only table and first-column existence is machine-checked (and only for dev cases, against the migrated schema). Values, units and the free text of `changes` are verified per case by that case's own script, and for the dev partition only. The manifest test's row-reference validator still harvests quoted tokens from any migration file that touches a table, so it can accept a column that belongs to another table; the Codex round 5 `customers.notes` miss came from that.
+- **`schemaProblems` still does not read `required`.** The matrix check in `execution-matrix.js` is unchanged; required inputs are enforced only by this harness's contract check (dev and gap-probed cases). Held-out calls are not checked for required inputs.
+- **W6 notice cases describe an unbuilt tool.** The notice step (`send_sms` with `appointment_id` and a template `message_type`, no `message`) cannot be issued until `reschedule_notice_send` exists. Their move step is executed; the notice is probed as a plain text on its own card, and only the non-gap part of the call (the customer) is compared.
+- **Natural wording does not map to the manifest's tool for W10.** The manifest names `update_restock_request` with the open request id for "We received 2 gallons of Taurus SC"; the route's grounding refuses that wording for that tool, so those cases pass only on a control wording and report `product_target_not_established`. Whether the manifest or the grammar should move is open (see the owner column above).
+- **A phone in a request is not the phone in the call.** Requests say "555-0173" (the manifest test forbids any other dashed form) but the tool needs the full number, so the manifest call carries the stored E.164 value (`+19415550173`). The model is expected to add the area code from the customer's own number.
+- **W5 price cases cannot tell stated from catalog price.** The harness seeds the one-time pest catalog price at 149, the same as the stated price, so a model that ignores the stated price still passes.
+- **The W6 fixture's "other visits on the day of the move" must not overlap.** The harness seeds them clear of the moved window because an overlap turns the move into a partially completed result with a warning; the manifest fixture text does not say so.
+- **W8 measurement and series ideas are written against designs that do not exist.** `measurement_key` (W8-dev-05) and `reschedule_appointment_series` (W6-dev-06) are the shapes the gap entries assume, not a built tool.
+- **The opt-in confirmation (W3-dev-05) is observed at a SendGrid stub**, not at the provider.
+- **Date anchors in free text.** `changes` lines name weekdays ("Friday window_start ..."), which are right on the anchor calendar and after any whole-week shift, but a held-out line that names a calendar date would not move with the test clock.
+
+## Reproduce
+
+Needs a throwaway local PostgreSQL named `waves_ib_workflow_<suffix>` (or `waves_ib_platform_<suffix>`) with this branch's migrations applied (`npx knex migrate:latest --knexfile knexfile.js` from `server/` with `DATABASE_URL` pointing at it). The suite refuses any other database name.
+
+```
+cd server
+IB_TEST_DATABASE_URL=postgres://localhost/waves_ib_workflow_<suffix> npx jest --runInBand tests/intelligence-bar-workflow-baseline-db.test.js
+```
+
+The suite asserts every case against `server/tests/fixtures/ib-workflow-baseline/baseline-dev.json` (outcome, first failure, the full list of `point:code` failures, the not-runnable reasons and the probe's failures), so a later fix or regression fails it until the snapshot is updated deliberately: add `UPDATE_IB_BASELINE=1`, which rewrites that file and `baseline-dev-detail.json` (evidence per case, including notes and timings). `IB_BASELINE_ONLY=W5,W6` runs a subset (it never rewrites the snapshot). Without `IB_TEST_DATABASE_URL` the suite skips. A `contract` failure or a manifest column that does not exist fails the suite whatever the snapshot says. The manifest suite (`tests/intelligence-bar-workflow-manifest.test.js`) is separate and needs no database.
+
+## CI
+
+Not added to the real-database step in this PR. The suite is deterministic on a fresh isolated database (about 40 seconds, three consecutive runs identical), so it is safe as a non-blocking job on its own database, which is the recommended first step. It is not yet safe for the shared CI database `waves_test`: W9 reads the account-wide balance list (top 15 by amount), so other suites' open invoices could change it; W10 resolves products by exact catalog name ("Taurus SC", "Talak"); the cases book the manifest's calendar days, which another suite could share; and the one-time pest catalog price is read and restored by W5. Run it as a non-blocking job against its own database first.

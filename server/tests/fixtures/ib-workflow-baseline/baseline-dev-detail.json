@@ -1,0 +1,1577 @@
+{
+  "schema_version": 1,
+  "cases": {
+    "W1-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 24,
+        "verified_completion_ms": 80
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 25
+      },
+      "notes": [
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 12
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 11
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 31
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-06": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 18
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 15
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 11
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 10
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W1-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 19
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 36
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 23
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 30
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 17
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-05": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "schedule_view_window_has_no_end",
+      "failures": [
+        {
+          "point": "tool_result",
+          "code": "schedule_view_window_has_no_end",
+          "detail": "schedule view window \"09:00:00\" carries the start only, seeded 09:00-11:00"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 19
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-06": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 25
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 13
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 14
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-09": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "customer_target_not_established",
+          "detail": "\"Situation on the Pellhams please.\" with no page: no target"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 26
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W2-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 42
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W3-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 22
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W3-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 18
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W3-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 17
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W3-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 18
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W3-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 1920
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W3-dev-06": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "lead_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "lead_target_not_established",
+          "detail": "\"Add Jay as the first name for the Murphy lead.\" with no page: no lead target"
+        },
+        {
+          "point": "target_resolution",
+          "code": "lead_target_not_established",
+          "detail": "\"actually put Jason\" with the lead page open: no lead target"
+        },
+        {
+          "point": "confirm",
+          "code": "superseded_pending_card_still_executable",
+          "detail": "confirming the superseded Zed card while the Zane card is pending returned 200"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 75
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W3-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 29
+      },
+      "notes": [
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W3-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 34
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W3-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": null,
+        "verified_completion_ms": 9
+      },
+      "notes": [
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W3-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 2,
+        "verified_completion_ms": 7
+      },
+      "notes": [
+        "update_lead_contact: error: This action is not available to your role"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W4-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 31
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 25
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 31
+      },
+      "notes": [
+        "add_customer_property: property_exists: A property with that street already exists for this customer"
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 66
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 3
+    },
+    "W4-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 34
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-06": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "customer_target_not_established",
+          "detail": "\"Add a second property for them at 27 Sample Court and label it rental.\" with the customer page open: no target"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 22
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 15
+      },
+      "notes": [
+        "add_customer_property: property_exists: A property with that street already exists for this customer"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W4-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 24
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W4-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 2,
+        "verified_completion_ms": 4
+      },
+      "notes": [
+        "add_customer_property: error: This action is not available to your role"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W4-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 29
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W5-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 136,
+        "verified_completion_ms": 1113
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W5-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 30,
+        "verified_completion_ms": 992
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W5-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 46
+      },
+      "notes": [
+        "find_available_slots returned 0 slots; the fixture seeds no technician capacity"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W5-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 13
+      },
+      "notes": [],
+      "strength": "no_mutation_attempted",
+      "contract_calls": 0
+    },
+    "W5-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 12
+      },
+      "notes": [],
+      "strength": "no_mutation_attempted",
+      "contract_calls": 0
+    },
+    "W5-dev-06": {
+      "outcome": "fail",
+      "point": "domain_rule",
+      "code": "commercial_account_booked_on_price",
+      "failures": [
+        {
+          "point": "domain_rule",
+          "code": "commercial_account_booked_on_price",
+          "detail": "1 visit(s) booked for a commercial account; card 1; confirm 200"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 1652
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W5-dev-07": {
+      "outcome": "fail",
+      "point": "confirm",
+      "code": "obsolete_booking_proposal_still_executable",
+      "failures": [
+        {
+          "point": "confirm",
+          "code": "obsolete_booking_proposal_still_executable",
+          "detail": "confirming the superseded 9 AM card returned 200"
+        },
+        {
+          "point": "read_back",
+          "code": "final_booking_wrong",
+          "detail": "rows 09:00"
+        },
+        {
+          "point": "side_effect",
+          "code": "nine_am_row_exists",
+          "detail": "a 9 AM row was saved"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 963
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W5-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 31,
+        "verified_completion_ms": 1017
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 3
+    },
+    "W5-dev-09": {
+      "outcome": "fail",
+      "point": "domain_rule",
+      "code": "taken_slot_double_booked",
+      "failures": [
+        {
+          "point": "domain_rule",
+          "code": "taken_slot_double_booked",
+          "detail": "the confirm 200 {\"success\":true,\"outcome\":\"partially_completed\",\"tool\":\"create_appointment\",\"result\":{\"success\":true,\"warning\":\"Heads up: this booking overlaps another appointment on the schedule on 2026-10-07 — both are kept on the cal; 1 row(s) saved on the taken slot"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 1678
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W5-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 17,
+        "verified_completion_ms": 961
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W6-dev-01": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "reschedule_notice_send",
+          "owner": "PR 3c (move + notice, decision D1)",
+          "reason": "A server-rendered reschedule notice: the move's own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 18,
+          "verified_completion_ms": 863
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 2
+      }
+    },
+    "W6-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 17
+      },
+      "notes": [],
+      "strength": "no_mutation_attempted",
+      "contract_calls": 0
+    },
+    "W6-dev-03": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "reschedule_notice_send",
+          "owner": "PR 3c (move + notice, decision D1)",
+          "reason": "A server-rendered reschedule notice: the move's own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 11,
+          "verified_completion_ms": 1720
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 4
+      }
+    },
+    "W6-dev-04": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "reschedule_notice_send",
+          "owner": "PR 3c (move + notice, decision D1)",
+          "reason": "A server-rendered reschedule notice: the move's own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 19,
+          "verified_completion_ms": 880
+        },
+        "notes": [
+          "turn status 409 not_resumable This task has no interrupted step to continue.; no tool call reached; answer: "
+        ],
+        "strength": null,
+        "contract_calls": 2
+      }
+    },
+    "W6-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 1570
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W6-dev-06": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "series_reschedule_writer",
+          "owner": "follow-up named in reschedule_appointment (Intelligence Bar series moves)",
+          "reason": "A tool that moves a whole recurring series. reschedule_appointment moves one row and refuses a recurring date move (COLLECTIVE_MOVE_REQUIRED); the series path is deferred to a follow-up PR."
+        },
+        {
+          "code": "reschedule_notice_send",
+          "owner": "PR 3c (move + notice, decision D1)",
+          "reason": "A server-rendered reschedule notice: the move's own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "domain_rule",
+        "code": "series_partially_moved",
+        "failures": [
+          {
+            "point": "domain_rule",
+            "code": "series_partially_moved",
+            "detail": "1 of the 4 series visits changed"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 20,
+          "verified_completion_ms": 871
+        },
+        "notes": [
+          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"93a32d5c-0ae8-404d-b47c-48cb9ef9673f\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
+        ],
+        "strength": null,
+        "contract_calls": 1
+      }
+    },
+    "W6-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 24
+      },
+      "notes": [
+        "reschedule_appointment: error: This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or sep"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W6-dev-08": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "customer_target_not_established",
+          "detail": "\"Move the Pellham visit to Friday at 10.\" with the customer page open: no target"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 1555
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W6-dev-09": {
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "card_shown_for_a_send_that_will_be_blocked",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "card_shown_for_a_send_that_will_be_blocked",
+          "detail": "the notice card was offered although the number is opted out"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 1585
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W6-dev-10": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "reschedule_notice_send",
+          "owner": "PR 3c (move + notice, decision D1)",
+          "reason": "A server-rendered reschedule notice: the move's own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 18,
+          "verified_completion_ms": 876
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 2
+      }
+    },
+    "W7-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 37
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W7-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 44
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W7-dev-03": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "secondary_number_customer_link",
+          "owner": "unassigned (W7 follow-up)",
+          "reason": "An authorized secondary contact number linked to the customer. sendSms compares the number with the customer's primary phone and clears the customer link when they differ, so the send is logged phone-only with no customer_id."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "proposal",
+        "code": "no_card_for_secondary_number",
+        "failures": [
+          {
+            "point": "proposal",
+            "code": "no_card_for_secondary_number",
+            "detail": "cards 0; [{\"error\":\"The message recipient does not match the selected customer\",\"code\":\"target_relationship_mismatch\"}]"
+          },
+          {
+            "point": "proposal",
+            "code": "card_does_not_name_the_number",
+            "detail": "the card does not show the number ending 0102"
+          },
+          {
+            "point": "read_back",
+            "code": "sent_to_wrong_number",
+            "detail": "0 submissions; to ...none"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 7,
+          "verified_completion_ms": 17
+        },
+        "notes": [
+          "send_sms: target_relationship_mismatch: The message recipient does not match the selected customer"
+        ],
+        "strength": null,
+        "contract_calls": 1
+      }
+    },
+    "W7-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 20
+      },
+      "notes": [
+        "queued listing {\"customer_id\":\"63ffbbad-93dd-4acc-975d-c1171330deb7\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"a5a9e50a-58d0-4f51-b288-a3e627e4e143\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"a5a9e50a-58d0-4f51-b288-a3e627e4e143\",\"customer_id\":\"63ffbbad-93dd-4a"
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W7-dev-05": {
+      "outcome": "fail",
+      "point": "receipt",
+      "code": "unknown_outcome_not_recorded",
+      "failures": [
+        {
+          "point": "receipt",
+          "code": "unknown_outcome_not_recorded",
+          "detail": "confirm 200 {\"success\":false,\"outcome\":\"blocked\",\"tool\":\"send_sms\",\"result\":{\"success\":false,\"error\":\"The carrier did not confirm this text. It may still go out; check the thread and do not retry it.\",\"blocked\":true,\"code\":\"PROVIDER_FAILURE\",\"mayHaveSe"
+        },
+        {
+          "point": "receipt",
+          "code": "unknown_outcome_retry_allowed",
+          "detail": "receipt {\"id\":\"d72e8d74-b73f-4faa-b3dc-06c9e8f76b9e\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: 16f5ccef-7b7f-4798-a03d-77506dd1f700, message: We will be there Tuesday at 9., mes"
+        },
+        {
+          "point": "recovery",
+          "code": "resend_before_reconciliation",
+          "detail": "1 further provider submissions while the first outcome was unknown"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 29
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W7-dev-06": {
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "card_shown_for_a_send_that_will_be_blocked",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "card_shown_for_a_send_that_will_be_blocked",
+          "detail": "a send card was offered for a number with STOP on file"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 13
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W7-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 9
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W7-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 15
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W7-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 13
+      },
+      "notes": [
+        "send_sms: error: Multiple customers match that name. Ask the operator which one, then retry with customer_id."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W7-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 15
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W8-dev-01": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 1902
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W8-dev-02": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 26,
+        "verified_completion_ms": 1695
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W8-dev-03": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 1840
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W8-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 30,
+        "verified_completion_ms": 174
+      },
+      "notes": [
+        "save_customer_estimate: invalid_input: Tool arguments do not match the required inputs"
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W8-dev-05": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "estimate_measurement_selector",
+          "owner": "unassigned (W8 follow-up)",
+          "reason": "A selector for which saved lawn measurement the estimate uses. save_customer_estimate takes customer, property, estimate and cadence only; the estimate body always derives one treatable_lawn_sqft from the selected property."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 14,
+          "verified_completion_ms": 280
+        },
+        "notes": [
+          "measurement choice: one saved measurement per property, no selector on save_customer_estimate"
+        ],
+        "strength": null,
+        "contract_calls": 2
+      }
+    },
+    "W8-dev-06": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 188
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 3
+    },
+    "W8-dev-07": {
+      "outcome": "fail",
+      "point": "domain_rule",
+      "code": "sent_quote_revision_offered",
+      "failures": [
+        {
+          "point": "domain_rule",
+          "code": "sent_quote_revision_offered",
+          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"bbb562ca-eefb-44a7-b078-006a3e23f365\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"bbb562ca@example.invalid\"},\"property\":{\"id\":\"75863d5c-f29b-4948-9d04-daa"
+        },
+        {
+          "point": "side_effect",
+          "code": "sent_quote_changed",
+          "detail": "the sent quote changed or a second estimate appeared"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 41,
+        "verified_completion_ms": 281
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W8-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 1668
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W8-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 32,
+        "verified_completion_ms": 58
+      },
+      "notes": [
+        "save_customer_estimate: missing_information: A saved service address, treatable lawn area and identified grass type are required. Update the missing property facts before pricing."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W8-dev-10": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "customer_target_not_established",
+          "detail": "\"Make a lawn estimate for the Thistledowns, twelve a year.\" with the customer page open: no target"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 1676
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W9-dev-01": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "pass",
+        "failures": [],
+        "timings": {
+          "first_tool_result_ms": 12,
+          "verified_completion_ms": 1582
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-02": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "tool_result",
+        "code": "failed_card_attempt_not_readable",
+        "failures": [
+          {
+            "point": "tool_result",
+            "code": "failed_card_attempt_not_readable",
+            "detail": "no reader shows the failed card attempt on the September invoice, so \"received?\" cannot be answered from the attempt"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 12,
+          "verified_completion_ms": 30
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-03": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "intent_not_linkable_to_customer",
+      "failures": [
+        {
+          "point": "tool_result",
+          "code": "intent_not_linkable_to_customer",
+          "detail": "the customer reader does not expose the processor customer id, so an intent cannot be tied to this customer except by amount"
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 1557
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W9-dev-04": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "tool_result",
+        "code": "recorded_payment_not_readable",
+        "failures": [
+          {
+            "point": "tool_result",
+            "code": "recorded_payment_not_readable",
+            "detail": "the recorded manual check (reference and date) is not in what the reader returns"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 13,
+          "verified_completion_ms": 33
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-05": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "tool_result",
+        "code": "remaining_balance_wrong",
+        "failures": [
+          {
+            "point": "tool_result",
+            "code": "remaining_balance_wrong",
+            "detail": "reported 150 owed; 200 less a 100 card payment and a 50 credit leaves 50"
+          },
+          {
+            "point": "tool_result",
+            "code": "payment_and_credit_not_named_by_type",
+            "detail": "neither the intent payment nor the applied credit is named by type in the readers"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 8,
+          "verified_completion_ms": 31
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-06": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "tool_result",
+        "code": "dispute_hold_not_readable",
+        "failures": [
+          {
+            "point": "tool_result",
+            "code": "dispute_hold_not_readable",
+            "detail": "neither reader says the invoice is under a dispute hold"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 8,
+          "verified_completion_ms": 1552
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-07": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": null,
+        "verified_completion_ms": 1553
+      },
+      "notes": [
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W9-dev-08": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": null,
+        "verified_completion_ms": 1561
+      },
+      "notes": [
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W9-dev-09": {
+      "outcome": "not_runnable",
+      "reasons": [
+        {
+          "code": "invoice_payment_reader",
+          "owner": "#5586 (PR 3a)",
+          "reason": "The per-customer invoice, recorded-payment and credit reader (W9). No such reader exists on main."
+        }
+      ],
+      "probe": {
+        "outcome": "fail",
+        "point": "tool_result",
+        "code": "payment_method_not_readable",
+        "failures": [
+          {
+            "point": "tool_result",
+            "code": "payment_method_not_readable",
+            "detail": "the readers do not say how the September invoice was paid, so \"no card payment on record\" cannot be stated"
+          }
+        ],
+        "timings": {
+          "first_tool_result_ms": 17,
+          "verified_completion_ms": 38
+        },
+        "notes": [],
+        "strength": null,
+        "contract_calls": 0
+      }
+    },
+    "W9-dev-10": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 36
+      },
+      "notes": [],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W10-dev-01": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"We just received 2 gallons of Taurus SC, show me what we have now.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 52
+      },
+      "notes": [
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W10-dev-02": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"Two gallons of Taurus SC came in today.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 31
+      },
+      "notes": [
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W10-dev-03": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"We received 2 quarts of Taurus SC.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        },
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"that was 2 gallons, not 2 quarts\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 58
+      },
+      "notes": [
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
+        "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action."
+      ],
+      "strength": null,
+      "contract_calls": 2
+    },
+    "W10-dev-04": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 13
+      },
+      "notes": [
+        "adjust_stock: error: Multiple products match \"sample granule\" — retry with product_id"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W10-dev-05": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 13
+      },
+      "notes": [
+        "update_restock_request: request_closed: Restock request is already received; refresh the list"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W10-dev-06": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 13
+      },
+      "notes": [
+        "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action."
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W10-dev-07": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"Reorder four more jugs of Talak from the vendor and record the three that just came in.\" names the product but the route asked \"Product \"four more jugs of Talak from the vendor and record the three that just came in.\" not found \""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 25
+      },
+      "notes": [
+        "adjust_stock: target_clarification_required: Product \"four more jugs of Talak from the vendor and record the three that just came in.\" not found in catalog"
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W10-dev-08": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"We received 2 gallons of Taurus SC.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        },
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"We received 2 gallons of Taurus SC.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 58
+      },
+      "notes": [
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
+      ],
+      "strength": null,
+      "contract_calls": 1
+    },
+    "W10-dev-09": {
+      "outcome": "pass",
+      "failures": [],
+      "timings": {
+        "first_tool_result_ms": 2,
+        "verified_completion_ms": 5
+      },
+      "notes": [
+        "adjust_stock: error: This action is not available to your role"
+      ],
+      "strength": null,
+      "contract_calls": 0
+    },
+    "W10-dev-10": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        {
+          "point": "target_resolution",
+          "code": "product_target_not_established",
+          "detail": "\"Taurus SC, 2 gallons, arrived this morning.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
+        }
+      ],
+      "timings": {
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 36
+      },
+      "notes": [
+        "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
+        "turn status 200; no tool call reached; answer: Done."
+      ],
+      "strength": null,
+      "contract_calls": 1
+    }
+  }
+}
