@@ -7268,14 +7268,21 @@ function NeighborhoodPicker({ property, onSaved, onCancel }) {
       setSearched(false);
       return undefined;
     }
+    // A new query never shows the previous query's choices: they could link
+    // the property to a neighborhood that does not match what was typed.
+    setResults([]);
+    setSearched(false);
     const timer = setTimeout(async () => {
       try {
         const data = await adminFetch(`/admin/neighborhood-access?q=${encodeURIComponent(q)}&limit=8`);
         if (seq !== searchSeq.current) return;
         setResults(Array.isArray(data?.neighborhoods) ? data.neighborhoods : []);
         setSearched(true);
+        setError("");
       } catch (err) {
         if (seq !== searchSeq.current) return;
+        setResults([]);
+        setSearched(false);
         setError(apiErrorMessage(err, "Could not search neighborhoods"));
       }
     }, NEIGHBORHOOD_SEARCH_DEBOUNCE_MS);

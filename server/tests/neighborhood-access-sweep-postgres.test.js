@@ -401,6 +401,20 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(real) });
   });
 
+  test('a property the office cleared is settled: its saved code is not retried every pass', async () => {
+    const n = await neighborhood('Cleared By Office');
+    const customerId = await customerWithCode('4545', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('customer_properties').where({ customer_id: customerId })
+      .update({ neighborhood_id: null, neighborhood_source: 'office', neighborhood_checked_at: trx.fn.now() });
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    // Linked again by the office: it files there.
+    const n2 = await neighborhood('Relinked By Office');
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2 });
+    expect((await sweepSavedGateCodes()).customers).toBe(1);
+    expect((await accessRows(n2)).map((r) => r.code)).toEqual(['4545']);
+  });
+
   test('free text files for the office to confirm, with no bell', async () => {
     const n = await neighborhood('Pinebrook Village');
     await customerWithCode('Text the owner on arrival; north gate only', { neighborhoodId: n });

@@ -361,6 +361,14 @@ async function unfiledGateCodeCustomers(conn) {
       .orWhereRaw(`f.neighborhood_id IS DISTINCT FROM (
         SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
         FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active)`))
+    // A single property the office explicitly cleared (no neighborhood, set
+    // by the office) is settled until the office links it again: filing has
+    // nowhere to go and the county lookup must not run, so it is not retried.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customer_properties p
+      WHERE p.customer_id = pp.customer_id AND p.active
+        AND p.neighborhood_id IS NULL AND p.neighborhood_source = 'office'
+        AND NOT EXISTS (SELECT 1 FROM customer_properties p2
+          WHERE p2.customer_id = pp.customer_id AND p2.active AND p2.id <> p.id))`)
     .orderBy('pp.customer_id')
     .pluck('pp.customer_id');
 }

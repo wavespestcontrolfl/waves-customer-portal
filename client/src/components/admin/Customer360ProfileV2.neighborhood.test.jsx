@@ -120,6 +120,23 @@ describe('CustomerNeighborhoodBlock', () => {
     expect(put.body).toEqual({ neighborhoodId: 'n7' });
   });
 
+  it('a failed search never leaves the previous query\'s choices clickable', async () => {
+    stubFetch((path) => {
+      if (path === PROPS_URL) return response({ properties: [unlinked()] });
+      if (path === `${BASE}?q=pines&limit=8`) return response({ neighborhoods: [{ id: 'n7', name: 'Sample Pines', county: 'Sarasota' }], total: 1 });
+      if (path.startsWith(`${BASE}?q=`)) return response({ error: 'Could not load gate codes' }, 500);
+      return response({});
+    });
+    render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change neighborhood' }));
+    fireEvent.change(screen.getByLabelText('Find a neighborhood'), { target: { value: 'pines' } });
+    expect(await screen.findByRole('button', { name: 'Sample Pines · Sarasota' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Find a neighborhood'), { target: { value: 'oaks' } });
+    await waitFor(() => expect(calls.some((c) => c.path === `${BASE}?q=oaks&limit=8`)).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sample Pines · Sarasota' })).toBeNull());
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
   it('Create neighborhood PUTs name and county', async () => {
     stubFetch((path, init) => {
       if (path === PROPS_URL) return response({ properties: [unlinked()] });
