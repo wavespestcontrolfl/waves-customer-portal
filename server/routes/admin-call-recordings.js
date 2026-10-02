@@ -78,7 +78,9 @@ router.get(
   '/audio/:id',
   rejectQueryString,
   adminAuthenticate,
-  requireTechOrAdmin,
+  // Admin-only: a recording is the whole customer conversation. A technician
+  // login never streams call audio (security audit 2026-10-01).
+  requireAdmin,
   async (req, res) => {
     try {
       const config = require('../config');
@@ -111,10 +113,18 @@ router.get(
   },
 );
 
+// Role map for this router (security audit 2026-10-01):
+//   - Recordings themselves are ADMIN-ONLY: the list, the per-call row
+//     (transcript), the audio proxy above, processing/synopsis (paid), the
+//     disposition tag (spam deletes the call and blocks the caller) and the
+//     block list each carry requireAdmin.
+//   - The follow-through surfaces a technician works from the field stay
+//     staff-wide: commitments, reschedule proposals, and the trimmed
+//     per-call intelligence read.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /stats — processing dashboard stats
-router.get('/stats', async (req, res, next) => {
+router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const stats = await CallRecordingProcessor.getStats();
     res.json(stats);
@@ -122,7 +132,7 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /recordings — list recordings with processing status
-router.get('/recordings', async (req, res, next) => {
+router.get('/recordings', requireAdmin, async (req, res, next) => {
   try {
     const { status, limit = 50, page = 1 } = req.query;
     let query = db('call_log')
@@ -153,7 +163,7 @@ router.get('/recordings', async (req, res, next) => {
 // POST /process/:callSid — process a single recording.
 // force=true (via query or body) bypasses the "already processed" dedup
 // guard so the admin Reprocess button can re-extract on an existing row.
-router.post('/process/:callSid', async (req, res, next) => {
+router.post('/process/:callSid', requireAdmin, async (req, res, next) => {
   try {
     const force = req.query.force === 'true' || req.body?.force === true;
     // `operator` = a human pressed Process, which selects the short quiet
@@ -188,7 +198,7 @@ router.post('/process/:callSid', async (req, res, next) => {
 });
 
 // POST /process-all — process all pending recordings
-router.post('/process-all', async (req, res, next) => {
+router.post('/process-all', requireAdmin, async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.processAllPending();
     res.json(result);
@@ -196,7 +206,7 @@ router.post('/process-all', async (req, res, next) => {
 });
 
 // POST /synopsis/:callSid — generate or regenerate lead synopsis
-router.post('/synopsis/:callSid', async (req, res, next) => {
+router.post('/synopsis/:callSid', requireAdmin, async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.generateSynopsis(req.params.callSid);
     res.json(result);
@@ -422,7 +432,7 @@ router.get('/commitments/auto-closed', async (req, res, next) => {
 });
 
 // POST /calls/:id/commitments — the office records a promise the AI missed.
-// Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
+// Staff-wide (router-level requireTechOrAdmin), like settling a promise.
 router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
@@ -967,7 +977,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
 });
 
 // GET /recording/:id — get single recording detail
-router.get('/recording/:id', async (req, res, next) => {
+router.get('/recording/:id', requireAdmin, async (req, res, next) => {
   try {
     const recording = await db('call_log')
       .where('call_log.id', req.params.id)
@@ -1008,7 +1018,7 @@ async function findLiveCustomerForCall(call) {
 }
 
 // PUT /calls/:id/disposition — tag a call
-router.put('/calls/:id/disposition', async (req, res, next) => {
+router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
   try {
     const { disposition } = req.body;
 
@@ -1098,7 +1108,7 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
 
 // GET /blocked — list blocked numbers (UI expects { phone, reason, blocked_at }
 // — alias from new schema for back-compat until the inbox UI redesign in PR 4).
-router.get('/blocked', async (req, res, next) => {
+router.get('/blocked', requireAdmin, async (req, res, next) => {
   try {
     const rows = await db('blocked_numbers').orderBy('blocked_at', 'desc');
     res.json({
@@ -1115,7 +1125,7 @@ router.get('/blocked', async (req, res, next) => {
 });
 
 // DELETE /blocked/:phone — unblock a number
-router.delete('/blocked/:phone', async (req, res, next) => {
+router.delete('/blocked/:phone', requireAdmin, async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.phone }).del();
     res.json({ success: true });

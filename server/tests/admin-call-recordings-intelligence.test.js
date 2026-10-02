@@ -352,7 +352,7 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
     });
   });
 
-  test('a technician can settle a promise (staff-wide, like tagging a disposition)', async () => {
+  test('a technician can settle a promise (staff-wide follow-through)', async () => {
     mockRole = 'tech';
     mockDb([{ call_log_id: CALL_ID }]);
     commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
