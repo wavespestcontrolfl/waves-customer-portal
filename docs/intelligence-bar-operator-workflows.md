@@ -1,10 +1,10 @@
 # Intelligence Bar operator workflows: contracts, matrix and evidence
 
-PR 0 of the ten-workflow scope (scope document `intelligence-bar-operator-scope-20261002.md`, Part 2). This page holds the ten request contracts, the execution-mode matrix, the evidence status for each workflow and the read-only request tally. It changes no runtime behavior. The 200 scenario cases and the harness that executes them land in a separate PR, which adds the manifest shape to this page.
+PR 0 of the Intelligence Bar ten-workflow scope (owner-approved October 2, 2026). The scope's hypotheses are written down here, not in an outside document: the per-workflow contracts below, and the expected admin and technician cells in `MATRIX` (`server/tests/fixtures/ib-workflows/execution-matrix.js`), which the test compares with the code. This page holds the ten request contracts, the execution-mode matrix, the evidence status for each workflow and the read-only request tally. It changes no runtime behavior. The 200 scenario cases and the harness that executes them land in a separate PR, which adds the manifest shape to this page.
 
 - **Inspected commit:** `60655b1ec9` (origin/main on October 2, 2026, as merged into this branch). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-matrix.test.js`; it is not a claim about production or about any open pull request.
 - **On this commit:** owner-direct mode (#5563) is merged, dark behind `GATE_IB_OWNER_DIRECT` (direct commits also ride on `GATE_IB_PLATFORM`). The owner cells below are derived from `server/services/intelligence-bar/owner-direct.js` (`OWNER_DIRECT_TOOL_NAMES`, `executesWithoutCard`), not typed in. Nothing here says either gate is on in production.
-- **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). They are listed as capability gaps in `execution-matrix.js` and documented with the scenario cases.
+- **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). They are documented as capability gaps with the scenario cases, which land separately.
 - **No production access** was used to build this.
 
 ## What is in the PR

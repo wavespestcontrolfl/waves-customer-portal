@@ -134,15 +134,6 @@ describe('execution-mode matrix on main', () => {
   });
 });
 
-// The write-call chokepoint. A manifest describes target behavior; each write
-// step that commits therefore names the call it would make ({ tool, input,
-// preview? }, synthetic values, a list for a compound step), and the call is
-// held to what the code can do: the tool is one the contract declares, every
-// input key and enum value exists in the schema the bar sends to the model, and
-// the card flag follows owner-direct.js. Anything the target needs that is not
-// on this tree is a declared capability gap (CAPABILITY_GAPS) carried as
-// `requires`; a gap licenses only what it `adds`.
-
 describe('request tally script', () => {
   const tally = require('../../scripts/ib-request-tally');
 
@@ -251,13 +242,3 @@ describe('request tally script', () => {
   });
 });
 
-describe('call schema check inputs', () => {
-  test('gap keys may be a list, a single key or absent', () => {
-    const call = { tool: 'send_sms', input: { customer_id: 'c', message: 'hi' } };
-    expect(() => matrix.schemaProblems(call, registry, [], undefined)).not.toThrow();
-    expect(() => matrix.schemaProblems(call, registry, [], 'reschedule_notice_send')).not.toThrow();
-    const typed = { tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } };
-    expect(matrix.schemaProblems(typed, registry, [], 'reschedule_notice_send').some((p) => /enum/.test(p))).toBe(false);
-    expect(matrix.schemaProblems(typed, registry, [], undefined).some((p) => /enum/.test(p))).toBe(true);
-  });
-});
