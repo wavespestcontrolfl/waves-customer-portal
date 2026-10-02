@@ -45,7 +45,9 @@ const REPORT = {
   inventoryDeductions: [{ product: 'Secret product' }],
 };
 const SMS = [
-  { direction: 'inbound', message_body: "Are you coming? I can't wait too long, I need to go to work", created_at: new Date() },
+  // 8:00 AM ET today: the fixture draft says "this morning", which is proved by the hour.
+  { direction: 'inbound', message_body: "Are you coming? I can't wait too long, I need to go to work",
+    created_at: require('../utils/datetime-et').parseETDateTime(`${require('../utils/datetime-et').etCalendarDayOf(new Date())}T08:00`) },
 ];
 
 function builder(table) {
