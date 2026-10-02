@@ -4263,9 +4263,9 @@ async function annualCoverageVerdictForPrediction(visit, conn = db, { deferredCu
   return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
 }
 
-// The customers (of `customerIds`) that have an after-visit prepay year: a
-// non-cancelled term whose estimate carries a deferred job, waiting or
-// already paid (a stamped visit keeps coverage past activation). One query,
+// The customers (of `customerIds`) that have an after-visit prepay year: any
+// term whose estimate carries a deferred job (waiting, paid, or cancelled to
+// end at term) (a stamped visit keeps coverage past activation). One query,
 // so a schedule board checks only those customers' visits one by one; the
 // per-visit check still decides. A failure throws; callers keep their own
 // posture.
@@ -4276,8 +4276,9 @@ async function deferredPrepayHoldCustomerIds(conn, customerIds) {
     .join('estimates as e', 'e.id', 't.source_estimate_id')
     .whereIn('t.customer_id', ids)
     // Any after-visit year, not only one still waiting: a visit completion
-    // stamped keeps its coverage after the year is paid and activated.
-    .whereNot('t.status', 'cancelled')
+    // stamped keeps its coverage after the year is paid and activated, and a
+    // paid year cancelled to end at term still covers it (coveredTermsAsOf);
+    // the per-visit check decides.
     .whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
     .distinct('t.customer_id');
   return new Set(rows.map((r) => String(r.customer_id)));
