@@ -2753,6 +2753,7 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
+  treeShrubFieldGuide: gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE'),
   // Schedule day-view exceptions from the Job Card; no paragraph generation
   // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
   dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),

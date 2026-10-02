@@ -117,7 +117,7 @@ describe('buildTreeShrubWarnings', () => {
   const kontos = cat('kontos', 'Kontos Insecticide/Miticide', { irac_group: '23' });
   const mainspring = cat('mainspring', 'Mainspring GNL Insecticide', { irac_group: '28' });
   const kphite = cat('kphite', 'KPHITE 7LP Systemic Fungicide', { frac_group: 'P07' });
-  const palm = cat('palm', 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+  const palm = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
   const orn = cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' });
   const plain = cat('plain', 'Cytogro Liquid Biostimulant');
   const catalogRows = [kontos, mainspring, kphite, palm, orn, plain];
@@ -207,10 +207,10 @@ describe('buildTreeShrubWarnings', () => {
   });
 
   test('an unlinked palm fertilizer application (named through its service product) still warns on spacing', () => {
-    const palmCandidate = cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+    const palmCandidate = cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' });
     const unlinked = {
       application_date: '2026-08-12', product_id: null, category: 'fertilizer',
-      product_name: 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', moa_group: null, history_moa_group: null,
+      product_name: 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', moa_group: null, history_moa_group: null,
     };
     expect(buildTreeShrubWarnings({ catalogRows: [palmCandidate], applications: [unlinked], visitDate }))
       .toEqual([expect.objectContaining({ type: 'palm_fertilizer_spacing', productId: 'palm', daysAgo: 50 })]);
@@ -221,13 +221,16 @@ describe('buildTreeShrubWarnings', () => {
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
   });
 
-  test('a palm fertilizer within 75 days warns on palm fertilizer candidates only', () => {
+  test('a palm fertilizer within three months warns on palm fertilizer candidates only', () => {
     const warnings = buildTreeShrubWarnings({ catalogRows, applications: [app(70, palm)], visitDate });
     expect(warnings).toEqual([{
-      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 75,
+      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 92,
       daysAgo: 70, appliedProductName: palm.name, appliedOn: '2026-07-23',
     }]);
-    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toEqual([]);
+    // Day 76 is still inside three calendar months (the full form agrees).
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toHaveLength(1);
+    // Three full calendar months later (2026-07-01 → 2026-10-01) it is due again.
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(92, palm)], visitDate })).toEqual([]);
   });
 
   test('an ornamental (non-palm) fertilizer does not trigger the palm spacing warning', () => {
@@ -279,7 +282,7 @@ describe('per-area rate units never pre-fill', () => {
 describe('buildTreeShrubFastContext', () => {
   const catalog = [
     cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' }),
-    cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' }),
+    cat('palm', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', { category: 'fertilizer' }),
     cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' }),
     cat('kphite', 'KPHITE 7LP Systemic Fungicide', { category: 'fungicide', frac_group: 'P07' }),
   ];
@@ -308,12 +311,12 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx).toMatchObject({ ok: true, eligible: true, reason: null, lastVisit: null, warnings: [] });
     expect(ctx.warningsUnavailable).toBeUndefined();
     expect(ctx.service).toMatchObject({ id: 'visit-1', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1', serviceKey: 'tree_shrub_program' });
-    // October protocol: Snapshot, 8-2-12, 13-0-13, KPHITE — suggestions, no amounts invented.
+    // October protocol: Snapshot and 8-0-12 palm — suggestions, no amounts
+    // invented. KPHITE (method unverified) and 13-0-13 (exact label needed;
+    // hold dose) are withheld.
     expect(ctx.monthProducts).toEqual([
       { productId: 'snapshot', method: 'granular_broadcast' },
       { productId: 'palm', method: 'granular_broadcast' },
-      { productId: 'orn', method: 'granular_broadcast' },
-      { productId: 'kphite', method: 'foliar_spray' },
     ]);
     expect(ctx.products.map((p) => p.id)).toEqual(['snapshot', 'palm', 'orn', 'kphite']);
     expect(ctx.products.find((p) => p.id === 'kphite').tsFlags).toMatchObject({ needsIracFrac: true });
@@ -347,7 +350,7 @@ describe('buildTreeShrubFastContext', () => {
       products: [{ productId: 'kphite', productName: 'KPHITE 7LP Systemic Fungicide', totalAmount: 2, amountUnit: 'qt' }],
     });
     const byId = Object.fromEntries(ctx.monthProducts.map((m) => [m.productId, m]));
-    expect(byId.kphite.lastAmount).toEqual({ totalAmount: 2, amountUnit: 'qt', serviceDate: '2026-09-02' });
+    expect(byId.kphite).toBeUndefined();
     // Snapshot is quarterly: its amount comes from the earlier visit that applied it.
     expect(byId.snapshot.lastAmount).toEqual({ totalAmount: 25.5, amountUnit: 'lb', serviceDate: '2026-07-01' });
     expect(byId.palm.lastAmount).toBeUndefined();
@@ -401,12 +404,12 @@ describe('buildTreeShrubFastContext', () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
       service_products: [
-        { service_record_id: 'rec-inc', product_id: 'kphite', total_amount: '3', amount_unit: 'qt' },
-        { service_record_id: 'rec-ok', product_id: 'kphite', total_amount: '2', amount_unit: 'qt' },
+        { service_record_id: 'rec-inc', product_id: 'palm', total_amount: '3', amount_unit: 'lb' },
+        { service_record_id: 'rec-ok', product_id: 'palm', total_amount: '2', amount_unit: 'lb' },
       ],
     }));
     expect(ctx.lastVisit).toMatchObject({ serviceRecordId: 'rec-ok', plantGroups: ['Palms'] });
-    expect(ctx.monthProducts.find((m) => m.productId === 'kphite').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'qt', serviceDate: '2026-09-20' });
+    expect(ctx.monthProducts.find((m) => m.productId === 'palm').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'lb', serviceDate: '2026-09-20' });
   });
 
   test('recent ledger rows produce warnings on the context', async () => {

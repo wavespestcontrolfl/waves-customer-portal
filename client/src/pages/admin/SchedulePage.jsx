@@ -14626,6 +14626,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14658,7 +14659,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
@@ -20654,6 +20655,7 @@ export function CompletionPanel({
             })}
             {/* Products applied */}
             <Field label="Products applied">
+              {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -23076,6 +23078,7 @@ export function CompletionPanel({
           })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
+          {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {quickComplete ? (
             <div
               style={{
@@ -25049,6 +25052,8 @@ const PRODUCT_DESCRIPTIONS = {
   "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
   snapshot: "granular bed pre-emergent for long residual weed prevention",
   "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "8-0-12": "LESCO palm fertilizer #511542; dose in pounds from the canopy chart",
+  "0-0-16": "LESCO palm fertilizer #510513; potassium and magnesium without N or P",
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
