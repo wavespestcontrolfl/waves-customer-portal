@@ -387,7 +387,7 @@ function heardInTranscript(heard, normTranscript) {
 // word right after ("ounces", "gallon", "grams", "teaspoons", "can"). "an
 // ounce" is one ounce. A number joined to another by "or" ("three or four") is
 // ambiguous and authorizes nothing.
-const VULGAR = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125 };
+const VULGAR = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875 };
 const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const FRACTION_WORDS = { half: 0.5, halves: 0.5, quarter: 0.25, quarters: 0.25, third: 1 / 3, thirds: 1 / 3, eighth: 0.125, eighths: 0.125 };
@@ -406,12 +406,12 @@ const UNIT_WORDS = {
 };
 const DIGITS_RE = /^(\d*\.\d+|\d+)$/;
 const FRACTION_TOKEN_RE = /^(\d+)\/(\d+)$/;
-const TOKEN_RE = /\d*\.\d+|\d+\/\d+|\d+|[½¼¾⅓⅔⅛]|[a-z]+/g;
+const TOKEN_RE = /\d*\.\d+|\d+\/\d+|\d+|[½¼¾⅓⅔⅛⅜⅝⅞]|[a-z]+/g;
 // Tokens with, for each, whether clause punctuation (or "but" / "then") sits
 // between it and the token before.
 function tokenize(text) {
   // "1,200" is one number; "3-4" / "3–4" is a range, read like "3 to 4" (neither end counts).
-  const src = String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛])/g, '$1 $2')
+  const src = String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛⅜⅝⅞])/g, '$1 $2')
     .replace(/(\d),(?=\d{3}\b)/g, '$1').replace(/(\d)\s*[-–—]\s*(?=\d)/g, '$1 to ');
   const tokens = [];
   const breaks = [];
@@ -538,7 +538,8 @@ function isCarrierVolume(tokens, start, end, unit, stops = []) {
   // back (past a product name and a comma) makes the gallons the finished mix
   // (never past a sentence stop: "I sprayed outside. I used Taurus, two gallons.")
   if (unit === 'gal') {
-    for (let j = start - 1; j >= 0 && start - j <= 4; j -= 1) {
+    // the whole sentence back ("Applied Taurus around the perimeter, two gallons")
+    for (let j = start - 1; j >= 0; j -= 1) {
       if (SPRAYED_WORDS.has(tokens[j])) return true;
       if (stops[j]) break;
     }
@@ -557,7 +558,7 @@ function isCarrierVolume(tokens, start, end, unit, stops = []) {
 // corrected just after it ("four ounces, no wait, five").
 const RETRACT_BEFORE = 3;
 const CORRECTION_AFTER = 3;
-const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
+const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
 // A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
 // first and is not a negation of the second.
 // ("no, it was five", "no, make it five", "no, actually five": a short filler may sit between)
@@ -845,7 +846,7 @@ function negatedPositions(tokens, breaks) {
   return out;
 }
 
-const AUXILIARY_WORDS = new Set(['was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
+const AUXILIARY_WORDS = new Set(['all', 'was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
 const POST_NEGATION_WINDOW = 4;
 function isNegatedMention(mention, world) {
   let from = mention.start;
@@ -866,6 +867,9 @@ function isNegatedMention(mention, world) {
   // a negation after the name, past auxiliary words, in the same clause.
   for (let j = mention.end; j < world.tokens.length && j - mention.end < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
     const token = world.tokens[j];
+    // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
+    if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
+      || token === 'ran' && world.tokens[j + 1] === 'out') return true;
     if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || world.tokens[j + 1] !== 'wait';
     if (!AUXILIARY_WORDS.has(token)) return false;
   }
@@ -1304,7 +1308,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:garage |gate )?(?:opener|remote|clicker)s?(?: code)? (?:is|was|=)|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate (?:was|is) (?:locked|closed|shut)|locked gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:garage |gate )?(?:opener|remote|clicker)s?(?: code)? (?:is|was|=)|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
@@ -1346,10 +1350,10 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   // aside: their audience is unclear, so they never go to the customer unasked.
   let afterOffice = false;
   const spoken = String(transcript).split(SENTENCE_SPLIT_RE).filter((t) => t.trim()).map((t) => {
-    // Only a LABELED sentence (to the office, or naming an entry code) makes every
-    // clause of it office-only; an internal topic in one clause ("..., gate was
-    // locked") is judged on that clause's own words by the caller.
-    const entry = { ...tokenize(t), office: OFFICE_ADDRESSED_RE.test(t) || COMPLETION_ACCESS_CODE_RE.test(t), afterOffice };
+    // Only a sentence ADDRESSED to the office makes every clause of it office-only;
+    // an internal topic or entry code in one clause ("...; gate code is 1234") is
+    // judged on that clause's own words by the caller.
+    const entry = { ...tokenize(t), office: OFFICE_ADDRESSED_RE.test(t), afterOffice };
     if (OFFICE_ADDRESSED_RE.test(t)) afterOffice = true;
     return entry;
   });
@@ -1358,9 +1362,8 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   // A said sentence whose internal topic sits in one comma clause ("Treated the
   // exterior for ants, gate was locked.") is routed clause by clause.
   const pieces = (raw) => String(raw ?? '').split(SENTENCE_SPLIT_RE).map((t) => t.trim()).filter(Boolean).flatMap((text) => {
-    if (!text.includes(',') || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)
-      || OFFICE_ADDRESSED_RE.test(text) || COMPLETION_ACCESS_CODE_RE.test(text)) return [text];
-    const parts = text.replace(/[.!?]+$/, '').split(/,\s*/).map((t) => t.trim()).filter(Boolean);
+    if (!/[,;:]/.test(text) || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) || OFFICE_ADDRESSED_RE.test(text)) return [text];
+    const parts = text.replace(/[.!?]+$/, '').split(/\s*[,;:]\s*/).map((t) => t.trim()).filter(Boolean);
     return parts.length > 1 && parts.every((part) => spokenClauseScope(part, spoken)) ? parts.map((part) => `${part}.`) : [text];
   });
   // one copy of a clause, wherever both note fields carried it
@@ -1395,11 +1398,22 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     else if (saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
     else place(customer, text);
   }
-  const officeText = [...officeSaid, ...office].join(' ');
+  // Caps apply at clause boundaries; a clause that does not fit is a Check, never cut.
+  const fit = (clauses, max) => {
+    const kept = [];
+    for (const clause of clauses) {
+      if ([...kept, clause].join(' ').length <= max) kept.push(clause);
+      else pushUnclear(unclear, clause, 'note_over_cap');
+    }
+    return kept;
+  };
+  const officeKept = fit([...officeSaid, ...office], CAPS.officeNote);
+  const customerKept = fit(customer, CAPS.customerNote);
+  const officeText = officeKept.join(' ');
   // An office line the tech said that neither note carries is a Check, so access or
   // billing words never vanish from an apparently complete fill.
   // (a line split clause by clause may sit partly in each note)
-  const keptClauses = [...officeSaid, ...office, ...customer].map((clause) => ` ${norm(clause)} `);
+  const keptClauses = [...officeKept, ...customerKept].map((clause) => ` ${norm(clause)} `);
   for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
@@ -1412,7 +1426,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     if (words.length && !words.every((w) => fromLine.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
   }
   return {
-    customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
+    customerNote: cleanNote(customerKept.join(' '), CAPS.customerNote),
     officeNote: cleanNote(officeText, CAPS.officeNote),
   };
 }

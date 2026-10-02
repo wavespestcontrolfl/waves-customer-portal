@@ -1529,3 +1529,51 @@ test.each([
 ])('catalog method matches the sheet: %o → %p', (row, method) => {
   expect(VoiceFill.catalogMethodOf(row)).toBe(method);
 });
+
+describe('Codex #5580 round 16', () => {
+  const row = (amount, unit, heard, productId = 'p-taurus') => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"Applied Taurus around the perimeter, two gallons": the gallons are finished mix', () => {
+    const t = 'Applied Taurus around the perimeter, two gallons.';
+    expect(validateFill(answer({ products: [row(2, 'gal', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('a semicolon sentence is routed clause by clause; the gate code stays out of the report', () => {
+    const t = 'Treated the exterior for ants; gate code is 1234.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.customerNote).not.toContain('1234');
+    expect(out.officeNote).toContain('1234');
+  });
+
+  test('"Sprayed around the gate for ants" stays customer copy; a locked gate does not', () => {
+    const t = 'Sprayed around the gate for ants. Gate was locked.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Sprayed around the gate for ants.');
+    expect(out.officeNote).toBe('Gate was locked.');
+  });
+
+  test('"four ounces, make it five ounces" corrects the four', () => {
+    const t = 'Taurus four ounces, make it five ounces.';
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [row(5, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+  });
+
+  test.each(['Taurus was out of stock, so I used Talstar.', 'Taurus ran out, so I used Talstar.'])('"%s" does not apply Taurus', (t) => {
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'Taurus')] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test.each([['⅜', 0.375], ['⅝', 0.625], ['⅞', 0.875]])('"Used %s ounce of Taurus" is %p', (glyph, value) => {
+    const t = `Used ${glyph} ounce of Taurus.`;
+    expect(validateFill(answer({ products: [row(value, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(value);
+  });
+
+  test('an office clause past the length cap is a Check, never silently cut', () => {
+    const long = Array.from({ length: 12 }, (_, i) => `Gate was locked number ${i} and the dog was loose in the back yard again today`).join('. ');
+    const t = `Treated outside. ${long}.`;
+    const out = validateFill(answer({ officeNote: long }), ctx, t);
+    expect(out.officeNote.length).toBeLessThanOrEqual(CAPS.officeNote);
+    expect(out.unclear.map((u) => u.reason)).toContain('note_over_cap');
+  });
+});
