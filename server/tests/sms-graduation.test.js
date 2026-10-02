@@ -186,6 +186,105 @@ describe('suggest → auto_send (outcome-driven, with judge backstop)', () => {
   });
 });
 
+describe('suggest → auto_send via judge-graded replies (owner ruling 2026-10-01, D2)', () => {
+  // Path (b): the nightly judge grades a live draft against the reply a human
+  // actually sent. draft_better + equivalent = accepted, human_better +
+  // draft_unsafe = corrected. Cards go unworked at Waves' volume, so this is
+  // the path a reply intent can actually earn.
+  const noHuman = { accepted: 0, corrected: 0, ignored: 0 };
+  const cleanBackstop = { recentUnsafe: 0, judged: 80 };
+
+  test('judge-graded evidence alone earns auto_send when the backstop is clean', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { ...cleanBackstop, gradedAccepted: 70, gradedCorrected: 6 } }); // 76 graded, 92% / 8%
+    expect(r.eligible).toBe(true);
+    expect(r.basis).toBe('judge_graded');
+    expect(r.nextRung).toBe('auto_send');
+    expect(r.blockers).toEqual([]);
+  });
+
+  test('human decisions remain a first-class path and name their basis', () => {
+    const r = evalR({ mode: 'suggest', suggest: { accepted: 90, corrected: 6, ignored: 4 }, judge: { ...cleanBackstop, gradedAccepted: 10, gradedCorrected: 30 } });
+    expect(r.eligible).toBe(true);
+    expect(r.basis).toBe('human_outcomes');
+  });
+
+  test('the 2026-10-01 prod shape (0 unsafe, humans mostly better) does NOT graduate, and both paths are explained', () => {
+    // prod, 30 d: 0 unsafe; 34 equivalent-or-better vs 80 human-better; 9 human decisions ever.
+    const r = evalR({ mode: 'suggest', suggest: { accepted: 2, corrected: 7, ignored: 0 }, judge: { recentUnsafe: 0, judged: 114, gradedAccepted: 34, gradedCorrected: 80 } });
+    expect(r.eligible).toBe(false);
+    expect(r.basis).toBeNull();
+    const text = r.blockers.join(' ');
+    expect(text).toMatch(/Needs 51 more human-decided suggestions \(9\/60\)/);
+    expect(text).toMatch(/Judge path: equivalent-or-better 30% < 85% required/);
+    expect(text).toMatch(/Judge path: human-better 70% > 10% cap/);
+  });
+
+  test('too few graded replies reports the exact shortfall', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { ...cleanBackstop, gradedAccepted: 20, gradedCorrected: 1 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Judge path: needs 39 more judge-graded replies \(21\/60\)/);
+  });
+
+  test('a single recent unsafe blocks the judge path too (shared backstop), without re-listing a clear path', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { recentUnsafe: 1, judged: 80, gradedAccepted: 75, gradedCorrected: 3 } });
+    expect(r.eligible).toBe(false);
+    expect(r.basis).toBeNull();
+    expect(r.blockers.join(' ')).toMatch(/1 unsafe in last 30 judged/);
+    expect(r.blockers.join(' ')).not.toMatch(/Judge path/);
+  });
+
+  test('an empty backstop blocks the judge path exactly like the human path', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { recentUnsafe: 0, judged: 8, gradedAccepted: 70, gradedCorrected: 2 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/22 more live judged drafts for the safety backstop \(8\/30\)/);
+  });
+
+  test('draft_unsafe counts as a correction on the judge path (rate math), never as accepted', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { recentUnsafe: 0, judged: 80, gradedAccepted: 60, gradedCorrected: 8 } }); // 68 graded, 88% / 12%
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Judge path: human-better 12% > 10% cap/);
+  });
+
+  test('no-reply verdicts carry no ground truth: scored volume alone never satisfies the judge path', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { recentUnsafe: 0, judged: 200 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Judge path: needs 60 more judge-graded replies \(0\/60\)/);
+  });
+
+  test('judge signal unavailable fails CLOSED for the judge path as well', () => {
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { gradedAccepted: 70, gradedCorrected: 2, judged: 80 }, judgeAvailable: false });
+    expect(r.eligible).toBe(false);
+    expect(r.basis).toBeNull();
+  });
+
+  test('judge-path bars default to the human-path bars (separately env-tunable)', () => {
+    const t = THRESHOLDS.suggestToAutosend;
+    expect(t.minGraded).toBe(t.minDecided);
+    expect(t.minGradedAcceptedRate).toBe(t.minAcceptedRate);
+    expect(t.maxGradedCorrectedRate).toBe(t.maxCorrectedRate);
+    // a thresholds object that predates the judge-path keys (like T above) still evaluates it
+    const r = evalR({ mode: 'suggest', suggest: noHuman, judge: { ...cleanBackstop, gradedAccepted: 55, gradedCorrected: 5 } });
+    expect(r.eligible).toBe(true);
+    expect(r.basis).toBe('judge_graded');
+  });
+
+  test('a stricter judge-path bar is honored when supplied', () => {
+    const strict = { ...T, suggestToAutosend: { ...T.suggestToAutosend, minGraded: 100 } };
+    const r = evaluateRung({ thresholds: strict, mode: 'suggest', suggest: noHuman, judge: { ...cleanBackstop, gradedAccepted: 70, gradedCorrected: 6 } });
+    expect(r.eligible).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/Judge path: needs 24 more judge-graded replies \(76\/100\)/);
+  });
+
+  test('active auto-send health carries the basis the executor would send on', () => {
+    const h = evaluateAutoSendHealth({ suggest: noHuman, judge: { ...cleanBackstop, gradedAccepted: 70, gradedCorrected: 6 } });
+    expect(h.sendReady).toBe(true);
+    expect(h.basis).toBe('judge_graded');
+    const gated = evaluateAutoSendHealth({ suggest: noHuman, judge: { recentUnsafe: 0, judged: 0 } });
+    expect(gated.sendReady).toBe(false);
+    expect(gated.basis).toBeNull();
+  });
+});
+
 describe('top of ladder', () => {
   test('auto_send has no further rung', () => {
     const r = evalR({ mode: 'auto_send' });

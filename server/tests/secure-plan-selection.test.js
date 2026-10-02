@@ -20,6 +20,8 @@ jest.mock('../models/db', () => {
     chain.whereNot = record('whereNot');
     chain.forUpdate = record('forUpdate');
     chain.whereNotNull = record('whereNotNull');
+    // The office-parked setup fee probe (setup_fee_office_billing alert).
+    chain.whereRaw = record('whereRaw');
     chain.orderBy = record('orderBy');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);

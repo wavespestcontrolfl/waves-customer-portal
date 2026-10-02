@@ -17,6 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
@@ -5297,11 +5298,42 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
       }
+      // GATE_LAWN_EXPECTATIONS (P9): the program line steps aside in Jun-Sep
+      // when the visit applied a nitrogen product, which the public
+      // applications[] shape does not carry, so read analysis_n from the
+      // catalog here. Gate off = no query, byte-identical. Only positive
+      // evidence clears nitrogen: a catalog hit OR the name-based check for
+      // products the catalog cannot resolve (no catalogId, no analysis_n row)
+      // both count, and a failed product load or catalog read counts as
+      // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
+      let nitrogenApplied = null;
+      let programVisit = false;
+      if (typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()) {
+        nitrogenApplied = await resolveNitrogenApplied({
+          applications,
+          productsLoadFailed,
+          loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'category', 'product_type', 'subcategory'),
+        });
+        // Only a recurring lawn plan visit gets the program line: the visit's
+        // catalog service identity must be a recurring lawn plan (never the
+        // WaveGuard tier, which is a bundle discount, not a lawn program).
+        // One-time lawn jobs, callbacks and unresolved identities get null.
+        programVisit = await resolveProgramVisit({
+          // Frozen completion identity first (a later repoint of the scheduled
+          // row cannot change a permanent report); live resolution only for
+          // legacy records with no completedServiceKey.
+          serviceData: parseJsonObject(service.service_data),
+          scheduledService: scheduledServiceRow,
+          isCallback: !!service.is_callback,
+          loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
+        });
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         wateringInstruction,
         mowingHeight,
         applications,
+        ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,

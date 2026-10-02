@@ -2004,7 +2004,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       );
       expect(refreshMatch).not.toBeNull();
       const refreshAt = source.indexOf("if (invErr?.code === 'SCHEDULED_PRICE_MOVED'");
-      const requiredCatchAt = source.indexOf('if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {');
+      const requiredCatchAt = source.indexOf('if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {');
       const releaseAt = source.indexOf('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
       expect(requiredCatchAt).toBeGreaterThan(-1);
       expect(refreshAt).toBeGreaterThan(requiredCatchAt);
@@ -2219,7 +2219,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // and only when no invoice row exists (a partial createFromService
       // that DID insert converges on resume via the existing-invoice
       // suppressors).
-      const guardAt = body.indexOf("if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {");
+      const guardAt = body.indexOf("if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {");
       expect(guardAt).toBeGreaterThan(-1);
       // The catch never recomputes the predicate from the live profile.
       expect(body).not.toContain('backfillTypedOneTimeMintRequired');
@@ -2850,7 +2850,7 @@ describe('completion route wiring (source contracts)', () => {
       // route-level posture the resume block swaps to the FROZEN value, so a
       // flagless resumed retry of a failed required mint can neither
       // evaluate as non-required nor finalize uninvoiced
-      'if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {',
+      'if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {',
     ];
     for (const gate of postCommitGates) {
       const at = source.indexOf(gate);

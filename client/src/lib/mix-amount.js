@@ -109,8 +109,13 @@ export function formatMeasuredRange(low, high, unit, { truckMeasures = false } =
       const steps = measureUnit === 'tsp' && roundTeaspoons(min, 'up', 4) > roundTeaspoons(max, 'down', 4) ? 8 : 4;
       const from = roundTeaspoons(min, 'up', steps), to = roundTeaspoons(max, 'down', steps);
       if (from > 0 && from <= to) return from === to ? measureText(from, measureUnit) : `${measureText(from, measureUnit)} – ${measureText(to, measureUnit)}`;
-      // No available measure fits: retain the exact bounds, never a midpoint.
-      return `${lowFlOz} fl oz – ${highFlOz} fl oz`;
+      // No available measure fits: the exact bounds, cut inward (low end up,
+      // high end down) so neither leaves the label; never a midpoint.
+      const inward = (n, mode) => {
+        const places = n < 1 ? 1000 : 100;
+        return (mode === 'up' ? Math.ceil(n * places - 1e-9) : Math.floor(n * places + 1e-9)) / places;
+      };
+      return `${inward(lowFlOz, 'up')} fl oz – ${inward(highFlOz, 'down')} fl oz`;
     }
     if (highFlOz >= 1) return flOzRange;
     const upTsp = roundTeaspoons(lowFlOz * TSP_PER_FL_OZ, "up");

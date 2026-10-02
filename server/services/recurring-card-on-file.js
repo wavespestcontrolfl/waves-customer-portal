@@ -116,6 +116,17 @@ function payAfterFirstVisitCardRail(policy) {
   return payAfterFirstVisitInvoiceRail(policy);
 }
 
+// GATE_PAF_SETUP_FEE: the setup-fee "billed with your first visit" promise
+// rides only a FRESH capture (policy.required) — the one surface that renders
+// the after_visit_card authorization. A customer satisfied by a saved or
+// enrolled method (saved_method_consented / autopay_already_active) sees no
+// capture and so never that text: the fee keeps today's payable invoice.
+// A held cohort (Auto Pay paused or turned off, PR-B) is never auto-charged,
+// so it is never promised that either.
+function payAfterFirstVisitSetupFeeRail(policy) {
+  return payAfterFirstVisitCardRail(policy) && policy.required === true && !afterVisitHeld(policy);
+}
+
 // The ONE predicate for "this accept's invoice rides the card lane": the
 // policy either captures a card at accept (required) or the customer already
 // has an enrolled/consented method (saved_method_consented /
@@ -2019,6 +2030,10 @@ function resolveCollectionPromise({
   tender = 'card',
   annualPrepay = false,
   collectsAtAccept = false,
+  // GATE_PAF_SETUP_FEE: this accept stamped the setup fee on the first visit
+  // (nothing collected at accept), so the capture rendered the after-visit
+  // authorization for a fresh card capture — the PR-B cohort or not.
+  setupFeeDeferred = false,
 } = {}) {
   const t = normalizeCollectionTender(tender);
   const afterVisit = !annualPrepay
@@ -2026,7 +2041,7 @@ function resolveCollectionPromise({
     && t === 'card'
     && !!policy
     && policy.required === true
-    && policy.afterVisitCard === true
+    && (policy.afterVisitCard === true || setupFeeDeferred === true)
     && !afterVisitHeld(policy);
   const variant = afterVisit ? 'after_visit_card' : null;
   return {
@@ -2079,6 +2094,7 @@ module.exports = {
   isRecurringCardOnFileEnabled,
   isPrepayCardAndChargeEnabled,
   payAfterFirstVisitCardRail,
+  payAfterFirstVisitSetupFeeRail,
   payAfterFirstVisitInvoiceRail,
   afterVisitHeld,
   explicitAutopayDisable,

@@ -1522,6 +1522,66 @@ tender, text }` (the exact authorization recorded as shown) beside the existing
 recovery record that text and version verbatim (never re-derived from current copy), and the
 recovery passes the committed `accepted_at` as the authorization time so an Auto Pay opt-out made
 after accepting is honored.
+Setup fee billed with the first visit (pay-after-first-visit PR-C,
+`GATE_PAF_SETUP_FEE`, dark; needs `GATE_PAY_AFTER_FIRST_VISIT`). Three public payload
+additions, each OMITTED (never `false`) unless true, so every gate-off response is
+byte-identical to before. (1) GET `/api/estimates/:token/data`
+`recurringCardPolicy.setupFeeAfterFirstVisit: true` only when BOTH gates are exactly
+`'true'` and the policy the accept would resolve puts this customer on the card rail with a
+FRESH capture (`required: true`, not the Auto Pay paused / off cohorts: a customer satisfied by a
+saved or enrolled method sees no capture, so never the after-visit text, and keeps today's
+payable setup invoice) AND every monthly-billed
+tier row in the quoted pricing carries a positive visit count (the accept defers only
+onto a priced first visit, and a tier row's per-visit price resolves only with a known
+visit count; otherwise the field is omitted and the page keeps today's invoice wording)
+AND the resolved customer does not keep monthly membership billing (one shared server
+predicate, also used by the legacy page copy and the accept; any lookup failure omits the
+field). The React page applies
+its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
+only when this is true AND its own selection resolves to the setup-only shape (monthly
+tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean
+about the viewer's own estimate: no customer, payer or payment-method data. (2) PUT
+`/api/estimates/:token/accept` request body `setupFeeAfterFirstVisitShown: true` ATTESTS the
+tab rendered that promise (render-bound, omitted otherwise); the accept recomputes the
+promise inside its transaction from the same inputs and, on ANY difference between the
+attestation and what it would apply, refuses with `409 { code: 'SETUP_FEE_TERMS_REFRESH' }`
+(whole accept rolls back; the page refetches). The deferred fee joins the accept's ONE
+collection promise (`resolveCollectionPromise`, see PR-B above): for a card tender the promise is
+`after_visit_card`, so the tab attests it with `recurringCardConsentVariant` / `Version` /
+`Tender` like the PR-B cohort and any difference is refused `409 CONSENT_VARIANT_STALE`; the
+accept persists `estimate_data.acceptedRecurringCardConsent` (exact text) and
+`acceptedRecurringCardConsentVariant`, which the `setup_intent.succeeded` recovery records
+verbatim. A bank tender records the base ACH consent. Success payload
+`setupFeeAfterFirstVisit: true` when this
+accept actually STAMPED the setup fee on the first visit's series parent
+(`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
+the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and
+`nextStep: 'confirmed'`. An accept that is not eligible to defer (not on the card rail, a
+bait-station setup or first-application line in the quote, a monthly tier whose visit
+count is unknown, or a converted customer whose billing lane is not `per_application`)
+keeps today's payload and pay link, omits the field and records the BASE consent. An
+accept the page DID promise first-visit billing for (card rail, setup-only shape, known
+visit counts, `per_application` lane) whose stamp cannot land (no series parent, no
+billable first visit, a different claim already on the series, or a MULTI-PROGRAM accept —
+the claim lives on one program's series and could not follow whichever program is performed
+first, so a multi-program accept never defers the fee) is REFUSED with
+`409 { code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false }` and the whole accept rolls
+back, never a payable setup invoice recorded under the after-first-visit consent; the
+retry, without the attestation, takes today's payable setup invoice. (3) Durable retry: the accept
+persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
+transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
+already-accepted estimate (`alreadyAccepted: true`) rebuilds the same
+`setupFeeAfterFirstVisit: true`, never a pay link. The setup fee is billed on the first
+PERFORMED visit's own invoice and charged once to the saved method; a no-show or
+cancelled series bills nothing. A fee the first performed visit cannot bill on its own
+completion invoice (the visit billed nothing, a grouped closeout handed to the office, a
+dues-covered billing lane) is PARKED FOR THE OFFICE, never turned into a free-standing
+invoice: the stamp is cleared and one internal `setup_fee_office_billing` dispatch alert
+(amount, series, estimate, customer) is the durable owed-fee record the office bills by
+hand, once. No draft invoice is created outside the normal completion mint, and nothing is
+sent to the customer. The accept notification (customer account feed) says
+nothing is charged today and the fee bills with the first visit. No message is sent
+because of these fields.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -1917,6 +1977,33 @@ headline + what we saw (+ why it matters only for needs_attention) with no
 line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
 stamp while the gate is on, so gate-off PDFs are never served after the flip
 (or the reverse on rollback).
+`GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
+for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
+(lawn only, never tree & shrub; no new route, token, privacy or rate-limit
+surface): instead of the peak / shoulder / dormant note it is one calendar-based,
+tier-neutral sentence for the visit's month and grass (St. Augustine,
+Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
+says what the program focuses on that time of year, never what the visit
+applied. It is written from `server/config/protocols.json` months, and any step
+the protocol makes conditional (skipped, soil-test or weather gated, optional,
+or on request) is only stated with a qualifier such as "where the
+lawn needs it" or "when conditions allow". It is at most about 30 words, and
+never naming a product, an ordinance, a county, a blackout, a law, a clock time,
+plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
+carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
+is null, and the old note stays, for a visit that is not a recurring lawn plan
+visit (the visit's catalog service identity must be a recurring lawn plan:
+one-time lawn jobs, callbacks and unresolved identities get no line; the
+WaveGuard tier is never the signal), for a visit with no assessment date, and
+for a June to September visit that may have applied nitrogen (the program
+applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
+with no `analysis_n`, or any applied product the catalog cannot resolve.
+The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
+lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+renders a program line once as a small "This time of year" card above the
+trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
+print `seasonalNote`, so its content and cache signature are unchanged.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
