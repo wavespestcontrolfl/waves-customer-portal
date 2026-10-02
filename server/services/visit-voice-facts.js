@@ -33,7 +33,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v4';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v5';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -164,7 +164,7 @@ areas: where the technician put product down (sprayed, baited, dusted, spread gr
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
 - "outside": anywhere outside the home (around the house, perimeter, foundation, eaves, lanai, patio, yard, mulch beds, outside door frames).
 - "garage": the garage.
-List an area only when the note says product went down there. A place the technician only looked at or inspected, where pests were seen but nothing was applied, or that the note says was not treated ("did not treat inside", "skipped the garage"), is NOT an area. For each area give a quote: the exact words from the note that say product went down there, copied character for character.
+List an area only when the note says product went down there. A place the technician only looked at or inspected, where pests were seen but nothing was applied, or that the note says was not treated ("did not treat inside", "skipped the garage"), is NOT an area. For each area give a quote: the exact words from the note that say product went down there, including the word that says so (sprayed, baited, treated, dusted, placed…), copied character for character.
 
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 
@@ -224,11 +224,12 @@ function validateVoiceFacts(json, note) {
   for (const entry of listOf(answer.areas)) {
     if (!AREA_LABELS[entry?.area]) continue;
     const read = readQuote(entry.quote, grounding, TREATMENT_FACT);
-    // Heard, but the note does not hold the quote or denies it there: never
-    // recorded, and never silently dropped either, since a missed indoor
-    // treatment loses the customer's indoor wait. The sheet holds until the
-    // note is read again or the tech says it plainly.
-    if (!read || read.denied) unresolvedAreas.add(entry.area);
+    // Heard, but the note does not hold the quote, denies it there, or the
+    // quote only names the place ("ants in the kitchen" is a sighting, not a
+    // treated inside): never recorded, and never silently dropped either,
+    // since a missed indoor treatment loses the customer's indoor wait. The
+    // sheet holds until the note is read again or the tech says it plainly.
+    if (!read || read.denied || !treatmentAssertion(read.quote)) unresolvedAreas.add(entry.area);
     else if (!heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
   }
   const pests = new Map();

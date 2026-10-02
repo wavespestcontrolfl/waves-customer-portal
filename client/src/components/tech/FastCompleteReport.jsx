@@ -148,8 +148,10 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
 // blank. `available` is false while the report writer's rules are off or the
 // visit is out of their scope, and on any failed read: the sheet then
 // completes without the check, as the full form does.
+// loaded: the first read has answered (a failed read too: the check fails
+// open), so the report is never written before the list could show.
 export function useVisitPromises({ base, request }) {
-  const [state, setState] = useState({ available: false, promises: [], total: 0, version: 0 });
+  const [state, setState] = useState({ available: false, promises: [], total: 0, version: 0, loaded: false });
   const [reloads, setReloads] = useState(0);
   useEffect(() => {
     let cancelled = false;
@@ -158,11 +160,11 @@ export function useVisitPromises({ base, request }) {
       .then((data) => {
         if (cancelled) return;
         setState((prev) => (data?.available === true
-          ? { available: true, promises: Array.isArray(data.promises) ? data.promises : [], total: Number(data.total) || 0, version: prev.version + 1 }
-          : { available: false, promises: [], total: 0, version: prev.version + 1 }));
+          ? { available: true, promises: Array.isArray(data.promises) ? data.promises : [], total: Number(data.total) || 0, version: prev.version + 1, loaded: true }
+          : { available: false, promises: [], total: 0, version: prev.version + 1, loaded: true }));
       })
       .catch(() => {
-        if (!cancelled) setState((prev) => ({ available: false, promises: [], total: 0, version: prev.version + 1 }));
+        if (!cancelled) setState((prev) => ({ available: false, promises: [], total: 0, version: prev.version + 1, loaded: true }));
       });
     return () => { cancelled = true; };
   }, [base, request, reloads]);

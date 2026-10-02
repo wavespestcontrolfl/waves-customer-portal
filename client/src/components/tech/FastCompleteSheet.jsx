@@ -804,12 +804,13 @@ function reportCompletionBody({
 
 // What still holds the report (generate) or the completion (complete), in
 // screen order, and the product whose stock holds it.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photosLoaded, stage, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photosLoaded, promisesLoaded, stage, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const [, reason = '', stockRow = null] = [
     [dictationPending, 'Finish dictating first.'],
     [!photosLoaded, 'Loading photos…'],
+    [!promisesLoaded, 'Loading promises…'],
     [!active.length, 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
@@ -973,7 +974,7 @@ function ReportFlowForm({
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
-  const holdInputs = { form, active, ratingAllowed, dictationPending, photosLoaded: visitPhotos.loaded };
+  const holdInputs = { form, active, ratingAllowed, dictationPending, photosLoaded: visitPhotos.loaded, promisesLoaded: visitPromises.loaded };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
@@ -1022,6 +1023,9 @@ function ReportFlowForm({
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
       serviceId={service?.id}
+      // The property this sheet loaded: the save is refused if the office has
+      // moved the visit to another one since (the map would be the old home's).
+      expectedPropertyId={ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined}
       customerName={customerNameOf(ctx.visit, service) || 'Customer'}
       address={service?.routedAddress || service?.address || ''}
       lat={service?.lat}

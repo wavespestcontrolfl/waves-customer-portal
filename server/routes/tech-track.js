@@ -1422,7 +1422,7 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type', 'property_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
@@ -1437,6 +1437,17 @@ router.post('/:id/treatment-zone', upload.fields([
       payload = JSON.parse(req.body?.payload || '');
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    // A caller that loaded the visit at a property (the Fast Complete report
+    // flow) binds the trace to it: a visit the office has moved to another
+    // property since is refused, so a map of the old home never lands on the
+    // new one. Callers that send nothing are unchanged.
+    if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId')
+      && String(payload.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
+      return res.status(409).json({
+        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
+        code: 'visit_property_changed',
+      });
     }
     {
       // Eligibility AND capture-mode agreement (codex P2 r19) — the

@@ -244,6 +244,17 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'spot' });
   });
 
+  test('a place quoted without the words that say product went down is unclear, never treated (Codex #5538)', () => {
+    const note = 'Saw ants in the kitchen; treated the exterior.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'ants in the kitchen' }, { area: 'outside', quote: 'treated the exterior' }],
+      pests: [],
+      spray: { method: 'not_said', quote: '' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.unclearAreas).toEqual(['Inside']);
+  });
+
   test('a short denial right after a fact denies it, comma or not, and a quote with no treatment word is read whole', () => {
     const note = 'Checked for spiders none found. Inside not treated. The garage was not needed. Nothing outside.';
     const facts = validateVoiceFacts({

@@ -10,8 +10,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onSaved, onClose }) => (
-    <div role="dialog" aria-label="Tracer">
+  default: ({ onSaved, onClose, expectedPropertyId }) => (
+    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)}>
       <button type="button" onClick={() => onSaved({ linear_ft: 182, capture_mode: 'perimeter' })}>Save trace</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
@@ -313,6 +313,15 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
+  test('the report waits for the promise list to answer, so a mark is never left out (Codex #5538)', async () => {
+    const request = makeRequest({ promises: () => new Promise(() => {}) });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Loading promises…')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+  });
+
   test('a note too long to read holds the send and says to shorten it', async () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'too_long', areas: [], pests: [] } }));
     await generate();
@@ -596,6 +605,8 @@ describe('complete and send', () => {
     expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+    // The tracer saves bound to the property this sheet loaded (Codex #5538).
+    expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-expected-property')).toBe('prop-1');
     fireEvent.click(await screen.findByRole('button', { name: 'Save trace' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
     expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
