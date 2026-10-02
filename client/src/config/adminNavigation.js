@@ -498,6 +498,7 @@ const TECH_ALLOWED_PATH_PREFIXES = [
 // match alone would admit them (codex P1). Both backend routers requireAdmin.
 const OWNER_ONLY_NESTED_PATHS = [
   "/admin/customers/duplicates",
+  "/admin/customers/gate-codes",
   "/admin/settings/pest-pressure",
 ];
 

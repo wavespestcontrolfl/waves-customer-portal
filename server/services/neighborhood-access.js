@@ -651,6 +651,7 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  closeResolvedConflictBells,
   countyHint,
   VALUE_HASH_SQL,
 };

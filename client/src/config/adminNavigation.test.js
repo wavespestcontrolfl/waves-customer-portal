@@ -280,6 +280,7 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
     // Owner-only pages nested under technician-allowed prefixes (codex P1).
     expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
+    expect(isPathAdminOnly("/admin/customers/gate-codes")).toBe(true);
     expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);
