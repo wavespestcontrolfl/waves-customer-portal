@@ -974,8 +974,8 @@ postgres('Email commitments on PostgreSQL', () => {
     // Pre-fix, the sweep's own JOIN excluded this row entirely: scanned
     // would read 0 and no bell would ever ring.
     expect(result).toMatchObject({ scanned: 1, fulfilled: 0 });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise emailed to a customer needs follow-up',
-      expect.any(String), expect.objectContaining({ bell: true }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
+      expect.stringContaining('We said “I\'ll send the estimate today”'), expect.objectContaining({ bell: true, detail: expect.stringContaining('promised this by email') }));
     expect((await mockPg('call_commitments').first()).status).toBe('open');
   });
 
@@ -1006,8 +1006,8 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(first).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise emailed to a customer needs follow-up',
-      expect.stringContaining('only after the promised deadline'), expect.objectContaining({ bell: true }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
+      expect.stringContaining('done only after the promised time'), expect.objectContaining({ bell: true, detail: expect.stringContaining('only after the promised deadline') }));
     await mockPg('system_settings').where({ key: 'email_operations.fulfillment_cursor' }).del();
     const second = await refreshEmailCommitments({ conn: mockPg, now: new Date(late.getTime() + 5 * 60000) });
     expect(second).toMatchObject({ fulfilled: 1 });
@@ -1060,7 +1060,7 @@ postgres('Email commitments on PostgreSQL', () => {
       evidence: JSON.stringify([{ quote: 'Please send the estimate', email_id: email.id, matched: true, speaker: 'caller' }]),
       sms_context: { channel: 'email', basis: 'request', customer_id: customerId, source_at: email.received_at.toISOString() } })
       .returning('*');
-    await mockPg('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'An email from a customer needs follow-up',
+    await mockPg('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Comms — follow up with Synthetic Fixture',
       metadata: { dedupeKey: `email-commitment:${row.id}` } });
     const updated = await applySmsCommitmentUpdate(mockPg, row.id, { customerId, action: 'fulfill', reviewedBy: randomUUID() });
     expect(updated).toMatchObject({ status: 'fulfilled' });
@@ -1087,7 +1087,7 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').where({ id: row.id }).first()).status).toBe('open');
   });
 
-  test('bell titles: ask vs promise', async () => {
+  test('bell names the customer and quotes the ask', async () => {
     const actualNotifications = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
@@ -1098,6 +1098,7 @@ postgres('Email commitments on PostgreSQL', () => {
       sms_context: { channel: 'email', basis: 'request', customer_id: customerId, source_at: email.received_at.toISOString() } });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await refreshEmailCommitments({ conn: mockPg, now: new Date(email.received_at.getTime() + 60000) });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'An email from a customer needs follow-up', expect.any(String), expect.anything());
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
+      expect.stringContaining('“Did you come today”'), expect.anything());
   });
 });

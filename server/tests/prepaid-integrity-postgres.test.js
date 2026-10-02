@@ -70,6 +70,11 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
       expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: child.id, issue: 'manual_series_stamp_missing' }) }));
     const key = () => notifications.notifyAdmin.mock.calls.filter((call) => call[3].metadata?.scheduled_service_id === child.id
       && call[3].metadata?.issue === 'manual_series_stamp_missing').at(-1)[3].metadata.dedupeKey;
+    // Owner audit 2026-10-01: the bell names the customer and the visit date, and opens that visit.
+    const [, bellTitle, , bellOpts] = notifications.notifyAdmin.mock.calls.find((call) => call[3].metadata?.scheduled_service_id === child.id);
+    expect(bellTitle).toBe("Schedule — check Synthetic Fixture's prepaid visit on Jan 15");
+    expect(bellOpts.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-15&appointment=${child.id}`);
+    expect(bellOpts.metadata).toMatchObject({ area: 'Schedule', subject: { type: 'visit', id: child.id } });
     const originalKey = key();
     await trx.transaction((sp) => sp('scheduled_services').where({ id: child.id }).update({
       prepaid_amount: 100, prepaid_method: 'check', prepaid_at: paidAt,

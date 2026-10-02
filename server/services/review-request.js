@@ -7,7 +7,7 @@ const {
   addETDays,
   etDateString,
 } = require("../utils/datetime-et");
-const { shortenOrPassthrough, existingShortUrlFor } = require("./short-url");
+const { shortenOrPassthrough, existingShortUrlFor, allShortUrlsFor } = require("./short-url");
 
 // How long a composer's pre-provider claim ('sending' + claimed_at) counts
 // as live: the ask gates block every canonical one-off path for this long,
@@ -3199,13 +3199,17 @@ const ReviewService = {
     // evidence of delivery.
     let frags = [row.token];
     try {
-      const short = await existingShortUrlFor({
+      // History, not reuse: the text that went out may carry a legacy code
+      // or the 10-char replacement a later re-send minted; search every code
+      // this request ever had (existingShortUrlFor hides legacy codes and
+      // returns only one).
+      const shorts = await allShortUrlsFor({
         kind: "review",
         entityType: "review_requests",
         entityId: row.id,
         rethrow: true,
       });
-      if (short) frags.push(short);
+      frags.push(...shorts);
     } catch (shortErr) {
       // An UNREADABLE short code is not "no short code" (local audit): the
       // text that went out may have carried one, and searching the long token
