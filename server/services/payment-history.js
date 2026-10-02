@@ -20,10 +20,14 @@ const logger = require('./logger');
 // pending / processing / requires_action, capped) and are filtered in JS through every linkage; a processing INVOICE
 // counts only if it is the homeowner's (payer_id NULL and not withdrawn to a payer by stamp).
 const IN_FLIGHT_PAYMENTS_LIMIT = 200;
+// Codex round-71 P2: not only pending / processing / requires_action - ANY status outside the renderer's resolved set (disputed, an
+// unknown status) is unresolved money, so an old dispute pushed out of the display window still blocks "no balance due".
+const { RESOLVED_PAYMENT_STATUSES } = require('./payment-status-contract');
+const RESOLVED_STATUS_SQL_LIST = [...RESOLVED_PAYMENT_STATUSES].map((s) => `'${s}'`).join(', ');
 const IN_FLIGHT_PAYMENTS_SQL = `SELECT id, metadata, stripe_payment_intent_id, stripe_charge_id, description
   FROM payments
   WHERE customer_id = ? AND payer_id IS NULL
-    AND lower(status) IN ('pending', 'processing', 'requires_action')
+    AND lower(coalesce(status, '')) NOT IN (${RESOLVED_STATUS_SQL_LIST})
   LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
 // Processing invoices come back as ids (capped) and are judged through the LIVE payer verdict in JS (Codex round-41 P1): a processing
 // invoice that resolves to a payer today is the payer's money in flight, not the homeowner's.

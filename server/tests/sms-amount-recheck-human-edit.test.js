@@ -53,8 +53,21 @@ describe('a staff Zelle contact is rechecked against the decision\'s target invo
   test('a target invoice that no longer resolves for this customer, or an unverifiable eligibility read, blocks too', async () => {
     const gone = (table) => ({ where: () => ({ first: async () => (table === 'invoices' ? null : { id: 'c1' }) }) });
     await expect(run('You can Zelle us at pay@example.com.', 'inv-A', { dbh: gone })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+    // an unverifiable read is an outage: still blocked, but retryable (Codex round-71 P2)
     visibility.mockRejectedValue(new Error('stripe down'));
-    await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+    await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
+  });
+  // Codex round-71 P1: an edit that re-targets by Zelle transfer amount alone is checked against THAT invoice
+  test('the edit names only a Zelle transfer amount: it re-targets to the invoice with that amount', () => {
+    const { explicitInvoiceReference } = require('../services/zelle-target-invoice');
+    expect(explicitInvoiceReference('Zelle $200 to pay@example.com')).toBe(true);
+    expect(explicitInvoiceReference('You can send 200 dollars by Zelle.')).toBe(true);
+    expect(explicitInvoiceReference('You can Zelle us at pay@example.com.')).toBe(false);
+  });
+  test('"Zelle $210 to ..." on a decision targeted at the $95 invoice A: invoice B ($210) is the one checked', async () => {
+    await expect(run('Zelle $210 to pay@example.com', 'inv-A')).resolves.toMatchObject({ stale: false, zelle: { invoiceId: 'inv-B' } });
+    visibility.mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-A', reason: 'not_eligible' }));
+    await expect(run('Zelle $210 to pay@example.com', 'inv-A')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
   // a reviewer edit that NAMES another invoice re-targets the instructions (Codex rounds 29/30): THAT invoice is checked
   test('the edit names invoice B while the target is A: B is checked, and blocks when B no longer takes Zelle', async () => {

@@ -178,7 +178,8 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
 // EDITED body re-targets the Zelle offer away from the invoice the draft was written for (Codex round-29 P1).
 function explicitInvoiceReference(text) {
   const named = invoiceNumbersNamed(text);
-  return named.full.length > 0 || named.tail.length > 0 || invoiceAmountsNamed(text).length > 0;
+  // Codex round-71 P1: a Zelle-scoped transfer amount ("Zelle $200 to ...") names the obligation too
+  return named.full.length > 0 || named.tail.length > 0 || invoiceAmountsNamed(text).length > 0 || zelleAmountsNamed(text).length > 0;
 }
 
 module.exports = { resolveZelleTargetInvoice, invoiceNumbersNamed, explicitInvoiceReference };

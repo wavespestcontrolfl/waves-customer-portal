@@ -767,6 +767,7 @@ module.exports = {
   renderPaymentStatusLines,
   sentencesFromFactsBlock,
   hasOutstandingObligation,
+  RESOLVED_PAYMENT_STATUSES,
   canonText,
   copiedSentences,
   withoutCopies,

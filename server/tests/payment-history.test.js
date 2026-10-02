@@ -66,7 +66,11 @@ describe('hasInFlightMoney', () => {
   test('two reads: candidate in-flight payments (payer_id NULL, capped) filtered in JS, and a processing invoice (not withdrawn)', () => {
     expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/FROM payments/);
     expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/payer_id IS NULL/);
-    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/IN \('pending', 'processing', 'requires_action'\)/);
+    // Codex round-71 P2: every status outside the renderer's resolved set is unresolved money (disputed, unknown), not only in-flight ones
+    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/lower\(coalesce\(status, ''\)\) NOT IN \(/);
+    const { RESOLVED_PAYMENT_STATUSES } = require('../services/payment-status-contract');
+    for (const st of RESOLVED_PAYMENT_STATUSES) expect(IN_FLIGHT_PAYMENTS_SQL).toContain(`'${st}'`);
+    expect(IN_FLIGHT_PAYMENTS_SQL).not.toContain("'disputed'");
     expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/LIMIT 200/);
     expect(IN_FLIGHT_INVOICE_SQL).toMatch(/FROM invoices/);
     expect(IN_FLIGHT_INVOICE_SQL).toMatch(/payer_id IS NULL AND payer_statement_id IS NULL AND lower\(status\) = 'processing'/);

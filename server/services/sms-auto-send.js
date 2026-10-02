@@ -600,6 +600,59 @@ async function maybeAutoSend(params = {}) {
  * runs for a draft that is already refused. Returns { reason } on refusal,
  * otherwise { customerId } — for gratitude, the reloaded durable customer.
  */
+// (3.7)-(3.8) of autoSendReadiness: the deterministic checks on the reply's own content, { reason } or null. Their own function (Codex
+// round-71 P2) so the readiness ladder keeps one rung per decision.
+function replyContentReadinessBlock(params, gratitudeLane) {
+  const { reply, intent, intendedActions = null } = params;
+  const suggest = require('./sms-suggest-mode');
+  // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
+  //       allows real amounts in texts, and the suggest lane now delivers
+  //       them (a human reviews before send) — but at the autonomy
+  //       boundary a wrong figure sent with nobody looking is the
+  //       worst-case failure, so this lane stays refused until an explicit
+  //       owner call relaxes it. Deterministic, independent of the LLM
+  //       verifier.
+  if (suggest.hasPriceQuote(reply)) {
+    logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
+    return { reason: 'price_quote' };
+  }
+
+  // (3.75) PAYMENT-SCOPED replies auto-send only as verbatim copies of rendered account sentences plus inert text (greeting, thanks,
+  //        "let us know if you have questions"). The status detector is a net with holes; this makes a miss fail SAFE for the
+  //        autonomous rung: anything else in a reply about payments goes to Agent Review, where a person reads it (owner ruling
+  //        2026-10-01, PR #5331). Real-answers (v12) drafts only; re-checked at dispatch with the claim's own snapshot.
+  const scopeBlock = paymentScopeReadinessBlock(params, gratitudeLane);
+  if (scopeBlock) return scopeBlock;
+
+  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
+  //       the real-answers prompt has the model quote the follow-up SLA
+  //       phrase when the facts can't answer, and the prompt now requires an
+  //       escalate action alongside it — but the prompt is not the boundary.
+  //       Deterministic backstop: an SLA phrase in the reply with no
+  //       escalate action means nobody owns the promise; never auto-send it.
+  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
+  //       prompt, and with the gate off auto-send is unchanged by this PR.
+  const followupSla = require('./sms-followup-sla');
+  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
+      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
+    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
+    return { reason: 'unowned_followup' };
+  }
+  return null;
+}
+
+// (3.75) of autoSendReadiness: { reason } when a v12 payment-scoped reply is not copy-only, else null (Codex round-71 P2: its own
+// function, so the readiness ladder stays one decision per rung).
+function paymentScopeReadinessBlock(params, gratitudeLane) {
+  if (gratitudeLane || typeof params.promptVersion !== 'string' || !params.promptVersion.startsWith('house_voice_v12')) return null;
+  const scopeBlock = require('./payment-status-contract').autoSendScopeBlock({
+    reply: params.reply, inboundText: params.inboundMessage == null ? null : String(params.inboundMessage), snapshot: params.paymentStatusSnapshot || null,
+  });
+  if (!scopeBlock) return null;
+  logger.info(`[sms-auto-send] payment-scoped reply is not copy-only — routing to review (intent=${params.intent})`);
+  return { reason: scopeBlock };
+}
+
 async function autoSendReadiness(params, gratitudeLane) {
   const {
     customer, smsLogId, reply, intent, intendedActions = null,
@@ -642,46 +695,9 @@ async function autoSendReadiness(params, gratitudeLane) {
   const profile = await pinDraftVoiceProfile(params);
   if (profile.reason) return profile;
 
-  // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
-  //       allows real amounts in texts, and the suggest lane now delivers
-  //       them (a human reviews before send) — but at the autonomy
-  //       boundary a wrong figure sent with nobody looking is the
-  //       worst-case failure, so this lane stays refused until an explicit
-  //       owner call relaxes it. Deterministic, independent of the LLM
-  //       verifier.
-  if (suggest.hasPriceQuote(reply)) {
-    logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
-    return { reason: 'price_quote' };
-  }
-
-  // (3.75) PAYMENT-SCOPED replies auto-send only as verbatim copies of rendered account sentences plus inert text (greeting, thanks,
-  //        "let us know if you have questions"). The status detector is a net with holes; this makes a miss fail SAFE for the
-  //        autonomous rung: anything else in a reply about payments goes to Agent Review, where a person reads it (owner ruling
-  //        2026-10-01, PR #5331). Real-answers (v12) drafts only; re-checked at dispatch with the claim's own snapshot.
-  if (!gratitudeLane && typeof params.promptVersion === 'string' && params.promptVersion.startsWith('house_voice_v12')) {
-    const scopeBlock = require('./payment-status-contract').autoSendScopeBlock({
-      reply, inboundText: params.inboundMessage == null ? null : String(params.inboundMessage), snapshot: params.paymentStatusSnapshot || null,
-    });
-    if (scopeBlock) {
-      logger.info(`[sms-auto-send] payment-scoped reply is not copy-only — routing to review (intent=${intent})`);
-      return { reason: scopeBlock };
-    }
-  }
-
-  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
-  //       the real-answers prompt has the model quote the follow-up SLA
-  //       phrase when the facts can't answer, and the prompt now requires an
-  //       escalate action alongside it — but the prompt is not the boundary.
-  //       Deterministic backstop: an SLA phrase in the reply with no
-  //       escalate action means nobody owns the promise; never auto-send it.
-  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
-  //       prompt, and with the gate off auto-send is unchanged by this PR.
-  const followupSla = require('./sms-followup-sla');
-  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
-      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
-    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
-    return { reason: 'unowned_followup' };
-  }
+  // (3.7)-(3.8) the reply's own content: amounts, payment scope, an owned follow-up (replyContentReadinessBlock)
+  const contentBlock = replyContentReadinessBlock(params, gratitudeLane);
+  if (contentBlock) return contentBlock;
 
   // (4) Server-enforced graduation eligibility — re-checked live every send.
   const elig = await require('./sms-graduation').evaluateAutoSendEligibility({

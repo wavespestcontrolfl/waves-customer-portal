@@ -680,9 +680,9 @@ describe('liveZelleFacts', () => {
     await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: 'invoice_unavailable' });
   });
 
-  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('an UNVERIFIABLE state (%s) => null: never an offer and never a denial', async (reason) => {
+  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('an UNVERIFIABLE state (%s) => null (flagged unverifiable): never an offer and never a denial', async (reason) => {
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
-    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT, unverifiable: true });
   });
 
   // Codex round-62 P1: the recipient is re-read AFTER the eligibility awaits
@@ -695,12 +695,13 @@ describe('liveZelleFacts', () => {
 
   test('a lookup that throws, an unexpected deposit read error, or an invoice that no longer resolves for this customer => null', async () => {
     payPageZelleVisibility.mockRejectedValue(new Error('stripe down'));
-    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null, unverifiable: true });
     payPageZelleVisibility.mockReset();
     assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
-    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null, unverifiable: true });
+    // Codex round-71 P2: a GONE invoice is a change (not flagged); an unreadable invoice row is an outage (flagged)
     await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbWithTables({ invoices: undefined }) })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT });
-    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbWithTables({ invoices: new Error('db down') }) })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbWithTables({ invoices: new Error('db down') }) })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: null, recipient: RECIPIENT, unverifiable: true });
   });
 });
 
@@ -745,11 +746,11 @@ describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered 
     await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
   });
 
-  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('eligibility is UNVERIFIABLE now (%s) => payment_status_changed (a Zelle sentence is never rendered on a guess)', async (reason) => {
+  test.each(['payer_unverifiable', 'credit_unverifiable', 'eligibility_unverifiable'])('eligibility is UNVERIFIABLE now (%s) => zelle_recheck_failed: held (never rendered on a guess) but retryable (Codex round-71 P2)', async (reason) => {
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
-    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'zelle_recheck_failed', zelle: null });
     payPageZelleVisibility.mockRejectedValue(new Error('stripe down'));
-    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    await expect(run(OFFER, snap([OFFER]))).resolves.toEqual({ reason: 'zelle_recheck_failed', zelle: null });
   });
 
   test('the target invoice is gone / renumbered, or the snapshot names no Zelle invoice => payment_status_changed', async () => {
@@ -764,8 +765,8 @@ describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered 
     await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: null, zelle: { ...LIVE_OFFER, state: 'invoice_unavailable' } });
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null }); // Zelle became available
     await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
-    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'credit_unverifiable' }); // can no longer be confirmed
-    await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: 'payment_status_changed', zelle: null });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'credit_unverifiable' }); // can no longer be confirmed: retryable
+    await expect(run(UNAVAILABLE, snap([UNAVAILABLE]))).resolves.toEqual({ reason: 'zelle_recheck_failed', zelle: null });
   });
 
   test('a copied "We don\'t take Zelle right now." stands only while no recipient is configured', async () => {

@@ -152,16 +152,18 @@ async function liveZelleFacts({ customerId, invoiceId, dbh = db } = {}) {
   let invoiceNumber = null;
   try {
     const row = await dbh('invoices').where({ id: invoiceId, customer_id: customerId }).first('invoice_number');
-    invoiceNumber = row?.invoice_number || null;
+    // the target invoice is GONE (deleted / moved to another customer): a change, not an outage
+    if (!row) return { state: null, invoiceId, invoiceNumber: null, recipient };
+    invoiceNumber = row.invoice_number || null;
   } catch {
-    return { state: null, invoiceId, invoiceNumber: null, recipient };
+    return { state: null, invoiceId, invoiceNumber: null, recipient, unverifiable: true };
   }
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
   // Codex round-62 P1: the recipient is read AGAIN after the eligibility awaits - one rotated or removed meanwhile is the one returned
   const recipientNow = manualPayOptionsFromEnv()?.zelle?.recipient || null;
   if (!recipientNow) return { state: 'not_offered', invoiceId, invoiceNumber: null, recipient: null };
-  const state = eligibility.eligible ? 'offer' : (ZELLE_UNVERIFIABLE.has(eligibility.reason) ? null : 'invoice_unavailable');
-  return { state, invoiceId, invoiceNumber, recipient: recipientNow };
+  if (!eligibility.eligible && ZELLE_UNVERIFIABLE.has(eligibility.reason)) return { state: null, invoiceId, invoiceNumber, recipient: recipientNow, unverifiable: true };
+  return { state: eligibility.eligible ? 'offer' : 'invoice_unavailable', invoiceId, invoiceNumber, recipient: recipientNow };
 }
 
 // Cheap, read-free pre-screen for the send seams (Codex round-11 P1): does this body carry anything the recheck judges - a dollar figure /
@@ -232,6 +234,9 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
     if (!context) return { reason: 'payment_status_recheck_failed', zelle: null };
     const copiesZelle = copied.some((t) => ZELLE_WORD_RE.test(t));
     const zelle = copiesZelle ? await liveZelleFacts({ customerId, invoiceId: snapshot?.zelle?.invoice_id || null, dbh }) : null;
+    // Codex round-71 P2: an UNREADABLE Zelle state (a target invoice whose eligibility could not be verified) is an outage, not a change -
+    // it stays retryable instead of retiring the reviewed decision
+    if (zelleUnverifiable(zelle)) return { reason: 'zelle_recheck_failed', zelle: null };
     const live = paymentStatus.renderPaymentStatusSentences(zelle ? { ...context, billing: { ...(context.billing || {}), zelleFacts: zelle } } : context)
       .map((s) => s.text);
     if (!copied.every((t) => live.includes(t))) return { reason: 'payment_status_changed', zelle: null };
@@ -253,6 +258,9 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
 // The invoice is the one the BODY names when it names one (a reviewer edit can re-target the instructions - Codex rounds 29/30), else the
 // decision's target, else the invoice the customer's message names / their one open invoice (resolveZelleTargetInvoice); unresolvable
 // => no invoice => not eligible (fail closed).
+// liveZelleFacts could not READ the target invoice's Zelle state (a lookup failure, an unverifiable eligibility reason): an outage, never
+// 'changed' (Codex round-71 P2). A gone invoice or no target is a change, not this.
+const zelleUnverifiable = (facts) => facts?.unverifiable === true;
 async function staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessage = null, dbh }) {
   if (!zelleBodyContacts(text).length) return { stale: false, zelle: null };
   const recipient = outgoingZelleStale(text);
@@ -270,6 +278,7 @@ async function staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessag
     }
   }
   const facts = await liveZelleFacts({ customerId, invoiceId, dbh });
+  if (zelleUnverifiable(facts)) return { stale: true, reason: 'zelle_recheck_failed', zelle: null };
   return facts.state === 'offer' ? { stale: false, zelle: facts } : { stale: true, reason: 'zelle_invoice_ineligible', zelle: null };
 }
 
