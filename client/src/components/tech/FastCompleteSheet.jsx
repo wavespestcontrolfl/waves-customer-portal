@@ -924,6 +924,12 @@ function reportReadyHolds({ draft, writing, traceRead }) {
   };
 }
 
+// The saved outlines that claim an area treated (the lawn and yard
+// workflows; trace-eligibility.js reads them as outline captures), and the
+// ways a product goes down across an area.
+const AREA_CAPTURES = new Set(['lawn', 'lawn_highlight', 'yard']);
+const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv']);
+
 // A lane visit (GATE_LANE_VOICE_FILL) has no pest facts and no trace step
 // (its outline stays on the full form): its record is the tech's to
 // confirm. A product picked as a perimeter spray needs a traced length, and
@@ -933,12 +939,21 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
-  const unusedTrace = draft && traceRead.zone && !perimeterRow;
+  // A saved trace claims what it shows: a perimeter a spray around the
+  // house, an outline (the lawn and yard workflows) an area treated, so each
+  // stands only with a product that went down that way (codex local r2 on
+  // #5629).
+  const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
+  const areaTrace = AREA_CAPTURES.has(traceMode);
+  const areaRow = active.find((row) => AREA_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
+  const unusedTrace = draft && traceRead.zone && (areaTrace ? !areaRow : !perimeterRow);
   return [
     ...ready.report,
     ...ready.trace,
     [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
-    [unusedTrace, 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
+    [unusedTrace, areaTrace
+      ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
+      : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
   ];
 }
 

@@ -231,8 +231,8 @@ describe('what holds a lane visit\'s send', () => {
     expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
   });
 
-  test('a saved trace no perimeter spray backs would show on the customer\'s report: remove it or use the Full form', async () => {
-    const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 120, capture_mode: 'outline', updated_at: '2026-10-02T14:00:00Z' } } });
+  test('a saved perimeter trace no perimeter spray backs would show on the customer\'s report: remove it or use the Full form', async () => {
+    const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 120, capture_mode: 'perimeter', updated_at: '2026-10-02T14:00:00Z' } } });
     await openSheet(request);
     addProduct('Temprid FX', '1');
     await generate();
@@ -252,6 +252,55 @@ describe('what holds a lane visit\'s send', () => {
     const body = request.bodies('/complete')[0];
     expect(body.traceSeen).toBe('2026-10-02T14:00:00Z');
     expect(body.products[0]).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 120, areaUnit: 'linear_ft' });
+  });
+});
+
+describe('a saved outline on a lane visit (codex local r2 on #5629)', () => {
+  const OUTLINE = (mode) => ({ enabled: true, treatmentZone: { capture_mode: mode, updated_at: '2026-10-02T14:00:00Z' } });
+
+  test('a mosquito yard outline stands with a fog/ULV mist: it goes on the report, and the card says so', async () => {
+    const visit = { ...VISIT, serviceType: 'Mosquito Control (Monthly)', serviceKey: 'mosquito_monthly' };
+    const request = makeRequest({
+      visit, lane: 'mosquito', trace: OUTLINE('yard'),
+      laneFacts: { available: true, status: 'read', lane: 'mosquito', areas: [], findings: [], unclearGroups: [] },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Mosquito Control (Monthly)', laneKey: 'mosquito' });
+    addProduct('Example Mosquito Concentrate', '2');
+    await generate('Misted the yard.');
+    expect(screen.getByText('With the trace.')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const body = request.bodies('/complete')[0];
+    expect(body.traceSeen).toBe('2026-10-02T14:00:00Z');
+    expect(body.products[0]).toMatchObject({ applicationMethod: 'fog_ulv' });
+    expect(body.products[0]).not.toHaveProperty('areaValue');
+  });
+
+  test('a lawn outline with no product spread across an area holds: remove it or use the Full form', async () => {
+    const visit = { ...VISIT, serviceType: 'Fire Ant Treatment', serviceKey: 'fire_ant' };
+    const request = makeRequest({
+      visit, lane: 'fire_ant', trace: OUTLINE('lawn'),
+      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [], findings: [], unclearGroups: [] },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Fire Ant Treatment', laneKey: 'fire_ant' });
+    addProduct('Temprid FX', '1');
+    await generate('Drenched two mounds.');
+    expect(await screen.findByText('Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('a lawn outline stands with a broadcast spray picked for the product', async () => {
+    const visit = { ...VISIT, serviceType: 'Fire Ant Treatment', serviceKey: 'fire_ant' };
+    const request = makeRequest({
+      visit, lane: 'fire_ant', trace: OUTLINE('lawn'),
+      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [], findings: [], unclearGroups: [] },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Fire Ant Treatment', laneKey: 'fire_ant' });
+    addProduct('Temprid FX', '1', 'Broadcast spray');
+    await generate('Broadcast the front lawn.');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
   });
 });
 
