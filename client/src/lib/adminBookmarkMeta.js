@@ -67,7 +67,7 @@ function setMeta(name, content) {
 
 /**
  * Capture the document's current bookmark identity so it can be restored
- * on SPA leave. Returns null on a document already carrying admin identity
+ * on SPA leave. Returns null on a document already carrying admin or field identity
  * (a cold /admin load in production is server-rendered with html.admin-app
  * before React mounts) — there is no pre-admin state to go back to, so
  * restore falls back to the customer defaults instead of "restoring" admin
@@ -77,6 +77,10 @@ export function snapshotBookmarkMeta() {
   if (typeof document === "undefined") return null;
   if (document.documentElement.classList.contains("admin-app")) return null;
   const manifest = document.querySelector('link[rel="manifest"]');
+  // A legacy /tech URL is server-rendered with the field identity and then
+  // redirected into /admin/today: that transient identity is not a pre-admin
+  // state, so leaving admin restores the customer defaults (Codex #5573 r6).
+  if (manifest?.getAttribute("href") === FIELD_BOOKMARK_META.manifest) return null;
   return {
     manifest:
       manifest?.getAttribute("href") ?? CUSTOMER_BOOKMARK_META.manifest,
