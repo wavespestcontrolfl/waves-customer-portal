@@ -251,6 +251,10 @@ export default function LawnReportViewPage() {
         {report.summary ? (
           <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.6 }}>{report.summary}</p>
         ) : null}
+        {/* A report sent with photos but no findings still says what the read was based on. */}
+        {!findings.length && report.basis ? (
+          <p style={{ margin: '8px 0 0', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{report.basis}</p>
+        ) : null}
       </SectionCard>
 
       {/* Lawn health at a glance */}

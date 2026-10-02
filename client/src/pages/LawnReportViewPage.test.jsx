@@ -83,6 +83,16 @@ describe('LawnReportViewPage', () => {
     expect(blocks[1]).not.toHaveTextContent(/What would settle it/);
   });
 
+  it('still prints the basis line on a report sent with no findings (codex P2 #5598 r2)', async () => {
+    const report = { ...REPORT, basis: 'Based on 3 photos.', findings: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText('Based on 3 photos.')).toBeInTheDocument();
+    expect(screen.queryByText('What we found')).toBeNull();
+    // Exactly once: the findings section is absent, so only the summary card prints it.
+    expect(screen.getAllByText('Based on 3 photos.')).toHaveLength(1);
+  });
+
   it('shows a friendly not-available state on 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({ error: 'Report not found' }) })));
     renderAt();
