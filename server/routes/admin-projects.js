@@ -135,6 +135,12 @@ function canAccessProject(req, project) {
   return isAdmin(req) || String(project?.created_by_tech_id || '') === String(req.technicianId || '');
 }
 
+// Technician access: the project's creator, or the technician named on its
+// service record or scheduled visit. A linked VISIT additionally has to sit
+// inside the canonical current/recent window (technicianVisitRowInScope:
+// not a dead status, within the access window) — a cancelled or stale visit
+// grants nothing (codex #5568 r4 P1). Creator and service-record access keep
+// their contract (admin-projects-guards / -routes tests pin it).
 async function hasProjectAccess(req, project) {
   if (canAccessProject(req, project)) return true;
   if (!project || !req.technicianId) return false;
@@ -149,8 +155,13 @@ async function hasProjectAccess(req, project) {
   if (project.scheduled_service_id) {
     const scheduled = await db('scheduled_services')
       .where({ id: project.scheduled_service_id, technician_id: req.technicianId })
-      .first('id');
-    if (scheduled) return true;
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (scheduled) {
+      const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
+      // Rows always carry status + date; evaluate the window when they do.
+      const windowed = scheduled.status != null || scheduled.scheduled_date != null;
+      if (!windowed || technicianVisitRowInScope(req, { ...scheduled, technician_id: req.technicianId })) return true;
+    }
   }
 
   return false;

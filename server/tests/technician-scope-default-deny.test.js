@@ -62,6 +62,7 @@ describe('matcher', () => {
     ['GET', '/api/admin/schedule/week', true],
     ['POST', '/api/admin/schedule/11111111-2222-4333-8444-555555555555/update-details', true],
     ['GET', '/api/admin/kb', true],
+    // /knowledge/queries matches the read pattern but the route itself is requireAdmin.
     ['GET', '/api/admin/kb/11111111-2222-4333-8444-555555555555', true],
     ['POST', '/api/admin/kb', false],
     ['POST', '/api/admin/kb/11111111-2222-4333-8444-555555555555/verify', false],

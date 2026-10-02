@@ -500,7 +500,10 @@ router.post('/assess', async (req, res, next) => {
     // validated visit's date instead of the current clock.
     let scheduledService = null;
     if (serviceId) {
-      const svc = await db('scheduled_services').where({ id: serviceId }).first();
+      // A technician may bind the assessment only to a visit on their own
+      // current/recent route — not another technician's visit for the same
+      // customer (codex #5568 r4 P1).
+      const svc = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', serviceId)).first();
       if (!svc) return res.status(404).json({ error: 'serviceId not found' });
       if (svc.customer_id !== customerId) {
         return res.status(400).json({ error: 'serviceId does not belong to customerId' });
@@ -1230,6 +1233,10 @@ router.post('/confirm', async (req, res, next) => {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
     if (!(await technicianServicesCustomer(req, assessment.customer_id))) return res.status(404).json({ error: 'Assessment not found' });
+    if (assessment.service_id && isTechnicianRequest(req)) {
+      const owned = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', assessment.service_id)).first('scheduled_services.id');
+      if (!owned) return res.status(404).json({ error: 'Assessment not found' });
+    }
 
     // Persisted provenance selects the workflow, even after the visit gate is
     // turned off. Legacy rows retain their existing confirmation behavior.

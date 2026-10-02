@@ -125,3 +125,20 @@ describe('GET /customers', () => {
     expect(chain.limit).toBeUndefined();
   });
 });
+
+describe('POST /assess binds to the submitted visit', () => {
+  test("a serviceId on another technician's route → 404 even when the customer is on this technician's route", async () => {
+    mockServices = true;
+    const scope = require('../services/technician-visit-scope');
+    scope.technicianCurrentVisitFilter.mockImplementation((req, q) => q);
+    const chain = {};
+    for (const m of ['where', 'whereNotIn', 'whereIn', 'whereNull', 'join', 'leftJoin', 'select', 'orderBy', 'modify']) chain[m] = jest.fn(() => chain);
+    chain.first = jest.fn(async () => null); // the filtered lookup finds no owned row
+    db.mockImplementation(() => chain);
+    await withServer(async (base) => {
+      const res = await call(base, 'POST', '/assess', { customerId: CUSTOMER, serviceId: '22222222-2222-4333-8444-555555555555', photos: [{ data: 'x', mimeType: 'image/jpeg' }] });
+      expect(res.status).toBe(404);
+    });
+    expect(scope.technicianCurrentVisitFilter).toHaveBeenCalled();
+  });
+});
