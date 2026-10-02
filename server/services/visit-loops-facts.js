@@ -131,9 +131,17 @@ function crossesIntoNow(row, nowMin) {
 //    row's current schedule (a same-day reschedule leaves the old alert behind).
 // Returns { date, startHms }.
 const ET_HHMM = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
-function alertOccurrence(payload, visit) {
+// A frozen promised_window is checked against the visit's LATEST delivered promise
+// (latest: the latestPromises entry, or undefined when no notice exists): a
+// communicated reschedule (a different or unknown start) obsoletes the alert even
+// before the detector sweep reconciles it; with no newer notice it stands.
+function alertOccurrence(payload, visit, latest) {
   const p = payload && typeof payload === 'object' ? payload : {};
   const promised = toDate(p.promised_window && p.promised_window.start_at);
+  if (promised && latest) {
+    const current = toDate(latest.start_at);
+    if (!current || current.getTime() !== promised.getTime()) return null;
+  }
   if (promised) return { date: etDateString(promised), startHms: `${promised.toLocaleTimeString('en-US', ET_HHMM)}:00` };
   if (!p.scheduled_date || !p.window_start) return null;
   if (calendarDay(p.scheduled_date) !== calendarDay(visit.scheduled_date)) return null;
@@ -168,12 +176,13 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   // a lagging member of a stop whose sibling has already ARRIVED or finished carries
   // no delay (the passed-window stop rule, arrival-only: en route can still be late)
   const startedStops = await startedStopKeys(conn, customerId, alerts || [], { arrivedOnly: true });
+  const latest = await latestPromiseMap(conn, [...new Set((alerts || []).map((r) => r.id))], now);
   const applicable = [];
   for (const row of alerts || []) {
     const key = stopKey(row);
     if (!preArrival(row) || (key && startedStops.has(key))) continue;
     const payload = parseJson(row.payload);
-    const occ = alertOccurrence(payload, row);
+    const occ = alertOccurrence(payload, row, latest.get(String(row.id)));
     if (!occ || !liveNow(occ)) continue;
     applicable.push({ row, payload, occ, gap: payload?.evidence === 'missing_tracking' && Number(payload?.stage) !== 2 });
   }
@@ -236,10 +245,14 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
 // A promise event with start_at null (a newer notice superseded the window without
 // recording its replacement) means the promised time is UNKNOWN: null, and the row
 // is skipped — never substitute the schedule and apologise for a window we can't name.
-async function promisedOccurrences(conn, rows, now) {
+async function latestPromiseMap(conn, ids, now) {
+  if (!ids.length) return new Map();
   const detector = require('./no-show-detector');
-  const events = await detector.loadPromiseEvents(conn, rows.map((r) => r.id), { now });
-  const latest = detector.latestPromises(events || [], now);
+  const events = await detector.loadPromiseEvents(conn, ids, { now });
+  return detector.latestPromises(events || [], now);
+}
+async function promisedOccurrences(conn, rows, now) {
+  const latest = await latestPromiseMap(conn, rows.map((r) => r.id), now);
   const out = new Map();
   for (const row of rows) {
     const promise = latest.get(String(row.id));

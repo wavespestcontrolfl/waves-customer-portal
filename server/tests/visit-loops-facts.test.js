@@ -197,6 +197,19 @@ describe('lateAlert', () => {
     expect((await run(alertRow({ payload: { promised_window: { start_at: '2026-10-03T13:00:00.000Z' } } }))).lateAlert).toBeNull();
   });
 
+  test('a delivered reschedule obsoletes the alert\'s frozen promise before the detector reconciles it', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+    // the customer was since told 3 PM: the 9 AM delay is obsolete
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T19:00:00.000Z', communicated_at: '2026-10-01T12:00:00Z' }]);
+    expect((await run(alertRow({ payload }, { window_start: '15:00:00' }))).lateAlert).toBeNull();
+    // a newer notice with an unknown window: obsolete too
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: null, communicated_at: '2026-10-01T12:00:00Z' }]);
+    expect((await run(alertRow({ payload }))).lateAlert).toBeNull();
+    // the latest notice IS the alert's promise: it stands
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' }]);
+    expect((await run(alertRow({ payload }))).lateAlert).toMatchObject({ visitId: 'visit-1', missingTracking: false });
+  });
+
   test('with two visits the alert names the visit it was raised on', async () => {
     const out = await run([alertRow({ payload: { scheduled_date: '2026-10-01', window_start: '14:00:00' } }, { id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]);
     expect(out.lateAlert).toMatchObject({ visitType: 'Lawn Care', visitId: 'visit-2' });
