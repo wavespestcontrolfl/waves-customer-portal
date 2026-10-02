@@ -19,15 +19,17 @@ jest.mock('../config/feature-gates', () => {
 });
 jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: jest.fn(async () => ({ customer: { id: 'c1' } })) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ classifyCustomerSmsTriageIntent: jest.fn(() => ({ intent: 'GENERAL', confidence: 0.9 })) }));
-jest.mock('../services/sms-shadow-drafter', () => ({ generateGroundedDraft: (...a) => mockDraft(...a) }));
+const mockUngrounded = jest.fn(() => false);
+jest.mock('../services/sms-shadow-drafter', () => ({ generateGroundedDraft: (...a) => mockDraft(...a), replyQuotesUngroundedAmount: (...a) => mockUngrounded(...a) }));
+jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
 
 const { runTranslationTrial, tokenParity, needsTranslation } = require('../services/sms-translation');
 
 const SPANISH = 'Hola, ¿cuándo pueden salir los perros después del tratamiento de hoy?';
 const ENGLISH_IN = 'Hi, when can the dogs go out after today\'s treatment?';
-const REPLY = 'Once the spray dries, about 30 minutes, they can go back out. Your next visit is Tuesday, Oct 14 at 2 PM.';
-const REPLY_ES = 'Cuando el producto se seque, unos 30 minutos, pueden volver a salir. Su próxima visita es el martes 14 de octubre a las 14 h.';
+const REPLY = 'Thanks for asking! Your technician will text you about 30 minutes before arriving. Your next visit is Tuesday, Oct 14 at 2 PM.';
+const REPLY_ES = '¡Gracias por preguntar! Su técnico le enviará un mensaje unos 30 minutos antes de llegar. Su próxima visita es el martes 14 de octubre a las 14 h.';
 const customer = { id: 'c1', city: 'Parrish' };
 
 function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, meaning = { same_meaning: true, differences: [] } }) {
@@ -48,6 +50,8 @@ beforeEach(() => {
   mockDispatch.mockReset();
   mockInsert.mockReset();
   mockDraft.mockReset();
+  mockUngrounded.mockReset();
+  mockUngrounded.mockReturnValue(false);
   mockDraft.mockResolvedValue({ parsed: { reply: REPLY, intended_actions: [] }, converged: true, passes: 1, model: 'm', factsBlock: 'FACTS', promptVersion: 'house_voice_v12' });
 });
 
@@ -132,6 +136,46 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Can we reschedule to Friday?' } });
     await runTranslationTrial({ inboundMessage: '¿Podemos cambiar la cita al viernes?', customer, smsLogId: 's1' });
     expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Can we reschedule to Friday?', schedulingIntent: true }));
+  });
+
+  test('a translation that drops or changes a figure from the customer\'s own text is held before drafting', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Can you come at 3 PM instead?' } });
+    const row = await runTranslationTrial({ inboundMessage: '¿Pueden venir a las 14 h en vez de eso?', customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'figures_changed_in_inbound_translation' });
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
+  test('trial drafting is metered on the translation lane', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ laneId: 'sms_translation', metricsLane: 'translation_trial' }));
+  });
+
+  test('the shadow drafter\'s post-draft guards hold a converged draft: placeholder, ungrounded amount', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'Hi [name], see you Tuesday.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'reply_has_placeholder' });
+    mockUngrounded.mockReturnValue(true);
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'reply_has_ungrounded_amount' });
+  });
+
+  test('a "translation" still in English, or too long to check whole, is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, translated: REPLY });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_not_in_customer_language' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: `${REPLY_ES} ${'Gracias. '.repeat(200)}` });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_too_long' });
+  });
+
+  test('a failed insert is reported as not saved, never as a stored ready answer', async () => {
+    const logger = require('../services/logger');
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    scriptModels({ inbound: SPANISH_INBOUND });
+    mockInsert.mockImplementationOnce(() => { throw Object.assign(new Error('relation does not exist: Hola ...'), { code: '42P01' }); });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'ready', saved: false });
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('ready'));
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('Hola');
   });
 
   test('a draft that did not pass the English checks is held before any translation', async () => {

@@ -241,83 +241,129 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
 async function recordTrial(row) {
   try {
     await db(TRIAL_TABLE).insert({ ...row, checks: row.checks ? JSON.stringify(row.checks) : null }).onConflict('sms_log_id').ignore();
+    return true;
   } catch (err) {
     // never err.message: knex puts the bound values (the customer's words) in it
     logger.warn(`[sms-translation] trial row not saved (sms_log ${row.sms_log_id}): ${err.code || err.name || 'error'}`);
+    return false;
   }
+}
+
+// The checks draftShadowReply runs on a converged draft before it may leave
+// the shadow lane: a copied redaction placeholder, an amount the billing facts
+// do not hold, and the deterministic comms-lint verdict (same options).
+function postDraftFault(englishReply, context) {
+  const suggestMode = require('./sms-suggest-mode');
+  if (suggestMode.hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
+  if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
+  const billingLane = context?.customer?.billingLane;
+  const lint = require('./comms-lint').lintComms(englishReply, {
+    channel: 'sms',
+    audience: 'customer',
+    stopExpected: false,
+    monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
+    billingMode: billingLane?.mode,
+  });
+  return lint.pass ? null : 'reply_failed_comms_lint';
+}
+
+// Steps 1-2: the customer's text in English, then the English draft.
+async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
+  if (inboundMessage.length > MAX_TEXT) return { stop: 'inbound_too_long' };
+  const inbound = await translateInbound(inboundMessage);
+  if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
+  // the model reads it as English: today's English path already answers it
+  if (inbound.isEnglish) return { english: true };
+  const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: clip(inbound.english) };
+  // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
+  const inboundParity = tokenParity(inbound.english, inboundMessage);
+  if (!inboundParity.ok) return { stop: 'figures_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity } };
+
+  const ContextAggregator = require('./context-aggregator');
+  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
+  const thread = await translateThread(liveContext, inboundMessage, inbound.english);
+  if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
+  const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
+  // both read off the English: the webhook's own reads ran on the foreign text
+  const intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
+  const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const draft = await require('./sms-shadow-drafter').generateGroundedDraft({
+    client, context: thread.context, inboundMessage: inbound.english, inboundPhone: fromPhone, intent, schedulingIntent,
+    city: customer.city || null, liveOpenTimes: true,
+    // trial traffic is metered on its own lane, never as live drafting
+    laneId: 'sms_translation', metricsLane: 'translation_trial',
+  });
+  const englishReply = typeof draft?.parsed?.reply === 'string' ? draft.parsed.reply.trim() : '';
+  Object.assign(fields, {
+    reply_english: englishReply || null,
+    model: draft?.model || null,
+    facts_block: draft?.factsBlock || null,
+    ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
+  });
+  const checks = { inbound_parity: inboundParity, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows };
+  if (!draft?.parsed) return { stop: 'draft_unparseable', fields, checks };
+  if (!englishReply) return { skip: 'no_reply_needed', fields, checks };
+  if (!draft.converged) return { stop: 'english_checks_not_passed', fields, checks };
+  if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
+  const fault = postDraftFault(englishReply, liveContext);
+  if (fault) return { stop: fault, fields, checks };
+  return { englishReply, language: inbound.language, fields, checks };
+}
+
+// Steps 3-4: translate, then check the exact stored text.
+async function translateAndCheck({ englishReply, language }) {
+  const translated = await translateReply({ englishReply, language });
+  if (!translated.ok) return { stop: `reply_translation_failed:${translated.reason}` };
+  const fields = { reply_translated: translated.text };
+  // checked whole, never clipped: an unread tail would escape both checks (and an SMS over the cap cannot send)
+  if (translated.text.length > MAX_TEXT) return { stop: 'translation_too_long', fields };
+  // a "translation" the English checks still read as English (or the reply echoed back) is not in the customer's language
+  if (translated.text === englishReply || !needsTranslation(translated.text)) return { stop: 'translation_not_in_customer_language', fields };
+  if (require('./sms-suggest-mode').hasRedactionPlaceholder(translated.text)) return { stop: 'translation_has_placeholder', fields };
+  const parity = tokenParity(englishReply, translated.text);
+  const back = await backTranslate({ translated: translated.text, language });
+  fields.back_translation = back.ok ? back.text : null;
+  if (!back.ok) return { stop: `back_translation_failed:${back.reason}`, fields, checks: { token_parity: parity } };
+  const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
+  const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
+  if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };
+  if (!meaning.ok) return { stop: `meaning_check_failed:${meaning.reason}`, fields, checks };
+  if (!meaning.same) return { stop: 'meaning_changed_in_translation', fields, checks };
+  return { fields, checks };
 }
 
 /**
  * Write one test answer for a customer text the English checks cannot read.
- * Never throws, never sends. Returns the verdict for logging/tests.
+ * Never throws, never sends. Returns the stored row (saved:false when the
+ * insert failed) for logging/tests.
  */
 async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId }) {
   if (!trialEnabled() || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
   const startedAt = Date.now();
-  const base = { sms_log_id: smsLogId, customer_id: customer.id, inbound_original: clip(inboundMessage), prompt_version: PROMPT_VERSION };
-  const hold = async (reason, extra = {}) => {
-    const row = { ...base, verdict: 'held', hold_reason: reason, ...extra, trial_ms: Date.now() - startedAt };
-    await recordTrial(row);
-    return row;
+  const save = async (verdict, holdReason, fields = {}, checks = undefined) => {
+    const row = {
+      sms_log_id: smsLogId, customer_id: customer.id, inbound_original: clip(inboundMessage), prompt_version: PROMPT_VERSION,
+      ...fields, verdict, hold_reason: holdReason ? holdReason.slice(0, 80) : null, ...(checks ? { checks } : {}), trial_ms: Date.now() - startedAt,
+    };
+    const saved = await recordTrial(row);
+    if (saved && verdict === 'ready') logger.info(`[sms-translation] test answer ready (customer=${customer.id})`);
+    return { ...row, saved };
   };
   try {
-    const inbound = await translateInbound(inboundMessage);
-    if (!inbound.ok) return await hold(`inbound_translation_failed:${inbound.reason}`.slice(0, 80));
-    // the model reads it as English: today's English path already answers it
-    if (inbound.isEnglish) return null;
-    const langFields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: clip(inbound.english) };
-
-    const ContextAggregator = require('./context-aggregator');
-    const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
-    const thread = await translateThread(liveContext, inboundMessage, inbound.english);
-    if (!thread.ok) return await hold(`thread_translation_failed:${thread.reason}`.slice(0, 80), langFields);
-    const { context } = thread;
-    const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
-    // both read off the English: the webhook's own reads ran on the foreign text
-    const intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
-    const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const drafter = require('./sms-shadow-drafter');
-    const draft = await drafter.generateGroundedDraft({
-      client, context, inboundMessage: inbound.english, inboundPhone: fromPhone, intent, schedulingIntent, city: customer.city || null, liveOpenTimes: true,
-    });
-    const englishReply = typeof draft?.parsed?.reply === 'string' ? draft.parsed.reply.trim() : '';
-    const draftFields = {
-      ...langFields,
-      reply_english: englishReply || null,
-      model: draft?.model || null,
-      facts_block: draft?.factsBlock || null,
-      ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
-    };
-    const loop = { converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows };
-    if (!draft?.parsed) return await hold('draft_unparseable', { ...draftFields, checks: loop });
-    if (!englishReply) {
-      const row = { ...base, ...draftFields, verdict: 'skipped', hold_reason: 'no_reply_needed', checks: loop, trial_ms: Date.now() - startedAt };
-      await recordTrial(row);
-      return row;
-    }
-    if (!draft.converged) return await hold('english_checks_not_passed', { ...draftFields, checks: loop });
-
-    const translated = await translateReply({ englishReply, language: inbound.language });
-    if (!translated.ok) return await hold(`reply_translation_failed:${translated.reason}`.slice(0, 80), { ...draftFields, checks: loop });
-    const parity = tokenParity(englishReply, translated.text);
-    const back = await backTranslate({ translated: translated.text, language: inbound.language });
-    const translatedFields = { ...draftFields, reply_translated: translated.text, back_translation: back.ok ? back.text : null };
-    if (!back.ok) return await hold(`back_translation_failed:${back.reason}`.slice(0, 80), { ...translatedFields, checks: { ...loop, token_parity: parity } });
-    const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
-    const checks = { ...loop, token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
-    if (!parity.ok) return await hold('figures_changed_in_translation', { ...translatedFields, checks });
-    if (!meaning.ok) return await hold(`meaning_check_failed:${meaning.reason}`.slice(0, 80), { ...translatedFields, checks });
-    if (!meaning.same) return await hold('meaning_changed_in_translation', { ...translatedFields, checks });
-
-    const row = { ...base, ...translatedFields, verdict: 'ready', hold_reason: null, checks, trial_ms: Date.now() - startedAt };
-    await recordTrial(row);
-    logger.info(`[sms-translation] test answer ready (customer=${customer.id} language=${inbound.languageCode || inbound.language})`);
-    return row;
+    const en = await draftInEnglish({ inboundMessage, fromPhone, customer });
+    if (en.english) return null;
+    if (en.skip) return await save('skipped', en.skip, en.fields, en.checks);
+    if (en.stop) return await save('held', en.stop, en.fields, en.checks);
+    const tr = await translateAndCheck({ englishReply: en.englishReply, language: en.language });
+    const fields = { ...en.fields, ...tr.fields };
+    const checks = { ...en.checks, ...tr.checks };
+    if (tr.stop) return await save('held', tr.stop, fields, checks);
+    return await save('ready', null, fields, checks);
   } catch (err) {
     logger.warn(`[sms-translation] trial failed (customer=${customer.id}): ${err.code || err.name || 'error'}`);
-    return hold('error');
+    return save('held', 'error');
   }
 }
 
