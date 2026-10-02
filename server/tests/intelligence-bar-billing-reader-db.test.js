@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C; let D; let E; let F; let G; let P; let P2; let W;
+  let A; let B; let H; let C; let D; let E; let F; let G; let P; let P2; let W; let K;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -212,6 +212,27 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('payments').insert({ customer_id: null, payer_id: funderId, statement_id: statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe',
       description: `Payer statement S-${statementId} settlement (ach)`, metadata: json({ statement_id: statementId, payer_id: funderId, source: 'synthetic' }) });
     inv.statementId = statementId;
+    // Statement-level orphans (a partial refund before settlement: customer_id and invoice_id NULL), tied by the statement's PaymentIntent or its marker.
+    const newStatement = async (key, extra) => {
+      const [row] = await db('payer_statements').insert({ payer_id: funderId, period_start: day(-60), period_end: day(-31), status: 'paid', terms_snapshot: 'net_30',
+        subtotal: 500, total: 500, invoice_count: 2, token: crypto.randomBytes(16).toString('hex'), paid_at: new Date(), ...extra }).returning('id');
+      const id = row.id || row;
+      await invoice(key, G, { total: 250, status: 'paid', paid_at: new Date(), payer_statement_id: id });
+      return id;
+    };
+    const byPi = await newStatement('g_stmt_pi', { stripe_payment_intent_id: `pi_sp_${run}` });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_sp_${run}`, customer_id: null, invoice_id: null, amount: 20, source: 'statement_pay_webhook', original_db_error: 'synthetic partial refund' });
+    const byMarker = await newStatement('g_stmt_marker', {});
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_sm_${run}`, customer_id: null, invoice_id: null, amount: 15, source: 'statement_pay_webhook',
+      original_db_error: `statement S-${byMarker}: partial refund $15.00 before settlement — reconcile refund_amount after settle` });
+    inv.statementOrphanIds = { byPi, byMarker };
+    // A combined PaymentIntent quarantined against the ANCHOR invoice only; every allocated invoice carries the PaymentIntent.
+    K = await customer(`Anchor${run}`, `Combined${run}`);
+    const comboPi = `pi_combo_${run}`;
+    await invoice('k_anchor', K, { total: 100, stripe_payment_intent_id: comboPi });
+    await invoice('k_sibling', K, { total: 50, stripe_payment_intent_id: comboPi });
+    await invoice('k_other', K, { total: 25 });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: comboPi, customer_id: K, invoice_id: inv.k_anchor.id, amount: 150, source: 'invoice_payment_webhook', original_db_error: 'synthetic combined quarantine' });
     // A packet invoice whose Bill-To moved AFTER it was sent: both payer columns stay null, only the withdrawal stamp records it.
     W = await customer(`Withdrawn${run}`, `Packet${run}`);
     await invoice('w_self', W, { total: 100 });
@@ -608,6 +629,67 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const complete = await read('get_invoice_detail', { invoice_id: inv.e_self.id });
     expect(complete.payment_summary).toMatchObject({ evidence_complete: true, received: false, attached_intent_outcome_unknown: false });
     expect(complete.payment_summary).not.toHaveProperty('counts_note');
+  });
+
+  test('review: a combined-PaymentIntent orphan held against the anchor holds every invoice the PaymentIntent allocated', async () => {
+    const list = await read('get_customer_invoices', { customer_id: K, limit: 50 });
+    for (const key of ['k_anchor', 'k_sibling']) {
+      const item = list.invoices.find((i) => i.id === inv[key].id);
+      expect(item).toMatchObject({ unreconciled_stripe_charges: 1, balance_due: null, amount_paid: null, payment_recorded: null });
+      expect(item.unknown.join(' ')).toMatch(/Do not collect or retry/);
+    }
+    expect(list.invoices.find((i) => i.id === inv.k_sibling.id).unknown.join(' ')).toMatch(/combined payment/);
+    expect(list.invoices.find((i) => i.id === inv.k_other.id)).toMatchObject({ unreconciled_stripe_charges: 0, balance_due: 25 });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.k_sibling.id });
+    expect(detail.invoice).toMatchObject({ balance_due: null, portal_recorded_balance_due: 50 });
+    const entry = detail.payments_timeline.find((e) => e.type === 'stripe_unreconciled_charge');
+    expect(entry).toMatchObject({ shared_with_other_invoices: true, amount: 150 });
+    expect(entry.amount_note).toMatch(/not this invoice's share/);
+    expect(detail.unknowns.join(' ')).toMatch(/Do not collect or retry/);
+    const clean = await read('get_invoice_detail', { invoice_id: inv.k_other.id });
+    expect(clean.invoice.balance_due).toBe(25);
+  });
+
+  test('review: a statement-level orphan (partial refund before settlement) is reconciliation-required on the statement\'s invoices', async () => {
+    for (const key of ['g_stmt_pi', 'g_stmt_marker']) {
+      const detail = await read('get_invoice_detail', { invoice_id: inv[key].id });
+      const entry = detail.payments_timeline.find((e) => e.type === 'payer_statement_reconciliation');
+      expect(entry).toMatchObject({ received: false, reconciliation_required: true });
+      expect(entry.statement_level.refund_amount).toBeGreaterThan(0);
+      expect(detail.payment_summary.statement_reconciliation_required).toBe(1);
+      expect(detail.payment_summary.statement).toMatch(/reconciliation required/);
+    }
+    const list = await read('get_customer_invoices', { customer_id: G, limit: 50 });
+    for (const key of ['g_stmt_pi', 'g_stmt_marker']) {
+      const item = list.invoices.find((i) => i.id === inv[key].id);
+      expect(item.statement_reconciliation_required).toBe(1);
+      expect(item.unknown.join(' ')).toMatch(/reconciliation required/);
+    }
+    // The ordinary statement invoice (no orphan) is untouched.
+    const plain = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
+    expect(plain.payment_summary.statement_reconciliation_required).toBe(0);
+  });
+
+  test('review: when the account summary read is incomplete every row-derived amount is null with one warning', async () => {
+    const InvoiceService = require('../services/invoice');
+    const original = InvoiceService.list.bind(InvoiceService);
+    const spy = jest.spyOn(InvoiceService, 'list').mockImplementation(async (params) => {
+      if ((params.status === 'unpaid' || params.status === 'processing') && params.limit === 100) {
+        return { total: 5000, invoices: Array.from({ length: 100 }, (_, n) => ({ id: uid(), status: params.status === 'processing' ? 'processing' : (n % 2 ? 'draft' : 'sent'), total: 10, credit_applied: 0 })) };
+      }
+      return original(params);
+    });
+    try {
+      const { account_summary: summary } = await read('get_customer_invoices', { customer_id: E, limit: 5 });
+      expect(summary.complete).toBe(false);
+      for (const field of ['total_due', 'not_yet_sent_due', 'payer_billed_due', 'presented_self_pay_due']) expect(summary[field]).toBeNull();
+      expect(summary.processing).toMatchObject({ count: 5000, amount: null });
+      expect(summary.outstanding_count).toBe(5000);
+      expect(summary.unknown).toMatch(/null \(unknown\), not zero/);
+      expect(summary.unknown).toMatch(/processing\.amount is null/);
+    } finally { spy.mockRestore(); }
+    const complete = await read('get_customer_invoices', { customer_id: E, limit: 5 });
+    expect(complete.account_summary).toMatchObject({ complete: true, total_due: 190 });
   });
 
   test('review: a failed per-invoice hold lookup is unknown (null), never false', async () => {

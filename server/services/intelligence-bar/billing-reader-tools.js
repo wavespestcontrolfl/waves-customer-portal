@@ -457,6 +457,56 @@ async function readDisputeHold(customerId) {
   }
 }
 
+const pgBase = (value) => (value ? String(value).split(':')[0] : null);
+const STATEMENT_ORPHAN_MARKER = /^statement S-(\d+):/;
+
+// Unresolved stripe_orphan_charges for these invoices, by every linkage the webhook writes, shared by the list
+// and the detail so both reach the same verdict:
+//   direct      invoice_id (a combined PaymentIntent is quarantined against the ANCHOR invoice only)
+//   shared      the orphan's PaymentIntent (before any ":<invoice id>" suffix) is the one stamped on the
+//               invoice: every invoice a combined PaymentIntent allocated carries it (pay-combined.js)
+//   statement   customer_id and invoice_id NULL (a partial statement refund before settlement), tied to an
+//               invoice with payer_statement_id through the statement's PaymentIntent or its
+//               "statement S-<id>:" marker
+async function loadUnresolvedOrphans(invoices) {
+  const byInvoice = new Map(invoices.map((invoice) => [String(invoice.id), { orphans: [], statementOrphans: [] }]));
+  if (!invoices.length) return { byInvoice, truncated: false };
+  const ids = invoices.map((invoice) => String(invoice.id));
+  const intents = [...new Set(invoices.map((invoice) => invoice.stripe_payment_intent_id).filter(Boolean))];
+  const statementIds = [...new Set(invoices.map((invoice) => invoice.payer_statement_id).filter((id) => id != null).map(String))];
+  const statementIntents = new Map(statementIds.map((id) => [id, new Set()]));
+  if (statementIds.length) {
+    const [statements, settlements] = await Promise.all([
+      db('payer_statements').whereRaw('id::text = ANY(?)', [statementIds]).select('id', 'stripe_payment_intent_id'),
+      db('payments').whereRaw('statement_id::text = ANY(?)', [statementIds]).whereNotNull('stripe_payment_intent_id').select('statement_id', 'stripe_payment_intent_id'),
+    ]);
+    for (const row of statements) if (row.stripe_payment_intent_id) statementIntents.get(String(row.id)).add(pgBase(row.stripe_payment_intent_id));
+    for (const row of settlements) statementIntents.get(String(row.statement_id)).add(pgBase(row.stripe_payment_intent_id));
+  }
+  const statementIntentList = [...new Set([...statementIntents.values()].flatMap((set) => [...set]))];
+  const rows = await db('stripe_orphan_charges').where({ resolved: false }).where(function linkedToPage() {
+    this.whereIn('invoice_id', ids);
+    if (intents.length) this.orWhereRaw("split_part(stripe_orphan_charges.stripe_payment_intent_id, ':', 1) = ANY(?)", [intents]);
+    if (statementIntentList.length) this.orWhereRaw("split_part(stripe_orphan_charges.stripe_payment_intent_id, ':', 1) = ANY(?)", [statementIntentList]);
+    if (statementIds.length) this.orWhereRaw('stripe_orphan_charges.original_db_error LIKE ANY(?)', [statementIds.map((id) => `statement S-${id}:%`)]);
+  }).orderBy('created_at', 'desc').limit(PAYMENT_ROW_CAP + 1)
+    .select('id', 'invoice_id', 'customer_id', 'stripe_payment_intent_id', 'amount', 'source', 'original_db_error', 'created_at');
+  for (const row of rows.slice(0, PAYMENT_ROW_CAP).reverse()) {
+    const base = pgBase(row.stripe_payment_intent_id);
+    const marked = STATEMENT_ORPHAN_MARKER.exec(String(row.original_db_error || ''));
+    for (const invoice of invoices) {
+      const slot = byInvoice.get(String(invoice.id));
+      if (row.invoice_id != null && String(row.invoice_id) === String(invoice.id)) slot.orphans.push({ ...row, linked_by: 'invoice_id' });
+      else if (row.invoice_id != null && base && base === invoice.stripe_payment_intent_id) slot.orphans.push({ ...row, linked_by: 'shared_payment_intent' });
+      else if (row.invoice_id == null && row.customer_id == null && invoice.payer_statement_id != null) {
+        const statement = String(invoice.payer_statement_id);
+        if ((marked && marked[1] === statement) || (base && statementIntents.get(statement).has(base))) slot.statementOrphans.push(row);
+      }
+    }
+  }
+  return { byInvoice, truncated: rows.length > PAYMENT_ROW_CAP };
+}
+
 // The customer's unresolved charge evidence (null = could not be read): orphan charges, the claimed /
 // ambiguous attempts the collection fence holds (stripe.js assertNoInvoiceChargeReconciliationPending), and
 // failed rows flagged ambiguous_outcome (that fence's no-PaymentIntent query, scoped to the customer).
@@ -519,7 +569,8 @@ async function accountSummary(InvoiceService, customer, today) {
     readDisputeHold(customerId),
     countUnconfirmedCharges(customerId),
   ]);
-  const sum = (rows) => fromCents(rows.reduce((total, invoice) => total + cents(balanceDue(invoice)), 0));
+  // A sum over a read that hit its bound is a partial figure, not the customer's number: null, with one warning.
+  const sum = (rows) => (unpaid.complete ? fromCents(rows.reduce((total, invoice) => total + cents(balanceDue(invoice)), 0)) : null);
   const totalDue = sum(unpaid.rows);
   const notYetSent = unpaid.rows.filter((invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status)));
   const payerBilled = unpaid.rows.filter(isPayerBilled);
@@ -531,7 +582,7 @@ async function accountSummary(InvoiceService, customer, today) {
     not_yet_sent_due: sum(notYetSent),
     payer_billed_due: sum(payerBilled),
     presented_self_pay_due: sum(presentedSelfPay),
-    processing: { count: processing.total, amount: fromCents(processing.rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)), note: 'Payments in flight (for example ACH): not received yet, and not counted in total_due.' },
+    processing: { count: processing.total, amount: processing.complete ? fromCents(processing.rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)) : null, note: 'Payments in flight (for example ACH): not received yet, and not counted in total_due.' },
     ...credit,
     dispute_hold: hold,
     unreconciled_stripe_charges: unreconciled ? unreconciled.orphans : null,
@@ -541,7 +592,8 @@ async function accountSummary(InvoiceService, customer, today) {
     complete: unpaid.complete && processing.complete,
   };
   const unknowns = [];
-  if (!summary.complete) unknowns.push('More invoices than the summary reads in one call: total_due may be understated.');
+  if (!unpaid.complete) unknowns.push('More unpaid invoices than the summary reads in one call: total_due, not_yet_sent_due, payer_billed_due and presented_self_pay_due are null (unknown), not zero. Page through get_customer_invoices for the invoices themselves.');
+  if (!processing.complete) unknowns.push('More processing invoices than the summary reads in one call: processing.amount is null (unknown); processing.count is exact.');
   if (unreconciled === null) unknowns.push('Unresolved charge evidence could not be read: whether total_due includes money Stripe already charged is unknown.');
   if (unreconciled && unreconciled.orphans > 0) unknowns.push(`${unreconciled.orphans} Stripe charge(s) for this customer's invoices are accepted by Stripe but not recorded in the portal: total_due may include money already charged. Do not collect or retry; check those invoices with get_invoice_detail.`);
   if (unreconciled && unreconciled.attempts > 0) unknowns.push(`${unreconciled.attempts} saved-card charge attempt(s) for this customer's invoices have no confirmed result (claimed, ambiguous, or failed with an ambiguous outcome): Stripe may already have charged them, so total_due may include money already charged. Do not collect or retry; check those invoices with get_invoice_detail.`);
@@ -573,7 +625,7 @@ function paymentPlanFromList(row) {
 // `heldIds` is null when the per-invoice hold lookup failed (unknown, never false); `unconfirmed` is the
 // invoice's unresolved charge evidence { orphans, attempts } (stripe_orphan_charges rows and the fence's
 // claimed / ambiguous attempts), or null when that lookup failed.
-function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unconfirmed = { orphans: [], attempts: [] }) {
+function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unconfirmed = { orphans: [], attempts: [], statementOrphans: [] }) {
   const allPayments = ledger.get(String(row.id)) || [];
   const payerFunded = allPayments.filter((payment) => payment.payer_funded);
   const payments = allPayments.filter((payment) => !payment.payer_funded);
@@ -625,8 +677,17 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
     amountPaid = null;
     basis = 'unknown: Stripe may have charged this invoice and the payments table does not show it';
   }
-  if (orphanRows.length) {
-    unknown.push(`Stripe accepted ${orphanRows.length} charge(s) for this invoice ($${fromCents(orphanRows.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)}) that the portal has not recorded: amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
+  const sharedRows = orphanRows.filter((orphan) => orphan.linked_by === 'shared_payment_intent');
+  const ownRows = orphanRows.filter((orphan) => orphan.linked_by !== 'shared_payment_intent');
+  if (ownRows.length) {
+    unknown.push(`Stripe accepted ${ownRows.length} charge(s) for this invoice ($${fromCents(ownRows.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)}) that the portal has not recorded: amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
+  }
+  if (sharedRows.length) {
+    unknown.push(`Stripe accepted a combined payment ($${fromCents(sharedRows.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)} across several invoices) that covers this invoice and the portal has not recorded it: this invoice's share may already have been charged, so amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
+  }
+  const statementOrphanRows = unconfirmed ? unconfirmed.statementOrphans || [] : [];
+  if (statementOrphanRows.length) {
+    unknown.push(`${statementOrphanRows.length} unreconciled partial refund(s) recorded against this invoice's payer statement before it settled: reconciliation required, so the payer settlement amounts are unknown. Say it is unknown; use get_invoice_detail.`);
   }
   if (unresolvedAttempts) {
     unknown.push(`${unresolvedAttempts} saved-card charge attempt(s) for this invoice have no confirmed result (claimed, ambiguous, or failed with an ambiguous outcome): Stripe may already have charged the customer, so amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail.`);
@@ -655,6 +716,7 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
     payment_recorded: recorded || !uncertain ? recorded : null,
     unreconciled_stripe_charges: unconfirmedUnknown ? null : orphanRows.length,
     unresolved_charge_attempts: unconfirmedUnknown ? null : unresolvedAttempts,
+    statement_reconciliation_required: unconfirmedUnknown ? null : statementOrphanRows.length,
     payer_funded_payments: payerFunded.length,
     has_active_payment_plan: Boolean(paymentPlanFromList(row)),
     payment_plan: paymentPlanFromList(row),
@@ -703,13 +765,17 @@ async function getCustomerInvoices(input, actionContext) {
   let unconfirmedMap = new Map();
   try {
     const ids = page.invoices.map((invoice) => invoice.id);
-    const [orphanRows, attemptRows] = ids.length ? await Promise.all([
-      db('stripe_orphan_charges').where({ resolved: false }).whereIn('invoice_id', ids).select('id', 'invoice_id', 'amount', 'source'),
-      db('stripe_invoice_charge_attempts').whereIn('invoice_id', ids).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').select('id', 'invoice_id', 'status'),
-    ]) : [[], []];
-    const slot = (id) => { if (!unconfirmedMap.has(String(id))) unconfirmedMap.set(String(id), { orphans: [], attempts: [] }); return unconfirmedMap.get(String(id)); };
-    for (const orphan of orphanRows) slot(orphan.invoice_id).orphans.push(orphan);
+    const loadedOrphans = await loadUnresolvedOrphans(page.invoices);
+    const attemptRows = ids.length
+      ? await db('stripe_invoice_charge_attempts').whereIn('invoice_id', ids).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').select('id', 'invoice_id', 'status')
+      : [];
+    const slot = (id) => { if (!unconfirmedMap.has(String(id))) unconfirmedMap.set(String(id), { orphans: [], attempts: [], statementOrphans: [] }); return unconfirmedMap.get(String(id)); };
+    for (const [invoiceId, found] of loadedOrphans.byInvoice) Object.assign(slot(invoiceId), found);
     for (const attempt of attemptRows) slot(attempt.invoice_id).attempts.push(attempt);
+    if (loadedOrphans.truncated) {
+      unconfirmedMap = null;
+      unknowns.push('More unresolved charge records than were read: whether a charge Stripe accepted is missing from these balances is unknown; say so and use get_invoice_detail.');
+    }
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] unconfirmed charge lookup failed (${err.code || err.name || 'error'})`);
     unconfirmedMap = null;
@@ -721,7 +787,7 @@ async function getCustomerInvoices(input, actionContext) {
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, unconfirmedMap ? unconfirmedMap.get(String(row.id)) || { orphans: [], attempts: [] } : null)),
+    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, unconfirmedMap ? unconfirmedMap.get(String(row.id)) || { orphans: [], attempts: [], statementOrphans: [] } : null)),
     returned_count: returned,
     total_matching: page.total,
     has_more: hasMore,
@@ -787,9 +853,26 @@ function orphanEntry(row) {
     received: confirmed,
     ...(confirmed ? { received_basis: 'Stripe state succeeded', ledger_recorded: false } : { unconfirmed: true }),
     amount: money(row.amount),
+    // A combined PaymentIntent is quarantined against its anchor invoice for the whole allocation.
+    ...(row.linked_by === 'shared_payment_intent' ? { shared_with_other_invoices: true, amount_note: 'This combined payment covers several invoices: the amount is the whole PaymentIntent, not this invoice\'s share.' } : {}),
     source: row.source || null,
     // Combined-payment residuals key the PaymentIntent as "<pi>:<invoice id>".
     stripe_payment_intent_id: row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id).split(':')[0] : null,
+  };
+}
+
+// A partial payer-statement refund recorded before the statement settled: the settlement row cannot know it.
+function statementReconciliationEntry(row) {
+  const statement = STATEMENT_ORPHAN_MARKER.exec(String(row.original_db_error || ''));
+  return {
+    type: 'payer_statement_reconciliation',
+    id: row.id,
+    at: iso(row.created_at),
+    received: false,
+    reconciliation_required: true,
+    statement_level: { statement_id: statement ? statement[1] : null, refund_amount: money(row.amount), applies_to: 'the whole payer statement, not this invoice alone' },
+    state_note: 'A partial refund was recorded against the payer statement this invoice is on before it settled, and is not yet reconciled: the payer settlement amounts may be overstated. Reconciliation required; say it is unknown.',
+    stripe_payment_intent_id: pgBase(row.stripe_payment_intent_id),
   };
 }
 
@@ -836,6 +919,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received
     && !(entry.type === 'stripe_unreconciled_charge' && receivedIntents.has(entry.stripe_payment_intent_id)));
   const disputed = entries.filter((entry) => entry.status === 'disputed');
+  const statementReconciliation = entries.filter((entry) => entry.type === 'payer_statement_reconciliation');
   const payerFunded = entries.filter((entry) => entry.type === 'payer_payment');
   const payerNames = [...new Set(payerFunded.map((entry) => entry.funded_by.name).filter(Boolean))];
   // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
@@ -877,6 +961,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (payerFunded.length) parts.push(`${payerFunded.length} payment record(s) funded by a third-party payer${payerNames.length ? ` (${payerNames.join(', ')})` : ''}, not the customer's own payment`);
+  if (statementReconciliation.length) parts.push(`${statementReconciliation.length} unreconciled partial refund(s) recorded against the payer statement before it settled (reconciliation required: the payer settlement may be overstated)`);
   for (const entry of payerFunded.filter((item) => item.statement_level)) {
     parts.push(`payer statement S-${entry.statement_level.statement_id} (${entry.status}) covers this invoice: its $${Number(entry.statement_level.statement_amount).toFixed(2)} is the whole statement's amount, not this invoice's share`);
   }
@@ -906,6 +991,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
     payer_funded_payments: payerFunded.length,
+    statement_reconciliation_required: statementReconciliation.length,
     settled_by_account_credit: creditSettled.length,
     evidence_complete: evidenceComplete,
     ...(evidenceComplete ? {} : { counts_note: 'Every count here covers only the rows that were read; older rows were not read, so a zero is not proof of none.' }),
@@ -937,8 +1023,9 @@ async function getInvoiceDetail(input, actionContext) {
   const linked = loadedPayments.linked.get(String(invoice.id)) || [];
   const { rows: attempts, truncated: attemptsTruncated } = await newestRows(db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
     .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'idempotency_key', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at'));
-  const { rows: orphans, truncated: orphansTruncated } = await newestRows(db('stripe_orphan_charges').where({ invoice_id: invoice.id, resolved: false })
-    .select('id', 'stripe_payment_intent_id', 'amount', 'source', 'created_at'));
+  const loadedOrphans = await loadUnresolvedOrphans([invoice]);
+  const { orphans, statementOrphans } = loadedOrphans.byInvoice.get(String(invoice.id));
+  const orphansTruncated = loadedOrphans.truncated;
   const { rows: credits, truncated: creditsTruncated } = await newestRows(db('customer_credit_ledger').where({ invoice_id: invoice.id })
     .select('id', 'delta', 'balance_after', 'source', 'note', 'created_by', 'created_at'));
   const evidenceComplete = !(loadedPayments.truncated || attemptsTruncated || orphansTruncated || creditsTruncated);
@@ -962,6 +1049,7 @@ async function getInvoiceDetail(input, actionContext) {
     ...linked.map((row) => paymentEntry(row, invoice)),
     ...attempts.map((row) => attemptEntry(row, ledgerStates, !loadedPayments.truncated)),
     ...orphans.map(orphanEntry),
+    ...statementOrphans.map(statementReconciliationEntry),
     ...credits.map((row) => ({
       type: 'credit_movement',
       id: row.id,
