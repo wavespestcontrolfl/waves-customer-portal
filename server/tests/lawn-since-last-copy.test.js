@@ -8,7 +8,7 @@
 // named only while today's report still carries it; the banner owns watering.
 
 const {
-  buildSinceLastCopy, APPLIED_NOUN, OVERALL_SENTENCE, METRIC_SENTENCE, WATCH_TOPIC, GUARD_STATE,
+  buildSinceLastCopy, MAX_LINES, APPLIED_NOUN, OVERALL_SENTENCE, METRIC_SENTENCE, WATCH_TOPIC, GUARD_STATE,
 } = require('../services/service-report/lawn-since-last-copy');
 const { checkLawnModelCopy } = require('../services/service-report/lawn-copy-guards');
 const { STATES, METRICS } = require('../services/service-report/lawn-progress');
@@ -118,6 +118,31 @@ describe('buildSinceLastCopy', () => {
       }),
     });
     expect(copy.lines.slice(1)).toEqual([METRIC_SENTENCE.weed_suppression.behind, METRIC_SENTENCE.turf_density.on_track]);
+  });
+
+  test('four lines at most: with every kind of line present the second metric line gives way to the watch list', () => {
+    const copy = buildSinceLastCopy({
+      sinceLast: sinceLast(),
+      progress: progress({
+        overall: { direction: 'down' },
+        items: [item('turf_density', 'on_track'), item('weed_suppression', 'behind')],
+      }),
+      insights: [card('weeds')],
+    });
+    expect(MAX_LINES).toBe(4);
+    expect(copy.lines).toEqual([
+      'Last visit we applied weed control.',
+      OVERALL_SENTENCE.down,
+      METRIC_SENTENCE.weed_suppression.behind,
+      'Still on our watch list: weeds.',
+    ]);
+    // Without a watch line both metric lines fit.
+    const noWatch = buildSinceLastCopy({
+      sinceLast: sinceLast({ checks: [] }),
+      progress: progress({ overall: { direction: 'down' }, items: [item('turf_density', 'on_track'), item('weed_suppression', 'behind')] }),
+    });
+    expect(noWatch.lines).toHaveLength(4);
+    expect(noWatch.lines[3]).toBe(METRIC_SENTENCE.turf_density.on_track);
   });
 
   test('an unapproved row, an unclear item, a check item and an unknown metric are never spoken', () => {

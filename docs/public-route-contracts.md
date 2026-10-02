@@ -2092,7 +2092,8 @@ are unchanged by this gate.
 Every line is a fixed sentence selected by key in
 `server/services/service-report/lawn-since-last-copy.js`; no model writes it and
 it carries no product name, active ingredient, number, date or timing word. In
-order, at most 40 words (whole lines are dropped from the end): what the prior
+order, at most four lines and 40 words (a second per-treatment line gives way
+to the watch list; past 40 words whole lines are dropped from the end): what the prior
 visit applied, by product kind ("Last visit we applied weed control and
 fertilizer."); the overall direction when the engine compared the two visits
 (up / down / holding steady; nothing when the photos cannot support a

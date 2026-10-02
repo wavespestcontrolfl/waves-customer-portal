@@ -28,6 +28,10 @@ const { checkLawnModelCopy } = require('./lawn-copy-guards');
 
 const MAX_APPLIED_NOUNS = 3;
 const MAX_METRIC_LINES = 2;
+// The whole block. With every kind of line present there are five candidates
+// (applied, overall, two metrics, watch): the second metric line is the one
+// given up, so the watch list always keeps its place.
+const MAX_LINES = 4;
 
 // What a product kind is called in the applied line. Keys are the closed set
 // the memory freezes (lawn-visit-memory TAG_BY_KIND).
@@ -186,12 +190,15 @@ function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerP
     .filter((text) => checkLawnModelCopy(text, facts).ok);
 
   const watch = watchLine(sinceLast, insights, bannerPresent);
-  const lines = watch ? [...guarded, watch] : guarded;
+  // guarded is ordered applied, overall, metrics (most important first), so
+  // cutting from its end drops the lesser metric line.
+  const lines = watch ? [...guarded.slice(0, MAX_LINES - 1), watch] : guarded.slice(0, MAX_LINES);
   return lines.length ? { priorDate, lines } : null;
 }
 
 module.exports = {
   buildSinceLastCopy,
+  MAX_LINES,
   APPLIED_NOUN,
   OVERALL_SENTENCE,
   METRIC_SENTENCE,

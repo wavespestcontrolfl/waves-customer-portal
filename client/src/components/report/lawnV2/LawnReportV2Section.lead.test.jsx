@@ -168,7 +168,6 @@ describe('LawnLeadCard layout', () => {
         'Last visit we applied weed control, fungus protection and fertilizer.',
         'Your overall lawn score is down since then.',
         'Weed control is behind where we expected.',
-        'It is too early to judge the turf repair.',
         'Still on our watch list: weeds and mowing height.',
       ] };
       const banner = ['Water in today’s treatment by Thu 2 PM.', 'Run spray heads about 15 minutes a zone and rotors about 40 minutes.', 'Run it even if it is not your usual day.'];
