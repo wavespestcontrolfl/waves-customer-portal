@@ -253,9 +253,12 @@ function checkPrices(dated, families, prices) {
     // A live prepay stamp, not the term link alone: a voided / refunded term
     // clears prepaid_amount but keeps the link for audit, and that visit bills.
     if (Number(row.prepaid_amount) > 0) continue;
-    const performs = rowFamilies(row).filter((family) => prices.has(family));
+    // Every service the row performs must have a known accepted price (one
+    // the customer did not accept, or whose price is unknown, means the row's
+    // price cannot be judged); it is reported under the services being judged.
+    const performs = rowFamilies(row);
     const judged = performs.filter((family) => families.has(family));
-    const shares = performs.map((family) => prices.get(family));
+    const shares = performs.map((family) => (prices.has(family) ? prices.get(family) : null));
     if (!judged.length || shares.some((share) => share == null)) continue;
     const expected = Math.round(shares.reduce((a, b) => a + b, 0) * 100) / 100;
     // In whole cents: float subtraction makes $150.02 - $150 read as just over two cents.
