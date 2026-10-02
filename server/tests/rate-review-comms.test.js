@@ -421,19 +421,14 @@ describe('letter wording and order', () => {
     expect(why).not.toContain('not a dollar over');
   });
 
-  test('the first application is the stored visit only while it is live and on/after the effective date', async () => {
+  test('the first application is stated as the rule ("on or after"), never one visit\'s date', async () => {
     const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
     const b = book({ notices: [n] });
-    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-01', status: 'pending', estimated_price: '117.00' }];
-    mockDb.reset(b);
-    let out = await comms.sendPreview(BATCH_KEY, { now: NOW });
-    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
-    expect(emailLeg.mock.calls[0][0].vars.line1_first).toBe('on or after December 10, 2026');
     b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed', estimated_price: '117.00' }];
     mockDb.reset(b);
-    out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
-    expect(emailLeg.mock.calls[1][0].vars.line1_first).toBe('December 12, 2026');
+    expect(emailLeg.mock.calls[0][0].vars.line1_first).toBe('on or after December 10, 2026');
   });
 
   test('lines are ordered by effective date once, for the email and the frozen letter alike', async () => {
@@ -476,6 +471,25 @@ describe('customer surfaces', () => {
     notices()[0].applied_at = null;
     notices()[0].apply_hold_reason = 'rate_moved_since_notice';
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('portal: a per-application change whose first visit was repriced since is not upcoming', async () => {
+    const n = draft(1, { status: 'sent', sent_at: NOW, metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const b = book({ notices: [n] });
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '117.00' }];
+    mockDb.reset(b);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+    mockDb.store.scheduled_services[0].estimated_price = '140.00';
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('the claim only lands while the notice still belongs to the letter\'s customer (customer-comms fence)', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    // a merge undo repoints the notice after the batch read, just before the claim's fence
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9); return { rows: [] }; }]);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(emailLeg).not.toHaveBeenCalled();
   });
 
   test('portal: a monthly change charges the account dues moved by the delta, not the line rate', async () => {

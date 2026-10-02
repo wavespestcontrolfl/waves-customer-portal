@@ -47,6 +47,7 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { portalUrl } = require('../utils/portal-url');
 const { propertyStreetLine } = require('../utils/property-display');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const PriceChangeNotices = require('./price-change-notices');
 
 const TEMPLATE_KEY = 'billing.rate_review_notice';
@@ -167,7 +168,7 @@ function whyFor(notice, snapshot) {
   return `${facts}${comparison}`;
 }
 
-function lineFor(notice, snapshot, customer, firstVisitDay) {
+function lineFor(notice, snapshot, customer) {
   const meta = parseJson(notice.metadata, {});
   const service = SERVICE_LABELS[notice.family_key];
   const street = propertyStreetLine(customer || {});
@@ -208,10 +209,9 @@ function lineFor(notice, snapshot, customer, firstVisitDay) {
     newLabel: `From ${dateLabel(effective)}`,
     new: `${money(next)} per ${unit} (up ${money(next - current)})`,
     firstLabel: unit === 'month' ? 'First month at the new rate' : 'First application at the new rate',
-    // The stored first visit only while it is still a live visit on or
-    // after the effective date (the apply reprices exactly those); else
-    // the date the rule itself states.
-    first: firstVisitDay ? dateLabel(firstVisitDay) : `on or after ${dateLabel(effective)}`,
+    // The rule itself, never one visit's date: the apply reprices every
+    // eligible application from the effective date, whichever comes first.
+    first: `on or after ${dateLabel(effective)}`,
     why: whyFor(notice, snapshot),
   };
 }
@@ -325,6 +325,13 @@ function hasContact(customer, prefs) {
   return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() };
 }
 
+// The notices' stored first visits (rate checks read their stamped price).
+async function visitsById(dbh, notices) {
+  const ids = notices.map((n) => parseJson(n.metadata, {}).first_visit_id).filter(Boolean);
+  const visits = ids.length ? await dbh('scheduled_services').whereIn('id', ids).select('id', 'scheduled_date', 'status', 'estimated_price') : [];
+  return new Map(visits.map((v) => [String(v.id), v]));
+}
+
 async function loadBatch(dbh, batchKey, today) {
   const snapshots = await dbh('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id');
   const approvedUnscheduled = await dbh('rate_review_snapshots')
@@ -337,21 +344,12 @@ async function loadBatch(dbh, batchKey, today) {
   const customerIds = [...new Set(notices.map((n) => n.customer_id))];
   const customers = customerIds.length ? await dbh('customers').whereIn('id', customerIds) : [];
   const prefs = customerIds.length ? await dbh('notification_prefs').whereIn('customer_id', customerIds).catch(() => []) : [];
-  const visitIds = notices.map((n) => parseJson(n.metadata, {}).first_visit_id).filter(Boolean);
-  const visits = visitIds.length ? await dbh('scheduled_services').whereIn('id', visitIds).select('id', 'scheduled_date', 'status', 'estimated_price') : [];
-  const visitById = new Map(visits.map((v) => [String(v.id), v]));
-  const firstVisits = new Map();
-  for (const n of notices) {
-    const v = visitById.get(String(parseJson(n.metadata, {}).first_visit_id || ''));
-    const day = v && ['pending', 'confirmed'].includes(String(v.status)) ? ymd(v.scheduled_date) : null;
-    if (day && day >= ymd(n.effective_date)) firstVisits.set(String(n.id), day);
-  }
+  const visitById = await visitsById(dbh, notices);
   return {
     snapshots: new Map(snapshots.map((s) => [String(s.notice_id), s])),
     notices,
     customers: new Map(customers.map((c) => [String(c.id), c])),
     prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
-    firstVisits,
     declinedTerms: await declinedPrepayTermIds(dbh, notices),
     liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
     ratesMoved: await ratesMovedFor(dbh, notices.filter((n) => !n.sent_at), { customers, visitById }),
@@ -392,7 +390,7 @@ function planEntry(data, customerId, notices, { today, now }) {
   for (const notice of notices) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
-    const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
+    const line = lineFor(notice, snapshot, customer);
     const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes, ratesMoved: data.ratesMoved });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
@@ -521,7 +519,7 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
   if (!lines.length) {
     const notice = data.notices.find((n) => String(n.id) === String(row.notice_id));
     if (!notice) throw badInput('This row has no scheduled notice yet', 404);
-    lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id)), data.firstVisits.get(String(notice.id))), notice }];
+    lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
   const payload = letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
@@ -533,15 +531,21 @@ function claimKeyFor(noticeIds) {
   return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',')).digest('hex').slice(0, 16);
 }
 
-async function claimLines(dbh, lines) {
+async function claimLines(dbh, entry) {
+  const lines = entry.lines;
   const claimed = [];
   for (const l of lines) {
     // Under the shared notice-event lock (price-change-notices.js
     // lockNoticeEvent — the legacy batch and the scheduler take it too).
+    // ...and the customer-comms fence (merge / merge-undo repoint notices
+    // under it): the claim only lands while the notice still belongs to the
+    // customer this letter was built for. Not held through the provider
+    // call — the SMS sender takes the same fence on its own connection.
     const n = await dbh.transaction(async (trx) => {
+      await lockCustomerComms(trx, entry.customerId);
       await PriceChangeNotices.lockNoticeEvent(trx, { customerId: l.notice.customer_id, effectiveDate: l.effectiveDate, currentCents: l.notice.current_amount_cents, newCents: l.notice.new_amount_cents });
       return trx('price_change_notices')
-        .where({ id: l.noticeId })
+        .where({ id: l.noticeId, customer_id: entry.customerId })
         .whereNull('sent_at')
         .whereIn('status', SENDABLE_STATUSES)
         .update({ status: 'sending', updated_at: new Date() });
@@ -589,7 +593,7 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
 }
 
 async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
-  const claimed = await claimLines(dbh, entry.lines);
+  const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
   const customer = entry.customer;
   const claimKey = claimKeyFor(claimed);
@@ -626,7 +630,7 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
   await dbh.transaction(async (trx) => {
     for (const l of entry.lines) {
       const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
-      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
+      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
         metadata: JSON.stringify({ ...meta, letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
@@ -790,17 +794,21 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // term's amount is written then), but the customer's rate only changes at
   // renewal — it stays upcoming until its effective date. Every other lane
   // drops off once the nightly apply writes the new rate.
-  const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('monthly_rate', 'billing_day') : null;
+  const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('id', 'monthly_rate', 'billing_day') : null;
   const declinedTerms = await declinedPrepayTermIds(dbh, rows);
   // A change the nightly apply is holding (apply_hold_reason) is not a
   // guaranteed rate — not shown until it applies or the hold clears.
   const pending = rows.filter((n) => !n.apply_hold_reason && (!n.applied_at || n.billing_lane === 'annual_prepay')
     && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
   const monthly = await applicableMonthly(dbh, pending, customer);
-  // A monthly change the apply would refuse (rate moved, or delivered too
-  // late) is not upcoming at all.
+  // A change the apply would refuse is not upcoming at all: monthly (rate
+  // moved, or delivered too late); per application (its first visit's
+  // stamped price moved). A prepaid term's amount is checked by the apply
+  // the night after delivery and holds there (apply_hold_reason above).
   const applicable = new Set(monthly.map((n) => String(n.id)));
-  return pending.filter((n) => n.billing_lane !== 'monthly_membership' || applicable.has(String(n.id))).map((n) => ({
+  const perApp = pending.filter((n) => n.billing_lane === 'per_application');
+  const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp) });
+  return pending.filter((n) => (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),
     current: money(n.noticed_current_cents ?? n.current_amount_cents),
