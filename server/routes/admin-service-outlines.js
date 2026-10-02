@@ -6,7 +6,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
   CONTENT_LIBRARY_VERSION,
@@ -551,7 +551,7 @@ router.post('/:id/send', async (req, res, next) => {
           customerId: packet.customer_id || estimate.customer_id || null,
         });
         const smsBody = `Waves: Your lawn care program overview is ready: ${shortUrl} Reply STOP to opt out.`;
-        outcomes.sms = await sendCustomerMessage({
+        outcomes.sms = await sendManualCustomerSms({
           to: estimate.customer_phone,
           body: smsBody,
           channel: 'sms',

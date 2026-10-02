@@ -22,6 +22,8 @@ jest.mock('../config/feature-gates', () => ({
   // every gate in this file defaults off, so this stays consistent with
   // gateEnvValue's own always-false mock above.
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
+  // send-manual-customer-sms → gratitudeClaimsPossible reads the activation stamp
+  gateEnvTimestamp: jest.fn(() => null),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({

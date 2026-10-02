@@ -1,16 +1,16 @@
 'use strict';
 
 const logger = require('../logger');
-const TwilioService = require('../twilio');
 const { isEnabled } = require('../../config/feature-gates');
 const {
   sendCustomerMessage,
   classifyDeliveryCertainty,
 } = require('./send-customer-message');
-const {
-  reserveHumanReply,
-  settleHumanReply,
-} = require('../sms-suggest-mode');
+// The reservation path's modules load on first use: while no autonomous lane
+// can claim, this wrapper is a pass-through and every operator route that
+// imports it stays as light as a direct sendCustomerMessage import.
+const reserveHumanReply = (...args) => require('../sms-suggest-mode').reserveHumanReply(...args);
+const settleHumanReply = (...args) => require('../sms-suggest-mode').settleHumanReply(...args);
 
 const INTERLOCK_FIELD = 'manualSmsInterlock';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -81,7 +81,7 @@ async function settle(reply, { state, reviewedBy, reason, acceptedResult = null 
 
 async function prepareReservation(input, reviewedBy) {
   try {
-    const fromNumber = input.metadata?.fromNumber || await TwilioService.deriveOutboundNumber({
+    const fromNumber = input.metadata?.fromNumber || await require('../twilio').deriveOutboundNumber({
       customerLocationId: input.metadata?.customerLocationId,
       customerId: input.customerId || null,
     });

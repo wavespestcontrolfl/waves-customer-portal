@@ -16,7 +16,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const PricingIntelligence = require('../services/pricing-intelligence');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 // Admin-only: this router edits pricing/offer config and can send marketing
@@ -370,7 +370,7 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       });
     }
 
-    const smsResult = await sendCustomerMessage({
+    const smsResult = await sendManualCustomerSms({
       to: customer.phone,
       body: message,
       channel: 'sms',

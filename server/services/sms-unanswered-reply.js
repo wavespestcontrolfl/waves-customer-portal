@@ -68,10 +68,13 @@ const ORDINARY_INTENTS = Object.freeze([
 // Deliberately broad; a false match only means a person answers it.
 const SENSITIVE_TOPICS = Object.freeze([
   ['legal', /\b(lawyers?|attorneys?|lawsuits?|sue|suing|sued|legal|court|small claims|bbb|better business|fdacs|epa|report(?:ing)? you|news|reporter)\b/i],
-  ['health_safety', /\b(sick|ill|illness|hospital|er\b|emergency|doctor|vet|poison\w*|toxic|allerg\w*|rash|vomit\w*|breath\w*|asthma|pregnan\w*|bit(?:ten)?|stung|sting|died|dead|dying|safe|safety|chemicals?|pesticides?|exposed|exposure)\b/i],
-  ['complaint', /\b(complain\w*|unhappy|upset|angry|furious|disappointed|terrible|awful|horrible|worst|unacceptable|ridiculous|damage\w*|broke|broken|ruin\w*|scam\w*|rip(?:ped)? ?off|never (?:showed|came)|no.?show|stood (?:me )?up)\b/i],
-  ['money', /\b(refund\w*|charge\w*|overcharg\w*|chargeback|dispute\w*|bill(?:ed|ing)?|invoice\w*|pay(?:ment|ing)?|paid|credit|discount|price|cost|fee|\$)/i],
-  ['cancellation', /\b(cancel\w*|stop (?:service|coming)|quit|terminate|end (?:my|the) (?:service|plan|contract))\b/i],
+  // Treatment and re-entry questions are chemical-safety questions, however plainly asked.
+  ['health_safety', /\b(sick|ill|illness|hospital|er|emergency|doctor|vet|poison\w*|toxic|allerg\w*|rash\w*|vomit\w*|breath\w*|asthma|pregnan\w*|bit|bitten|bites?|stung|stings?|died|dead|dying|safe\w*|danger\w*|harm\w*|chemicals?|pesticides?|insecticides?|herbicides?|fertili[sz]\w*|exposed|exposure|spray\w*|treat(?:ed|ment|ments|ing)?|applied|application|granules?|fumes?|smell\w*|odou?r|wet|dry|dried|re-?entry|kids?|child\w*|bab(?:y|ies)|toddlers?|pets?|dogs?|puppy|puppies|cats?|kittens?|animals?|fish|pond|pool|garden|vegetables?|fruit|bees?|chickens?)\b/i],
+  ['complaint', /\b(complain\w*|unhappy|upset|angry|mad|furious|disappointed|frustrat\w*|terrible|awful|horrible|worst|unacceptable|ridiculous|damage\w*|broke|broken|ruin\w*|kill(?:ed|ing)?|scam\w*|rip(?:ped)? ?off|never (?:showed|came)|no.?show|stood (?:me )?up|still (?:seeing|have|has|got)|came back|not working|didn'?t work)\b/i],
+  // Billing state changes without a reliable timestamp (webhooks), so any
+  // money talk on either side stays with staff.
+  ['money', /(\$|\b(refund\w*|charg\w*|overcharg\w*|chargeback|disput\w*|bill\w*|invoic\w*|pay\w*|paid|credit|debit|card|autopay|discount|price\w*|cost\w*|fees?|balance|owe\w*|due|pending|processing|receipt|deposit|prepa\w*|money|dollars?)\b)/i],
+  ['cancellation', /\b(cancel\w*|stop (?:service|coming)|quit|terminat\w*|end (?:my|the) (?:service|plan|contract)|pause|hold off|switch\w* (?:to|companies))\b/i],
 ]);
 
 function sensitiveTopic(text) {
@@ -190,7 +193,8 @@ function candidateRefusal({ row, meta, snapshot, now, dueAt }) {
     // The card a person would have sent must be the verified draft, word for word.
     ['draft_mismatch', () => reply !== row.draft_response],
     ['intent_not_ordinary', () => !ORDINARY_INTENTS.includes(row.detected_intent) || row.draft_intent !== row.detected_intent],
-    ['sensitive_topic', () => sensitiveTopic(row.inbound_message) !== null],
+    // A reply grounded in product-label facts is a chemical-safety answer by definition.
+    ['label_grounded', () => Boolean(snapshot.label_facts_snapshot)],
     ['not_stamped', () => stamp.policy_version !== STAMP_VERSION],
     ['not_verified', () => stamp.verifier_enabled !== true || jsonObject(meta.verify)?.converged !== true],
     ['review_required', () => stamp.require_review !== false],
@@ -202,6 +206,8 @@ function candidateRefusal({ row, meta, snapshot, now, dueAt }) {
     ['media_or_unknown', () => require('./sms-gratitude-context').mediaCountFromMetadata(row.inbound_metadata) !== 0],
     ['redaction_placeholder', () => suggest.hasRedactionPlaceholder(reply)],
     ['price_quote', () => suggest.hasPriceQuote(reply)],
+    // Both sides: what the customer asked and what the reply talks about.
+    ['sensitive_topic', () => sensitiveTopic(row.inbound_message) !== null || sensitiveTopic(reply) !== null],
     // Any follow-up promise in the words themselves, under either prompt: nobody would own it.
     ['unowned_followup', () => require('./sms-followup-sla').replyPromisesFollowup(reply)],
     ['not_due', () => !(dueAt instanceof Date) || !(dueAt.getTime() <= now.getTime())],
@@ -364,33 +370,43 @@ async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, 
  * is repeatable after the sender's attempt marker.
  */
 function handoffCheck(claim) {
-  const check = async ({ dbi = db } = {}) => {
-    const { threadLast10, customerId, smsLogId, factsAt, fromPhone, toPhone } = claim.unanswered;
-    // Slower-moving state first: the phone's owner and the customer's visits.
-    const owner = await threadOwnerRefusal(dbi, { customerId, fromPhone, toPhone });
-    if (owner) return { ok: false, code: owner, reason: owner };
-    // A reschedule during the claim or provider preparation makes the reply stale.
-    const changed = await accountChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null });
-    if (changed) {
-      return { ok: false, code: changed, reason: changed };
+  const check = async (ctx = {}) => {
+    try {
+      return await handoffState(claim, ctx);
+    } catch (err) {
+      // Never let a knex message (rendered bindings: the customer's phone) reach the executor's logs.
+      logger.warn(`[sms-unanswered] handoff check failed (suggestion ${claim.unanswered?.suggestionId}): ${errLabel(err)}`);
+      return { ok: false, code: 'handoff_check_failed', reason: 'handoff_check_failed' };
     }
-    // Then the thread, in ONE statement, as the last read: a text or a call
-    // landing between two separate queries cannot slip past.
-    const thread = { threadLast10, customerId, smsLogId };
-    const callQ = callSinceInboundQuery(dbi, thread);
-    if (!callQ) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
-    const { rows: [moved] } = await dbi.raw('SELECT EXISTS (?) AS newer_inbound, EXISTS (?) AS called', [
-      newerInboundQuery(dbi, thread).select(dbi.raw('1')), callQ.select(dbi.raw('1')),
-    ]);
-    if (moved?.newer_inbound !== false) return { ok: false, code: 'newer_inbound', reason: 'newer_inbound' };
-    if (moved.called !== false) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
-    // Gate and clock after every await: conversational sends skip the shared
-    // send-window validator, so a check that began at 7:59 PM must not pass at 8:00.
-    if (!unansweredReplyLive()) return { ok: false, code: 'gate_off', reason: 'gate_off' };
-    if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
-    return { ok: true };
   };
   return require('./agent-decision-send-checks').markRepeatable(check);
+}
+
+async function handoffState(claim, { dbi = db } = {}) {
+  const { threadLast10, customerId, smsLogId, factsAt, fromPhone, toPhone } = claim.unanswered;
+  // Slower-moving state first: the phone's owner and the customer's visits.
+  const owner = await threadOwnerRefusal(dbi, { customerId, fromPhone, toPhone });
+  if (owner) return { ok: false, code: owner, reason: owner };
+  // A reschedule during the claim or provider preparation makes the reply stale.
+  const changed = await accountChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null });
+  if (changed) {
+    return { ok: false, code: changed, reason: changed };
+  }
+  // Then the thread, in ONE statement, as the last read: a text or a call
+  // landing between two separate queries cannot slip past.
+  const thread = { threadLast10, customerId, smsLogId };
+  const callQ = callSinceInboundQuery(dbi, thread);
+  if (!callQ) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
+  const { rows: [moved] } = await dbi.raw('SELECT EXISTS (?) AS newer_inbound, EXISTS (?) AS called', [
+    newerInboundQuery(dbi, thread).select(dbi.raw('1')), callQ.select(dbi.raw('1')),
+  ]);
+  if (moved?.newer_inbound !== false) return { ok: false, code: 'newer_inbound', reason: 'newer_inbound' };
+  if (moved.called !== false) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
+  // Gate and clock after every await: conversational sends skip the shared
+  // send-window validator, so a check that began at 7:59 PM must not pass at 8:00.
+  if (!unansweredReplyLive()) return { ok: false, code: 'gate_off', reason: 'gate_off' };
+  if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
+  return { ok: true };
 }
 
 /**

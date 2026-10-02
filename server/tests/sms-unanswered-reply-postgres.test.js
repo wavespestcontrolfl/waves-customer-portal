@@ -232,6 +232,10 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     ['sensitive_topic', { inboundText: 'Why was I charged twice?' }],
     ['sensitive_topic', { inboundText: 'Please cancel my service.' }],
     ['sensitive_topic', { inboundText: 'The tech never showed, really disappointed.' }],
+    ['sensitive_topic', { inboundText: 'Can my kids go outside after you sprayed?' }],
+    ['sensitive_topic', { inboundText: 'Is it still pending?' }],
+    ['sensitive_topic', { reply: 'Your payment is still processing and should clear soon.' }],
+    ['label_grounded', { snapshot: { label_facts_snapshot: { product: 'synthetic', reentry: 'until dry' } } }],
   ])('%s keeps the card for a person', async (reason, overrides) => {
     const s = await waitingSuggestion(overrides);
     const totals = await sweep();
@@ -463,6 +467,21 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect(unanswered.unansweredClaimsPossible()).toBe(true);
     delete process.env.GATE_SMS_UNANSWERED_REPLY;
     expect(unanswered.unansweredClaimsPossible()).toBe(false);
+  });
+
+  test('a database error in the boundary check refuses the send and logs no message text', async () => {
+    const s = await waitingSuggestion();
+    const logger = require('../services/logger');
+    sendCustomerMessage.mockImplementation(async (input) => {
+      const verdict = await input.providerPreSendCheck({ dbi: Object.assign(() => { throw new Error(`select ... ${CUSTOMER_PHONE}`); }, { raw: () => { throw new Error(CUSTOMER_PHONE); } }) });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.handoff_check_failed).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+    const logged = JSON.stringify(logger.warn.mock.calls);
+    expect(logged).not.toContain(CUSTOMER_PHONE.slice(-10));
   });
 
   test('closing time between the claim and the provider call holds the send and the card returns', async () => {

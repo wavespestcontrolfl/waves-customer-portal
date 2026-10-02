@@ -15,9 +15,11 @@ same send-once key per inbound, same send-time rechecks and policy-checked provi
   reply's facts were read (so "today"/"tomorrow" still mean what they said).
 - Intent is `general_customer_sms_needs_review` or `customer_nudge_needs_reply`. Money,
   cancellations, complaints, photos, lookups and unclassified texts stay with staff.
-- The customer's own words pass a deliberately broad topic screen (`SENSITIVE_TOPICS`): legal,
-  health/chemical safety, complaints, money and cancellations stay with staff even when the
-  intent label is the general one. A false match only means a person answers.
+- The customer's words AND the reply pass a deliberately broad topic screen (`SENSITIVE_TOPICS`):
+  legal, health/chemical safety (spraying, treatment, re-entry, kids, pets), complaints, money
+  (any billing or payment talk; invoice state has no reliable change stamp) and cancellations stay
+  with staff even when the intent label is the general one. A reply grounded in product-label
+  facts stays with staff too. A false match only means a person answers.
 - No photo on the text, and nothing the drafter recorded as missing information.
 - The draft was stamped at draft time **while the gate was on** as verified, action-free,
   lint-clean and not owed a review. Drafts from before the flip are never candidates.
@@ -37,7 +39,8 @@ card; a crash between send and label is repaired by the next sweep.
 ## Staff replies always win
 
 While the variable is present (`true` or `false`), staff sends (admin composer, scheduled sends,
-tech line, the manual-send wrapper) take the same thread interlock as Phase E auto-send: a staff
+tech line, and every other operator route through `sendManualCustomerSms`, pinned by
+`staff-reply-surfaces-interlock.test.js`) take the same thread interlock as Phase E auto-send: a staff
 reply backs off while an AI claim is mid-send, and a staff reply in flight keeps the AI from
 claiming. After an enable, the sweep claims nothing for the first 15 minutes of a process's
 life, so every instance reads the gate before any claim exists.

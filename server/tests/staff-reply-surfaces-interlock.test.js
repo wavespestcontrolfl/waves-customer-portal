@@ -1,29 +1,38 @@
-// Every staff reply surface goes through the interlocked manual-send wrapper
-// (send-manual-customer-sms.js), so a staff reply can never cross an automatic
-// reply on the same thread (Codex #5609 r2 P1: the dashboard inbox bypassed it).
+// Every staff-triggered SMS goes through the interlocked manual-send wrapper
+// (send-manual-customer-sms.js), so it never crosses an automatic reply on the
+// same thread (Codex #5609 r2/r4). Discovered, not listed: any direct
+// sendCustomerMessage( in an operator route fails this test unless the route
+// owns the same reservation lifecycle itself.
 const fs = require('fs');
 const path = require('path');
 
-const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+const routesDir = path.join(__dirname, '..', 'routes');
+// Routes that run reserveHumanReply / the composer reservation themselves.
+const OWN_LIFECYCLE = new Set(['admin-communications.js', 'tech-line.js']);
+const OPERATOR_ROUTES = fs.readdirSync(routesDir)
+  .filter((f) => /^admin-.*\.js$/.test(f) || f === 'ai-assistant.js' || f === 'tech-line.js');
 
-// [route file, entryPoint of its staff-typed reply]
-const SURFACES = [
-  ['routes/admin-dashboard-ops.js', 'admin_dashboard_ops_inbox_reply'],
-  ['routes/ai-assistant.js', 'ai_assistant_admin_reply'],
-  ['routes/admin-leads.js', 'admin_leads_send_sms'],
-  ['routes/admin-drafts.js', 'admin_draft_approve'],
-  ['routes/admin-drafts.js', 'admin_draft_revise'],
-];
+describe('staff SMS surfaces use the interlocked wrapper', () => {
+  test('operator routes were found', () => {
+    expect(OPERATOR_ROUTES.length).toBeGreaterThan(20);
+  });
 
-describe('staff reply surfaces use the interlocked wrapper', () => {
-  test.each(SURFACES)('%s (%s)', (file, entryPoint) => {
-    const src = read(file);
+  test.each(OPERATOR_ROUTES.filter((f) => !OWN_LIFECYCLE.has(f)))('%s sends no SMS around the wrapper', (file) => {
+    const src = fs.readFileSync(path.join(routesDir, file), 'utf8');
+    expect(src.match(/\bsendCustomerMessage\(/g) || []).toEqual([]);
+  });
+
+  test.each([
+    ['admin-dashboard-ops.js', 'admin_dashboard_ops_inbox_reply'],
+    ['ai-assistant.js', 'ai_assistant_admin_reply'],
+    ['admin-leads.js', 'admin_leads_send_sms'],
+    ['admin-drafts.js', 'admin_draft_approve'],
+    ['admin-estimates.js', 'admin_estimate_follow_up'],
+    ['admin-estimates.js', 'admin_estimate_send_booking_link'],
+  ])('%s %s sends through sendManualCustomerSms', (file, entryPoint) => {
+    const src = fs.readFileSync(path.join(routesDir, file), 'utf8');
     const at = src.indexOf(`entryPoint: '${entryPoint}'`);
     expect(at).toBeGreaterThan(-1);
-    // the nearest send call before the entryPoint is the wrapper
-    const before = src.slice(0, at);
-    const wrapper = before.lastIndexOf('sendManualCustomerSms(');
-    const direct = before.lastIndexOf('sendCustomerMessage(');
-    expect(wrapper).toBeGreaterThan(direct);
+    expect(src.slice(0, at).lastIndexOf('sendManualCustomerSms(')).toBeGreaterThan(-1);
   });
 });

@@ -4,7 +4,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const { excludeNeverAttemptedHoldDeferrals } = require('../services/collections/collection-hold');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
@@ -350,7 +350,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           entity_type: 'payment',
           entity_id: payment.id,
         });
-        const result = await sendCustomerMessage({
+        const result = await sendManualCustomerSms({
           audience: 'customer',
           channel: 'sms',
           to: customer.phone,
