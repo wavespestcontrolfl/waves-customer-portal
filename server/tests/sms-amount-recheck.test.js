@@ -685,6 +685,14 @@ describe('liveZelleFacts', () => {
     await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: RECIPIENT });
   });
 
+  // Codex round-62 P1: the recipient is re-read AFTER the eligibility awaits
+  test('a recipient rotated or removed during the eligibility read => the live one, or not_offered', async () => {
+    payPageZelleVisibility.mockImplementationOnce(async () => { process.env.ZELLE_RECIPIENT = 'billing@wavespestcontrol.com'; return { visible: true, reason: null }; });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: 'offer', recipient: 'billing@wavespestcontrol.com' });
+    payPageZelleVisibility.mockImplementationOnce(async () => { delete process.env.ZELLE_RECIPIENT; return { visible: true, reason: null }; });
+    await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toEqual({ state: 'not_offered', invoiceId: 'inv-1', invoiceNumber: null, recipient: null });
+  });
+
   test('a lookup that throws, an unexpected deposit read error, or an invoice that no longer resolves for this customer => null', async () => {
     payPageZelleVisibility.mockRejectedValue(new Error('stripe down'));
     await expect(liveZelleFacts({ customerId: 'c1', invoiceId: 'inv-1', dbh })).resolves.toMatchObject({ state: null });

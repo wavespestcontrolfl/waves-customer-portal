@@ -836,3 +836,30 @@ test.each(['Checks are accepted.', 'Credit cards are accepted.', 'Credit cards a
 test.each(['Your payment was accepted.', 'A credit was applied to your account.', 'We debited your account.'])('still a status: %s', (b) => {
   expect(c.assertsPaymentStatus(b, { inboundText: 'What payment methods do you take?' })).toBe(true);
 });
+
+// Codex round-62 P2: a copied receipt must be dated the day the customer named
+describe('a copied payment sentence and the payment date the customer named', () => {
+  const SEP12 = 'We received your $100.00 payment on Sep 12, 2026.';
+  test.each([
+    ['Did you receive the payment I sent on Sep 1?', true], ['Did my 9/1 payment go through?', true], ['Did my Sep 12 payment arrive?', false],
+    ['Did you get my payment from September 12th, 2026?', false], ['Did you get my payment from 9/12/25?', true], ['Did my payment go through?', false],
+  ])('%s => off target: %s', (inbound, off) => {
+    expect(c.copiesOffTarget([SEP12], inbound)).toBe(off);
+  });
+  test('an invoice sentence is not bound to the payment date', () => {
+    expect(c.copiesOffTarget(['Invoice #0002 for $100.00 is paid.'], 'Did my Sep 1 payment cover it?')).toBe(false);
+  });
+});
+
+// Codex round-62 P2: the status vocabulary is English - es / pt / fr money words scope the exchange and hold the reply
+describe('unsupported-language payment confirmations are held', () => {
+  const ok = (reply, inboundText) => c.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
+  test.each([
+    ['Sí, recibimos su pago.', 'Recibieron mi pago'], ['Oui, nous avons bien reçu le paiement.', 'Vous avez mon paiement?'],
+    ['Sim, recebemos o pagamento.', 'Vocês receberam meu pagamento?'],
+  ])('held: %s', (reply, inbound) => { expect(ok(reply, inbound)).toBe(false); });
+  test.each([
+    ['We saw a cobra near the pool, the tech will check it Tuesday.', 'Did you get my payment?'], ['Sure, the payer on file is you.', 'Who pays?'],
+    ['See you Tuesday!', 'When is my next visit?'],
+  ])('not held: %s', (reply, inbound) => { expect(ok(reply, inbound)).toBe(true); });
+});

@@ -471,9 +471,15 @@ const CLAUSE_BREAK_RE = /(?<=[.!?])\s+|;/;
 // payment-scoped too: the customer's pronoun refers to the payment the thread is about.
 const RECEIPT_SCOPE_RE = /\b(?:(?:went|go|goes|gone|going|came|come|comes|coming)\s+(?:through|thru)|came\s+in|made\s+it|(?:get|gotten|getting|receive[ds]?|receiving|see|saw|seen|spot(?:ted)?)\s+(?:it|that|this|them|mine|yours)|(?:on|in)\s+(?:our|your)\s+(?:end|system|records?|account|books))\b/i;
 /** Is this one message about money (a payment word, or a pronoun-only receipt phrase)? A message too long to judge counts as yes. */
+// Codex round-62 P2: the status vocabulary is English. Money words of the languages the drafter answers in (es / pt / fr) scope a
+// message too, and inside a payment-scoped exchange a reply carrying them - or one the English rules cannot read at all
+// (sms-label-facts.looksNonEnglish, the shared detector) - is held: it may confirm a payment in words no list knows.
+const FOREIGN_MONEY_RE = /(?<![\p{L}])(?:pag(?:o|os|ar|ue|u[eé]|ó|amos|aron|ado|ada|amento|amentos|ou|uei)|paiements?|pay[ée]e?s?|factura|facturas|fatura|faturas|facture|factures|saldo|saldos|solde|dinero|dinheiro|argent|cobr(?:o|os|ar|amos|aron|ado|ada|anza|é|ó)|recib\p{L}*|receb\p{L}*|reçu|transferencia|transfer[eê]ncia|virement|tarjeta|cart[aã]o|carte|cuenta|conta|compte|deuda|d[ií]vida|dette|reembols\p{L}*|rembours\p{L}*)(?![\p{L}])/iu;
+const notReadableEnglish = (text) => { try { return !!require('./sms-label-facts').looksNonEnglish(text); } catch { return true; } };
 function isPaymentScopedText(text) {
   const t = String(text ?? '').replace(/[’‘]/g, "'");
   if (t.length > MAX_INBOUND_CHARS) return true;
+  if (FOREIGN_MONEY_RE.test(t)) return true;
   const body = t.replace(GREETING_RE, ''); // "Hi Bill," is a name, not a bill
   return TOPIC_RE.test(body) || RECEIPT_SCOPE_RE.test(body);
 }
@@ -498,6 +504,7 @@ function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scope
   if (body.length > MAX_REPLY_CHARS) return true; // never truncated and passed
   const inbound = inboundText == null ? null : String(inboundText);
   if (!isPaymentScoped({ reply: body, inboundText: inbound, scopeTexts, scoped })) return false;
+  if (body.trim() && (FOREIGN_MONEY_RE.test(body) || notReadableEnglish(body))) return true;
   return body.split(CLAUSE_BREAK_RE).some((raw) => {
     const sentence = raw.trim();
     if (!sentence) return false;
@@ -523,6 +530,29 @@ const INBOUND_TENDER_RES = [
   ['cash', /\bcash\b/i],
   ['check', /\b(?:paper\s+)?che(?:ck|que)s?\b(?!\s+(?:on|in|with|if|whether|that|to\s+see))/i],
 ];
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const INBOUND_NAMED_DATE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b/gi;
+const INBOUND_NUMERIC_DATE_RE = /(?<![\d/$.])(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?(?![\d/])/g;
+// The calendar dates an inbound names ({month, day, year|null}); a month name or m/d[/yy] form only.
+function inboundDates(text) {
+  const out = [];
+  for (const m of String(text || '').matchAll(INBOUND_NAMED_DATE_RE)) {
+    const month = MONTH_NAMES.indexOf(m[1].slice(0, 3).toLowerCase()) + 1;
+    const day = Number(m[2]);
+    if (month && day >= 1 && day <= 31) out.push({ month, day, year: m[3] ? Number(m[3]) : null });
+  }
+  for (const m of String(text || '').matchAll(INBOUND_NUMERIC_DATE_RE)) {
+    const month = Number(m[1]); const day = Number(m[2]);
+    const year = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : null;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) out.push({ month, day, year });
+  }
+  return out;
+}
+// the {month, day, year} a rendered payment sentence is dated, or null
+function sentenceDate(t) {
+  const m = new RegExp(`(${SHORT_MONTHS.join('|')}) (\\d{1,2}), (\\d{4})`).exec(t);
+  return m ? { month: SHORT_MONTHS.indexOf(m[1]) + 1, day: Number(m[2]), year: Number(m[3]) } : null;
+}
 // the tender a rendered payment sentence names ('card' / 'ach'), or null when it names none
 const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH payment\b/.test(t) ? 'ach' : null);
 function copiesOffTarget(copied, inboundText) {
@@ -537,8 +567,15 @@ function copiesOffTarget(copied, inboundText) {
   // / ACH from Stripe columns; a manual tender - Zelle, cash, check - is never named), so a copied payment sentence answers a tender
   // question only when it names THAT tender: a Zelle / cash / check question is never answered by a copied receipt.
   const namedTenders = INBOUND_TENDER_RES.filter(([, re]) => re.test(inbound)).map(([tender]) => tender);
+  // Codex round-62 P2: a payment DATE the customer named ("the payment I sent on Sep 1", "9/1") - a copied payment sentence must be
+  // dated that day (month + day; the year too when the customer gave one)
+  const namedDates = inboundDates(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
+    if (namedDates.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t)) {
+      const d = sentenceDate(t);
+      if (!d || !namedDates.some((n) => n.month === d.month && n.day === d.day && (n.year == null || n.year === d.year))) return true;
+    }
     if (namedTenders.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
     if (inv && (named.full.length || named.tail.length)) {

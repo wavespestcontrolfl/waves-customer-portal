@@ -157,8 +157,11 @@ async function liveZelleFacts({ customerId, invoiceId, dbh = db } = {}) {
     return { state: null, invoiceId, invoiceNumber: null, recipient };
   }
   const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
+  // Codex round-62 P1: the recipient is read AGAIN after the eligibility awaits - one rotated or removed meanwhile is the one returned
+  const recipientNow = manualPayOptionsFromEnv()?.zelle?.recipient || null;
+  if (!recipientNow) return { state: 'not_offered', invoiceId, invoiceNumber: null, recipient: null };
   const state = eligibility.eligible ? 'offer' : (ZELLE_UNVERIFIABLE.has(eligibility.reason) ? null : 'invoice_unavailable');
-  return { state, invoiceId, invoiceNumber, recipient };
+  return { state, invoiceId, invoiceNumber, recipient: recipientNow };
 }
 
 // Cheap, read-free pre-screen for the send seams (Codex round-11 P1): does this body carry anything the recheck judges - a dollar figure /
