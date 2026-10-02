@@ -5494,7 +5494,7 @@ function draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedText
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -5780,7 +5780,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     } else {
       try {
         const vResp = await createDeepMessage(client, {
-          laneId: 'sms_verifier',
+          // a caller metering its own traffic (the any-language trial) passes its lane; live keeps sms_verifier
+          ...(verifierLaneId ? { laneId: verifierLaneId } : { laneId: 'sms_verifier' }),
           model: verifier.VERIFIER_MODEL,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
@@ -5835,7 +5836,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // shadow row, never published or auto-sent — instead of re-resolving (a second
   // GPS + route-provider round trip and a full re-verify for a figure the next
   // inbound will refresh anyway).
-  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt })) {
+  // a caller that fetched the context earlier (the any-language trial) passes when, so the ETA ages from its real lookup
+  const etaAsOf = liveEtaFetchedAt instanceof Date && factsAt instanceof Date && liveEtaFetchedAt < factsAt ? liveEtaFetchedAt : factsAt;
+  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt: etaAsOf })) {
     logger.warn('[sms-shadow] live ETA expired while the draft was generated; withholding the card (not converged)');
     converged = false;
   }
@@ -6487,6 +6490,7 @@ module.exports = {
   PRE_DEPLOY_PROMPT_IDENTITIES,
   validateComplianceCopy,
   hasBannedCustomerCopy,
+  SMS_COMPLIANCE_CLAIM_RE,
   PEST_REPORT_TEXT_RE,
   PRONOUN_RETURN_TEXT_RE,
   customerHasPestRelationship,
