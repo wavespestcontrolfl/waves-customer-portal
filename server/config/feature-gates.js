@@ -1165,6 +1165,14 @@ const gates = {
   // send path does not load the ledger module. Read at call time by
   // sms-offers.js offerLedgerLive() — this entry is for logGateStatus only.
   smsOfferLedger: gateEnvValue('GATE_SMS_OFFER_LEDGER'),
+  // SMS scheduling suggestions (slice 1b of sms-booking-complete-scope
+  // 2026-10-02): a scheduling-intent draft whose offered times came from a
+  // booking picker (open_times_snapshot with a picker source and id) becomes
+  // a staff suggestion card instead of silent shadow. Suggestion only, never
+  // auto-send; staff press send and the send checks recheck the times. Read
+  // at call time by sms-suggest-mode.js schedulingSuggestLive() — this entry
+  // is for logGateStatus only.
+  smsSchedulingSuggest: gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
