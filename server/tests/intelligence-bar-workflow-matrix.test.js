@@ -163,7 +163,7 @@ describe('request tally script', () => {
     // `not (null and ...)` is NULL, which a WHERE drops: the predicate must be IS DISTINCT FROM TRUE
     expect(tally.NOT_PUBLIC_ESTIMATE).toMatch(/is distinct from true\s*$/i);
     expect(tally.NOT_PUBLIC_ESTIMATE).not.toMatch(/^\s*not\b/i);
-    expect(tally.TURNS_SQL).toMatch(/jsonb_typeof\(q\.tool_calls\) is distinct from 'array'/);
+    expect(tally.TURNS_SQL).toMatch(/case when jsonb_typeof\(q\.tool_calls\) = 'array' then jsonb_array_length\(q\.tool_calls\) = 0 else true end/);
   });
 
   // The same predicate, evaluated by PostgreSQL over the rows that matter. Runs in the
@@ -207,6 +207,25 @@ describe('request tally script', () => {
     expect(s.failures).toEqual(failures);
   });
 
+  test('turns are kept per operator and day, including a day whose turns called no tool', () => {
+    const turns = [
+      { day: '2026-10-01', operator_id: 'op-1', turns: 3, turns_without_tools: 3 },
+      { day: '2026-10-02', operator_id: 'op-1', turns: 2, turns_without_tools: 0 },
+    ];
+    const calls = [{ day: '2026-10-02', operator_id: 'op-1', tool: 'needs_me', calls: 2 }];
+    const s = tally.summarize(calls, turns, []);
+    expect(s.operators['op-1'].turns).toBe(5);
+    expect(s.operators['op-1'].turns_by_day['2026-10-01']).toEqual({ turns: 3, turns_without_tools: 3 });
+    const text = tally.formatText({ days: 14, generated_at: 'now', summary: s });
+    expect(text).toMatch(/2026-10-01  3 turns \(3 without tools\)/);
+    expect(text).toMatch(/2026-10-02  2 turns \(0 without tools\); needs_me x2/);
+  });
+
+  test('the turn query only takes an array length inside a CASE that has checked the type', () => {
+    expect(tally.TURNS_SQL).toMatch(/case when jsonb_typeof\(q\.tool_calls\) = 'array' then jsonb_array_length\(q\.tool_calls\) = 0 else true end/);
+    expect(tally.TURNS_SQL).not.toMatch(/\bor jsonb_array_length/);
+  });
+
   test('confirmed writes are counted from ib_pending_actions using only outcome flags, never result text', () => {
     // the result column is only ever read through a named key
     expect(tally.CONFIRMED_SQL).not.toMatch(/a\.result\s*(,|\bas\b|$)/im);
@@ -221,12 +240,24 @@ describe('request tally script', () => {
       { tool: 'send_sms', flags: null }, // consumed, no stored result
       { tool: 'adjust_stock', flags: { keys: true, blocked: true } },
       { tool: 'adjust_stock', flags: { keys: true } }, // a result with no outcome flag
+      { tool: 'adjust_stock', flags: { keys: true, partial: true } }, // landed, follow-up still needed
     ];
     expect(tally.classifyConfirmed(rows)).toEqual([
-      { tool: 'send_sms', confirmed: 4, succeeded: 2, failed: 1, unknown: 1 },
-      { tool: 'adjust_stock', confirmed: 2, succeeded: 0, failed: 1, unknown: 1 },
+      { tool: 'send_sms', confirmed: 4, succeeded: 2, partial: 0, failed: 1, unknown: 1 },
+      { tool: 'adjust_stock', confirmed: 3, succeeded: 0, partial: 1, failed: 1, unknown: 1 },
     ]);
     const s = tally.summarize([], [], [], tally.classifyConfirmed(rows));
-    expect(tally.formatText({ days: 14, generated_at: 'now', summary: s })).toMatch(/Confirmed-write outcomes[\s\S]*1 failed \/\s+1 unknown \/\s+4 confirmed  send_sms/);
+    expect(tally.formatText({ days: 14, generated_at: 'now', summary: s })).toMatch(/Committed-write outcomes[\s\S]*1 failed \/\s+0 partial \/\s+1 unknown \/\s+4 committed  send_sms/);
+  });
+});
+
+describe('call schema check inputs', () => {
+  test('gap keys may be a list, a single key or absent', () => {
+    const call = { tool: 'send_sms', input: { customer_id: 'c', message: 'hi' } };
+    expect(() => matrix.schemaProblems(call, registry, [], undefined)).not.toThrow();
+    expect(() => matrix.schemaProblems(call, registry, [], 'reschedule_notice_send')).not.toThrow();
+    const typed = { tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } };
+    expect(matrix.schemaProblems(typed, registry, [], 'reschedule_notice_send').some((p) => /enum/.test(p))).toBe(false);
+    expect(matrix.schemaProblems(typed, registry, [], undefined).some((p) => /enum/.test(p))).toBe(true);
   });
 });

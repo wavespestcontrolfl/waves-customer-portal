@@ -204,7 +204,7 @@ All ten: the platform evidence ledger (`docs/intelligence-bar-platform-implement
 
 ## Request tally (decision D4)
 
-`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY` transaction) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, per-operator turn counts, read and proposal-phase failure counts per tool from `tool_health_events`, and confirmed-write outcomes per tool from `ib_pending_actions`. The two failure lists are separate because a carded write records its health event when it is proposed; the write that runs after Confirm records none, so its failures (a rejected text, a stale write, a database error) are read from the pending-action row, classified with the bar's own `executionOutcome` from the row's outcome flags only.
+`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY` transaction) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, turn counts per operator and day (including turns that called no tool), read and proposal-phase failure counts per tool from `tool_health_events`, and committed-write outcomes per tool (succeeded, partial, failed, unknown) from `ib_pending_actions`. The two failure lists are separate because a carded write records its health event when it is proposed; the write that commits later (after a Confirm click, or directly under owner-direct) records none, so its failures (a rejected text, a stale write, a database error) are read from the pending-action row, classified with the bar's own `executionOutcome` from the row's outcome flags only.
 
 The owner runs it through Railway; it needs the production `DATABASE_URL`, so it is never run from CI or from a session:
 
@@ -218,8 +218,8 @@ Reading the numbers:
 
 - `tool_calls` stores the tools called in a turn, so tool counts are not request counts; one request can call several tools.
 - The window is a rolling `--days` x 24 hours back from the run, while the day columns are Eastern calendar days, so the earliest day is a partial day. Rank families over the whole window, not over a single day column, and ignore the first day when comparing days.
-- `operator_id` is a nullable column that the bar route does not write on this commit, so expect one `(none)` operator. Any value containing `@` is shown as a short hash label, never an email.
-- Public estimate Q&A rows share the table and appear as the tool `public_estimate_ask`; ignore them for workflow ranking.
+- `operator_id` is written by the bar route since #5591 (the signed-in staff member). `(none)` holds only rows written before that change or without a staff identity. Any value containing `@` is shown as a short hash label, never an email.
+- Public estimate Q&A turns (customer traffic that shares the table, a turn that called `public_estimate_ask`) are left out of every count; they do not appear in the output.
 - Health events are filtered to the `intelligence-bar` and `tech-intelligence-bar` sources.
 - Freeze the ten after seeing the tally; swap at most two (D4).
 

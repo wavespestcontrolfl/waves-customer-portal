@@ -30,11 +30,12 @@
  *     public_estimate_ask); they are customer traffic, not operator turns, and
  *     are left out of every count here
  *   - tool_health_events records a carded write when it is PROPOSED (and a
- *     read when it runs); the write that runs after Confirm records no health
- *     event. Confirmed-write failures (a rejected text, a stale write, a
- *     database error) come from ib_pending_actions instead, classified with the
- *     same executionOutcome the bar uses. A consumed row with no stored result
- *     counts as outcome_unknown.
+ *     read when it runs); the write that commits later records no health
+ *     event. Committed-write outcomes (a rejected text, a stale write, a
+ *     database error) come from the consumed ib_pending_actions row instead,
+ *     classified with the same executionOutcome the bar uses. A consumed row
+ *     is a Confirm click or, with owner-direct on, a direct commit with no
+ *     card. A consumed row with no stored result counts as outcome_unknown.
  */
 require('dotenv').config();
 
@@ -80,7 +81,7 @@ const TURNS_SQL = `
     end as operator_id,
     count(*)::int as turns,
     (count(*) filter (
-      where jsonb_typeof(q.tool_calls) is distinct from 'array' or jsonb_array_length(q.tool_calls) = 0
+      where case when jsonb_typeof(q.tool_calls) = 'array' then jsonb_array_length(q.tool_calls) = 0 else true end
     ))::int as turns_without_tools
   from intelligence_bar_queries q
   where q.created_at >= now() - make_interval(days => ?)
@@ -129,10 +130,12 @@ const CONFIRMED_SQL = `
     and coalesce(a.consumed_at, a.updated_at) >= now() - make_interval(days => ?)
 `;
 
-// Outcomes that count as a failed confirmed write. awaiting_approval cannot
-// follow a confirm, so it is reported with the unknowns.
+// Outcomes of a committed write. partially_completed landed but still needs
+// follow-up, so it is its own count, never folded into succeeded.
+// awaiting_approval cannot follow a commit, so it is reported with the unknowns.
 const CONFIRMED_FAILED = new Set(['failed', 'blocked']);
-const CONFIRMED_OK = new Set(['completed', 'partially_completed', 'provider_accepted']);
+const CONFIRMED_OK = new Set(['completed', 'provider_accepted']);
+const CONFIRMED_PARTIAL = new Set(['partially_completed']);
 
 function classifyConfirmed(rows, outcomeOf = require('../server/services/intelligence-bar/outcomes').executionOutcome) {
   const byTool = {};
@@ -143,9 +146,10 @@ function classifyConfirmed(rows, outcomeOf = require('../server/services/intelli
     const { keys, ...flags } = r.flags && typeof r.flags === 'object' ? r.flags : {};
     const result = keys ? (Object.keys(flags).length ? flags : { other: true }) : null;
     const outcome = outcomeOf(result);
-    const t = byTool[r.tool] = byTool[r.tool] || { tool: r.tool, confirmed: 0, succeeded: 0, failed: 0, unknown: 0 };
+    const t = byTool[r.tool] = byTool[r.tool] || { tool: r.tool, confirmed: 0, succeeded: 0, partial: 0, failed: 0, unknown: 0 };
     t.confirmed += 1;
     if (CONFIRMED_OK.has(outcome)) t.succeeded += 1;
+    else if (CONFIRMED_PARTIAL.has(outcome)) t.partial += 1;
     else if (CONFIRMED_FAILED.has(outcome)) t.failed += 1;
     else t.unknown += 1;
   }
@@ -180,9 +184,13 @@ function summarize(calls, turns, failures, confirmed = []) {
     op.days[r.day] = op.days[r.day] || {};
     op.days[r.day][r.tool] = r.calls;
   }
+  // turns per operator and day, kept even for a day whose turns called no tool
   for (const t of turns) {
     byOperator[t.operator_id] = byOperator[t.operator_id] || { turns: 0, calls: 0, tools: {}, days: {} };
-    byOperator[t.operator_id].turns += t.turns;
+    const op = byOperator[t.operator_id];
+    op.turns += t.turns;
+    op.turns_by_day = op.turns_by_day || {};
+    op.turns_by_day[t.day] = { turns: t.turns, turns_without_tools: t.turns_without_tools };
   }
   const toolRank = Object.entries(byTool).map(([tool, count]) => ({ tool, calls: count })).sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool));
   return { tool_rank: toolRank, operators: byOperator, failures, confirmed };
@@ -199,10 +207,13 @@ function formatText(report) {
   for (const [op, data] of Object.entries(report.summary.operators).sort(([a], [b]) => a.localeCompare(b))) {
     lines.push('');
     lines.push(`Operator ${op}: ${data.turns} turns, ${data.calls} tool calls`);
-    const days = Object.keys(data.days).sort();
+    const byDay = data.turns_by_day || {};
+    const days = [...new Set([...Object.keys(data.days), ...Object.keys(byDay)])].sort();
     for (const day of days) {
-      const tools = Object.entries(data.days[day]).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-      lines.push(`  ${day}  ${tools.map(([t, n]) => `${t} x${n}`).join(', ')}`);
+      const tools = Object.entries(data.days[day] || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const t = byDay[day];
+      const turnNote = t ? `${t.turns} turns (${t.turns_without_tools} without tools)` : '';
+      lines.push(`  ${day}  ${[turnNote, tools.map(([n, k]) => `${n} x${k}`).join(', ')].filter(Boolean).join('; ')}`);
     }
   }
   lines.push('');
@@ -210,10 +221,10 @@ function formatText(report) {
   if (!report.summary.failures.length) lines.push('  (no health events in the window)');
   for (const f of report.summary.failures) lines.push(`  ${String(f.failures).padStart(5)} failed / ${String(f.events).padStart(6)} events  ${f.tool}${f.circuit_open ? `  (circuit open on ${f.circuit_open})` : ''}`);
   lines.push('');
-  lines.push('Confirmed-write outcomes per tool (ib_pending_actions, after the operator pressed Confirm)');
+  lines.push('Committed-write outcomes per tool (ib_pending_actions consumed rows: a Confirm click, or an owner-direct commit with no card)');
   const confirmed = report.summary.confirmed || [];
-  if (!confirmed.length) lines.push('  (no confirmed writes in the window)');
-  for (const c of confirmed) lines.push(`  ${String(c.failed).padStart(5)} failed / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} confirmed  ${c.tool}`);
+  if (!confirmed.length) lines.push('  (no committed writes in the window)');
+  for (const c of confirmed) lines.push(`  ${String(c.failed).padStart(5)} failed / ${String(c.partial).padStart(4)} partial / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} committed  ${c.tool}`);
   return lines.join('\n');
 }
 

@@ -228,7 +228,7 @@ const stepCommits = (step) => step.card === true || step.changes.length > 0 || s
 // What the schemas the bar sends to the model say about a call, with the
 // gaps the case declares applied on top. Returns a list of problems.
 function schemaProblems(call, registry, updatableCustomerFields, gapKeys) {
-  const gaps = gapKeys.map((k) => CAPABILITY_GAPS[k]).filter(Boolean);
+  const gaps = asList(gapKeys).map((k) => CAPABILITY_GAPS[k]).filter(Boolean);
   const addedTool = gaps.map((g) => g.adds && g.adds.tools && g.adds.tools[call.tool]).find(Boolean);
   const action = registry.actions.get(call.tool);
   if (!action && !addedTool) return [`tool ${call.tool} is not in the registry and no declared gap adds it`];
