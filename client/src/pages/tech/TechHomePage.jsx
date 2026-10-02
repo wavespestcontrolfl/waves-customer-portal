@@ -167,6 +167,15 @@ function isTypedReportEligible(service) {
     && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
     && completesOnOwnRecord(service);
 }
+// The inspection credit a typed inspection visit offers on the sheet, as the
+// office form offers it (SchedulePage isInspectionVisit): an inspection
+// profile, or the typed rodent and termite inspection keys, while the
+// schedule row says a credit is available. The server re-checks.
+function offersInspectionCredit(service) {
+  const profile = service?.completionProfile;
+  return (profile?.category === 'inspection' || ['rodent_inspection', 'termite_inspection'].includes(profile?.serviceKey))
+    && service?.inspectionCreditAvailable === true;
+}
 const laneKeyOf = (service) => resolveSpecialtyServiceKey({
   serviceKey: service?.completionProfile?.serviceKey,
   serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
@@ -186,6 +195,7 @@ function reportFlowFields(service) {
     typedFlow,
     typedType: typedFlow ? service.completionProfile.findingsType : null,
     typedSchema: typedFlow ? service.findingsSchema : null,
+    inspectionCredit: typedFlow && offersInspectionCredit(service),
     traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
   };
 }

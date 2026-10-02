@@ -418,6 +418,11 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     // Whether a saved trace would show on a lane or typed visit's report,
     // so the sheet holds only on a map the customer would see.
     ...(traceOnReport === undefined ? {} : { traceOnReport }),
+    // Typed voice fill (GATE_TYPED_VOICE_FILL, step 3 "after sending"): the
+    // sheet offers to book the follow-up a completion suggests (bed bug,
+    // flea, cockroach and the knockdowns), as the office's Schedule
+    // follow-up does.
+    followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
     lane,
     existingRecordLoadFailed,
     service: recapServiceIdentity(svc, profile),

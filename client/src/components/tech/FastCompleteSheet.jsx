@@ -80,8 +80,8 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, TechNoteBoxPhotos, TraceSection,
-  TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, typedCardFields, typedScoreIsTechs,
+  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter,
+  TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, typedCardFields, typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
   useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
@@ -436,6 +436,8 @@ function useFastCompleteContext({
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
           traceOnReport: data?.traceOnReport !== false,
+          // Step 3 "after sending": book the follow-up a completion suggests.
+          followupBooking: data?.followupBooking === true,
           rating: {
             // A typed visit keeps its own activity (the completion ignores
             // the 1 to 5 rating on a typed form), so it asks for none.
@@ -1295,6 +1297,10 @@ function useTypedRecord(service) {
   const [typedRecord, setTypedRecord] = useState(EMPTY_TYPED_RECORD);
   const ref = useRef(typedRecord);
   ref.current = typedRecord;
+  // A typed inspection's credit toward booked service (the office form's
+  // toggle), on unless the tech turns it off; sent only where it is offered.
+  const creditOffered = !!schema && service.inspectionCredit === true;
+  const [offerCredit, setOfferCredit] = useState(true);
   // The record a read lands on: only fields still empty that nobody picked,
   // and only from an answer for this form.
   const recordFor = (facts) => {
@@ -1309,7 +1315,10 @@ function useTypedRecord(service) {
     // What the read is judged beside (the server never fills over it).
     current: typedRecord.values,
     signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
-    inputs: (record, facts) => recordInputs(schema ? 'typed' : null, record, facts, schema),
+    inputs: (record, facts) => {
+      const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
+      return creditOffered ? { ...fields, completionExtras: { ...fields.completionExtras, offerInspectionCredit: offerCredit } } : fields;
+    },
     recordFor,
     settle: (facts) => {
       const filled = recordFor(facts);
@@ -1320,15 +1329,18 @@ function useTypedRecord(service) {
       return filled;
     },
     card: ({ draft, locked, writing }) => (schema ? (
-      <TypedRecordCard
-        schema={schema}
-        record={typedRecord}
-        unclear={draft?.facts?.unclearFields || []}
-        readFailed={draft?.facts?.status === 'failed'}
-        locked={locked || writing}
-        onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
-        onScore={(score) => setTypedRecord((prev) => ({ ...prev, score }))}
-      />
+      <>
+        <TypedRecordCard
+          schema={schema}
+          record={typedRecord}
+          unclear={draft?.facts?.unclearFields || []}
+          readFailed={draft?.facts?.status === 'failed'}
+          locked={locked || writing}
+          onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
+          onScore={(score) => setTypedRecord((prev) => ({ ...prev, score }))}
+        />
+        {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
+      </>
     ) : null),
   };
 }
@@ -1500,7 +1512,7 @@ function ReportFlowForm({
     }));
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
-        <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} />
+        <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
     );

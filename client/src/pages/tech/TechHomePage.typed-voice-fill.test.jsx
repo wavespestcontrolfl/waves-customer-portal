@@ -102,6 +102,18 @@ it('opens a typed visit in the report flow, reading its own form, with no trace 
   expect(assign).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['a pest inspection with a credit available', { completionProfile: { category: 'inspection', serviceKey: 'pest_inspection', findingsType: 'pest_inspection' }, findingsSchema: { ...ROACH_SCHEMA, type: 'pest_inspection' }, inspectionCreditAvailable: true }, true],
+  ['a rodent inspection with a credit available', { completionProfile: { category: 'rodent', serviceKey: 'rodent_inspection', findingsType: 'rodent_inspection' }, findingsSchema: { ...ROACH_SCHEMA, type: 'rodent_inspection' }, inspectionCreditAvailable: true }, true],
+  ['an inspection with no credit available', { completionProfile: { category: 'inspection', serviceKey: 'pest_inspection', findingsType: 'pest_inspection' }, findingsSchema: { ...ROACH_SCHEMA, type: 'pest_inspection' } }, false],
+  ['a treatment visit', { inspectionCreditAvailable: true }, false],
+])('%s: the sheet offers the inspection credit: %s', async (_label, overrides, offered) => {
+  rows = [row('svc-credit', overrides)];
+  mount();
+  await openFromTools();
+  expect((await sheetService()).inspectionCredit).toBe(offered);
+});
+
 it('the sheet\'s Full form opens the visit\'s own typed form', async () => {
   rows = [row('svc-roach')];
   mount();

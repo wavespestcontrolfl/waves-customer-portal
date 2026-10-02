@@ -219,6 +219,14 @@ describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)',
     expect(result).not.toHaveProperty('traceOnReport');
   });
 
+  test('the sheet books a suggested follow-up only while the gate is on', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    expect((await buildRecapContext(roach.id, contextDb(roach))).followupBooking).toBe(true);
+    delete process.env.GATE_TYPED_VOICE_FILL;
+    expect((await buildRecapContext(roach.id, contextDb(roach))).followupBooking).toBe(false);
+  });
+
   test('a profile that could not be read is no typed form', async () => {
     process.env.GATE_TYPED_VOICE_FILL = 'true';
     resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('profile store down'));

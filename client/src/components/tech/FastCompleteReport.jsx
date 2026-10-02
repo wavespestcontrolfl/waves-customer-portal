@@ -17,6 +17,7 @@ import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
 import { reconcileDependentFindingSelections, specialtyCompletedWorkWithoutAction } from '../../lib/service-completion-presets';
 import { typedFieldRequiredNow } from '../../lib/typed-findings-rules';
+import { formatETDateOnly } from '../../lib/timezone';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -1022,7 +1023,7 @@ function usePromisesStillOpen({ base, request, ids }) {
 // which promises are off the customer's open list. Off the list is not proof
 // the completion closed one (the office may have moved it to another
 // customer), so it never says "closed".
-export function SentSummary({ result, doneMarks = [], base, request }) {
+export function SentSummary({ result, doneMarks = [], base, request, followupBooking = false }) {
   const open = usePromisesStillOpen({ base, request, ids: doneMarks.map((mark) => String(mark.id)) });
   if (!result) return null;
   const lines = [smsLine(result), billLine(result)].filter(Boolean);
@@ -1034,7 +1035,66 @@ export function SentSummary({ result, doneMarks = [], base, request }) {
           {open.has(String(mark.id)) ? `Still open: ${mark.description}. The office will settle it.` : `Off the customer’s open list: ${mark.description}`}
         </p>
       ))}
+      {followupBooking && <FollowupBooking suggestion={result.followupSuggestion} base={base} request={request} />}
     </div>
+  );
+}
+
+// "Thursday, October 15", a follow-up's ET calendar day.
+const followupDay = (date) => formatETDateOnly(date, { weekday: 'long', month: 'long', day: 'numeric' });
+
+// The follow-up a completion suggests (GATE_TYPED_VOICE_FILL, step 3 "after
+// sending": bed bug, flea, cockroach and the knockdowns), booked in one tap
+// on its suggested day as a pending visit, the office's Schedule follow-up
+// (POST /admin/dispatch/:id/schedule-followup; the server re-derives the
+// suggestion and books it once per visit). No suggestion, nothing shown.
+export function FollowupBooking({ suggestion, base, request }) {
+  const [state, setState] = useState({ status: 'idle', message: '' });
+  if (!suggestion?.required || !suggestion.suggestedDate) return null;
+  const days = Number.isFinite(Number(suggestion.days)) && Number(suggestion.days) > 0 ? ` (${Number(suggestion.days)} days)` : '';
+  const book = async () => {
+    setState({ status: 'booking', message: '' });
+    try {
+      const answer = await request(`${base}/schedule-followup`, { method: 'POST', body: JSON.stringify({ date: suggestion.suggestedDate }) });
+      const day = followupDay(answer?.appointment?.scheduledDate || suggestion.suggestedDate);
+      setState({
+        status: 'booked',
+        message: answer?.alreadyScheduled
+          ? `A follow-up is already on the books for ${day}.`
+          : `Follow-up booked for ${day}. It stays pending until the office confirms it.`,
+      });
+    } catch (err) {
+      setState({ status: 'failed', message: `${err?.message || 'The follow-up could not be booked.'} Try again.` });
+    }
+  };
+  return (
+    <div data-testid="fast-complete-followup">
+      <p className="tech-visit-muted">{`Follow-up suggested: ${followupDay(suggestion.suggestedDate)}${days}`}</p>
+      {state.status === 'booked'
+        ? <p className="tech-visit-muted" role="status">{state.message}</p>
+        : (
+          <>
+            {state.status === 'failed' && <p className="tech-visit-muted tech-visit-status--warn" role="status">{state.message}</p>}
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={state.status === 'booking'} onClick={book}>
+              Book the follow-up
+            </Button>
+          </>
+        )}
+    </div>
+  );
+}
+
+// The inspection credit a typed inspection offers (the office form's
+// "Credit this inspection toward booked service"), on unless the tech turns
+// it off. The window is the service's own, so no number is named here.
+export function InspectionCreditToggle({ checked, locked, onChange }) {
+  return (
+    <section className="tech-visit-card" aria-label="Inspection credit">
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-tip" aria-pressed={checked} disabled={locked} onClick={() => onChange(!checked)}>
+        Credit this inspection toward booked service
+      </Button>
+      <p className="tech-visit-muted">Applies as account credit only if they book. Nothing is credited now.</p>
+    </section>
   );
 }
 

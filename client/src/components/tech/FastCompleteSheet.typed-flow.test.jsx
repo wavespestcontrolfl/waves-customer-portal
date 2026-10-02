@@ -66,7 +66,7 @@ const REPORT = 'WHAT WE FOUND\nGerman roaches behind the refrigerator.\n\nWHAT W
 
 function makeRequest({
   visit = VISIT, typedType = 'cockroach', typedFacts = READ, trace = { enabled: true, treatmentZone: null }, complete = { success: true },
-  traceOnReport,
+  traceOnReport, followupBooking, scheduleFollowup = () => ({ appointment: { scheduledDate: '2026-10-15' } }),
 } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
@@ -75,6 +75,7 @@ function makeRequest({
       return {
         ok: true, eligible: false, lane: null, ...(typedType ? { typedType } : {}), service: visit, products: CATALOG,
         ...(traceOnReport === undefined ? {} : { traceOnReport }),
+        ...(followupBooking === undefined ? {} : { followupBooking }),
       };
     }
     // The rating contract allows a rating on a first visit: a typed visit
@@ -89,6 +90,7 @@ function makeRequest({
     if (path.endsWith('/typed-facts')) return typeof typedFacts === 'function' ? typedFacts() : typedFacts;
     if (path.endsWith('/voice-facts') || path.endsWith('/lane-facts')) throw new Error('a typed visit reads only its own form');
     if (path.endsWith('/complete')) return complete;
+    if (path.endsWith('/schedule-followup')) return scheduleFollowup();
     return {};
   });
   request.bodies = (suffix) => calls.filter((call) => call.path.endsWith(suffix)).map((call) => call.body);
@@ -397,5 +399,103 @@ describe('the visit the tech tapped', () => {
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
     expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
+  });
+});
+
+describe('a typed inspection\'s credit (step 3: inspections)', () => {
+  const INSPECTION_SCHEMA = {
+    type: 'pest_inspection',
+    label: 'Pest Inspection',
+    fields: [{ key: 'severity', label: 'Severity', type: 'select', required: true, options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] }],
+    activity: null,
+  };
+  const inspectionRequest = () => makeRequest({
+    visit: { ...VISIT, serviceType: 'Pest Inspection', serviceKey: 'pest_inspection' },
+    typedType: 'pest_inspection',
+    typedFacts: { available: true, status: 'read', type: 'pest_inspection', values: { severity: 'Moderate' }, heard: {}, unclearFields: [] },
+  });
+  const INSPECTION = { ...SERVICE, serviceType: 'Pest Inspection', typedType: 'pest_inspection', typedSchema: INSPECTION_SCHEMA, inspectionCredit: true };
+  const creditButton = () => within(screen.getByRole('region', { name: 'Inspection credit' })).getByRole('button', { name: 'Credit this inspection toward booked service' });
+
+  test('is on unless the tech turns it off, and the completion says which', async () => {
+    const request = inspectionRequest();
+    await openSheet(request, INSPECTION);
+    await generate('Moderate ghost ant activity in the kitchen.');
+    expect(creditButton().getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(creditButton());
+    expect(creditButton().getAttribute('aria-pressed')).toBe('false');
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).toMatchObject({ offerInspectionCredit: false });
+  });
+
+  test('left on, it is offered', async () => {
+    const request = inspectionRequest();
+    await openSheet(request, INSPECTION);
+    await generate('Moderate ghost ant activity in the kitchen.');
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).toMatchObject({ offerInspectionCredit: true });
+  });
+
+  test('a visit that offers no credit shows no toggle and sends no choice', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(screen.queryByRole('region', { name: 'Inspection credit' })).toBeNull();
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).not.toHaveProperty('offerInspectionCredit');
+  });
+});
+
+describe('after sending: the follow-up a completion suggests (step 3)', () => {
+  const SUGGESTED = { success: true, followupSuggestion: { required: true, suggestedDate: '2026-10-15', days: 14 } };
+  const sendIt = async (request) => {
+    await openSheet(request);
+    await generate();
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+  };
+
+  test('one tap books it on the suggested day, pending until the office confirms it', async () => {
+    const request = makeRequest({ complete: SUGGESTED, followupBooking: true });
+    await sendIt(request);
+    expect(screen.getByText('Follow-up suggested: Thursday, October 15 (14 days)')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Book the follow-up' }));
+    expect(await screen.findByText('Follow-up booked for Thursday, October 15. It stays pending until the office confirms it.')).toBeTruthy();
+    expect(request.bodies('/schedule-followup')).toEqual([{ date: '2026-10-15' }]);
+    expect(screen.queryByRole('button', { name: 'Book the follow-up' })).toBeNull();
+  });
+
+  test('one already on the books says so', async () => {
+    const request = makeRequest({
+      complete: SUGGESTED, followupBooking: true, scheduleFollowup: () => ({ alreadyScheduled: true, appointment: { scheduledDate: '2026-10-16' } }),
+    });
+    await sendIt(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Book the follow-up' }));
+    expect(await screen.findByText('A follow-up is already on the books for Friday, October 16.')).toBeTruthy();
+  });
+
+  test('a booking that fails says so and can be tried again', async () => {
+    const request = makeRequest({ complete: SUGGESTED, followupBooking: true, scheduleFollowup: () => { throw new Error('Could not book.'); } });
+    await sendIt(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Book the follow-up' }));
+    expect(await screen.findByText('Could not book. Try again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Book the follow-up' })).toBeTruthy();
+  });
+
+  test.each([
+    ['the switch off (GATE_TYPED_VOICE_FILL)', { complete: SUGGESTED, followupBooking: false }],
+    ['an older server that says nothing', { complete: SUGGESTED }],
+    ['no follow-up suggested', { complete: { success: true, followupSuggestion: { required: false } }, followupBooking: true }],
+  ])('%s: no booking', async (_label, options) => {
+    const request = makeRequest(options);
+    await sendIt(request);
+    expect(screen.queryByTestId('fast-complete-followup')).toBeNull();
   });
 });
