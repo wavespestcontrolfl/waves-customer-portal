@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002135000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002137000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -29,7 +29,7 @@ jest.setTimeout(60000);
 
   test('one row per correction across the five sources, with the AI text and the human text side by side; non-corrections stay out', async () => {
     const ids = {
-      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(), parkedSend: randomUUID(), trainingEdited: randomUUID(), trainingOnCorrected: randomUUID(), trainingDecision: randomUUID(),
+      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(), parkedSend: randomUUID(), trainingEdited: randomUUID(), trainingOnCorrected: randomUUID(), trainingSameReply: randomUUID(), trainingDecision: randomUUID(), humanReplySms: randomUUID(),
       labelWrong: randomUUID(), labelRight: randomUUID(),
       revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(),
       humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(),
@@ -80,12 +80,17 @@ jest.setTimeout(60000);
     await trx('message_drafts').where({ id: ids.approved }).update({ status: 'approved', approved_by: reviewer, approved_at: at(6) });
 
     // One judgment per draft (unique on draft_id), so each verdict gets its own shadow draft.
+    // The person's own reply the judge graded: its sender and time are the correction's provenance.
+    await trx('sms_log').insert({
+      id: ids.humanReplySms, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
+      message_body: 'Yes, Tuesday works. See you then.', admin_user_id: reviewer, created_at: at(5.5),
+    });
     const judgment = (id, verdict, draftId) => ({
       id, draft_id: draftId, intent: 'general', verdict, human_replied: true, human_reply_text: 'Yes, Tuesday works. See you then.',
       scores: JSON.stringify({ accuracy: 5 }), notes: 'Human answered the question', model: 'claude-opus-5-5', prompt_version: 'judge_v3', judged_at: at(5),
     });
     await trx('shadow_draft_judgments').insert([
-      judgment(ids.humanBetter, 'human_better', ids.shadowDraft),
+      { ...judgment(ids.humanBetter, 'human_better', ids.shadowDraft), human_reply_sms_id: ids.humanReplySms },
       judgment(ids.equivalent, 'equivalent', ids.shadowDraft2),
       judgment(ids.humanBetterAlreadyCorrected, 'human_better', ids.shadowDraft3),
       judgment(ids.humanBetterNoSend, 'human_better', ids.shadowDraft4),
@@ -122,14 +127,17 @@ jest.setTimeout(60000);
     });
     await trx('reply_training_examples').insert([
       training(ids.trainingEdited, ids.trainingDecision, 'edited', at(3.5)),
-      training(ids.trainingOnCorrected, ids.linkedCorrected, 'edited', at(3.4)), // its decision already records the correction: left out
+      // its decision was corrected too, but shows a DIFFERENT reply (the settling send): a separate rewrite, kept
+      training(ids.trainingOnCorrected, ids.linkedCorrected, 'edited', at(3.4)),
+      // its decision already shows this same reply as its human text: one correction, left out
+      { ...training(ids.trainingSameReply, ids.linkedCorrected, 'edited', at(3.3)), outbound_body: '  Tuesday at 2 is fine. See you then. ' },
     ]);
     const rows = await trx('corrections').whereIn('source_id', Object.values(ids)).orderBy('corrected_at', 'asc');
     const byId = Object.fromEntries(rows.map((r) => [r.source_id, r]));
 
     expect(rows.map((r) => `${r.source}:${r.kind}`)).toEqual([
       'agent_decision:dismissed', 'agent_decision:corrected', 'agent_decision:ignored', 'typed_review:label_wrong',
-      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected', 'reply_training:edited',
+      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected', 'reply_training:edited', 'reply_training:edited',
     ]);
     // the person's own text, not the canned note: the settling send first, the judgment's human text when no send is on record, the note last
     expect(byId[ids.linkedCorrected]).toMatchObject({ source: 'agent_decision', kind: 'corrected', human_text: 'Tuesday at 2 is fine. See you then.' });
@@ -139,9 +147,11 @@ jest.setTimeout(60000);
     expect(byId[ids.ignored]).toMatchObject({ kind: 'ignored', human_text: 'We will be there Thursday morning.' });
     expect(byId[ids.ignored].detail.correction_note).toBe('A staff reply to this thread was sent.');
     // reply training: the draft beside the person's reply, the verdict as the kind, no version or model known
-    expect(byId[ids.trainingEdited]).toMatchObject({ source: 'reply_training', kind: 'edited', surface: 'sms', topic: 'scheduling', ai_text: `Draft ${ids.trainingEdited.slice(0, 4)}`, human_text: 'Thursday at 9 works, see you then.', version: null, model: null, corrected_by: 'office@test' });
+    expect(byId[ids.trainingEdited]).toMatchObject({ source: 'reply_training', kind: 'edited', surface: 'sms', topic: 'scheduling', ai_text: `Draft ${ids.trainingEdited.slice(0, 4)}`, human_text: 'Thursday at 9 works, see you then.', version: 'house_voice_v12_real_answers3_cfl', model: 'claude-sonnet-5-5', corrected_by: 'office@test' });
+    // a rewrite saved beside a separately corrected decision is its own correction
+    expect(byId[ids.trainingOnCorrected]).toMatchObject({ source: 'reply_training', kind: 'edited', human_text: 'Thursday at 9 works, see you then.' });
     expect(byId[ids.trainingEdited].detail).toMatchObject({ source_agent_decision_id: ids.trainingDecision, review_note: 'Named the day', capture_reason: 'agent_review_reply_verdict' });
-    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.trainingOnCorrected, ids.trainingDecision]) {
+    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.trainingSameReply, ids.trainingDecision]) {
       expect(byId[absent]).toBeUndefined();
     }
     expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
@@ -167,8 +177,11 @@ jest.setTimeout(60000);
 
     expect(byId[ids.humanBetter]).toMatchObject({
       surface: 'sms', ai_text: `Draft ${ids.shadowDraft.slice(0, 4)}`, human_text: 'Yes, Tuesday works. See you then.',
-      version: 'house_voice_v12_real_answers3_cfl', model: 'gpt-5.6-terra', corrected_by: null,
+      version: 'house_voice_v12_real_answers3_cfl', model: 'gpt-5.6-terra', corrected_by: reviewer,
     });
+    // the person's reply time, not the nightly judge run; the judge time rides in detail
+    expect(byId[ids.humanBetter].corrected_at).toEqual(at(5.5));
+    expect(new Date(byId[ids.humanBetter].detail.judged_at)).toEqual(at(5));
     expect(byId[ids.humanBetter].detail).toMatchObject({ draft_id: ids.shadowDraft, judge_model: 'claude-opus-5-5', judge_prompt_version: 'judge_v3', scores: { accuracy: 5 }, notes: 'Human answered the question' });
 
     expect(byId[ids.profileRejected]).toMatchObject({ surface: 'voice', topic: 'voice_profile', ai_text: `Profile ${ids.profileRejected.slice(0, 4)}`, human_text: null, version: 'v2', corrected_by: 'owner@test' });
