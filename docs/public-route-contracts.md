@@ -2167,7 +2167,10 @@ performs) and replay byte for byte afterwards, so a later product edit or row
 approval never changes a sent report; a stored entry replays even when a later
 read fails. A degraded read (any input read failed, including the next-visit
 lookup that picks the by-next-visit sentence) or an unverifiable treatment
-creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`).
+creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
+such a render's lead keeps the snapshot headline and has no applied line (never
+the AI treatment narrative). A failed property or estimate lookup behind the
+next-visit check counts as a degraded read.
 A scheduled next visit sets that sentence's gap only when it resolves to this
 visit's property (`visit-property-scope.js`); otherwise no by-next-visit
 sentence is chosen. The fields reach the lead through a non-enumerable

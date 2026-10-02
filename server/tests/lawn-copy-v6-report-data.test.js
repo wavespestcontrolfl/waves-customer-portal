@@ -260,8 +260,14 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     const { data, log } = await render(recs, { service_products: FAIL });
     expect(log.updates).toHaveLength(0);
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
-    expect(data.reportV2.copyV6).toBeUndefined();
+    // An all-null carrier: the lead keeps the snapshot headline and shows no
+    // applied line rather than the AI narrative in snapshot.treatmentSummary.
+    expect(data.reportV2.copyV6).toEqual({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    data.reportV2.snapshot.treatmentSummary = 'An AI narrative paragraph.';
+    const lead = reconciled(data).reportV2.lead;
+    expect(lead.headline).toBe(data.reportV2.snapshot.statusHeadline);
+    expect(lead.applied).toBeNull();
     const next = await render(recs);
     expect(storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur')).toBeTruthy();
     expect(next.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
@@ -306,6 +312,25 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 
     test('a next visit with no property evidence: no gap', async () => {
       expect(await gapFor({})).toBeNull();
+    });
+
+    test('a FAILED property lookup is a degraded read (no freeze), never read as "another home"', async () => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        await render(records(), {
+          customer_properties: FAIL,
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+            { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
+          ],
+        });
+        expect(spy.mock.calls[0][0].degraded).toBe(true);
+        expect(spy.mock.calls[0][0].ctx.nextVisitGapDays).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

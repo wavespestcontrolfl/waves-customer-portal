@@ -3818,6 +3818,9 @@ function buildWateringBanner(instruction, weekPlan = null) {
   };
 }
 
+// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
+
 // The days from this visit to the next one, for the v6 copy's "by your next
 // visit" sentence (GATE_LAWN_REPORT_COPY_V6). A cadence estimate comes from
 // this visit's own service, so it is this property's. A SCHEDULED next visit
@@ -3835,9 +3838,12 @@ async function lawnCopyNextVisitGap(service, timing, knex, readFailures) {
       .first('property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
       .catch(failSoft(readFailures, 'next_visit', null));
     if (!thisRow) return null;
+    // A failed property / estimate lookup is a degraded read, not "another
+    // home": the copy must not freeze without its by-next-visit sentence.
+    const scope = { onLookupFailure: () => readFailures.add('next_visit') };
     const [mine, next] = await Promise.all([
-      resolveVisitPropertyScope(thisRow, knex),
-      resolveVisitPropertyScope(timing.nextRow, knex),
+      resolveVisitPropertyScope(thisRow, knex, scope),
+      resolveVisitPropertyScope(timing.nextRow, knex, scope),
     ]);
     if (!sameResolvedProperty(mine && mine.key, next && next.key)) return null;
   }
@@ -5679,11 +5685,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             degraded: readFailures.size > 0 || !!(lawnTreatmentGuard && !lawnTreatmentGuard.verified),
             knex,
           });
-          if (outcome.copy) {
-            Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy, enumerable: false, writable: true, configurable: true });
-          }
+          // No copy (a degraded read): an all-null carrier still marks the v6
+          // contract live, so the lead keeps the snapshot headline and leaves
+          // applied empty rather than fall back to the AI treatment narrative
+          // that has replaced snapshot.treatmentSummary by now.
+          Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy || LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
         } catch {
+          Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
           lawnAssessment.weekWeatherUncacheable = true;
         }
       } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
