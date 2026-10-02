@@ -16,6 +16,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const {
   estimateDataHasQuoteRequirement,
@@ -2855,7 +2856,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               throw new Error('invalidated_before_delivery');
             }
           }
-          const result = await sendManualCustomerSms({
+          const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
             channel: 'sms',

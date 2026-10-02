@@ -49,7 +49,7 @@ const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PR
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
-const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const ProjectEmail = require('../services/project-email');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
@@ -3546,7 +3546,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           entity_type: 'project',
           entity_id: project.id,
         });
-        const result = await sendManualCustomerSms({
+        const result = await sendCustomerMessage({
           to: normalizedPhone,
           body: smsBody,
           channel: 'sms',
@@ -4052,7 +4052,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
         if (smsClaim.alreadySent) {
           channels.sms = { ok: true, deduplicated: true };
         } else {
-          const result = await sendManualCustomerSms({
+          const result = await sendCustomerMessage({
             to: normalizedPhone,
             body: smsBody,
             channel: 'sms',
@@ -5184,7 +5184,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           : isPayerInvoice
             ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
             : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
-        const result = await sendManualCustomerSms({
+        const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
           channel: 'sms',

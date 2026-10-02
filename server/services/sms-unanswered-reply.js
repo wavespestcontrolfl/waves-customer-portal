@@ -146,8 +146,17 @@ function candidatePage({ now, limit = SWEEP_LIMIT, after = null }) {
     .whereIn('ad.detected_intent', ORDINARY_INTENTS)
     .whereNotNull('ad.customer_id')
     .where('s.created_at', '>=', new Date(now.getTime() - LOOKBACK_MS))
+    // Only today's texts (ET): an earlier day's reply can never send
+    // (not_same_day), and a backlog of them must not fill the page cap.
+    .whereRaw("(s.created_at AT TIME ZONE 'America/New_York')::date = ?::date", [etDateString(now)])
     .where('s.created_at', '<=', new Date(now.getTime() - WAIT_OPEN_MINUTES * 60 * 1000))
     .whereRaw("md.intended_actions->'unanswered'->>'policy_version' = ?", [STAMP_VERSION])
+    // The draft-time verdicts that never change, filtered here so permanently
+    // refused rows never take a page slot (candidateRefusal re-checks them).
+    .whereRaw("md.intended_actions->'unanswered'->>'require_review' = 'false'")
+    .whereRaw("md.intended_actions->'unanswered'->>'lint_pass' = 'true'")
+    .whereRaw("md.intended_actions->'unanswered'->>'actions_verified_safe' = 'true'")
+    .whereRaw("md.intended_actions->'unanswered'->>'verifier_enabled' = 'true'")
     // One send-once key per inbound: an inbound that ever held a claim (sent,
     // failed or in flight) is never tried again.
     .whereNotExists(function alreadyClaimed() {
@@ -280,51 +289,68 @@ async function threadOwnerRefusal(dbh, { customerId, fromPhone, toPhone }) {
   return null;
 }
 
-// The customer's records a reply's facts are read from (VISITS, PENDING
-// ESTIMATE, BILLING) and that change without touching the SMS thread. Writers
-// do not all bump updated_at (declining an estimate stamps only declined_at),
-// so each record's EVENT columns count, and a deadline that passed during the
-// wait (an estimate expiring) is a change too.
+// Every customer-keyed record the drafter's facts are read from
+// (context-aggregator: profile and plan, property notes, payment methods and
+// payments, visits and service records, lawn assessments, estimates,
+// invoices, interactions, reschedules, sequences). Writers do not all bump
+// updated_at (declining an estimate stamps only declined_at), so each record's
+// EVENT columns count; a deadline that passed during the wait counts too.
+// Columns that move on their own (last_seen_at, last_contact_date) are left out.
 const ACCOUNT_RECORDS = Object.freeze([
   {
+    table: 'customers', key: 'id', reason: 'customer_changed',
+    events: ['updated_at', 'pipeline_stage_changed_at', 'service_paused_at', 'deleted_at', 'last_payment_at'],
+  },
+  { table: 'property_preferences', reason: 'customer_changed', events: ['updated_at', 'created_at', 'irrigation_home_changed_at'] },
+  { table: 'payment_methods', reason: 'invoice_changed', events: ['updated_at', 'created_at'] },
+  { table: 'payments', reason: 'invoice_changed', events: ['updated_at', 'created_at', 'refunded_at'] },
+  {
     table: 'scheduled_services', reason: 'visit_changed',
-    events: ['updated_at', 'cancelled_at', 'completed_at', 'confirmed_at', 'en_route_at', 'arrived_at',
+    events: ['updated_at', 'created_at', 'cancelled_at', 'completed_at', 'confirmed_at', 'en_route_at', 'arrived_at',
       'actual_start_time', 'actual_end_time', 'check_in_time', 'check_out_time', 'date_exception_at', 'field_confirmed_at'],
     deadlines: ['reservation_expires_at'],
   },
   {
+    table: 'service_records', reason: 'visit_changed',
+    events: ['updated_at', 'created_at', 'started_at', 'ended_at', 'report_generated_at'],
+  },
+  { table: 'lawn_assessments', reason: 'visit_changed', events: ['updated_at', 'created_at', 'confirmed_at'] },
+  { table: 'reschedule_log', reason: 'visit_changed', events: ['created_at', 'sms_responded_at'] },
+  {
     table: 'estimates', reason: 'estimate_changed',
-    events: ['updated_at', 'sent_at', 'viewed_at', 'last_viewed_at', 'accepted_at', 'declined_at', 'disposition_at',
-      'archived_at', 'scheduled_at', 'price_locked_at', 'extension_requested_at', 'extension_auto_granted_at',
-      'annual_plan_activated_at', 'last_follow_up_at'],
+    events: ['updated_at', 'created_at', 'sent_at', 'viewed_at', 'last_viewed_at', 'accepted_at', 'declined_at',
+      'disposition_at', 'archived_at', 'scheduled_at', 'price_locked_at', 'extension_requested_at',
+      'extension_auto_granted_at', 'annual_plan_activated_at', 'last_follow_up_at'],
     deadlines: ['expires_at'],
+    // The daily expiry sweep lags the deadline: an estimate past it but still
+    // sent/viewed reads as open in the facts, whenever it expired.
+    stale: "status IN ('sent', 'viewed') AND expires_at <= ?",
   },
   {
     table: 'invoices', reason: 'invoice_changed',
-    events: ['updated_at', 'sent_at', 'viewed_at', 'paid_at', 'payment_recorded_at', 'ach_processing_notified_at',
-      'reconciled_at', 'archived_at'],
-    deadlines: [],
+    events: ['updated_at', 'created_at', 'sent_at', 'viewed_at', 'paid_at', 'payment_recorded_at',
+      'ach_processing_notified_at', 'reconciled_at', 'archived_at'],
   },
+  { table: 'customer_interactions', reason: 'customer_changed', events: ['created_at'] },
+  { table: 'sms_sequences', reason: 'customer_changed', events: ['updated_at', 'created_at'] },
 ]);
 
 /**
- * Which of the customer's visits, estimates or invoices changed after the
- * reply's facts were read, in one statement. Returns a reason or null; an
- * unreadable facts time fails closed. Column names are the constants above.
+ * Which of the customer's records changed after the reply's facts were read
+ * (or, for estimates, sits past its deadline unexpired), in one statement.
+ * Returns a reason or null; an unreadable facts time fails closed. Every
+ * identifier is a constant above.
  */
 async function accountChangedSince(dbh, { customerId, factsAt, now = new Date() }) {
-  if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return 'visit_changed';
-  const probes = ACCOUNT_RECORDS.map(({ table, events, deadlines }) => {
-    const event = `GREATEST(${events.map((c) => `"${c}"`).join(', ')}) > ?`;
-    const deadline = deadlines.map((c) => `("${c}" > ? AND "${c}" <= ?)`);
-    return dbh(table)
-      .where({ customer_id: customerId })
-      .where(function changed() {
-        this.whereRaw(event, [factsAt]);
-        for (const clause of deadline) this.orWhereRaw(clause, [factsAt, now]);
-      })
-      .select(dbh.raw('1'));
-  });
+  if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return 'customer_changed';
+  const probes = ACCOUNT_RECORDS.map(({ table, key = 'customer_id', events, deadlines = [], stale = null }) => dbh(table)
+    .where(key, customerId)
+    .where(function changed() {
+      this.whereRaw(`GREATEST(${events.map((c) => `"${c}"`).join(', ')}) > ?`, [factsAt]);
+      for (const c of deadlines) this.orWhereRaw(`("${c}" > ? AND "${c}" <= ?)`, [factsAt, now]);
+      if (stale) this.orWhereRaw(stale, [now]);
+    })
+    .select(dbh.raw('1')));
   const { rows: [changed] } = await dbh.raw(
     `SELECT ${ACCOUNT_RECORDS.map((_, i) => `EXISTS (?) AS c${i}`).join(', ')}`,
     probes,

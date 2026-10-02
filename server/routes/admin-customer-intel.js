@@ -8,7 +8,7 @@ const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
-const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // CRM health, pricing, retention drafts and outcomes are office-only, even
 // when the requesting technician has a visit assigned to the customer.
@@ -199,7 +199,7 @@ router.put('/retention/:id/approve', async (req, res, next) => {
       logger.warn(`Retention SMS skipped — customer ${customer.id} has no phone`);
     } else {
       try {
-        const smsResult = await sendManualCustomerSms({
+        const smsResult = await sendCustomerMessage({
           to: customer.phone,
           body: claimed.message_content,
           channel: 'sms',

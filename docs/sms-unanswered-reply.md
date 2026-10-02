@@ -39,8 +39,10 @@ card; a crash between send and label is repaired by the next sweep.
 ## Staff replies always win
 
 While the variable is present (`true` or `false`), staff sends (admin composer, scheduled sends,
-tech line, and every other operator route through `sendManualCustomerSms`, pinned by
-`staff-reply-surfaces-interlock.test.js`) take the same thread interlock as Phase E auto-send: a staff
+tech line, and every operator REPLY route through `sendManualCustomerSms`, pinned by
+`staff-reply-surfaces-interlock.test.js`; notifications such as receipts and delivered documents
+stay on the direct sender and are covered by the provider-handoff reservation) take the same
+thread interlock as Phase E auto-send: a staff
 reply backs off while an AI claim is mid-send, and a staff reply in flight keeps the AI from
 claiming. After an enable, the sweep claims nothing for the first 15 minutes of a process's
 life, so every instance reads the gate before any claim exists.
@@ -50,3 +52,9 @@ life, so every instance reads the gate before any claim exists.
 Set `GATE_SMS_UNANSWERED_REPLY=false` (do not delete it yet). The sweep stops, no new drafts are
 stamped, any claim in flight refuses at its next check, and the staff-reply interlock stays on
 through the deploy overlap. Delete the variable later, once nothing is in flight.
+
+## Expect a modest send rate
+
+The freshness check is deliberately conservative: any write to the customer's records after the
+draft (including automated ones such as reminder logs) keeps the text with staff. Watch the
+`refused` counts in the sweep log after the flip before judging the lane's reach.

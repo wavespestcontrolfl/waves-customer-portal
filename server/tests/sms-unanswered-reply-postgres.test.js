@@ -63,7 +63,9 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     trx = await database.transaction();
     const schema = `sms_unanswered_${randomUUID().replaceAll('-', '')}`;
     await trx.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services', 'customers', 'estimates', 'invoices']) {
+    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services', 'customers', 'estimates', 'invoices',
+      'property_preferences', 'payment_methods', 'payments', 'service_records', 'lawn_assessments',
+      'reschedule_log', 'customer_interactions', 'sms_sequences']) {
       await trx.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
@@ -197,7 +199,9 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
   test('a reply drafted yesterday evening is never sent the next day', async () => {
     const s = await waitingSuggestion({ inboundAt: at('2026-10-05T22:30:00Z') }); // Monday 6:30 PM ET
     const totals = await sweep();
-    await expectUntouched(s, totals, 'not_same_day');
+    // filtered in SQL (only today's ET texts are read), so it never takes a page slot
+    expect(totals.scanned).toBe(0);
+    await expectUntouched(s, totals);
   });
 
   test('only ordinary intents are candidates', async () => {
@@ -215,11 +219,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
   });
 
   test.each([
-    ['review_required', { stamp: { require_review: true } }],
-    ['lint_flagged', { stamp: { lint_pass: false } }],
     ['lint_flagged', { snapshot: { comms_lint: [{ rule: 'plan_total' }] } }],
-    ['not_verified', { stamp: { verifier_enabled: false } }],
-    ['action_required', { stamp: { actions_verified_safe: false } }],
     ['action_required', { actions: [{ type: 'escalate' }] }],
     ['price_quote', { reply: 'Your total is $89 for this visit.' }],
     ['redaction_placeholder', { reply: 'Hello [name], your visit is Thursday.' }],
@@ -291,6 +291,18 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect(await card(s.decisionId)).toMatchObject({ status: unanswered.ANSWERED_STATUS, human_verdict: null });
   });
 
+  test.each([
+    ['review required', { require_review: true }],
+    ['lint failed', { lint_pass: false }],
+    ['verifier off', { verifier_enabled: false }],
+    ['actions not verified safe', { actions_verified_safe: false }],
+  ])('a draft stamped "%s" is never a candidate (filtered in SQL)', async (_label, stamp) => {
+    const s = await waitingSuggestion({ stamp });
+    const totals = await sweep();
+    expect(totals.scanned).toBe(0);
+    await expectUntouched(s, totals);
+  });
+
   test('a judge backstop that is not clear blocks the send', async () => {
     graduation.evaluateJudgeBackstop.mockResolvedValue({ clear: false, blockers: ['Needs 30 more live judged drafts'] });
     const s = await waitingSuggestion();
@@ -330,6 +342,25 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, ...fields });
     const totals = await sweep();
     await expectUntouched(s, totals, 'estimate_changed');
+  });
+
+  test('an estimate already past its deadline but not yet marked expired blocks the send', async () => {
+    const s = await waitingSuggestion({ inboundText: 'Can I still accept that estimate?' });
+    await trx('estimates').insert({
+      id: randomUUID(), customer_id: customerId, status: 'sent',
+      expires_at: at('2026-10-05T12:00:00Z'), updated_at: at('2026-10-01T12:00:00Z'), created_at: at('2026-09-20T12:00:00Z'),
+    });
+    await expectUntouched(s, await sweep(), 'estimate_changed');
+  });
+
+  test.each([
+    ['the plan changed', async () => trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Gold', updated_at: at('2026-10-06T16:00:00Z') })],
+    ['property notes changed', async () => trx('property_preferences').insert({ id: randomUUID(), customer_id: customerId, created_at: at('2026-10-06T16:00:00Z'), updated_at: at('2026-10-06T16:00:00Z') })],
+    ['a note was logged', async () => trx('customer_interactions').insert({ id: randomUUID(), customer_id: customerId, interaction_type: 'note', created_at: at('2026-10-06T16:00:00Z') })],
+  ])('%s after the facts were read: nothing is sent', async (_label, change) => {
+    const s = await waitingSuggestion({ inboundText: 'What plan am I on?' });
+    await change();
+    await expectUntouched(s, await sweep(), 'customer_changed');
   });
 
   test('an estimate that expires later, untouched since the facts, does not block', async () => {
@@ -525,17 +556,17 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
 
   test('a full page of refused candidates does not starve a newer eligible one', async () => {
     for (let i = 0; i < unanswered.SWEEP_LIMIT; i += 1) {
-      // 8:00–9:39 AM ET, all held for a person's review.
+      // 8:00–9:39 AM ET, all refused (lint-flagged) after the read.
       await waitingSuggestion({
         inboundAt: new Date(at('2026-10-06T12:00:00Z').getTime() + i * 60 * 1000),
         phone: `+1202555${String(1000 + i).padStart(4, '0')}`,
-        stamp: { require_review: true },
+        snapshot: { comms_lint: [{ rule: 'plan_total' }] },
       });
     }
     const s = await waitingSuggestion();
     const totals = await sweep();
     expect(totals).toMatchObject({ scanned: unanswered.SWEEP_LIMIT + 1, attempted: 1, sent: 1 });
-    expect(totals.refused.review_required).toBe(unanswered.SWEEP_LIMIT);
+    expect(totals.refused.lint_flagged).toBe(unanswered.SWEEP_LIMIT);
     expect((await card(s.decisionId)).status).toBe(unanswered.ANSWERED_STATUS);
   });
 
