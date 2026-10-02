@@ -764,14 +764,10 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 // of 80°F or less" is cool through the trailing "or less" fold.
 const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
-// A ceiling named AFTER the figure, closing its clause: "80°F max", "80
-// degrees maximum", "80°F at most", "an 80°F maximum temperature" — the
-// same cap as "a maximum of 80°F". Every ceiling folds cool whatever its
-// figure, as the parent documents (owner 2026-10-02 on #5561: the
-// value-sensitive ceiling and the unit-less context gate were reverted
-// after five non-converging review rounds).
-// It must end the clause: "90°F maximum damage" is not a ceiling.
-const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))(?!(?:[\\s,;]+\\w+){0,3}[\\s,;]+(?:higher|hotter|warmer|more|greater|above|over|upwards?|up)\\b)`, 'gi');
+// A ceiling named AFTER the figure ("80°F max", "an 80°F maximum
+// temperature") is NOT folded: three review rounds each found a new suffix
+// that slipped past it (owner 2026-10-02, #5561). Such copy stays a false
+// block the proof surfaces to the owner, as on the parent.
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -793,7 +789,6 @@ function foldTemperatures(sentence) {
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
   text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
-  text = text.replace(TEMP_POSTFIX_CEILING, (match) => token('cooltemp', match));
   // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
   // judged on its Fahrenheit value, so the raw-number triggers never see it.
   text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
