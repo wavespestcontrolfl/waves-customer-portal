@@ -692,6 +692,13 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
     });
 
+    test('a displayed commitment closed between the two reads is caught by the final rebuild', async () => {
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ['cc-1'], visit_loop_status: { signature: null } }) });
+      openFor({ calls: [{ id: 'cc-1' }] }); // first read: still open
+      nowFacts(loops()); // the rebuild: fulfilled meanwhile
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('commitment_closed');
+    });
+
     test('the rebuild includes commitments: an open promise/request the draft did not show refuses (review), a shown one passes', async () => {
       const d = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ids, visit_loop_status: { signature: null } }) });
       openFor({ calls: [{ id: 'cc-1' }] });

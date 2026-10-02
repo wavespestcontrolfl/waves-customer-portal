@@ -467,6 +467,11 @@ async function visitStatusReason(conn, signature, customerId, refs) {
   const facts = require('./visit-loops-facts');
   const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true });
   if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
+  // the displayed commitments, from this same rebuild (a second read could miss one
+  // closed between the two): each must still be listed, unedited
+  const listed = new Map([...(fresh.weOwe || []), ...(fresh.customerWaiting || [])]
+    .filter((c) => c && c.id != null).map((c) => [String(c.id), c]));
+  if (refs.some(({ id, rev }) => !listed.has(id) || (rev && listed.get(id).rev && listed.get(id).rev !== rev))) return 'commitment_closed';
   const shown = new Set(refs.map((r) => r.id));
   const unseen = [...(fresh.weOwe || []), ...(fresh.customerWaiting || [])].some((c) => c && c.id != null && !shown.has(String(c.id)));
   return unseen ? 'commitment_appeared' : null;

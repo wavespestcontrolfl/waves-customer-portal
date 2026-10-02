@@ -209,6 +209,24 @@ describe('lateAlert', () => {
     expect((await run(alertRow({ payload: day }, { scheduled_date: '2026-09-30' }), at)).lateAlert).toBeNull();
   });
 
+  test('a 10 PM window (ends exactly at midnight) carries over: its alert stays live after midnight', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T02:00:00.000Z' } }; // 09-30 22:00 ET
+    expect((await run(alertRow({ payload }, { scheduled_date: '2026-09-30', window_start: '22:00:00' }), new Date('2026-10-01T04:45:00Z'))).lateAlert).toMatchObject({ scheduledDate: '2026-09-30' }); // 00:45 ET
+  });
+
+  test('an alert on a grouped member cancelled since is read through the stop\'s next live member', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+    const live = todayRow({ id: 'visit-2', visit_id: 'g1', status: 'confirmed', service_type: 'Lawn Care' });
+    const conn = fakeConn({
+      dispatch_alerts: () => [alertRow({ payload }, { visit_id: 'g1', status: 'cancelled' })],
+      scheduled_services: (ops) => (hasOp(ops, 'whereIn', (x) => x[0] === 'status' && x[1].includes('pending')) && hasOp(ops, 'whereIn', (x) => x[0] === 'visit_id') ? [live] : []),
+    });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).lateAlert).toMatchObject({ visitId: 'visit-2', visitType: 'Lawn Care' });
+    // no live member left: no delay
+    const none = fakeConn({ dispatch_alerts: () => [alertRow({ payload }, { visit_id: 'g1', status: 'cancelled' })], scheduled_services: () => [] });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: none })).lateAlert).toBeNull();
+  });
+
   test('an alert on an uncleared street-level hold is excluded in the query', async () => {
     const conn = fakeConn({ dispatch_alerts: (ops) => (hasOp(ops, 'whereNotExists') ? [] : [{ type: 'tech_late' }]), scheduled_services: () => [] });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).lateAlert).toBeNull();
@@ -393,16 +411,29 @@ describe('pastWindow', () => {
       { visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' },
     ]);
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-1' });
-    expect(loadPromiseEvents.mock.calls[1][1]).toEqual(['visit-1']);
   });
 
-  test('a visit moved far out of the date scan is recalled by its promise (the detector\'s promisedVisitIds)', async () => {
-    const recalledQuery = (ops) => hasOp(ops, 'whereIn', (a) => a[0] === 'id');
-    const conn = fakeConn({ scheduled_services: (ops) => (recalledQuery(ops)
+  test('a visit moved far out (no upper date bound) is still read; its promise decides the occurrence', async () => {
+    const conn = fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops)
       ? [todayRow({ status: 'confirmed', scheduled_date: '2027-03-01' })] : []) });
-    promisedVisitIds.mockResolvedValueOnce(['visit-1']);
     loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' }]);
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-1', scheduledDate: '2026-10-01' });
+    // one customer's rows only, from 60 days back, no fleet-wide recall
+    const scan = conn.calls.find((c) => c.table === 'scheduled_services' && isCandidateQuery(c.ops));
+    expect(hasOp(scan.ops, 'where', (x) => x[0] && x[0].customer_id === 'c1')).toBe(true);
+    expect(hasOp(scan.ops, 'where', (x) => x[0] === 'scheduled_date' && x[1] === '<=')).toBe(false);
+    expect(promisedVisitIds).not.toHaveBeenCalled();
+  });
+
+  test('a cancelled claim owner\'s GROUPED reminder still holds a silently moved live sibling', async () => {
+    const isSiblingQuery = (ops) => hasOp(ops, 'whereIn', (x) => x[0] === 'visit_id');
+    const conn = fakeConn({ scheduled_services: (ops) => {
+      if (isCandidateQuery(ops)) return [todayRow({ id: 'visit-b', visit_id: 'g1', status: 'confirmed', scheduled_date: '2026-12-15', window_start: '15:00:00' })];
+      if (isSiblingQuery(ops)) return [{ id: 'visit-a', visit_id: 'g1', status: 'cancelled', technician_id: 'tech-1', scheduled_date: '2026-10-01' }];
+      return [];
+    } });
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-a', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z', grouped: true }]);
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-b', scheduledDate: '2026-10-01', windowStart: '09:00:00' });
   });
 
   test('a promise whose window is UNKNOWN (a newer notice superseded it, start_at null) is never "passed"', async () => {

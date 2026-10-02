@@ -149,6 +149,25 @@ function alertOccurrence(payload, visit, latest) {
 const PRE_ARRIVAL_STATUSES = ['pending', 'confirmed', 'en_route'];
 const PRE_ARRIVAL_TRACK_STATES = ['scheduled', 'en_route'];
 const preArrival = (r) => PRE_ARRIVAL_STATUSES.includes(r.status) && (r.track_state == null || PRE_ARRIVAL_TRACK_STATES.includes(r.track_state));
+// An alert raised on a grouped member that was since cancelled/skipped speaks for
+// the stop's next LIVE member (the detector's representativeOf hand-off, which its
+// sweep makes later): read it through that member, same physical stop, lowest id.
+const VISIT_COLUMNS = ['id', 'visit_id', 'technician_id', 'status', 'track_state', 'scheduled_date',
+  'window_start', 'window_end', 'window_display', 'time_window', 'service_type'];
+async function liveRepresentatives(conn, alerts) {
+  const { LIVE_STATUSES } = require('./no-show-detector');
+  const gone = (r) => !LIVE_STATUSES.includes(r.status) && !ATTENDED_STATUSES.includes(r.status);
+  const visitIds = [...new Set(alerts.filter((r) => gone(r) && r.visit_id).map((r) => String(r.visit_id)))];
+  if (!visitIds.length) return alerts;
+  const members = ((await conn('scheduled_services').whereIn('visit_id', visitIds)
+    .whereIn('status', PRE_ARRIVAL_STATUSES).select(...VISIT_COLUMNS)) || [])
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return alerts.map((alert) => {
+    if (!gone(alert) || !alert.visit_id) return alert;
+    const next = members.find((m) => String(m.visit_id) === String(alert.visit_id) && m.id !== alert.id && stopKey(m) && stopKey(m) === stopKey(alert));
+    return next ? { ...alert, ...next } : alert;
+  });
+}
 // The customer's open delay alerts, read through their visits — not only today's
 // schedule: an uncommunicated move can take the row off today while its promised
 // window is still today (the no-show detector's promisedIds path). Each alert must
@@ -168,16 +187,17 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   const yesterday = etDateString(addETDays(now, -1));
   // yesterday's overnight window stays live while its alert is unresolved: a stage-2
   // alert is raised AFTER the window ends, so "window still open" would drop it
-  const overnight = (occ) => (customerWindowEndMinutes({ window_start: occ.startHms }) || 0) > 1440;
+  const overnight = (occ) => (customerWindowEndMinutes({ window_start: occ.startHms }) || 0) >= 1440; // a 10 PM–12 AM window counts
   const liveNow = (occ) => occ.date === today || (occ.date === yesterday && overnight(occ));
   // Every applicable alert, newest first; a confirmed delay outranks a tracking
   // gap (a gap is not a must-answer loop, so it must never hide a real delay).
   // a lagging member of a stop whose sibling has already ARRIVED or finished carries
   // no delay (the passed-window stop rule, arrival-only: en route can still be late)
-  const startedStops = await startedStopKeys(conn, customerId, alerts || [], { arrivedOnly: true });
-  const latest = await stopPromiseMap(conn, alerts || [], now);
+  const resolved = await liveRepresentatives(conn, alerts || []);
+  const startedStops = await startedStopKeys(conn, customerId, resolved, { arrivedOnly: true });
+  const latest = await stopPromiseMap(conn, resolved, now);
   const applicable = [];
-  for (const row of alerts || []) {
+  for (const row of resolved) {
     const key = stopKey(row);
     if (!preArrival(row) || (key && startedStops.has(key))) continue;
     const payload = parseJson(row.payload);
@@ -246,10 +266,15 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
 // is skipped — never substitute the schedule and apologise for a window we can't name.
 // Each row's STOP promise, the detector's own resolution: a grouped reminder's
 // evidence sits on whichever member won the claim, so siblings are loaded and
-// stopPromise picks the window across all members. The stop is PHYSICAL — same
-// visit_id, tech and day (stopKey): a member reassigned to another tech or day keeps
-// its visit_id but is a separate stop, and its notices never speak for this one.
+// stopPromise picks the window across the members. A row's members are its
+// PHYSICAL stop — same visit_id, tech and day (stopKey): a member reassigned to
+// another tech or day keeps its visit_id but is a separate stop, and its own notices
+// never speak for this one — plus any sibling the customer no longer expects
+// (cancelled, skipped, …): stopPromise takes only its GROUPED evidence, which spoke
+// for every member when it was sent (the claim owner of a grouped reminder can be
+// cancelled while a silently moved sibling still holds that window).
 // Map id → promise (absent: none).
+const ATTENDED_STATUSES = ['completed'];
 const promiseStopKey = (r) => (r.visit_id && stopKey(r)) || `row:${r.id}`;
 async function stopPromiseMap(conn, rows, now) {
   const pick = (r) => ({ id: r.id, visit_id: r.visit_id, status: r.status, technician_id: r.technician_id, scheduled_date: r.scheduled_date });
@@ -257,26 +282,22 @@ async function stopPromiseMap(conn, rows, now) {
   if (!own.length) return new Map();
   const detector = require('./no-show-detector');
   const known = new Set(own.map((r) => String(r.id)));
-  const stopKeys = new Set(own.map(promiseStopKey));
   const visitIds = [...new Set(own.map((r) => r.visit_id).filter(Boolean).map(String))];
   const siblings = visitIds.length
     ? ((await conn('scheduled_services').whereIn('visit_id', visitIds)
       .select('id', 'visit_id', 'status', 'technician_id', 'scheduled_date')) || [])
-      .filter((r) => !known.has(String(r.id)) && stopKeys.has(promiseStopKey(r))).map(pick)
+      .filter((r) => !known.has(String(r.id)) && visitIds.includes(String(r.visit_id))).map(pick)
     : [];
-  const stops = new Map();
-  for (const m of [...own, ...siblings]) {
-    const key = promiseStopKey(m);
-    if (!stops.has(key)) stops.set(key, []);
-    stops.get(key).push(m);
-  }
-  const all = [...stops.values()].flat();
+  const awaited = (m) => detector.LIVE_STATUSES.includes(m.status) || ATTENDED_STATUSES.includes(m.status);
+  const membersOf = (row) => [...own, ...siblings].filter((m) => String(m.id) === String(row.id)
+    || (row.visit_id && String(m.visit_id) === String(row.visit_id)
+      && (promiseStopKey(m) === promiseStopKey(row) || !awaited(m))));
+  const all = [...own, ...siblings];
   const events = detector.byVisit((await detector.loadPromiseEvents(conn, all.map((r) => String(r.id)), { now })) || []);
   const out = new Map();
-  for (const members of stops.values()) {
-    const promise = detector.stopPromise(members, events, now);
-    if (!promise) continue;
-    for (const m of members) if (known.has(String(m.id))) out.set(String(m.id), promise);
+  for (const row of own) {
+    const promise = detector.stopPromise(membersOf(row), events, now);
+    if (promise) out.set(String(row.id), promise);
   }
   return out;
 }
@@ -305,21 +326,16 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
   const nowMin = nowEtMinutes(now);
   const COLUMNS = ['id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_end',
     'window_display', 'time_window', 'service_type'];
-  // by schedule date, plus the detector's promise recall (promisedVisitIds: visits
-  // whose promised window is in the last 48h, wherever the row was moved since)
-  const promisedIds = await require('./no-show-detector').promisedVisitIds(conn, { now });
-  const [scanned, recalled] = await Promise.all([
-    conn('scheduled_services')
-      .where({ customer_id: customerId })
-      .where('scheduled_date', '>=', yesterday).where('scheduled_date', '<=', etDateString(addETDays(now, 60)))
-      .whereIn('status', NOT_STARTED_STATUSES)
-      .select(...COLUMNS),
-    (promisedIds || []).length
-      ? conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', promisedIds)
-        .whereIn('status', NOT_STARTED_STATUSES).select(...COLUMNS)
-      : [],
-  ]);
-  const rows = [...new Map([...(scanned || []), ...(recalled || [])].map((r) => [String(r.id), r])).values()]
+  // every live row of THIS customer from 60 days back on, with no upper bound: an
+  // uncommunicated move (forward or back) keeps the row in scan, and its promise
+  // (stopPromiseMap) decides the occurrence — the detector's promisedVisitIds recall,
+  // scoped to one customer instead of a fleet-wide read per inbound text
+  const scanned = await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', etDateString(addETDays(now, -60)))
+    .whereIn('status', NOT_STARTED_STATUSES)
+    .select(...COLUMNS);
+  const rows = (scanned || [])
     // not started (tracker unset or 'scheduled'), plus the service-record,
     // street-level-hold and sibling checks below
     .filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
@@ -351,7 +367,7 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
     const nowOnDay = occ.date === today ? nowMin : nowMin + 1440;
     if (endMin == null || endMin >= nowOnDay) continue;
     // yesterday's occurrence counts only when its window ran past midnight into today
-    if (occ.date !== today && endMin <= 1440) continue;
+    if (occ.date !== today && endMin < 1440) continue;
     passed.push({ row, occ, minutesPast: nowOnDay - endMin });
   }
   if (!passed.length) return null;
