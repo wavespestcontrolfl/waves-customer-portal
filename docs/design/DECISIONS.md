@@ -3002,3 +3002,134 @@ The button reuses the report footer's existing path (`/?tab=schedule`, the
 authenticated portal Schedule tab, behind the server's `reserviceEligible` boolean).
 No `/reservice/:token` link is put on the public, forwardable report and no new route
 or token is minted.
+
+## 2026-10-02 — Photos in the notes box, office Complete Service (dark)
+
+Owner "ok go" on the Fast Complete mockup v8 (call 10: photos go in the text
+box, each with a short description typed or said; the separate photo section
+goes away). Behind `GATE_NOTE_BOX_PHOTOS` (dark), the office Complete Service
+form, on a computer and on a phone, puts the visit's photos inside the notes
+box (`components/schedule/NoteBoxPhotos.jsx`). Tapping a photo opens its
+description, typed or dictated. "Describe with AI" and its summary move in
+with them. A description is the photo's caption, the same field the AI photo
+read fills: it goes to Generate (`photoCaptions`) and is frozen with the
+photo on the customer's report. A typed one carries no AI tag. The schedule
+payload's per-visit `noteBoxPhotosEnabled` is never on for lawn or tree,
+shrub & palm (another lane owns those completions and their photo steps),
+and the form checks the same lines again. Off, the photo section is exactly
+as before. The tech Fast Complete sheet's notes box follows in its own
+change.
+
+## 2026-10-02 — Service tips: 50 owner-approved tips for the services the general pest tips don't fit
+
+Owner "ok go" on the Fast Complete mockup v8 (call 12), then approval of all
+50 drafts ("looks good, approve"). The tip registry
+(`server/services/service-report/tip-library.js`) gains tips for bed bugs,
+German roaches, palmetto bugs, fleas and ticks, fire ants, bees, wasps and
+mud daubers, mosquitoes, rodent trapping, exclusion, bait stations and
+sanitation, termite bait stations, termite treatment (liquid, trench, spot,
+foam), termite inspections, Bora-Care and wildlife trapping. Each names the
+catalog services it is for (`services`, service keys). A visit of one of
+those services leads its picker with them as "For this service"; they stay
+out of every other visit's list. `GET /admin/dispatch/:serviceId/tech-tips`
+reads the visit's service key from its completion profile (fail-soft: no
+lead group). The 42 existing tips, and the lawn and tree & shrub tips, are
+unchanged. Every new tip passes the same customer-copy screen and
+visit-claim lint as the rest. Two rest on product-label guidance the owner
+approved as written (fire ant bait kept dry; Bora-Care sealed where
+exposed).
+
+## 2026-10-01 — Fast Complete report flow: talk, generate the report, trace, send (dark)
+
+Owner "ok go" on the talk / generate / trace / send mockup. Behind
+`GATE_FAST_COMPLETE_REPORT` (dark), the tech portal opens the one-screen
+Fast Complete sheet for every open untyped pest visit, a re-service or a
+regular visit, in its report flow: the tech talks into the note, adds
+photos (thumbnails), taps whether the customer was home (the full form's
+three choices, "not home, full access" picked every time), the pest activity
+on the 1–5 tracker (a first visit opens at 5, as the full form does), one tip
+and the promise check, then taps Generate AI report (the full form's own
+`POST /admin/schedule/generate-report`). The report the customer will see is
+read on its own step, with Edit and Write again (`fresh: true`, past the
+30-minute draft cache), then the spray is traced (the existing Treatment Zone
+tracer, opened over the sheet) and Complete & send posts `/complete` exactly
+as the full form does: billed at finish, the report text, a pay link and the
+review ask on a regular visit, never on a re-service. The edited-report
+heads-up and a promise changed after the report are confirmed on the sheet
+and resent under the same key.
+
+There are no Pests / Where / How taps (owner ruling 2026-09-30: those facts
+are voice only). `POST /admin/dispatch/:id/voice-facts` reads where product
+went down (Inside / Outside / Garage), the pests named and how the sprays
+went down (around the outside of the home, or spots), each quoted from the
+note word for word (a quote that denies it is dropped in code), and the
+report step shows them as "Heard from you". The note is read first and the
+report is written from exactly what the completion records: the visit's
+areas serviced (a product's area only when one place was heard, as the full
+form fills it), each product's targets and the sprays' method, so an indoor
+treatment keeps its re-entry wait on the customer's report. A perimeter
+spray takes its length from the trace, which never changes the record after
+the report was read; Complete & send waits for where the tech treated and,
+for a perimeter, the trace. Off, the tech portal routes pest visits exactly
+as before.
+
+## 2026-10-01 — "From the Waves blog" on the service report (dark)
+
+Owner "ok go" on the Fast Complete mockup: the technician or the office can
+pick one Waves blog post while completing a visit, searched the way
+Quick Links searches links, and the customer's report shows it at the bottom
+as "From the Waves blog": the post's title as a link and where it lives
+(`wavespestcontrol.com/pest-control/…`). Behind `GATE_REPORT_BLOG_POST`
+(dark). Only a published post that is live on the hub links, at its live
+URL on the site's own host (`server/services/service-report/report-blog-post.js`,
+the share gate's live rule); the pick is frozen on the record at completion
+and checked against the host again when the report renders. The card is a
+glass card with an `h2` title (the glass theme hides `.section-eyebrow`
+outside the hero), live view only, the last card above the footer on every
+layout. Owner ruling 2026-10-02: every service but WDO, termite pre-treat,
+lawn and tree, shrub & palm (another lane owns those completions), and never
+a visit that completes through a project (`blogPostAllowedFor`, the one rule
+the search and the completion share). Off, the search answers unavailable, a
+pick is ignored and no report shows a post.
+
+## 2026-10-02 — Lane voice fill, server reader (dark)
+
+Owner "ok go" on the Fast Complete mockup v8, step 2: a specialty visit's own
+record (bed bug, fire ant, tick, bee & wasp, mud dauber, recurring mosquito)
+is filled from the technician's note, on the office Complete Service form
+and the tech's sheet, through one reader on the server. This first slice is
+that reader: `POST /admin/dispatch/:id/lane-facts` (services/visit-lane-facts.js,
+`TEXT_POLICIES.fastStructured`, lane `visit_lane_facts`), behind
+`GATE_LANE_VOICE_FILL` (dark; off answers 404). The places come from the
+lane's own list and each finding group gets at most one value, each with the
+note's own words; the lane is the visit's completion profile (a typed form
+or a visit with no lane answers `available: false`), never one the client
+names. The model judges what the note means; the code keeps only a value the
+lane's closeout offers, standing on words the note holds word for word, and
+never a pair the completion refuses (the lane's exclusions leave both groups
+for a person to pick), following the 2026-09-30 direction on the call
+reader (the extraction judges, the code verifies). It writes nothing: the
+office form (slice 2) fills only fields nobody picked and the tech's sheet
+(slice 3) shows each field with its words and a Change, so a person confirms
+every value before anything is sent. The gate stays off until both land.
+Bora-Care has no lane yet; its places and findings wait for an owner ruling.
+
+## 2026-10-02 — Lane voice fill, the office form (dark)
+
+Slice 2 of the Fast Complete step 2 lane voice fill (the server reader
+landed in #5625). With the schedule payload's per-visit
+`laneVoiceFillEnabled` (`GATE_LANE_VOICE_FILL` and a lane the reader reads,
+resolved as the completion resolves it through `voiceLaneFor`), Generate AI
+report on the office Complete Service form (computer and phone) first reads
+the notes for the visit's own record, the notes as the report writer gets
+them (without the marker lines a tap writes), and fills only what nobody
+picked, the way a tap does: an empty group gets the `[Found]` marker and the
+label; the areas fill only while none are picked. A value that clashes with
+a pick (the lane's exclusions, or the selected protocol actions) is left for
+a person, with "The notes didn't make this clear. Pick one." under the
+group. Each filled field shows the words it came from ("Heard: ...") while
+it still holds the filled value. The report is written on the next render,
+from the record as the fill left it, so the report and the record agree; the
+form stays locked through both steps. A failed read fills nothing and the
+report is written anyway. The two Generate buttons (computer and phone) now
+share one handler. Off, Generate is exactly as before.

@@ -75,6 +75,19 @@ describe('LawnLeadCard layout', () => {
     expect(region).toHaveTextContent(LEAD.yourPart[0]);
   });
 
+  it('renders What to expect and Watching blocks only when the v6 writer supplied them', () => {
+    const { unmount } = renderLead();
+    expect(screen.queryByTestId('lawn-lead-expect')).toBeNull();
+    expect(screen.queryByTestId('lawn-lead-watching')).toBeNull();
+    unmount();
+    renderLead({ lead: { ...LEAD, whatToExpect: 'Weeds usually start to yellow or curl within about 3 to 7 days.', watching: 'Thin areas along the driveway edge.' } });
+    const expectBlock = screen.getByTestId('lawn-lead-expect');
+    expect(expectBlock).toHaveTextContent('What to expect');
+    expect(expectBlock).toHaveTextContent('Weeds usually start to yellow or curl within about 3 to 7 days.');
+    expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Watching');
+    expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Thin areas along the driveway edge.');
+  });
+
   it('leaves out Today’s focus, the driving box, the watching list, "What Waves will do next" and the seasonal note', () => {
     renderLead();
     const region = screen.getByTestId('lawn-lead-region');
@@ -130,6 +143,50 @@ describe('LawnLeadCard layout', () => {
     renderLead();
     const bannerWords = banner.join(' ').split(/\s+/).length;
     expect(words(screen.getByTestId('lawn-lead-region')) + bannerWords).toBeLessThanOrEqual(250);
+  });
+
+  describe('Since your last visit (lead.sinceLast)', () => {
+    const SINCE = { priorDate: '2026-08-01', lines: ['Last visit we applied weed control.', 'Weed control is on track.'] };
+
+    it('renders nothing when the lead has no block, or an empty one', () => {
+      renderLead();
+      expect(screen.queryByTestId('lawn-since-last')).toBeNull();
+      cleanup();
+      renderLead({ lead: { ...LEAD, sinceLast: { priorDate: '2026-08-01', lines: [] } } });
+      expect(screen.queryByTestId('lawn-since-last')).toBeNull();
+    });
+
+    it('prints the server lines as given, labelled with the prior visit day, above "What we applied today"', () => {
+      renderLead({ lead: { ...LEAD, sinceLast: SINCE } });
+      const block = screen.getByTestId('lawn-since-last');
+      expect(block).toHaveTextContent('Since your last visit, Aug 1');
+      for (const line of SINCE.lines) expect(within(block).getByText(line)).toBeInTheDocument();
+      const region = screen.getByTestId('lawn-lead-region');
+      const text = region.textContent;
+      expect(text.indexOf('Since your last visit')).toBeLessThan(text.indexOf('What we applied today'));
+    });
+
+    it('the day is the calendar day the server sent, whatever the viewer time zone, and a bad date drops only the date', () => {
+      renderLead({ lead: { ...LEAD, sinceLast: { ...SINCE, priorDate: '2026-12-31' } } });
+      expect(screen.getByTestId('lawn-since-last')).toHaveTextContent('Since your last visit, Dec 31');
+      cleanup();
+      renderLead({ lead: { ...LEAD, sinceLast: { ...SINCE, priorDate: 'nope' } } });
+      const block = screen.getByTestId('lawn-since-last');
+      expect(block).toHaveTextContent('Since your last visit');
+      expect(block).not.toHaveTextContent(/Invalid|nope|,/);
+    });
+
+    it('still fits the 250 visible-word budget with a full block and banner lines', () => {
+      const full = { priorDate: '2026-08-01', lines: [
+        'Last visit we applied weed control, fungus protection and fertilizer.',
+        'Your overall lawn score is down since then.',
+        'Weed control is behind where we expected.',
+        'Still on our watch list: weeds and mowing height.',
+      ] };
+      const banner = ['Water in today’s treatment by Thu 2 PM.', 'Run spray heads about 15 minutes a zone and rotors about 40 minutes.', 'Run it even if it is not your usual day.'];
+      renderLead({ lead: { ...LEAD, sinceLast: full } });
+      expect(words(screen.getByTestId('lawn-lead-region')) + banner.join(' ').split(/\s+/).length).toBeLessThanOrEqual(250);
+    });
   });
 
   it('merges a style override (the page mounts it with a top margin)', () => {

@@ -326,6 +326,14 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
   );
 }
 
+// "Aug 1" from the server's YYYY-MM-DD (a calendar day, so it is read at noon
+// UTC and printed in UTC: no viewer time zone can move it a day).
+function shortDay(ymd) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))) return null;
+  const date = new Date(`${ymd}T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 // ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
@@ -334,11 +342,15 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
 // card, so there is no Today's focus, "What's driving it" box, watching list,
 // "What Waves will do next", seasonal note or "no action needed" line here. The
 // watering banner (rendered above the report) owns the watering task.
+// lead.sinceLast (GATE_LAWN_SINCE_LAST) is the "Since your last visit" block:
+// server-selected sentences printed as given, above what was applied today.
 export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
   const visitDate = nextVisitSentence(snapshot.nextVisit);
   const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
+  const sinceLastLines = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
+  const sinceLastDay = shortDay(lead.sinceLast?.priorDate);
   return (
     <div data-testid="lawn-lead-region">
       <Card style={{ background: TAN, ...(style || {}) }}>
@@ -357,10 +369,37 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           </div>
         </div>
 
+        {sinceLastLines.length ? (
+          <div data-testid="lawn-since-last" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {sinceLastDay ? `Since your last visit, ${sinceLastDay}` : 'Since your last visit'}
+            </div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>
+              {sinceLastLines.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
+            </div>
+          </div>
+        ) : null}
+
         {lead.applied ? (
           <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
             <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+          </div>
+        ) : null}
+
+        {/* GATE_LAWN_REPORT_COPY_V6: approved expectation sentences (selected, never
+            model-written) and the short guarded "watching" line. Absent keys render nothing. */}
+        {lead.whatToExpect ? (
+          <div data-testid="lawn-lead-expect" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What to expect</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.whatToExpect}</div>
+          </div>
+        ) : null}
+
+        {lead.watching ? (
+          <div data-testid="lawn-lead-watching" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Watching</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.watching}</div>
           </div>
         ) : null}
 

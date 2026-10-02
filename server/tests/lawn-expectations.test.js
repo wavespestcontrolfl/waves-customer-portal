@@ -836,7 +836,7 @@ describe('buildLawnExpectations', () => {
       expect(tiered).toEqual(plain);
     });
 
-    it('ships dark: no runtime file other than its own tests, the audit script and the dark progress engine reads the engine or config', () => {
+    it('ships dark: no runtime file other than its own tests, the audit script, the dark progress engine and the dark v6 copy writer reads the engine or config', () => {
       const root = path.join(__dirname, '..');
       const hits = [];
       const walk = (dir) => {
@@ -852,6 +852,8 @@ describe('buildLawnExpectations', () => {
       walk(root);
       expect(hits.sort()).toEqual([
         'scripts/audit-lawn-expectation-products.js',
+        // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
+        'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
         'services/service-report/lawn-progress.js',
@@ -893,5 +895,30 @@ describe('iron by-next-visit wording holds for short and long gaps (terminal rev
     const out = buildLawnExpectations({ applications: [{ name: 'LESCO Chelated Iron Plus' }], issues: [], visitDate: '2026-06-02', nextVisitGapDays: gap }, { includeUnapproved: true });
     const lines = out.byNextVisit.map((b) => b.line).join(' ');
     expect(lines).not.toMatch(/about like today/i);
+  });
+});
+
+describe('keyed sentences (what the P14 writer selects by id)', () => {
+  it('every emitted row exposes its printable lines as keyed sentences, in reading order, with unique keys', () => {
+    const out = buildLawnExpectations({
+      applications: [{ name: 'Celsius WG' }, { name: 'LESCO Chelated Iron Plus' }],
+      visitDate: '2026-09-30',
+      nextVisitGapDays: 28,
+      celsiusYtdCount: 1,
+    }, PREVIEW);
+    expect(out.rows.length).toBeGreaterThan(1);
+    for (const row of out.rows) {
+      expect(row.sentences.map((s) => s.text)).toEqual(row.lines);
+      const keys = row.sentences.map((s) => s.key);
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(keys[0]).toBe('visibleChange');
+    }
+  });
+
+  it('keys name the sentence, so a swapped second-application line keeps its key', () => {
+    const second = (count) => buildLawnExpectations({ applications: [{ name: 'Celsius WG' }], nextVisitGapDays: 28, celsiusYtdCount: count }, PREVIEW)
+      .rows[0].sentences.find((s) => s.key === 'secondApp');
+    expect(second(1).text).toMatch(/second application/);
+    expect(second(3).text).toMatch(/different weed-control product/);
   });
 });

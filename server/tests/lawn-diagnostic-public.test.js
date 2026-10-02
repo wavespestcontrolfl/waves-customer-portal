@@ -1,6 +1,7 @@
 // Controls for the db mock — set per test.
 let mockDiagnosticRow = null;   // what lawn_diagnostics .first() returns
 let mockUpdateResult = 1;       // rows affected by the one-shot lead-link update
+let mockPhotoCount = null;      // what lawn_diagnostic_photos .count().first() returns (an Error rejects)
 const mockLeadInsert = jest.fn(() => ({ returning: () => Promise.resolve([{ id: 'lead-uuid-1' }]) }));
 
 function builder(table) {
@@ -8,7 +9,13 @@ function builder(table) {
     where: () => b,
     whereNull: () => b,
     whereNotNull: () => b,
-    first: () => Promise.resolve(table === 'lawn_diagnostics' ? mockDiagnosticRow : null),
+    count: () => b,
+    first: () => {
+      if (table === 'lawn_diagnostic_photos') {
+        return mockPhotoCount instanceof Error ? Promise.reject(mockPhotoCount) : Promise.resolve(mockPhotoCount);
+      }
+      return Promise.resolve(table === 'lawn_diagnostics' ? mockDiagnosticRow : null);
+    },
     insert: (obj) => (table === 'leads' ? mockLeadInsert(obj) : { returning: () => Promise.resolve([{ id: 'x' }]) }),
     update: () => Promise.resolve(mockUpdateResult),
   };
@@ -84,6 +91,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDiagnosticRow = null;
   mockUpdateResult = 1;
+  mockPhotoCount = null;
 });
 
 describe('buildPublicLawnReport whitelisting', () => {
@@ -413,6 +421,55 @@ describe('GET /api/public/lawn-diagnostic/:token', () => {
       const body = await res.json();
       expect(body.report.primary_finding).toBe('chinch bug activity');
       expect(JSON.stringify(body)).not.toContain('Talstar');
+    });
+  });
+
+  describe('GATE_LAWN_DIAGNOSTIC_EVIDENCE', () => {
+    const previous = process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE;
+    afterEach(() => {
+      if (previous === undefined) delete process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE; else process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE = previous;
+    });
+    const fetchReport = async () => {
+      const { server, baseUrl } = appServer();
+      try {
+        const res = await fetch(`${baseUrl}/api/public/lawn-diagnostic/${TOKEN}`);
+        return { status: res.status, body: await res.json() };
+      } finally { server.close(); }
+    };
+
+    test('gate off: the photo table is never read and the report carries no basis or evidence', async () => {
+      delete process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE;
+      mockDiagnosticRow = sentDiagnostic();
+      mockPhotoCount = { count: '3' };
+      const { status, body } = await fetchReport();
+      expect(status).toBe(200);
+      expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('lawn_diagnostic_photos');
+      expect(Object.prototype.hasOwnProperty.call(body.report, 'basis')).toBe(false);
+      expect(body.report.findings[0].evidence).toBeUndefined();
+    });
+
+    test('gate on: the stored photo count (a pg bigint string) reaches the basis line, and each finding carries evidence', async () => {
+      process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE = 'true';
+      mockDiagnosticRow = sentDiagnostic();
+      mockPhotoCount = { count: '3' };
+      const { status, body } = await fetchReport();
+      expect(status).toBe(200);
+      // The fixture's photo set is 'limited', so the fixed caution rides along.
+      expect(body.report.basis).toBe('Based on 3 photos. Some photos limited what we could see, so we kept our wording cautious.');
+      expect(body.report.findings[0].evidence.why).toMatch(/^Chinch bug damage shows/);
+      expect(JSON.stringify(body)).not.toContain('sunny edge browning');
+    });
+
+    test('gate on: a failed or empty photo count still serves the report, without a number', async () => {
+      process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE = 'true';
+      mockDiagnosticRow = sentDiagnostic();
+      mockPhotoCount = new Error('relation missing');
+      const failed = await fetchReport();
+      expect(failed.status).toBe(200);
+      expect(failed.body.report.basis).not.toMatch(/Based on/);
+      expect(failed.body.report.findings[0].evidence).toBeTruthy();
+      mockPhotoCount = { count: '0' };
+      expect((await fetchReport()).body.report.basis).not.toMatch(/Based on/);
     });
   });
 

@@ -833,6 +833,17 @@ function initScheduledJobs() {
     return;
   }
 
+  // Public forecast history: first successful snapshot per city / ET day.
+  // Afternoon retry fills weather gaps, never rewrites morning predictions.
+  cron.schedule('15 8,14 * * *', async () => {
+    if (!gateEnvValue('GATE_PEST_FORECAST_HISTORY')) return;
+    try {
+      await runExclusive('pest-forecast-history', () => require('./pest-forecast/history').collectDailyForecasts());
+    } catch (err) {
+      logger.error(`[pest-forecast-history] ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -848,6 +859,22 @@ function initScheduledJobs() {
   };
   cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — SMS offer ledger backfill (GATE_SMS_OFFER_LEDGER, dark):
+  // re-records an offer whose post-send write failed after the carrier took
+  // the text. Gate off, the sweep returns before touching the database.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    try {
+      await runExclusive('sms-offer-ledger-backfill', async () => {
+        const result = await require('./sms-offers').backfillMissedOffers();
+        if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // A failed scan or write must fail job health, not read as a green tick.
+        if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+      });
+    } catch (err) {
+      logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
 
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
@@ -1088,6 +1115,17 @@ function initScheduledJobs() {
         require('./link-library').syncSitemapLinks());
     } catch (err) {
       logger.error(`[link-library] nightly sitemap sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:05AM — Customer home line stamp (GATE_HOME_LINE, read inside)
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    try {
+      await runExclusive('home-line-sweep', () => require('./home-line').stampHomeLines());
+    } catch (err) {
+      logger.error(`[home-line] daily sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1928,6 +1966,34 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // A pass in which any customer's filing or any conflict bell failed is
+      // reported to job health as failed (both retry next pass).
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
+        const result = await require('./neighborhood-access').sweepSavedGateCodes();
+        if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
+        if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        return result;
+      });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3173,6 +3239,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
+  // The judge's human_better verdict is a lead, not a failure: this turns
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
+  // ai_incidents only — shadow data, nothing reads it at runtime. Same
+  // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
+  // =========================================================================
+  cron.schedule('30 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS incident adjudicator');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateHumanBetter } = require('./sms-pathology-ledger');
+      await runExclusive('sms-incident-adjudicate', () => adjudicateHumanBetter());
+    } catch (err) {
+      logger.error(`SMS incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
   // evidence get ONE parked harness-patch proposal card + bell (Agents →
   // Shadow Drafts). Recommendation only — a human ships any actual prompt
@@ -3188,6 +3275,25 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
+  // cell with enough DISTINCT confirmed ai_incidents on the live prompt
+  // version gets one pending ai_fix_proposals row with its dev/holdout
+  // split. No model call, no bell: the Monday correction-loop lane reads the
+  // rows. Same gate as the ledger; PATHOLOGY_FIX_PROPOSAL_MAX_CELLS=0 stops it.
+  // =========================================================================
+  cron.schedule('45 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS correction-loop fix proposals');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeSmsFixes } = require('./sms-pathology-ledger');
+      await runExclusive('sms-fix-proposals', () => proposeSmsFixes());
+    } catch (err) {
+      logger.error(`SMS correction-loop fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4165,6 +4271,38 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset three minutes) — Unanswered-text replies
+  // A suggested reply still waiting after two open hours goes out on its own
+  // (sms-unanswered-reply.js, GATE_SMS_UNANSWERED_REPLY read at call time).
+  // Same shape as the gratitude sweep above: no cron lease (each send holds
+  // pool connections through the provider call), claims are send-once per
+  // inbound under the thread lock, and the in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let unansweredSweepRunning = false;
+  cron.schedule('3-59/5 * * * *', async () => {
+    const unanswered = require('./sms-unanswered-reply');
+    // Runs while the variable is present at all: after a rollback to false it
+    // still repairs answered-card labels, and sends nothing.
+    if (!unanswered.unansweredClaimsPossible() || unansweredSweepRunning) return;
+    unansweredSweepRunning = true;
+    try {
+      const result = await unanswered.processUnansweredReplyCandidates();
+      // Every run that read anything, refusals included: the rollout is judged
+      // on what was held back and why (docs/sms-unanswered-reply.md).
+      if (result?.scanned || result?.attempted) {
+        const refused = Object.entries(result.refused || {}).map(([why, n]) => `${why}=${n}`).join(' ') || 'none';
+        logger.info(`[sms-unanswered] sweep: scanned=${result.scanned} attempted=${result.attempted} sent=${result.sent} refused: ${refused}`);
+      }
+    } catch (err) {
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[sms-unanswered] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+    } finally {
+      unansweredSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
@@ -4503,6 +4641,11 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            // GATE_SMS_SCHEDULING_SUGGEST rollback (Codex #5617 r2): a scheduling
+            // card queued while the gate was on must not fire after it is unset.
+            // Gate on, this reads nothing. Same block+retire path as the checks below.
+            const schedulingGated = !anchorStale
+              && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
             // anchor check can't see it). Non-human-authored agent text
@@ -4688,7 +4831,7 @@ function initScheduledJobs() {
               }
             }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
+            const priorStale = anchorStale || schedulingGated || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4701,7 +4844,9 @@ function initScheduledJobs() {
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
-                : amountsStale
+                : schedulingGated
+                  ? 'scheduling_suggest_gate_off'
+                  : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
@@ -4739,7 +4884,9 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : amountsStale
+                    : schedulingGated
+                      ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
+                      : amountsStale
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`

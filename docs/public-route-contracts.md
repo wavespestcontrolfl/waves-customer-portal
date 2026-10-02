@@ -77,6 +77,18 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+"From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
+`true`, read at call time) adds `blogPost: { title, url }` — the one Waves
+blog post the technician or the office picked at completion, frozen on the
+record (`structured_notes.blogPost`) with its live URL and re-checked at read
+to be on the marketing site's own host
+(`server/services/service-report/report-blog-post.js`). The web report
+renders it in live mode only, above the footer. Off, or nothing frozen, the
+field is `null` (the switch hides frozen posts too). Auth, headers and routes
+are unchanged.
+
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), when the visit's rating was entered by staff
@@ -470,6 +482,48 @@ render (gate on or off, every service line) — `report-data.js`'s
 `expectationFactsOut` out-param that is never attached to the object the
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
+
+Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
+lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
+read at call time, no redeploy to flip): on the tree/shrub service-report
+payload (`/api/reports/:token/data` and the PDF, which share
+`buildReportV1Data` → `buildTreeShrubReportV2`), gate on lets the technician's
+own decisions on the photo-read findings (frozen at completion in the service
+record's `structured_notes.treeShrubTechFindings`, written whether or not the
+signed preview was accepted) override the photo read in customer copy. The
+payload gains no new field or route: only the existing `reportV2` strings and
+scores change. Per finding: **hide** — the category score, the overall score it
+influenced, the photo-read summary, any insight card built on it, any photo
+caption tied to it, and its point in the visit's (and later reports') trend
+history are withheld; the category reads "tracking", never healthy. **Confirm**
+— the diagnosis row and insight read as the technician's finding ("Your
+technician confirmed …"), still in signals language (no infestation or
+diagnosis claim). **Edit** — the technician's own text replaces the system
+sentence, with the photo-read prose and captions withheld.
+It is the ONLY free technician text this change can add to the public payload:
+it is capped at 400 characters, run through `redactAccessCodes`
+(`context-aggregator.js`, the report-egress access-code redactor) both when
+frozen and when rendered, so gate, garage, lockbox and alarm codes never
+egress, and it passes the customer-copy compliance screen
+(`customerCopyViolations`): completion refuses wording that fails it, and an
+edit with no printable text reads as a hide. **Monitor** keeps today's
+signals-only wording. The photo read itself stays on the stored assessment row
+for the office; admin views are unchanged. The same overlay governs the other
+photo-read surfaces of the payload for tree/shrub visits: any hidden or edited
+finding withholds every `data.photos[].caption` (the PDF gallery), the
+`data.typedReport.photoSummary` and the photo-read plant groups (the photos
+themselves stay). Palm-crown rule (owner 2026-10-01, photos are ground level):
+the photo read and the AI report writer are instructed on every tree/shrub
+generation never to state or imply that a palm's crown, spear leaf or newest
+fronds look healthy; the strong leaf-color and fullness sentences no longer say
+"healthy new growth". Owner 2026-10-02: the instruction is the guard — there is
+no word filter over customer copy, so a saved pre-gate report is not rewritten.
+The portal Trees & Shrubs score omits an overall whose read the technician hid,
+and withholds the score when the decisions cannot be read. The stored-PDF cache
+key carries `-tsfind<revision>` while the gate is on, so flipping it
+re-renders tree/shrub PDFs. Gate off (or unset) is byte-identical to before:
+nothing is frozen, no copy changes and the PDF key is unchanged. Auth, token
+gates, rate limits and headers are unchanged.
 
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
@@ -1448,6 +1502,14 @@ creates a placeholder first name. The explicitly linked profile
 (`estimates.customer_id`) with a blank first name takes the collected first
 name through `propagateCustomerNameChange`; phone-matched or sibling profiles
 never do.
+
+Greeting name (2026-10-02, precursor to #5559). GET `/api/estimates/:token/data`
+`estimate.customerFirstName` is the greeting token, not blindly the first word of
+`customer_name`: when the linked customer (`estimates.customer_id`) has a blank first
+name and the estimate name begins with that customer's surname (or is a single word
+and the surname is unknown), it is `null`, and the page greets "there". Unlinked
+estimates, a linked customer with a first name, or a failed lookup keep the first word
+of `customer_name` as before. The linked customer's name fields are never returned.
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
@@ -2023,7 +2085,8 @@ separate customer text right after the lawn completion text, rendered from the
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -2042,7 +2105,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits. The web report mounts the lead card right under the watering
+until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2115,9 +2178,85 @@ row and prior check, and an overall direction, from `sinceLast` plus both visits
 scores and this render's photo confidence). It adds NO public key: it rides the
 in-process report object as a non-enumerable `reportV2.progress`, so JSON, spread
 and `Object.keys` never see it and the `/api/reports/:token/data` payload is what
-it was (a test pins that), until P14 writes guarded copy from it and this section
-is updated with the key it then exposes. Pure, no read, no write, and a failure
-cannot break a render.
+it was (a test pins that). The block itself never reaches the payload; the only
+thing a customer sees of it is the sentences below. Pure, no read, no write, and
+a failure cannot break a render.
+`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
+also live, so gate off, or lead off, leaves the lawn payload, render and PDF
+unchanged, key for key, and makes no read or write) swaps the old
+`LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
+(`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
+shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
+sentence built from the visit's facts; no model writes any of it (owner ruling
+2026-10-02). It adds NO top-level payload key: its fields reach the customer only
+through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
+`lead.applied` is the deterministic treatment summary of the recorded products
+(`treatment-summary.js`), never the AI treatment narrative that later overwrites
+`snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
+optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
+42 words: the visible-change sentence of the first two expectation rows the owner
+has approved for today's products, printed word for word, a sentence that would
+pass the cap left out whole; no by-next-visit timing yet, since that needs the
+next visit at this property, which the report's own next-visit line does not
+resolve; every row ships `approved: false`, so the key is absent until the owner
+approves one) and
+`watching` ("We are also keeping an eye on <topics>." for the watched issues
+after the one the headline names, at most three). The lead's word budget gives
+these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
+`whatToExpect`, then `sinceLast`. The fields freeze into
+`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, copyVersion,
+assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
+migration, written at the first healthy render, which the completion write gate
+performs) and replay byte for byte afterwards, so a later product edit or row
+approval never changes a sent report; a stored entry replays even when a later
+read fails, and its headline also replaces `snapshot.statusHeadline` on that
+render, so the lead's banner fallback and the PDF's Overall line replay it too. A degraded read (any input read failed) or an unverifiable treatment
+creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
+such a render's lead keeps the snapshot headline and has no applied line (never
+the AI treatment narrative). A render whose copy a retry could still freeze
+differently (a failed read, an unverifiable treatment, or a failed freeze write)
+sets
+`lawnAssessment.lawnCopyV6Unfrozen`, and the pinned (emailed) PDF defers with a
+retryable `lawn_copy_v6_unfrozen` error instead of sending it.
+The fields reach the lead through a non-enumerable
+in-process hand-off (`reportV2.copyV6`, read first by
+`applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
+under this gate, so a later assessment correction cannot make the PDF and the
+live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
+as a "What to expect" line (the insights it already lists cover `watching`),
+and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
+`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
+`{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
+(`mode: 'live'`), and the web report prints it in the lead as "Since your last
+visit, <Mon D>" above "What we applied today". PDF and static builds mount the
+same lead card but never carry the key, so PDF content and its cache signature
+are unchanged by this gate.
+Every line is a fixed sentence selected by key in
+`server/services/service-report/lawn-since-last-copy.js`; no model writes it and
+it carries no product name, active ingredient, number, date or timing word. In
+order, at most four lines and 40 words (a second per-treatment line gives way
+to the watch list; past 40 words whole lines are dropped from the end): what the prior
+visit applied, by product kind ("Last visit we applied weed control and
+fertilizer."); the overall direction when the engine compared the two visits
+(up / down / holding steady; nothing when the photos cannot support a
+comparison); at most two per-treatment states (ahead of schedule, on track,
+holding steady, too early, behind, or seasonal for color), spoken ONLY for an
+expectation row the owner has approved (`server/config/lawn-expectations.js`
+`approved: true`) and never for an `unclear` item; and "Still on our watch
+list: …" naming the prior visit's watched topics (weeds, stressed areas, mowing
+height, watering, sprinkler coverage) that today's report still carries as a
+watch or needs-attention finding. A topic today's report no longer carries is
+not called cleared, and no better / same / worse wording exists: that verdict
+comes only from a same-spot recheck record, which nothing writes yet. Under a
+watering banner the block names neither watering nor sprinkler coverage (the
+banner owns them). The key is absent when there is nothing to say, when there
+is no prior visit, or when the prior visit froze no memory. The sentences are
+selected at render from the frozen memory and the two visits' scores, so a
+permanent token repeats them while those inputs stand; approving an expectation
+row later adds that row's line to reports already delivered.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -2725,7 +2864,24 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
-internals, or tech notes — generic 404 for missing/draft/expired/malformed),
+internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
+for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
+"Based on N photos." from a count of the diagnostic's stored photos (capped at
+12; the number is left out when none are stored or the count fails) plus a
+fixed note when `input_assessment.photo_quality` is limited or poor; null when
+neither applies. Per finding, `evidence` `{ why, certainty, confirm }`: what
+the condition looks like, how sure the read is, and the on-site check that
+would settle it (`confirm` is null for a high-confidence finding and for
+conditions that need no check; `certainty` is null for a clean lawn). Every
+string is fixed copy in `server/services/lawn-diagnostic-evidence.js` selected
+ONLY by the finding's already-allowlisted condition label and clamped
+confidence, so the naming gate still decides what is named and the stored
+`observed_evidence`, `inferred_context`, `negative_evidence`,
+`confirmation_step` and photo limitations (model or client free text) are
+still never published. A label the table does not know gets no `evidence`
+key. The `/api/public/lawn-assessment` teaser's `first_finding` never carries
+`evidence`),
 `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
 + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
 validation before coercion — name plus a valid email or phone — links one
@@ -2828,6 +2984,18 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
+Forecast evidence: `baseline_comparison` is `above|below|near` the monthly
+seasonal model. The legacy `pests[].trend` stays `up|down|flat` with
+`trend_basis: seasonal_baseline` for existing embeds; it is not a temporal
+trend. `week_over_week` is null unless the same city's same model has a
+comparable-weather snapshot exactly seven ET calendar days earlier. When
+available it carries direction, score delta, and both dates, describing
+modeled change only. `model_version` identifies the scoring model and
+`evidence.observation_validation` remains `not_validated`. Public requests
+may READ `pest_forecast_snapshots` under `GATE_PEST_FORECAST_HISTORY`, but
+never write history or read customer observations. The gated 08:15/14:15 ET
+cron captures the first successful city forecast per day. History failure
+preserves the weather outlook with unavailable comparisons.
 Note: unlike the token-gated read routes, the forecast and `/locations`
 responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy

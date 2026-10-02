@@ -300,6 +300,7 @@ async function deleteManualLink(id) {
 
 module.exports = {
   CATEGORIES,
+  SITE_HOST,
   nameForSiteUrl,
   categoryForSiteUrl,
   isSiteUrl,

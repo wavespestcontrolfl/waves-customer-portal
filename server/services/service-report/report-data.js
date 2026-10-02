@@ -21,8 +21,12 @@ const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = 
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
+const { buildSinceLastCopy } = require('./lawn-since-last-copy');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
+const {
+  techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
+} = require('./tree-shrub-tech-findings');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
@@ -1080,7 +1084,7 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
       // transient failure preserves the exterior dry-down guidance rather
       // than silently dropping customer re-entry advice.
       try {
-        return !!(await knex('treatment_zone_maps')
+        return judgedTraceRow(record, await knex('treatment_zone_maps')
           .where({ scheduled_service_id: record.scheduled_service_id })
           .first());
       } catch (traceErr) {
@@ -1114,13 +1118,24 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
     } catch { /* label fallback above already ran; proceed to the lookup */ }
   }
   try {
-    return !!(await knex('treatment_zone_maps')
+    return judgedTraceRow(record, await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
       .first());
   } catch (traceErr) {
     return !(traceErr?.code === '42P01'
       || /no such table|does not exist/i.test(String(traceErr?.message || '')));
   }
+}
+
+// A trace counts as exterior evidence only when it is one the record may
+// show: a Fast Complete report-flow record froze the trace it was judged
+// against (traceJudged), and a trace it never saw (kept while the map gate
+// was dark, or saved after) drives no exterior dry-down guidance in the
+// report, the re-entry context, the lifecycle email or the completion text
+// either (Codex #5538). Any other record counts its trace as before.
+function judgedTraceRow(record, row) {
+  if (!row) return false;
+  return require('../treatment-zone-maps').traceJudgedAllows(parseJsonObject(record.structured_notes), row);
 }
 
 function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
@@ -2697,6 +2712,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // stamp rides only while the gate is live: gate off leaves every signature,
   // and so every cached PDF key, byte-identical to before.
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
+  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
+  // its PDF key moves with it; the stamp rides only while the gate is live.
+  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3803,6 +3821,9 @@ function buildWateringBanner(instruction, weekPlan = null) {
   };
 }
 
+// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
+
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -4038,6 +4059,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
     ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
+    : null;
+
+  // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions for a tree &
+  // shrub visit (null = gate off or another service line). They govern every
+  // free-text photo surface below: gallery captions, the typed photo summary
+  // and the V2 report, so the PDF and web report agree.
+  const tsCopyFindings = (serviceLine === 'tree_shrub' && techFindingsCopyLive())
+    ? normalizeTechFindings(structured?.treeShrubTechFindings)
     : null;
 
   const scheduledServicePromise = service.scheduled_service_id
@@ -4733,7 +4762,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
         .catch(() => null);
-      if (tracedRow?.snapshot_s3_key && PhotoService) {
+      // A report-flow record shows only the trace it was judged against.
+      if (tracedRow?.snapshot_s3_key && PhotoService
+        && require('../treatment-zone-maps').traceJudgedAllows(structured, tracedRow)) {
         const tracedSnapshotUrl = await PhotoService.getViewUrl(
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
@@ -4991,7 +5022,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     .map(async (photo) => ({
       id: photo.id,
       url: await photoUrl(photo),
-      caption: photo.caption || '',
+      caption: tsCopyFindings
+        ? (filterCaptionsForCustomer([photo.caption || ''], tsCopyFindings)[0] || '')
+        : (photo.caption || ''),
       stateBadge: photo.state_badge || null,
       zoneId: photo.zone_id || null,
       capturedAt: photo.captured_at || photo.created_at,
@@ -5544,6 +5577,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // a real upcoming scheduled_services row (same allow-list as context-aggregator);
       // otherwise a clearly-labeled cadence ESTIMATE from the service frequency; else
       // omitted entirely. Never invent a precise date the data can't back.
+      // The visit day the v6 copy reads (the SELECTED assessment's date: an
+      // A→B re-do or a pinned render can differ from the record's service_date,
+      // the same anchor the water snapshot and gap history use).
+      const lawnCopyAnchor = lawnAssessment.assessmentDate || service.service_date || null;
+      const lawnCopyVisitDate = lawnCopyAnchor
+        ? (lawnCopyAnchor instanceof Date ? lawnCopyAnchor.toISOString().slice(0, 10) : String(lawnCopyAnchor).slice(0, 10))
+        : null;
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5602,7 +5642,57 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         } catch { /* next-visit lookup is best-effort */ }
       }
 
-      if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
+      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
+        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
+        // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
+        // read while this is live). Fixed sentences from this visit's facts, no
+        // model (owner 2026-10-02); frozen copy replays; a degraded read or an
+        // unverifiable treatment ships the lead's own copy. The fields ride the
+        // in-process report as `copyV6` for the lead derivation (a non-enumerable
+        // hand-off, like reportV2.progress, so the payload gains a key only
+        // through reportV2.lead).
+        try {
+          const { resolveLawnCopyV6ForRender } = require('./lawn-copy-v6');
+          const outcome = await resolveLawnCopyV6ForRender({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            assessmentId: lawnAssessment.assessmentId,
+            reportV2,
+            ctx: { visitDate: lawnCopyVisitDate },
+            // Never CREATE the first-writer-wins entry from a degraded read
+            // (any input read that failed is in readFailures) or from
+            // unverifiable treatment data; a stored entry still replays first.
+            degraded: readFailures.size > 0 || !!(lawnTreatmentGuard && !lawnTreatmentGuard.verified),
+            knex,
+          });
+          // No copy (a degraded read): an all-null carrier still marks the v6
+          // contract live, so the lead keeps the snapshot headline and leaves
+          // applied empty rather than fall back to the AI treatment narrative
+          // that has replaced snapshot.treatmentSummary by now.
+          Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy || LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
+          // The frozen headline IS this report's status line from now on: the
+          // lead's banner rule may drop it and fall back to the snapshot, and
+          // the PDF prints the snapshot's Overall line, so a later assessment
+          // correction must not reach either through statusHeadline (a no-op
+          // on the render that froze it: the copy was built from this value).
+          if (outcome.copy && outcome.copy.headline && reportV2.snapshot) {
+            reportV2.snapshot.statusHeadline = outcome.copy.headline;
+          }
+          if (outcome.unfrozen) {
+            lawnAssessment.weekWeatherUncacheable = true;
+            // DELIVERY: an emailed PDF is permanent, so it must not carry copy a
+            // later render could freeze differently. Every unfrozen cause is one
+            // a retry can fix (a failed read, an unverifiable treatment, which
+            // is itself a failed products or catalog read, or a failed freeze
+            // write), so the send waits.
+            lawnAssessment.lawnCopyV6Unfrozen = true;
+          }
+        } catch {
+          Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
+          lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.lawnCopyV6Unfrozen = true;
+        }
+      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
         // The overlay rewrites customer-facing prose and validates only
         // banned-copy + rain-window rules — it can reintroduce advice that
         // contradicts today's applications (codex P1 r28). Skip it entirely
@@ -5657,6 +5747,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       if (reportV2 && lawnProgress) {
         Object.defineProperty(reportV2, 'progress', { value: lawnProgress, enumerable: false, writable: true, configurable: true });
       }
+      // GATE_LAWN_SINCE_LAST: the "Since your last visit" sentences, selected
+      // here because the progress block never leaves this process. Handed to
+      // the lead (applyLawnReportReconciliation) the same non-enumerable way,
+      // so the payload gains a key only through reportV2.lead.sinceLast.
+      // LIVE VIEWS ONLY: the PDF and static builds mount the same lead card,
+      // and their cache key does not vary on this gate, the expectation rows'
+      // approvals or the photo confidence these lines depend on, so a stored
+      // PDF never carries the block (codex P1 #5597 r1).
+      if (reportV2 && visitMemorySinceLast && opts.mode === 'live' && featureGates.lawnSinceLastLive()) {
+        try {
+          const sinceLastCopy = buildSinceLastCopy({
+            sinceLast: visitMemorySinceLast,
+            progress: lawnProgress,
+            insights: reportV2.insights,
+            bannerPresent: Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0,
+          });
+          if (sinceLastCopy) {
+            Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the block */ }
+      }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
@@ -5677,12 +5788,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // Assessment photos the builder dropped for a failed signing are
         // expected images the artifact silently omits (codex P2 #3176 r22).
         imageResolutionFailures += Number(treeShrubAssessment.droppedPhotoCount) || 0;
+        // GATE_TS_TECH_FINDINGS_COPY: earlier visits' hide decisions could not be
+        // loaded, so their scores were withheld. Counted like a dropped image: the
+        // report is served but no PDF stores it as the healthy object.
+        if (treeShrubAssessment.techFindingsUnavailable) imageResolutionFailures += 1;
         reportV2 = buildTreeShrubReportV2({
           treeShrubAssessment,
           applications,
           actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
           customerConcern: structuredCustomerConcern(structured),
           waterSnapshot: null, // Phase 3: landscape water calibration
+          // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen keep / confirm /
+          // hide / edit decisions override the photo read in customer copy
+          // (undefined while dark: the builder output is unchanged).
+          ...(tsCopyFindings ? { techFindings: tsCopyFindings } : {}),
         });
         // AI "What we applied today" narrative (owner 2026-07-21): why each
         // product, what it does, the benefit — cached per input hash; the
@@ -6713,6 +6832,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
       }
       : null,
+    // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the
+    // client renders it above the footer): the post the record froze, its
+    // title and live URL checked again against the site's own host
+    // (report-blog-post.js). Null unless the gate is on; the switch hides
+    // frozen posts too. Read here only, never onto the protocol object the
+    // payload also returns, so this gated field is the post's one way out
+    // (pre-push P0 on #5547).
+    blogPost: featureGates.reportBlogPostLive?.() === true
+      ? require('./report-blog-post').frozenBlogPost(structured.blogPost)
+      : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the
     // estimate, the report token is a shareable bearer link the customer owns —
@@ -6802,7 +6931,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
           ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
-        photoSummary: typedSnapshot.photoSummary || null,
+        photoSummary: tsCopyFindings
+          ? summaryForCustomer(typedSnapshot.photoSummary, tsCopyFindings)
+          : (typedSnapshot.photoSummary || null),
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,

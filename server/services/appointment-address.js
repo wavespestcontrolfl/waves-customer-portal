@@ -97,6 +97,12 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     updated_at: trx.fn.now(),
   };
   await trx('scheduled_services').whereIn('id', addressRows.map((row) => row.id)).update(stamp);
+  // A trace is drawn on the satellite photo of the property it was traced
+  // at, and the report shows it beside the visit's live address: a visit
+  // that moves to another property drops it (Codex #5538). Its images stay
+  // in S3 unreferenced, as when a visit is deleted.
+  const movedIds = addressRows.filter((row) => String(row.property_id ?? '') !== String(property.id)).map((row) => row.id);
+  if (movedIds.length) await trx('treatment_zone_maps').whereIn('scheduled_service_id', movedIds).del();
   if (plan.parentId) {
     await trx('scheduled_services').where({ id: plan.parentId, customer_id: plan.anchor.customer_id }).update({
       recurring_template_overrides: trx.raw(

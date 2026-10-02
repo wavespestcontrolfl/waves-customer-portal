@@ -1,8 +1,8 @@
-# Intelligence Bar operator workflows: contracts, manifests and evidence
+# Intelligence Bar operator workflows: contracts, manifests, matrix and evidence
 
-PR 0 of the ten-workflow scope (scope document `intelligence-bar-operator-scope-20261002.md`, Part 2). This page holds the ten request contracts, the execution-mode matrix, the scenario manifest shape and the evidence status for each workflow. It changes no runtime behavior.
+PR 0 of the Intelligence Bar ten-workflow scope (owner-approved October 2, 2026). The scope's hypotheses are written down here, not in an outside document: the per-workflow contracts below, and the expected admin and technician cells in `MATRIX` (`server/tests/fixtures/ib-workflows/execution-matrix.js`), which the test compares with the code. This page holds the ten request contracts, the execution-mode matrix, the evidence status for each workflow and the read-only request tally. It changes no runtime behavior. The 200 scenario cases (the manifests) and the harness that executes them are in the same branch as the manifest shape below; the matrix and the tally were split out and merged separately (#5626).
 
-- **Inspected commit:** `60655b1ec9` (origin/main on October 2, 2026, as merged into this branch). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-manifest.test.js`; it is not a claim about production or about any open pull request.
+- **Inspected commit:** `60655b1ec9` (origin/main on October 2, 2026, as merged into this branch). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-matrix.test.js`; it is not a claim about production or about any open pull request.
 - **On this commit:** owner-direct mode (#5563) is merged, dark behind `GATE_IB_OWNER_DIRECT` (direct commits also ride on `GATE_IB_PLATFORM`). The owner cells below are derived from `server/services/intelligence-bar/owner-direct.js` (`OWNER_DIRECT_TOOL_NAMES`, `executesWithoutCard`), not typed in. Nothing here says either gate is on in production.
 - **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). Each is a named gap, listed below; the cases that need one carry it and stay scored targets.
 - **No production access** was used to build this. Nothing in the manifests names a real customer, address, phone number, email or gate code; fixture keys are synthetic.
@@ -12,12 +12,13 @@ PR 0 of the ten-workflow scope (scope document `intelligence-bar-operator-scope-
 | Piece | Where |
 | --- | --- |
 | Scenario manifests, W1 to W10 (200 cases) | `server/tests/fixtures/ib-workflows/W1.json` to `W10.json` |
-| Matrix data and renderer | `server/tests/fixtures/ib-workflows/execution-matrix.js` |
-| Contract test (manifests, matrix, write calls, gaps, tally script) | `server/tests/intelligence-bar-workflow-manifest.test.js` |
+| Matrix data and renderer, plus the case helpers (capability gaps, call lists, the write-call schema check) | `server/tests/fixtures/ib-workflows/execution-matrix.js` |
+| Matrix and tally test | `server/tests/intelligence-bar-workflow-matrix.test.js` |
+| Manifest contract test (shape, row references, write calls, gaps, partition table) | `server/tests/intelligence-bar-workflow-manifest.test.js` |
 | Read-only request tally | `scripts/ib-request-tally.js` |
 | This page | `docs/intelligence-bar-operator-workflows.md` |
 
-Run the contract test with `npm exec jest -- server/tests/intelligence-bar-workflow-manifest.test.js --runInBand`. After a deliberate matrix change, `UPDATE_IB_MATRIX_DOC=1` rewrites the table between the matrix markers below; without it the test fails if the table is stale.
+Run the matrix test with `npm exec jest -- server/tests/intelligence-bar-workflow-matrix.test.js --runInBand` and the manifest contract test with `npm exec jest -- server/tests/intelligence-bar-workflow-manifest.test.js --runInBand`. After a deliberate matrix change, `UPDATE_IB_MATRIX_DOC=1` rewrites the table between the matrix markers below; without it the test fails if the table is stale.
 
 ## Manifest shape
 
@@ -192,7 +193,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 
 ### W9 What they owe and whether payment was received
 
-- **Tools today:** `get_outstanding_balances`, `get_stripe_payment_intents`, `get_customer_detail`. **Reader gap:** there is no per-customer invoice list, invoice detail, recorded-payment or credit reader. PR 3a (#5586) builds one read-only reader; cases carrying the `invoice_payment_reader` gap cannot fully pass until it lands.
+- **Tools today:** `get_outstanding_balances`, `get_stripe_payment_intents`, `get_customer_detail` (the customer's five most recent invoices) and `query_revenue` (accepts `customer_id`, up to 100 invoices). **Reader gap:** no invoice detail, no recorded-payment or credit evidence per invoice, no collectibility check, and no completeness signal when the list is cut off. PR 3a (#5586) builds that read-only reader; cases carrying the `invoice_payment_reader` gap cannot fully pass until it lands.
 - **Rulings:** `pay-after-first-visit-throughout-ruling`, `new-customers-pay-at-visit-ruling`, `dispute-hold-rulings-2026-09-30`, `remove-prepay-flag-ruling`, `payment-emails-always-send-ruling` (context only).
 - **Pass:** the balance equals the Invoices page for the fixture; a failed or pending attempt is never called received; a recorded manual payment, a succeeded intent and an applied credit are each named by type with date and amount; unknown states are called unknown.
 - **Forbidden:** any charge, refund, credit, invoice edit, receipt send or reminder; "paid" from an intent that is not succeeded.
@@ -234,19 +235,19 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | W1 | `needs_me` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W1 | `get_today_briefing` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
-| W2 | `get_customer_detail` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2/W9 | `get_customer_detail` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_schedule_view` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
-| W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone | card | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields | card | card | card | refused | refused |
-| W4 | `add_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
-| W4 | `update_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
+| W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone (differs) | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (differs) | card | card | card | refused | refused |
+| W4 | `add_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
+| W4 | `update_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
 | W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
 | W4 | `switch_appointment_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W5 | `find_available_slots` | read | direct | direct | direct | direct | direct | refused | refused |
 | W5 | `create_appointment` | bare_write_card | card | card | card | card | card | refused | refused |
-| W6 | `reschedule_appointment` | bare_write_card | direct | direct when the pinned visit is ungrouped | card | card | card | refused | refused |
+| W6 | `reschedule_appointment` | bare_write_card | direct | direct when the pinned visit is ungrouped (differs) | card | card | card | refused | refused |
 | W6/W7 | `send_sms` | bare_write_card | card | card | card | card | card | scoped | refused (differs) |
 | W7 | `draft_sms` | read | direct | direct | direct | direct | direct | n/a | refused |
 | W7 | `list_queued_messages` | read | direct | direct | direct | direct | direct | n/a | refused |
@@ -256,6 +257,7 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W8 | `save_customer_estimate` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W8 | `get_estimate_detail` | read | direct | direct | direct | direct | direct | refused | refused |
 | W9 | `get_outstanding_balances` | read | direct | direct | direct | direct | direct | refused | refused |
+| W9 | `query_revenue` | read | direct | direct | direct | direct | direct | refused | refused |
 | W9 | `get_stripe_payment_intents` | read | direct | direct | direct | direct | direct | refused | refused |
 | W10 | `query_stock` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W10 | `get_stock_movements` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
@@ -268,14 +270,14 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 ### Findings from the matrix
 
 1. **Owner-direct is merged and the owner cells now come from it.** Gate off, the owner is an ordinary admin: every write is a card. Gate on, the owner's reads are direct and these writes execute without a card: `update_lead_contact` (by `lead_id` alone), `update_customer` (only name, phone, address, lead source and note fields), `add_customer_property` and `update_customer_property` (no label), `set_primary_property`, `reschedule_appointment` (the pinned visit has no `visit_id`), `adjust_stock`, `update_restock_request` and `create_restock_request`. Every other write keeps its card: `create_appointment`, `send_sms`, `cancel_queued_message`, `switch_appointment_property` and `save_customer_estimate`.
-2. **Two owner cells differ from the scope hypothesis.** The scope expected `switch_appointment_property` and `save_customer_estimate` to execute directly for the owner; the merged policy keeps both on a card (a property move on a grouped visit relocates every service line sharing it; the estimate writers are money). The W4 and W8 cases that expected no card were corrected to the code, and `W3-held-06` (notes and lead source) is direct, not carded, because both fields are on `DIRECT_CUSTOMER_FIELDS`. A labelled property add or edit keeps its card in every W4 case.
+2. **Seven owner cells differ from the scope hypothesis.** The matrix compares the whole cell, condition included, because the condition decides whether a workflow's own request goes without a card. Two keep a card where the scope expected direct: `switch_appointment_property` (a property move on a grouped visit relocates every service line sharing it) and `save_customer_estimate` (money). Five are direct only under a condition the scope did not state: `add_customer_property` and `update_customer_property` (no label, so W4's own "label it rental" request keeps its card), `update_customer` (contact, address, lead source and note fields; email and pipeline stage keep the card), `update_lead_contact` (by `lead_id` alone, never by name) and `reschedule_appointment` (the pinned visit is ungrouped).
 3. **Technician reach is narrower on main than the scope expects.** Every tool outside `tech-tools.js` has registry role `admin`, so a technician cannot reach the W1/W2 reads, the W10 inventory reads or `send_sms`. The scope expects scoped reach (own visits, own-visit customers, read-only inventory). These ten cells are recorded as differences for the staff access work to close or to correct in the scope; no technician write is reachable today. The scope's W10 cell "refused (read only)" is read here as read-only inventory for technicians, matching the technician allow-list ruling.
 4. **`send_sms` and the move/booking tools are legacy bare writes.** They are carded by the route from their parameters, not by a structural two-step in the executor, which matters for PR 2a: resume and double-send fixes depend on the card path.
 5. **`needs_me` has no browser page of its own on this commit.** W1 verifies against the Needs Me reader (`GET /api/admin/needs-me`) and the dashboard surface; PR 1 should pin the exact page.
 
 ## Evidence status
 
-Evidence the existing suites already give, and what is still unproven. Suites ending `-db` or `-postgres` need `DATABASE_URL` and skip locally; they run in CI. "Controlled-model" means scripted model responses: execution layer only, nothing about natural-language understanding. No live-model, live-provider or browser evidence exists for any workflow yet, and PR 0 adds none.
+Evidence the existing suites already give, and what is still unproven. Suites ending `-db` or `-postgres` need `DATABASE_URL` and skip locally; they run in CI. "Controlled-model" means scripted model responses: execution layer only, nothing about natural-language understanding. No live-model, live-provider or browser evidence exists for any workflow yet, and this PR adds none.
 
 | Workflow | Existing suites covering parts | Covered today | Not yet covered |
 | --- | --- | --- | --- |
@@ -294,7 +296,7 @@ All ten: the platform evidence ledger (`docs/intelligence-bar-platform-implement
 
 ## Request tally (decision D4)
 
-`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY` transaction) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, per-operator turn counts, read and proposal-phase failure counts per tool from `tool_health_events`, and confirmed-write outcomes per tool from `ib_pending_actions`. The two failure lists are separate because a carded write records its health event when it is proposed; the write that runs after Confirm records none, so its failures (a rejected text, a stale write, a database error) are read from the pending-action row, classified with the bar's own `executionOutcome` from the row's outcome flags only.
+`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY`, `REPEATABLE READ` transaction, so every count comes from the same snapshot) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, turn counts per operator and day (including turns that called no tool), tool-call health counts per tool from `tool_health_events` (reads, card proposals, and owner-direct writes as they execute), and committed-write outcomes per tool (succeeded, partial, failed, unknown) from `ib_pending_actions`. The two lists answer different questions. Health events are recorded when a tool call runs: a read, a card proposal, or (with owner-direct on) a direct write as it executes. A carded write that commits after a Confirm click records no health event, so its failures (a rejected text, a stale write, a database error) are read from the consumed pending-action row, classified with the bar's own `executionOutcome` from the row's outcome flags only. A failed owner-direct write therefore appears in both lists.
 
 The owner runs it through Railway; it needs the production `DATABASE_URL`, so it is never run from CI or from a session:
 
@@ -308,8 +310,8 @@ Reading the numbers:
 
 - `tool_calls` stores the tools called in a turn, so tool counts are not request counts; one request can call several tools.
 - The window is a rolling `--days` x 24 hours back from the run, while the day columns are Eastern calendar days, so the earliest day is a partial day. Rank families over the whole window, not over a single day column, and ignore the first day when comparing days.
-- `operator_id` is a nullable column that the bar route does not write on this commit, so expect one `(none)` operator. Any value containing `@` is shown as a short hash label, never an email.
-- Public estimate Q&A rows share the table and appear as the tool `public_estimate_ask`; ignore them for workflow ranking.
+- `operator_id` is written by the bar route since #5591 (the signed-in staff member). `(none)` holds only rows written before that change or without a staff identity. Any value containing `@` is shown as a short hash label, never an email.
+- Public estimate Q&A turns (customer traffic that shares the table, a turn that called `public_estimate_ask`) are left out of every count; they do not appear in the output.
 - Health events are filtered to the `intelligence-bar` and `tech-intelligence-bar` sources.
 - Freeze the ten after seeing the tally; swap at most two (D4).
 

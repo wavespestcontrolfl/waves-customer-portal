@@ -12,9 +12,6 @@
  * differs from the cell on this branch is a finding, listed in
  * KNOWN_DIFFERENCES / OWNER_KNOWN_DIFFERENCES; it is never silently "fixed"
  * here.
- *
- * Gap keys (CAPABILITY_GAPS) name what a case's target behavior needs that is
- * not on this tree. A case that carries `requires` stays a scored target.
  */
 
 // cls: read | two_step_card | bare_write_card
@@ -31,7 +28,7 @@
 const MATRIX = [
   { workflow: 'W1', tool: 'needs_me', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W1', tool: 'get_today_briefing', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
-  { workflow: 'W2', tool: 'get_customer_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
+  { workflow: 'W2/W9', tool: 'get_customer_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_schedule_view', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_conversation_thread', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W2', tool: 'get_open_commitments', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
@@ -53,6 +50,7 @@ const MATRIX = [
   { workflow: 'W8', tool: 'save_customer_estimate', cls: 'two_step_card', owner: 'direct', admin: 'card', tech: 'refused' },
   { workflow: 'W8', tool: 'get_estimate_detail', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W9', tool: 'get_outstanding_balances', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
+  { workflow: 'W9', tool: 'query_revenue', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W9', tool: 'get_stripe_payment_intents', cls: 'read', owner: 'direct', admin: 'direct', tech: 'refused' },
   { workflow: 'W10', tool: 'query_stock', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
   { workflow: 'W10', tool: 'get_stock_movements', cls: 'read', owner: 'direct', admin: 'direct', tech: 'scoped' },
@@ -116,15 +114,30 @@ function ownerGateOnCell(ownerDirect, tool) {
   return `direct when ${OWNER_DIRECT_CONDITIONS[tool] || 'UNDOCUMENTED CONDITION'}`;
 }
 
-const baseCell = (cell) => String(cell).replace(/ when .*$/, '');
 
 // Owner cells (gate on) where owner-direct.js differs from the scope hypothesis,
-// as "tool:owner". The scope expected both to execute without a card; the
-// merged policy keeps a card on them (switch_appointment_property relocates
-// every service line sharing a visit; the estimate writers are money).
+// as "tool:owner". The full cell is compared, condition included: a scope
+// "direct" against a code "direct when <condition>" is a difference, because the
+// condition decides whether the workflow's own request goes without a card.
+//   - switch_appointment_property, save_customer_estimate: the scope expected
+//     direct; the merged policy keeps a card (a property move on a grouped
+//     visit relocates every service line sharing it; the estimate writers are
+//     money)
+//   - add_customer_property, update_customer_property: direct only with no
+//     label, so W4's own "label it rental" request keeps its card
+//   - update_customer: direct only for contact, address, lead source and note
+//     fields; email and pipeline stage keep the card (the scope named name,
+//     phone and address)
+//   - update_lead_contact: direct only by lead_id alone, never by name
+//   - reschedule_appointment: direct only when the pinned visit is ungrouped
 const OWNER_KNOWN_DIFFERENCES = [
   'switch_appointment_property:owner',
   'save_customer_estimate:owner',
+  'add_customer_property:owner',
+  'update_customer_property:owner',
+  'update_customer:owner',
+  'update_lead_contact:owner',
+  'reschedule_appointment:owner',
 ];
 
 function classify(name, action, gates) {
@@ -162,7 +175,7 @@ function renderTable(rows) {
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   for (const r of rows) {
-    const ownerMark = differs(r.owner, baseCell(r.actual.ownerOn)) ? ' (differs)' : '';
+    const ownerMark = differs(r.owner, r.actual.ownerOn) ? ' (differs)' : '';
     const adminMark = differs(r.admin, r.actual.admin) ? ' (differs)' : '';
     const techMark = differs(r.tech, r.actual.tech) ? ' (differs)' : '';
     lines.push(`| ${r.workflow} | \`${r.tool}\` | ${r.actual.cls} | ${r.owner} | ${r.actual.ownerOn}${ownerMark} | ${r.actual.ownerOff} | ${r.admin} | ${r.actual.admin}${adminMark} | ${r.tech} | ${r.actual.tech}${techMark} |`);
@@ -170,6 +183,9 @@ function renderTable(rows) {
   return lines.join('\n');
 }
 
+// ===========================================================================
+// Workflow case helpers (added by #5585; the matrix above is main's, from #5626).
+// ===========================================================================
 // ---------------------------------------------------------------------------
 // Capability gaps. A case whose target behavior needs something that is not on
 // this tree carries `requires: "<key>"` (or an array of keys) and stays a
@@ -278,7 +294,8 @@ function expectedCard(c, calls, ownerDirect) {
 }
 
 module.exports = {
-  MATRIX, KNOWN_DIFFERENCES, OWNER_KNOWN_DIFFERENCES, OWNER_DIRECT_CONDITIONS, CAPABILITY_GAPS,
-  computeActual, renderTable, differs, baseCell, ownerPolicyProbe, ownerGateOnCell,
-  asList, callList, stepCommits, schemaProblems, expectedCard,
+  MATRIX, KNOWN_DIFFERENCES, OWNER_KNOWN_DIFFERENCES, OWNER_DIRECT_CONDITIONS,
+  computeActual, renderTable, differs, ownerPolicyProbe, ownerGateOnCell,
+  // case helpers for the workflow manifests (#5585): gaps, call lists, the write-call schema check
+  CAPABILITY_GAPS, asList, callList, stepCommits, schemaProblems, expectedCard,
 };

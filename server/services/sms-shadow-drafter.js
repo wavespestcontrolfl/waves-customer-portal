@@ -5779,6 +5779,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const loadContext = (liveEta) => (customer
       ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: liveEta, includeVisitLoops: true })
       : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: liveEta, includeVisitLoops: true }));
+    // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
+    // a fingerprint of this customer's facts that a delayed send re-derives
+    // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
+    // the drafting context loads, so the reply is never written from data
+    // older than its fingerprint: a change landing in between makes the
+    // send-time comparison fail, which keeps the text with staff.
+    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer);
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
@@ -5830,19 +5837,24 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
     // card; intents flipped to 'auto_send' (and that have earned the rung)
     // have it SENT to the customer automatically. Escalation intents,
-    // scheduling-intent messages, and anything without a customer + inbound
-    // link stay silent shadow.
+    // scheduling-intent messages (unless GATE_SMS_SCHEDULING_SUGGEST and the
+    // offer came from a booking picker: then a card, never a send), and
+    // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
+    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft);
     const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
       customerId: customer?.id || null,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
+      // GATE_SMS_SCHEDULING_SUGGEST: a scheduling draft whose times came from a
+      // booking picker may reach the staff card (never auto-send).
+      openTimesSnapshot,
       // Any draft whose facts list something owed goes to a person: no check can
       // prove a non-empty reply actually addressed it (openLoopThanks is the
       // demoted-gratitude case of the same rule).
-      requireReview: openLoopThanks || factsListOpenLoop(factsForDraft),
+      requireReview,
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
@@ -5926,6 +5938,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               verifier_enabled: VERIFY_ENABLED,
             },
           } : {}),
+          // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; {} while it is off):
+          // what a later sweep needs to know about this draft and cannot re-derive.
+          ...require('./sms-unanswered-reply').draftStamp({
+            autoSendSafe: parsed.auto_send_safe, requireReview, lintPass: lint.pass, verifierEnabled: VERIFY_ENABLED,
+            factsFingerprint: unansweredFacts,
+          }),
         }),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
@@ -6047,6 +6065,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
             const decisionId = await suggestMode.publishSuggestion({
@@ -6100,6 +6119,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
           if (publishDemotedCard) {
@@ -6209,6 +6229,9 @@ module.exports = {
   parseOpenTimesDaysFromFactsBlock,
   stripOpenTimesSection,
   planOpenTimesRecheck,
+  // The day label every scheduler-backed offer is rendered with (sms-offers.js
+  // reads a sent offer's calendar date back through it).
+  schedulerDayLabel,
   looksLikeOfferText,
   computeOpenTimesSnapshot,
   openTimesStillOffered,

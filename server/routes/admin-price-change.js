@@ -64,7 +64,7 @@ router.post('/send', async (req, res) => {
     const failNote = result.failed ? ` ⚠️ ${result.failed} FAILED — check logs; re-running the same change is safe (customers already notified are skipped).` : '';
     res.json({
       ...result,
-      message: `${result.created} notices created — ${result.emailed} emailed, ${result.texted} texted${result.unreachable ? `, ${result.unreachable} unreachable (no email or phone)` : ''}${result.alreadyNotified ? `, ${result.alreadyNotified} already notified (skipped)` : ''}.${failNote}`,
+      message: `${result.created} notices created — ${result.emailed} emailed, ${result.texted} texted${result.unreachable ? `, ${result.unreachable} unreachable (no email or phone)` : ''}${result.alreadyNotified ? `, ${result.alreadyNotified} already notified (skipped)` : ''}${result.rateReview ? `, ${result.rateReview} left to the annual rate review (skipped)` : ''}.${failNote}`,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

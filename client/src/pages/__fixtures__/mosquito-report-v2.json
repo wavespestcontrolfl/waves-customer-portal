@@ -1009,7 +1009,9 @@
         "emoji": "🦟",
         "level": "high",
         "trend": "up",
-        "note": "Daily rain is refilling containers and low spots — expect strong evening activity."
+        "baselineComparison": "above",
+        "weekOverWeek": null,
+        "note": "Recent rain may favor mosquito activity; check for standing water."
       },
       "conditions": {
         "headline": "Good treatment window.",
