@@ -21,7 +21,8 @@
  * handoff, staff marked done), when staff dismissed or snoozed it, or when
  * the customer shows later activity the proof does not model: a visit
  * booked, a connected call about a quote or scheduling promise, an estimate
- * sent to the customer (callback and quote promises), or a text a staff
+ * sent to the customer (a quote promise; a callback only by its own call's
+ * quote), or a text a staff
  * member sent by hand.
  *
  * Alert: one rolling "missed in the last 24 hours" list (see runInner) —
@@ -49,9 +50,6 @@ const {
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
-// Kinds an estimate sent to the customer after the promise keeps (a callback
-// about the quote, and the quote promise itself).
-const ESTIMATE_FOLLOWUP_KINDS = Object.freeze(['callback', 'send_estimate']);
 const ESTIMATE_SENT_SMS_TYPE = 'estimate_sent';
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
@@ -331,7 +329,7 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   // text with no customer_id (admin-estimates), so a linked promise would
   // never select it by customer. Its delivery text alone also matches an
   // UNOWNED row by the number the promise was made on, in this same query.
-  const linkedQuotePhones = [...new Set(scoped.filter((x) => x.r.customer_id && ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && x.callerPhone).map((x) => x.callerPhone))];
+  const linkedQuotePhones = [...new Set(scoped.filter((x) => x.r.customer_id && x.r.kind === 'send_estimate' && x.callerPhone).map((x) => x.callerPhone))];
   const smsContact = (qb) => qb.where(function smsContactClause() {
     if (customerIds.length) this.whereIn('customer_id', customerIds);
     if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
@@ -389,31 +387,33 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
       if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
     }
   }
-  // An estimate SENT to the customer after the promise keeps a callback or a
-  // quote promise: the callback ("call back to discuss the quote") is
-  // answered by the quote arriving, and a quote the office sent without
-  // linking it to this call (a re-sent or hand-built estimate) is still the
-  // quote. Same evidence boundary as everything above (`since`: the call's
-  // end, a floor time, or a renewal) and the canonical estimate-delivery
-  // witness (call-commitments handedOffWithin / witnessAt: a real handoff or
-  // an acceptance, never a suppressed send's bare sent_at). A linked caller
-  // matches the customer's own estimates (customer_id); an unlinked one only
-  // an UNOWNED estimate on the caller's phone, as estimateSentTo does, so a
-  // shared household number never clears another customer's promise. Two
-  // batched reads however many promises. An estimate the office parked on a
-  // lead the customer joined later (estimateSentTo's lead-mirror fence) is
-  // not matched here; its delivery text (sms_log 'estimate_sent', read with
-  // the texts above) is the second witness of the same send.
-  const quoteScoped = scoped.filter((x) => ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind));
+  // An estimate SENT after the promise keeps it, by kind (Codex #5543 r3):
+  // - send_estimate: ANY estimate sent to the customer ("send me the quote" is
+  //   kept by the quote arriving, linked to this call or not). A linked caller
+  //   is read through the canonical ownership fence (whereEstimateCustomerOwnership:
+  //   the customer's own rows plus live lead-owned ones, never one another
+  //   lead claims or a deleted lead's), so an estimate parked on a lead and
+  //   sent by email only still counts; an unlinked caller matches only an
+  //   UNOWNED estimate on the caller's phone, as estimateSentTo does.
+  // - callback ("call back to discuss the quote"): only the promise call's OWN
+  //   quote — an estimate stamped with that call, or on the lead that call
+  //   minted or linked (commitments.directEstimatesSentAfter, the same direct
+  //   proof the canonical fulfillment uses). An unrelated estimate going out
+  //   never closes "we'll call back with availability".
+  // Both use the canonical delivery witness (handedOffWithin / witnessAt: a
+  // real handoff or an acceptance, never a suppressed send's bare sent_at)
+  // after the evidence boundary `since`. send_estimate's delivery text
+  // (sms_log 'estimate_sent', read with the texts above) is a second witness.
   const estimateDone = new Set();
-  const quoteCustomerIds = [...new Set(quoteScoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
-  if (quoteCustomerIds.length) {
-    const lowest = new Date(Math.min(...quoteScoped.filter((x) => x.r.customer_id).map((x) => x.since.getTime())));
-    const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereIn('customer_id', quoteCustomerIds)
-      .select(...commitments.HANDOFF_COLS(conn), 'customer_id');
-    for (const x of quoteScoped.filter((y) => y.r.customer_id)) {
-      if (sent.some((e) => String(e.customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
-    }
+  const quoteScoped = scoped.filter((x) => x.r.kind === 'send_estimate');
+  const linkedQuotes = quoteScoped.filter((x) => x.r.customer_id);
+  for (const customerId of [...new Set(linkedQuotes.map((x) => String(x.r.customer_id)))]) {
+    const group = linkedQuotes.filter((x) => String(x.r.customer_id) === customerId);
+    const lowest = new Date(Math.min(...group.map((x) => x.since.getTime())));
+    const sent = await commitments.handedOffWithin(conn('estimates'), lowest)
+      .modify((b) => commitments.whereEstimateCustomerOwnership(b, customerId))
+      .select(...commitments.HANDOFF_COLS(conn));
+    for (const x of group) if (sent.some((e) => commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
   }
   const quotePhones = [...new Set(quoteScoped.filter((x) => x.phone).map((x) => x.phone))];
   if (quotePhones.length) {
@@ -424,6 +424,18 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
     for (const x of quoteScoped.filter((y) => y.phone)) {
       if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since))) estimateDone.add(x.r.id);
     }
+  }
+  const callbackQuotes = scoped.filter((x) => x.r.kind === 'callback' && x.r.call_log_id);
+  if (callbackQuotes.length) {
+    const callRows = await conn('call_log').whereIn('id', [...new Set(callbackQuotes.map((x) => x.r.call_log_id))])
+      .select('id', 'twilio_call_sid', 'created_at', 'customer_id', 'from_phone', 'to_phone', 'direction');
+    const callById = new Map(callRows.map((c) => [String(c.id), c]));
+    const probes = callbackQuotes.filter((x) => callById.has(String(x.r.call_log_id))).map((x) => {
+      const call = callById.get(String(x.r.call_log_id));
+      return { key: String(x.r.id), callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at,
+        customerId: call.customer_id || x.r.customer_id || null, phone: contactPhone(call), after: x.since };
+    });
+    if (probes.length) for (const key of (await commitments.directEstimatesSentAfter(conn, probes)).keys()) estimateDone.add(key);
   }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
@@ -438,7 +450,7 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || personTexts.some((t) => mine(t, x) && after(t, x.since))
       || estimateDone.has(x.r.id)
-      || (ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && estimateTexts.some((t) => (mine(t, x) || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && after(t, x.since)))) done.add(x.r.id);
+      || (x.r.kind === 'send_estimate' && estimateTexts.some((t) => (mine(t, x) || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && after(t, x.since)))) done.add(x.r.id);
   }
   return done;
 }
