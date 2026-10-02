@@ -2757,7 +2757,24 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
-internals, or tech notes — generic 404 for missing/draft/expired/malformed),
+internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
+for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
+"Based on N photos." from a count of the diagnostic's stored photos (capped at
+12; the number is left out when none are stored or the count fails) plus a
+fixed note when `input_assessment.photo_quality` is limited or poor; null when
+neither applies. Per finding, `evidence` `{ why, certainty, confirm }`: what
+the condition looks like, how sure the read is, and the on-site check that
+would settle it (`confirm` is null for a high-confidence finding and for
+conditions that need no check; `certainty` is null for a clean lawn). Every
+string is fixed copy in `server/services/lawn-diagnostic-evidence.js` selected
+ONLY by the finding's already-allowlisted condition label and clamped
+confidence, so the naming gate still decides what is named and the stored
+`observed_evidence`, `inferred_context`, `negative_evidence`,
+`confirmation_step` and photo limitations (model or client free text) are
+still never published. A label the table does not know gets no `evidence`
+key. The `/api/public/lawn-assessment` teaser's `first_finding` never carries
+`evidence`),
 `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
 + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
 validation before coercion — name plus a valid email or phone — links one
