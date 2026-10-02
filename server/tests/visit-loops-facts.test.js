@@ -707,6 +707,17 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ ss_status_present: false, status: null, track_state: null, ss_scheduled_date: null })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
+  test('the visit itself under way (tech started it late, unmoved) resolves the hand-off; a windowless slot given a time is a move (Codex #5610 r3)', async () => {
+    for (const over of [{ status: 'en_route' }, { status: 'on_site' }, { track_state: 'en_route' }, { track_state: 'on_property' }]) {
+      expect((await run([noshow(over)])).out.missedVisit).toBeNull();
+    }
+    // still unstarted at the same slot: open
+    expect((await run([noshow({ track_state: 'scheduled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // windowless miss: same day, still windowless = open; given a time = moved
+    expect((await run([noshow({ original_window: null, window_start: null })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([noshow({ original_window: null, window_start: '14:00:00' })])).out.missedVisit).toBeNull();
+  });
+
   test('a page of followed-up misses never hides an older open one', async () => {
     const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
     const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);

@@ -1016,6 +1016,25 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).not.toContain('OPEN TIMES (real');
   });
 
+  test('gate on: a scheduling request beside a listed MISSED VISIT gets no OPEN TIMES at all — the office rebooks (Codex #5610 r3)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn();
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: {
+        summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [],
+        visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+      },
+      inboundMessage: 'Can we rebook the visit you missed?',
+      intent: { intent: 'service_scheduling_window_reply' }, schedulingIntent: true, city: 'Venice', voiceProfile: null,
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).not.toContain('OPEN TIMES (real');
+  });
+
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn();

@@ -4603,27 +4603,30 @@ function visitLoopsNeedAnswer(context) {
 // Read from the RENDERED facts block (live drafting and the sealed eval's frozen
 // facts alike): one of the lines the rule says must be answered is listed.
 const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|MISSED VISIT|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
-function factsListOpenLoop(factsBlock) {
+// The "- " item lines of the rendered VISIT STATUS & OPEN LOOPS section ([] when absent).
+function visitLoopItemLinesIn(factsBlock) {
   const text = String(factsBlock || '');
   const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
-  if (at < 0) return false;
+  if (at < 0) return [];
   const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
   const end = lines.findIndex((l) => !l.startsWith('- '));
-  return lines.slice(0, end < 0 ? lines.length : end).some((line) => MUST_ANSWER_LINE_RE.test(line));
+  return lines.slice(0, end < 0 ? lines.length : end);
+}
+function factsListOpenLoop(factsBlock) {
+  return visitLoopItemLinesIn(factsBlock).some((line) => MUST_ANSWER_LINE_RE.test(line));
 }
 // The lines whose rule is a hand-off (WINDOW PASSED, MISSED VISIT): the reply must
 // carry the follow-up timing AND record the escalation a person owns — the
 // verifier only fact-checks claims and never sees intended_actions (Codex #5610 r2).
 const HANDOFF_LINE_RE = /^- (?:WINDOW PASSED|MISSED VISIT)\b/;
 function factsListHandoff(factsBlock) {
-  const text = String(factsBlock || '');
-  const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
-  if (at < 0) return false;
-  const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
-  const end = lines.findIndex((l) => !l.startsWith('- '));
-  return lines.slice(0, end < 0 ? lines.length : end).some((line) => HANDOFF_LINE_RE.test(line));
+  return visitLoopItemLinesIn(factsBlock).some((line) => HANDOFF_LINE_RE.test(line));
 }
-function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null }) {
+const MISSED_LINE_RE = /^- MISSED VISIT\b/;
+function factsListMissedVisit(factsBlock) {
+  return visitLoopItemLinesIn(factsBlock).some((line) => MISSED_LINE_RE.test(line));
+}
+function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, offeredTimes = null }) {
   const text = String(reply || '').trim();
   if (factsListOpenLoop(factsBlock) && !text) {
     return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
@@ -4635,6 +4638,10 @@ function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null }) {
   const violations = [];
   if (!replyPromisesFollowup(text)) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
   if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
+  // the office rebooks a miss: no customer-selectable times beside it (a frozen block may still carry OPEN TIMES)
+  if (Array.isArray(offeredTimes) && offeredTimes.length && factsListMissedVisit(factsBlock)) {
+    violations.push('MISSED VISIT is listed: the office rebooks it — offer no times (leave offered_times empty)');
+  }
   return { ok: violations.length === 0, violations };
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (a delay, a
@@ -5410,10 +5417,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // its service_interest wins inside the engine — so no classification
   // then. Carried on the snapshot so the send-time recheck asks the same
   // question.
-  const needsOpenTimes = Boolean(schedulingIntent)
+  // A listed MISSED VISIT withholds OPEN TIMES for the whole reply (owner 10-02,
+  // #5610: the office rebooks a miss — a "can we rebook the one you missed?" must
+  // not converge with customer-selectable times; Codex r3).
+  const missedVisitListed = Boolean(context?.visitLoops?.missedVisit) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const needsOpenTimes = !missedVisitListed && (Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
-    || pestReportSignal(inboundMessage, context);
+    || pestReportSignal(inboundMessage, context));
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -5572,7 +5583,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
-    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions });
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, offeredTimes: parsed?.offered_times });
     if (!singlePassOpenLoop.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassOpenLoop.violations);
@@ -5617,7 +5628,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
-    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions });
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, offeredTimes: parsed.offered_times });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;

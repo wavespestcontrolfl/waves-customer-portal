@@ -311,6 +311,13 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
       expect(validateOpenLoopAnswer({ reply: 'Sorry about that.', factsBlock: f, intendedActions: esc }).ok).toBe(false);
       expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour.", factsBlock: f }).ok).toBe(false);
     }
+    // MISSED VISIT: no times beside it, even from a frozen block that carries OPEN TIMES (Codex #5610 r3)
+    const okReply = "Sorry we missed you. We'll follow up within the hour.";
+    const offer = [{ date: 'Tue', window: '9-11' }];
+    expect(validateOpenLoopAnswer({ reply: okReply, factsBlock: facts(['- MISSED VISIT: x']), intendedActions: esc, offeredTimes: offer }))
+      .toMatchObject({ ok: false, violations: [expect.stringContaining('offer no times')] });
+    expect(validateOpenLoopAnswer({ reply: okReply, factsBlock: facts(['- MISSED VISIT: x']), intendedActions: esc, offeredTimes: [] }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: okReply, factsBlock: facts(['- WINDOW PASSED: x']), intendedActions: esc, offeredTimes: offer }).ok).toBe(true);
     // other loops keep the non-empty rule only
     expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: facts(['- WE OWE THEM: x']), intendedActions: [] }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: 'Sorry for the delay.', factsBlock: facts(['- DELAY FLAGGED: x']), intendedActions: [] }).ok).toBe(true);

@@ -2140,6 +2140,11 @@ class SmartRebooker {
         });
       }
 
+      // The scope frozen below is read HERE, after this transaction's own update took
+      // the row lock: the outer pre-read can be stale against a concurrent Edit
+      // Appointment save (the CAS never pins service/property) — Codex #5610 r3.
+      const committedScope = (await trx('scheduled_services').where({ id: serviceId })
+        .first('service_type', 'service_id', 'property_id')) || service;
       await trx('reschedule_log').insert({
         scheduled_service_id: serviceId,
         customer_id: service.customer_id,
@@ -2150,9 +2155,9 @@ class SmartRebooker {
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
         // the moved occurrence's own scope, frozen at the move (a later edit of the row never rewrites it)
-        occurrence_service_type: service.service_type || null,
-        occurrence_service_id: service.service_id || null,
-        occurrence_property_id: service.property_id || null,
+        occurrence_service_type: committedScope.service_type || null,
+        occurrence_service_id: committedScope.service_id || null,
+        occurrence_property_id: committedScope.property_id || null,
       });
     });
 

@@ -414,6 +414,8 @@ const MISSED_VISIT_SCOPE_LINE = `(MISSED VISIT lists a logged no-show from the l
 const MISSED_PAGE = 10;
 const MISSED_PAGES_MAX = 20;
 const LIVE_OR_DONE = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
+// the track_state enum's in-progress values (scheduled | en_route | on_property | complete | cancelled)
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
 // One service identity, compared the way the catalog-aware invariants compare
 // visits (completion-record-invariants, lead-to-cash-invariants): the catalog
 // row by service_id, else the ONE catalog row whose name matches the label
@@ -462,9 +464,13 @@ async function noshowFollowedUp(conn, noshow) {
     && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
   const date = calendarDay(noshow.original_date);
   const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
+  // a windowless missed slot that has since been given a time is a move too (Codex #5610 r3)
+  const currentStart = hhmmToMinutes(noshow.window_start);
   const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
-    || (missedStart != null && hhmmToMinutes(noshow.window_start) !== missedStart);
-  const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true
+    || (missedStart != null ? currentStart !== missedStart : currentStart != null);
+  // the visit itself is under way (the tech started it late, unmoved): nothing for the office to rebook
+  const underWay = ['en_route', 'on_site'].includes(noshow.status) || LIVE_TRACK_STATES.includes(noshow.track_state);
+  const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true || underWay
     || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
   if (!rowEvidence || (noshow.ss_property_id || null) !== (noshow.occurrence_property_id || null)) return false;
   const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, noshow.ss_service_type]);
