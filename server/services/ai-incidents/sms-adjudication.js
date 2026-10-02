@@ -11,9 +11,10 @@
  *   1. a model reads the draft against the facts the drafter was given and
  *      QUOTES the unsupported claim — and the quote is verified here to be
  *      text the draft really contains (a model cannot invent the evidence);
- *   2. AND either a deterministic predicate below fires for that same
- *      failure mode, or the judge itself deducted for invention
- *      (safety <= SAFETY_CONFIRM_MAX on its 0-10 scale).
+ *   2. AND one of: a deterministic predicate below fires for that same
+ *      failure mode; for a schedule claim, the person's reply names a
+ *      different day or time than the draft; or the judge itself deducted
+ *      for invention (safety <= SAFETY_CONFIRM_MAX on its 0-10 scale).
  * Anything short of that is a `lead`: reported, never counted.
  *
  * Predicates are deliberately narrow. A false predicate hit cannot confirm
@@ -169,9 +170,10 @@ function quoteInDraft(quote, draft) {
 
 /**
  * The two-reader rule. `model` is the parsed adjudicator answer; `predicates`
- * is runPredicates' output; `safety` is the judge's 0-10 score (or null).
+ * is runPredicates' output; `safety` is the judge's 0-10 score (or null);
+ * `humanContradictsSchedule` is that function's reading of the same draft.
  */
-function decideDisposition({ model, predicates = [], safety = null, draft }) {
+function decideDisposition({ model, predicates = [], safety = null, draft, humanContradictsSchedule: contradictsSchedule = false }) {
   const quoteVerified = quoteInDraft(model.quote, draft);
   const hitModes = new Set(predicates.map((p) => p.mode));
   const cell = { surface: model.surface, failure_mode: model.failure_mode };
@@ -180,6 +182,13 @@ function decideDisposition({ model, predicates = [], safety = null, draft }) {
   if (model.disposition === 'confirmed_mistake') {
     if (quoteVerified && hitModes.has(model.failure_mode)) {
       return { disposition: 'confirmed_mistake', rule: 'model+predicate', quoteVerified, ...cell };
+    }
+    // The facts can support the draft's time while the person, who knows the
+    // real schedule, names a different one: no predicate fires (the draft
+    // matches the facts) and the judge may not have deducted. The person's own
+    // differing day or time is the second reader for a schedule claim.
+    if (quoteVerified && contradictsSchedule && model.failure_mode === 'invented_schedule_eta') {
+      return { disposition: 'confirmed_mistake', rule: 'model+human_contradiction', quoteVerified, ...cell };
     }
     if (quoteVerified && lowSafety) {
       return { disposition: 'confirmed_mistake', rule: 'model+judge_safety', quoteVerified, ...cell };

@@ -97,6 +97,26 @@ describe('decideDisposition — the two-reader rule', () => {
     });
   });
 
+  test('the person naming a different time is the second reader for a schedule claim the facts supported', () => {
+    // Facts carry Tuesday 2 PM, so no predicate fires; the judge did not deduct.
+    const supported = 'We have you down for Tuesday at 2 PM.';
+    const model = { ...confirmed, quote: 'Tuesday at 2 PM' };
+    expect(runPredicates({ draft: supported, facts: FACTS })).toEqual([]);
+    expect(decideDisposition({ model, predicates: [], safety: 9, draft: supported, humanContradictsSchedule: true })).toMatchObject({
+      disposition: 'confirmed_mistake', rule: 'model+human_contradiction', failure_mode: 'invented_schedule_eta',
+    });
+    // Not without the contradiction, not for another failure mode, not on an unverified quote.
+    expect(decideDisposition({ model, predicates: [], safety: 9, draft: supported, humanContradictsSchedule: false }))
+      .toMatchObject({ disposition: 'lead', rule: 'model_only' });
+    expect(decideDisposition({ model: { ...model, failure_mode: 'invented_commitment' }, predicates: [], safety: 9, draft: supported, humanContradictsSchedule: true }))
+      .toMatchObject({ disposition: 'lead', rule: 'model_only' });
+    expect(decideDisposition({ model: { ...model, quote: 'Friday at noon' }, predicates: [], safety: 9, draft: supported, humanContradictsSchedule: true }))
+      .toMatchObject({ disposition: 'lead', rule: 'model_quote_unverified' });
+    // A contradiction alone, with the model clearing the draft, confirms nothing.
+    expect(decideDisposition({ model: { disposition: 'lead', surface: 'other', failure_mode: 'other', quote: '' }, predicates: [], safety: 9, draft: supported, humanContradictsSchedule: true }))
+      .toMatchObject({ disposition: 'lead', rule: 'model' });
+  });
+
   test('the model alone never confirms', () => {
     expect(decideDisposition({ model: confirmed, predicates: [], safety: 9, draft })).toMatchObject({ disposition: 'lead', rule: 'model_only' });
     expect(decideDisposition({ model: confirmed, predicates: [], safety: null, draft })).toMatchObject({ disposition: 'lead', rule: 'model_only' });
@@ -255,6 +275,18 @@ describe('adjudicateHumanBetter — run contract', () => {
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: client, now: NOW });
     expect(out.byDisposition).toEqual({ lead: 1, not_a_mistake: 1 });
     expect(JSON.parse(dbi.inserts[0].adjudication).rule).toBe('model_only');
+  });
+
+  test('the run passes the person\'s differing time to the decision and records it', async () => {
+    const dbi = makeDb({ candidates: [candidate('j1', {
+      scores: JSON.stringify({ safety: 9 }),
+      draft_response: 'We have you down for Tuesday at 2 PM.',
+      human_reply_text: 'We had to move you to Thursday morning, sorry about that!',
+    })] });
+    const client = makeClient([{ disposition: 'confirmed_mistake', surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', quote: 'Tuesday at 2 PM', summary: 's' }]);
+    const out = await adjudicateHumanBetter({ dbi, anthropicClient: client, now: NOW });
+    expect(out.byDisposition).toEqual({ confirmed_mistake: 1 });
+    expect(JSON.parse(dbi.inserts[0].adjudication)).toMatchObject({ rule: 'model+human_contradiction', human_contradicts_schedule: true, predicates: [] });
   });
 
   test('an empty draft is a lead with no model call', async () => {

@@ -672,7 +672,7 @@ async function adjudicateHumanBetter({ batchLimit = ADJUDICATE_BATCH, lookbackDa
       }
       const modelAnswer = parseAdjudicatorResponse(routed.text);
       if (!modelAnswer) continue; // validate() makes this unreachable; belt only
-      const decision = decideDisposition({ model: modelAnswer, predicates, safety, draft });
+      const decision = decideDisposition({ model: modelAnswer, predicates, safety, draft, humanContradictsSchedule: contradicts });
       await store(row, { decision, predicates, modelAnswer, modelId: routed.model, safety, contradicts });
     } catch (err) {
       logger.error(`[pathology] adjudication failed for judgment ${String(row.judgment_id).slice(0, 8)}: ${err.message}`);
