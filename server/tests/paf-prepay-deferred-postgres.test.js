@@ -357,7 +357,8 @@ postgres('annual prepay charged after the first visit', () => {
       await perform(f.parentId, f.customerId);
       require('../services/stripe').chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
-      raiseAdminAlert.mockRejectedValueOnce(new Error('synthetic alert failure'));
+      // notifyAdmin's own failure mode: a null return, not a throw.
+      raiseAdminAlert.mockResolvedValueOnce(null);
       await sweep();
       expect((await jobOf(f)).status).toBe('delivered_fallback');
       expect(await jobOf(f)).not.toHaveProperty('charge_alert_raised_at');

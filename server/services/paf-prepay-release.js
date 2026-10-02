@@ -143,7 +143,11 @@ async function releaseOne(row, now) {
 
 async function raise(spec, dedupeKey) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
-  await raiseAdminAlert('billing', { area: 'Billing', severity: 'needs-you', who: 'person', ...spec }, { dedupeKey });
+  const result = await raiseAdminAlert('billing', { area: 'Billing', severity: 'needs-you', who: 'person', ...spec }, { dedupeKey });
+  // notifyAdmin reports a failed write as null rather than throwing: only a
+  // persisted row (or the office's own preference turning the bell off) may
+  // be stamped as raised; anything else is retried next pass.
+  if (!result || !(result.id || result.suppressed)) throw new Error(`alert ${dedupeKey} was not persisted`);
 }
 
 async function close(key, resolution) {
