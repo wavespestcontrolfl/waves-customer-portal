@@ -468,33 +468,33 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
 async function dispatchRecipientOptins(claims = [], customer = null) {
   let requested = 0;
   for (const claim of claims) {
-    // This claim's row. An on-site ask (visitId) is bound to its visit: every
-    // write below is scoped to it, so a newer booking that rebound the row to
-    // another visit is never touched.
-    // With a lease taken, every write is also scoped to THAT lease.
+    // This claim's row, bound to its visit (an on-site ask) or to NO visit (a
+    // portal / explicit-consent ask): a booking that rebound the row to a
+    // visit is never touched by an older claim. With the lease taken, every
+    // write is also scoped to THAT lease.
     let leaseAt = null;
     const claimRow = () => db('recipient_optin')
       .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
-      .where((q) => { if (claim.visitId) q.where({ visit_id: claim.visitId }); })
+      .where((q) => { if (claim.visitId) q.where({ visit_id: claim.visitId }); else q.whereNull('visit_id'); })
       .where((q) => { if (leaseAt) q.where({ dispatch_lease_at: leaseAt }); });
     const markAttempted = () => claimRow()
       .update({ dispatched_at: new Date(), dispatch_lease_at: null, updated_at: new Date() })
       .catch(() => {});
     try {
-      // An on-site ask takes a DISPATCH LEASE first (dispatch_lease_at, while
-      // undispatched, bound to this visit and not already leased): a newer
-      // booking can no longer rebind it, and only one claim sends. The lease
+      // Every ask takes a DISPATCH LEASE first (dispatch_lease_at, while
+      // undispatched, bound to its visit or none, and not already leased): a
+      // newer booking can no longer rebind it, and only one claim sends. The lease
       // is NOT dispatched_at — that stays the proof the provider accepted the
       // ask, so a YES can never confirm an ask still in flight. The visit is re-checked at
       // the provider boundary under the lease: dead releases the ask
       // (ask_failed); a hold or an unreadable check returns the lease (the
       // recovery sweep retries).
+      const takenAt = new Date();
+      const leased = await claimRow().whereNull('dispatched_at').where(leaseFree)
+        .update({ dispatch_lease_at: takenAt, updated_at: new Date() });
+      if (!leased) continue;
+      leaseAt = takenAt;
       if (claim.visitId) {
-        const takenAt = new Date();
-        const leased = await claimRow().whereNull('dispatched_at').where(leaseFree)
-          .update({ dispatch_lease_at: takenAt, updated_at: new Date() });
-        if (!leased) continue;
-        leaseAt = takenAt;
         const asked = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
         if (asked.state !== 'live') {
           await claimRow().update({
@@ -603,8 +603,9 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
               }),
             });
             const marked = await trx('recipient_optin')
-              .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
-              .update({ dispatched_at: new Date(), updated_at: new Date() });
+              .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending', dispatch_lease_at: leaseAt })
+              .whereNull('visit_id')
+              .update({ dispatched_at: new Date(), dispatch_lease_at: null, updated_at: new Date() });
             if (marked !== 1) {
               throw new Error(`dispatch marker update touched ${marked} rows (expected 1)`);
             }

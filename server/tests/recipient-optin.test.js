@@ -422,6 +422,24 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     expect(done.patch.dispatch_lease_at).toBeNull();
   });
 
+  test('a portal (no-visit) ask also takes the lease, scoped to visit_id IS NULL', async () => {
+    const { optin, writes, send } = load();
+    const portal = { ...claim, visitId: undefined };
+    expect((await optin.dispatchRecipientOptins([portal], { id: 'c1' })).requested).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    const lease = writes.find((w) => w.patch && w.patch.dispatch_lease_at instanceof Date);
+    expect(lease.nulls).toEqual(expect.arrayContaining(['visit_id', 'dispatched_at']));
+    const done = writes.find((w) => w.patch && w.patch.provider_sid === 'SM1');
+    expect(done.nulls).toContain('visit_id');
+    expect(done.filter).toMatchObject({ dispatch_lease_at: lease.patch.dispatch_lease_at });
+  });
+
+  test('a portal ask whose row a booking rebound (no lease) sends nothing', async () => {
+    const { optin, send } = load({ leaseCount: 0 });
+    expect((await optin.dispatchRecipientOptins([{ ...claim, visitId: undefined }], { id: 'c1' })).requested).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   test('no lease (a newer booking owns the row) = nothing sent', async () => {
     const { optin, send } = load({ leaseCount: 0 });
     expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
