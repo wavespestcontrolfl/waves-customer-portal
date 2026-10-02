@@ -68,6 +68,8 @@ const REASON_LABELS = {
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
+  missing_first_name: "First name missing — get it",
+  household_contact_linked: "New household contact — confirm",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",

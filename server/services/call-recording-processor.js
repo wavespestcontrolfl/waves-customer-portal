@@ -891,6 +891,8 @@ const CONFIRM_REASON_TEXT = {
   service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
+  missing_first_name: "no first name captured — get the account holder's first name (booked on the last name alone)",
+  household_contact_linked: 'caller from a number not on file was linked to the existing account at this address as a household contact — confirm who they are',
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
@@ -3718,6 +3720,70 @@ async function avAddressUniqueOwner(matches, opts) {
   } catch (e) {
     logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
     return null;
+  }
+}
+
+// GATE_CALL_HOUSEHOLD_ADDRESS_MATCH (owner ruling 2026-10-02): a caller from a
+// number NOT on file who is calling about the exact address of ONE existing
+// active residential customer is a household contact of that account (a
+// spouse, a neighbour-sitter, an adult child), not a new customer. Phone-only
+// matching left the call customer-less and the confirmed booking unbooked.
+//
+// Deterministic only: the number matches NOBODY (any slot, any live customer),
+// the street (suffix-canonical, unit-stripped) + 5-digit ZIP matches exactly
+// ONE active, non-deleted customer, that customer is an established one
+// (FAIL_OPEN_CUSTOMER_STAGES), and neither side carries a unit that differs
+// from the other (a unit on one side only counts as differing: a condo door is
+// a different account). Commercial accounts are refused. Anything weaker
+// returns { customer: null, reason } and the caller falls back to today's
+// behaviour. Never throws.
+async function findHouseholdCustomerByAddress({ phone, address = {}, commercialCall = false, conn = db } = {}) {
+  const refuse = (reason) => ({ customer: null, reason });
+  try {
+    if (commercialCall) return refuse('commercial_call');
+    const key = phoneKey(phone);
+    const street = String(address.address_line1 || '').trim();
+    const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
+    const zip5 = normalizeZip(address.zip);
+    if (!key || !street || !zip5) return refuse('no_phone_or_address');
+
+    const phoneHit = await conn('customers').whereNull('deleted_at')
+      .where(function orPhones() {
+        for (const col of CONTACT_MATCH_PHONE_COLS) {
+          this.orWhereRaw(key.length === 10
+            ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+            : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`, [key]);
+        }
+      })
+      .first('id');
+    if (phoneHit) return refuse('phone_on_file');
+
+    const rows = await conn('customers')
+      .whereNull('deleted_at')
+      .where({ active: true })
+      .whereRaw("LEFT(regexp_replace(COALESCE(zip, ''), '[^0-9]', '', 'g'), 5) = ?", [zip5])
+      .select('id', 'first_name', 'last_name', 'phone', 'address_line1', 'address_line2', 'zip',
+        'pipeline_stage', 'property_type', 'waveguard_tier')
+      .limit(50);
+    const wantStreet = streetKey(street);
+    const wantUnit = unitKey(address.address_line2) || streetEmbeddedUnitKey(street);
+    const sameStreet = rows.filter((r) => streetKey(r.address_line1) === wantStreet && wantStreet);
+    if (sameStreet.length === 0) return refuse('no_address_match');
+    if (sameStreet.length > 1) return refuse('multiple_customers_at_address');
+    const match = sameStreet[0];
+    const haveUnit = unitKey(match.address_line2) || streetEmbeddedUnitKey(match.address_line1);
+    if (wantUnit !== haveUnit) return refuse('unit_differs');
+    const type = String(match.property_type || '').toLowerCase();
+    if (['commercial', 'business'].includes(type) || String(match.waveguard_tier || '') === 'Commercial') {
+      return refuse('commercial_account');
+    }
+    if (!FAIL_OPEN_CUSTOMER_STAGES.has(String(match.pipeline_stage || '').trim().toLowerCase())) {
+      return refuse('not_established_customer');
+    }
+    return { customer: match, reason: 'address_match' };
+  } catch (e) {
+    logger.warn(`[call-proc] household address match failed: ${e.code || e.name || 'error'}`);
+    return refuse('lookup_error');
   }
 }
 
@@ -6630,7 +6696,12 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   };
 
   const missing = [];
-  if (!String(merged.firstName || '').trim()) missing.push('first_name');
+  // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+  // gave only a last name still books; the missing first name is ADVISORY
+  // (the missing_first_name card asks the office for it), like the last name.
+  // Gate off: first_name stays required, byte-identical to before.
+  const firstNameAdvisory = require('../config/feature-gates').callFirstNameAdvisoryLive();
+  if (!String(merged.firstName || '').trim() && !firstNameAdvisory) missing.push('first_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -6658,6 +6729,9 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   }
   if (!String(merged.lastName || '').trim()) {
     advisory.push('last_name');
+  }
+  if (firstNameAdvisory && !String(merged.firstName || '').trim()) {
+    advisory.push('first_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -6787,7 +6861,7 @@ async function backfillLinkedCustomerFromExtraction({ customerId, existing, extr
   return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
 }
 
-async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false, suppressEmail = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
   if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
@@ -6806,7 +6880,9 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   // stored email is never overwritten by a call capture.
   const storedEmailInvalid = customer.email && !EMAIL_RE.test(String(customer.email).trim().toLowerCase());
   const extractedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
-  if ((!customer.email || storedEmailInvalid) && extractedEmailValid) updates.email = extracted.email;
+  // suppressEmail: a household contact's email is NOT the account holder's
+  // (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH) — never written onto the account.
+  if ((!customer.email || storedEmailInvalid) && extractedEmailValid && !suppressEmail) updates.email = extracted.email;
   if (!customer.address_line1 && extracted.address_line1) updates.address_line1 = extracted.address_line1;
   if (!customer.city && extracted.city) updates.city = extracted.city;
   if (!customer.state && extracted.state) updates.state = extracted.state;
@@ -11931,8 +12007,23 @@ const CallRecordingProcessor = {
       }
     }
 
+    // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+    // gave only a LAST name still becomes a customer when the call otherwise
+    // qualifies — a validated, in-service-area premise address (the caller is
+    // on the line to book it). The missing first name rides an advisory card.
+    // Every other creation guard (phone, voicemail, non-customer nature)
+    // still applies at the branch below. Gate off: first_name is required.
+    const firstNameAdvisoryCreate = !extracted.first_name
+      && require('../config/feature-gates').callFirstNameAdvisoryLive()
+      && !!String(extracted.last_name || '').trim()
+      && !!String(extracted.address_line1 || '').trim()
+      && ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status)
+      && effectiveAddressValidation?.inServiceArea === true;
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
+    // GATE_CALL_HOUSEHOLD_ADDRESS_MATCH: this pass linked the call by service
+    // address (the caller's number is NOT on the account).
+    let householdLinkedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -11953,6 +12044,28 @@ const CallRecordingProcessor = {
         // duplicate customer (codex round-10 P2).
         avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
+      // GATE_CALL_HOUSEHOLD_ADDRESS_MATCH (owner ruling 2026-10-02): no phone
+      // match anywhere, but the stated service address belongs to exactly ONE
+      // active residential customer -> the caller is a household contact of
+      // that account. Never for a voicemail, spam, or a third-party nature
+      // (applicant / vendor), and never for a commercial call.
+      const householdMatch = (!existing && !sharedPhoneAmbiguity.candidates
+        && require('../config/feature-gates').callHouseholdAddressMatchLive()
+        && !extracted.is_voicemail && !extracted.is_spam && !v2ThirdPartyCallNature)
+        ? await findHouseholdCustomerByAddress({
+          phone,
+          address: {
+            address_line1: extracted.address_line1,
+            address_line2: extracted.address_line2 || null,
+            zip: extracted.zip,
+          },
+          commercialCall: v2CanonicalExtraction?.property?.property_type === 'commercial'
+            || v2CanonicalExtraction?.property?.hoa_common_area_service === true,
+        })
+        : null;
+      if (householdMatch && !householdMatch.customer) {
+        logger.info(`[call-proc] household address match refused for ${maskSid(callSid)}: ${householdMatch.reason}`);
+      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -11961,6 +12074,52 @@ const CallRecordingProcessor = {
         await backfillLinkedCustomerFromExtraction({
           customerId, existing, extracted, source: 'call-extraction-backfill',
         });
+      } else if (householdMatch?.customer) {
+        // Link only: NO email/address/phone backfill onto the account holder
+        // from a different person's call. The caller's name + number go to a
+        // service-contact slot through the shared secondary-contact writer.
+        customerId = householdMatch.customer.id;
+        householdLinkedThisPass = true;
+        const householdContact = {
+          first_name: extracted.first_name || null,
+          last_name: extracted.last_name || null,
+          phone,
+          email: null,
+          role: ['tenant', 'spouse_partner', 'family_member'].includes(v2CanonicalExtraction?.caller?.relationship_to_property)
+            ? v2CanonicalExtraction.caller.relationship_to_property : null,
+          wants_notifications: true,
+        };
+        let householdPersist = 'not_attempted';
+        try {
+          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
+        } catch (persistErr) {
+          householdPersist = 'error';
+          logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
+        }
+        logger.info(`[call-proc] Linked ${maskSid(callSid)} to customer ${customerId} by service address (household contact: ${householdPersist})`);
+        const accountName = [householdMatch.customer.first_name, householdMatch.customer.last_name].filter(Boolean).join(' ') || null;
+        if (!bridgeNeedsConfirmation.includes('household_contact_linked')) bridgeNeedsConfirmation.push('household_contact_linked');
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'household_contact_linked',
+            onFileAddress,
+            extraction: v2CanonicalExtraction || undefined,
+            severity: 'advisory',
+            extraPayload: {
+              note: `New household contact booked on ${accountName || 'the account at this address'}`,
+              matched_customer_id: String(customerId),
+              matched_customer_name: accountName,
+              household_contact: {
+                name: [householdContact.first_name, householdContact.last_name].filter(Boolean).join(' ') || null,
+                phone,
+              },
+              contact_saved: householdPersist,
+            },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore()
+          .catch((triageErr) => logger.warn(`[call-proc] household-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
@@ -11983,7 +12142,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (extracted.first_name && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
@@ -12032,7 +12191,7 @@ const CallRecordingProcessor = {
           // Lazy require: route module from a service (load-cycle risk).
           const { ensureCustomerAccount } = require('../routes/admin-customers');
           const account = await ensureCustomerAccount(db, {
-            firstName: extracted.first_name,
+            firstName: extracted.first_name || '',
             lastName: extracted.last_name || null,
             phone,
             email: extracted.email || null,
@@ -12061,7 +12220,10 @@ const CallRecordingProcessor = {
               account_id: account.accountId,
               is_primary_profile: !account.existingCustomer,
               profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-              first_name: extracted.first_name,
+              // customers.first_name is NOT NULL: the advisory-create path
+              // (last name only) stores '' — every greeting falls back to
+              // "there" (see the audit in the PR notes).
+              first_name: extracted.first_name || '',
               last_name: extracted.last_name || null,
               phone,
               email: extracted.email || null,
@@ -12216,7 +12378,7 @@ const CallRecordingProcessor = {
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
     const prelinkedGate = prelinkedBackfillGate({
-      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass: phoneMatchedThisPass || householdLinkedThisPass, extracted, explicitUnlink,
       thirdPartyCallNature: v2ThirdPartyCallNature,
     });
     if (prelinkedGate.eligible) {
@@ -13700,7 +13862,7 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16601,7 +16763,7 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, suppressEmail: householdLinkedThisPass });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the
@@ -16649,6 +16811,26 @@ const CallRecordingProcessor = {
           if (customerValidation.advisory?.includes('last_name')) {
             await fileLastNameAdvisoryCard(db)
               .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+          }
+          // First-name advisory (GATE_CALL_FIRST_NAME_ADVISORY, owner ruling
+          // 2026-10-02): same shape as the surname card above; only advised
+          // when the gate let a first-name-less booking through.
+          const fileFirstNameAdvisoryCard = (conn) => conn('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'missing_first_name',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+              },
+            }))
+            .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore()
+            .catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
+          if (customerValidation.advisory?.includes('first_name')) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
@@ -16756,7 +16938,9 @@ const CallRecordingProcessor = {
               missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
             );
           } else {
-            const firstName = customerValidation.details.firstName || '';
+            // 'there' when no first name is on file (advisory-create path):
+            // a confirmation must never read "Hello !" or "Hello null!".
+            const firstName = customerValidation.details.firstName || 'there';
             const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
             // Price: transcript-quoted (what the agent and caller agreed)
             // first, catalog list price fallback (one_time services only).
@@ -17145,6 +17329,9 @@ const CallRecordingProcessor = {
                   // (codex #4991 r2).
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
+                  }
+                  if (freshValidation.advisory?.includes('first_name')) {
+                    await fileFirstNameAdvisoryCard(trx);
                   }
                   // Geographic veto re-runs on the fenced row (Codex #5403
                   // r6): when the call stated no locality, the pre-fence
@@ -22223,6 +22410,7 @@ CallRecordingProcessor._test = {
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
+  findHouseholdCustomerByAddress,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

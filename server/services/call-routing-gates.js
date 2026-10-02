@@ -890,7 +890,7 @@ const FLAG_PAYLOAD_STAMPS = [
   // The surname card's provenance evidence: the names THIS call heard, at
   // filing (codex r18 P1). The merged V1 names the surname backfill writes
   // from arrive as extraPayload.heard_name_v1 from the processor.
-  { flags: new Set(['missing_last_name']),
+  { flags: new Set(['missing_last_name', 'missing_first_name']),
     stamp: ({ extraction }) => ({ heard_name: { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null } }) },
   { flags: ADDRESS_SNAPSHOT_FLAGS, stamp: ({ extraction }) => ({ heard_address: heardAddressSnapshot(extraction) }) },
   { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
@@ -1022,6 +1022,12 @@ function buildTriageItem({
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',
+    // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
+    // collects the first name; never holds the booking.
+    missing_first_name: 'name_review',
+    // Caller from a number not on file linked to the one account at the call's
+    // service address (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH) — the office confirms.
+    household_contact_linked: 'customer_field_conflict',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-
