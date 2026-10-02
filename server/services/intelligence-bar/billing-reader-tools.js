@@ -133,12 +133,29 @@ function maskCardNumbers(text) {
     return '[number]';
   });
 }
+// Bearer credentials. The customer-facing routes that carry a token as a path segment (client router paths and the
+// server's /api mounts for them: pay-v2 and pay-statement, receipt-v2, estimate-public, tracking, reports, review-gate
+// (rate), card-public, reviews, documents, the short-link and referral redirects, unsubscribe and the other :token
+// routes): the segment after the route is replaced. Beyond routes, any standalone 32+ character hex or base64url run
+// that is not a UUID is a token too, and the invoice tokens the reader holds are removed exactly.
+const TOKEN_ROUTES = [
+  'pay/statement', 'pay', 'receipt', 'estimates?', 'appointment', 'book', 'card', 'careers/interview', 'interview', 'contract', 'inspection',
+  'lawn-report', 'pest-report', 'prep', 'price-change', 'rate', 'recap', 'report/project', 'reports?', 'reschedule', 'reservice', 'review', 'reviews',
+  'secure', 'service-outlines', 'track(?:ing)?', 'visit', 'documents', 'project', 'quiz', 'feedback', 'confirm', 'shared', 'unsubscribe', 'stm', 'l', 'r', 'go', 'e',
+];
+const TOKEN_ROUTE_RE = new RegExp(`(/(?:api/)?(?:${TOKEN_ROUTES.join('|')})/)[A-Za-z0-9_.~%-]{4,}`, 'gi');
+const LONG_TOKEN_RE = /[A-Za-z0-9_-]{32,}/g;
+const maskTokens = (text) => text.replace(TOKEN_ROUTE_RE, '$1[token]').replace(LONG_TOKEN_RE, (run) => (/\d/.test(run) ? '[token]' : run));
 // Emails and card numbers are masked; record ids (UUIDs) pass through untouched, so a digit-heavy id still works in
 // the follow-up read, and the text around them is masked.
-// Complete emails are masked FIRST (an address may have a UUID local part), then standalone UUIDs are exempted.
-const maskSensitive = (text) => String(text).replace(EMAIL_RE, '[email]').split(UUID_IN_TEXT_RE)
-  .map((part, at) => (at % 2 ? part : maskCardNumbers(part)))
-  .join('');
+// Order: exact known tokens, tokenized routes, complete emails (an address may have a UUID local part), THEN standalone
+// UUIDs are exempted from the card and long-token passes.
+function maskSensitive(text, secrets = []) {
+  let out = String(text);
+  for (const secret of secrets) if (secret) out = out.split(String(secret)).join('[token]');
+  out = out.replace(TOKEN_ROUTE_RE, '$1[token]').replace(EMAIL_RE, '[email]');
+  return out.split(UUID_IN_TEXT_RE).map((part, at) => (at % 2 ? part : maskCardNumbers(maskTokens(part)))).join('');
+}
 // Free text (a decline message, a manual-payment note, a ledger note) can echo
 // an email or a card number: both are masked before anything leaves.
 function scrub(value, max = 240) {
@@ -150,10 +167,10 @@ function scrub(value, max = 240) {
 // THE egress scrubber: every string that leaves either tool (any free-text column, a reason built from row data, a
 // payer or customer name) passes through it once, at the single exit (executeBillingReaderTool), so a field added
 // later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
-function scrubEgress(value) {
-  if (typeof value === 'string') return maskSensitive(value);
-  if (Array.isArray(value)) return value.map(scrubEgress);
-  if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner)]));
+function scrubEgress(value, secrets = []) {
+  if (typeof value === 'string') return maskSensitive(value, secrets);
+  if (Array.isArray(value)) return value.map((inner) => scrubEgress(inner, secrets));
+  if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner, secrets)]));
   return value;
 }
 
@@ -275,8 +292,9 @@ const needsReconciliation = (reason) => held('needs_reconciliation', `${reason} 
 // The tender that proves a bank (ACH) debit: only `us_bank_account` (the value the canonical classifier,
 // recurring-card-on-file.js classifySavedMethodChargeInvoice, reads from invoice.payment_method). A processing
 // card intent, or a tender nobody recorded, is never a bank payment.
-const BANK_TENDER = 'us_bank_account';
-const isBankTender = (tender) => String(tender || '') === BANK_TENDER;
+// Every tender source goes through the canonical classifier (autopay-eligibility.js isBankMethodType: 'ach',
+// 'us_bank_account', 'bank', 'bank_account'): savePaymentMethod writes 'ach', other paths 'us_bank_account'.
+const isBankTender = (tender) => require('../autopay-eligibility').isBankMethodType(tender);
 
 // Every PaymentIntent tied to the invoice (its own and each unresolved attempt's) and the processing payments rows
 // that record them, with each row's and attempt's tender. `unpaired` is true when an unresolved attempt has no
@@ -646,14 +664,14 @@ function invoiceItem(listedRow, today, fence, heldIds) {
 
 // ─── get_customer_invoices ──────────────────────────────────────────
 
-async function getCustomerInvoices(input, actionContext) {
+async function getCustomerInvoices(input, actionContext, secrets = new Set()) {
   const resolved = await resolveBillingCustomer(input, actionContext);
   if (resolved.error) return resolved;
   // Every read below shares ONE read-only REPEATABLE READ snapshot, and the selected customer is re-validated INSIDE it.
   return inSnapshot(async (database) => {
     const current = await database('customers').where({ id: resolved.customer.id }).first('id', 'first_name', 'last_name', 'phone', 'deleted_at');
     if (!current || current.deleted_at || String(current.id) !== String(resolved.customer.id)) return { error: CUSTOMER_CHANGED_REASON, code: 'record_unavailable' };
-    return listForCustomer(current, input, database);
+    return listForCustomer(current, input, database, secrets);
   });
 }
 
@@ -670,7 +688,7 @@ async function attachTermSidePrepay(rows, database) {
   }
 }
 
-async function listForCustomer(customer, input, database) {
+async function listForCustomer(customer, input, database, secrets) {
   const InvoiceService = require('../invoice');
   const { collectionHoldInvoiceIds } = require('../collections/collection-hold');
   const today = etDateString();
@@ -684,6 +702,7 @@ async function listForCustomer(customer, input, database) {
   const page = await InvoiceService.list({
     customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest', database, stableOrder: true,
   });
+  for (const row of page.invoices) if (row.token) secrets.add(row.token);
   await attachTermSidePrepay(page.invoices, database);
   const summary = await accountSummary(InvoiceService, customer, today, database);
   const fences = await fenceAll(page.invoices, database);
@@ -835,7 +854,7 @@ async function loadRecordedPayments(customerId, invoice, database) {
   };
 }
 
-async function getInvoiceDetail(input, actionContext) {
+async function getInvoiceDetail(input, actionContext, secrets = new Set()) {
   if (!input.invoice_id || !UUID_RE.test(String(input.invoice_id))) {
     return { error: 'A valid invoice_id is required', code: 'invalid_target' };
   }
@@ -843,7 +862,7 @@ async function getInvoiceDetail(input, actionContext) {
     return { error: 'A valid customer_id is required', code: 'invalid_target' };
   }
   // Every read below shares ONE read-only REPEATABLE READ snapshot.
-  return inSnapshot((database) => detailInSnapshot(input, actionContext, database));
+  return inSnapshot((database) => detailInSnapshot(input, actionContext, database, secrets));
 }
 
 const RECORD_UNAVAILABLE = { error: 'That invoice is unavailable for this customer', code: 'record_unavailable' };
@@ -937,10 +956,11 @@ function discountsProjection(facts, lines) {
   };
 }
 
-async function detailInSnapshot(input, actionContext, database) {
+async function detailInSnapshot(input, actionContext, database, secrets) {
   const loaded = await authorizeInvoiceRead(input, actionContext, database);
   if (loaded.refusal) return loaded.refusal;
   const { invoice, customer } = loaded;
+  if (invoice.token) secrets.add(invoice.token);
   const fence = await invoiceCollectibility(invoice, database);
   if (fence.state === 'unavailable') return { error: `That invoice is unavailable: ${RECORD_CHANGED_REASON}`, code: 'record_unavailable' };
   const facts = effectiveRow(invoice, fence);
@@ -974,10 +994,12 @@ async function executeBillingReaderTool(toolName, input = {}, actionContext = {}
     return { error: 'Billing readers are limited to admin accounts', code: 'permission_denied' };
   }
   const context = actionContext || {};
+  // The invoice pay-link tokens a call has in hand: removed exactly from every string it returns.
+  const secrets = new Set();
   try {
     switch (toolName) {
-      case 'get_customer_invoices': return scrubEgress(await getCustomerInvoices(input || {}, context));
-      case 'get_invoice_detail': return scrubEgress(await getInvoiceDetail(input || {}, context));
+      case 'get_customer_invoices': return scrubEgress(await getCustomerInvoices(input || {}, context, secrets), [...secrets]);
+      case 'get_invoice_detail': return scrubEgress(await getInvoiceDetail(input || {}, context, secrets), [...secrets]);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

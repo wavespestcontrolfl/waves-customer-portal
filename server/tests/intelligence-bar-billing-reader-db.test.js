@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2; let TIED; let VISIT;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let U2; let L; let M; let N; let T; let R2; let TIED; let VISIT;
   const inv = {};
   const tokens = [];
 
@@ -191,6 +191,15 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
     await db('payment_plans').insert(Array.from({ length: 7 }, (_, n) => ({ customer_id: M, invoice_id: manyPlans.id, total_balance: 70, payment_amount: 10, payment_frequency: 'monthly', status: 'cancelled', plan_start_date: day(-n - 1), next_payment_date: day(7) })));
+    // The saved-bank writer's own alias: payment_methods.method_type 'ach' (savePaymentMethod), on the attempt's method and on the payment row's snapshot.
+    U2 = await customer(`Ach${run}`, `Alias${run}`);
+    await db('payment_methods').insert({ customer_id: U2, method_type: 'ach', stripe_payment_method_id: `pm_ach_${run}` });
+    const achAttempt = await invoice('u2_ach_attempt', U2, { total: 31, payment_method: 'us_bank_account', stripe_payment_intent_id: `pi_u2a_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achAttempt.id, stripe_payment_method_id: `pm_ach_${run}`, idempotency_key: `k-u2a-${run}`, status: 'ambiguous', amount: 31, stripe_payment_intent_id: `pi_u2a_${run}`, submitted_at: new Date() });
+    await db('payments').insert({ customer_id: U2, payment_date: day(0), amount: 31, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_u2a_${run}`, description: 'In flight', metadata: json({ invoice_id: achAttempt.id }) });
+    const achRow = await invoice('u2_ach_row', U2, { total: 32, stripe_payment_intent_id: `pi_u2r_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achRow.id, stripe_payment_method_id: 'pm_unknown_synth', idempotency_key: `k-u2r-${run}`, status: 'ambiguous', amount: 32, stripe_payment_intent_id: `pi_u2r_${run}`, submitted_at: new Date() });
+    await db('payments').insert({ customer_id: U2, payment_date: day(0), amount: 32, status: 'processing', processor: 'stripe', payment_method_type: 'ach', stripe_payment_intent_id: `pi_u2r_${run}`, description: 'In flight', metadata: json({ invoice_id: achRow.id }) });
     // ACH evidence accounts for the attempt only: an unresolved orphan charge, or a failed row flagged ambiguous, still holds.
     W2 = await customer(`Mixed${run}`, `Holds${run}`);
     for (const key of ['w2_orphan', 'w2_failamb', 'w2_dbfail']) {
@@ -585,6 +594,40 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.recorded_payments[0].funded_by_payer.name).toContain('[email]');
     expect(detail.payment_plan.active).toBeNull();
     expect(detail.payment_plan.history[0].payment_frequency).toContain('[email]');
+  });
+
+  test('the saved-bank alias \'ach\' reads as bank in flight through every tender source (the canonical isBankMethodType)', async () => {
+    const list = await read('get_customer_invoices', { customer_id: U2, limit: 50 });
+    for (const key of ['u2_ach_attempt', 'u2_ach_row']) {
+      expect(by(list, key)).toMatchObject({ collectible: false, needs_reconciliation: false, bank_payment_processing: true });
+    }
+    expect(list.account_summary.processing.bank_payment_in_flight).toBe(2);
+    expect(list.account_summary.needs_reconciliation_count).toBe(0);
+  });
+
+  test('bearer tokens never leave: tokenized route URLs, bare long tokens and the invoice\'s own token are redacted; UUIDs stay', async () => {
+    const Q = await customer(`Token${run}`, `Leak${run}`);
+    const hex64 = crypto.randomBytes(32).toString('hex');
+    const b64 = crypto.randomBytes(30).toString('base64url');
+    const uuid = '123e4567-e89b-12d3-a456-426614174099';
+    const row = await invoice('q_token', Q, { total: 5, title: `Link https://portal.example.com/pay/${hex64} and /receipt/${hex64.slice(0, 40)} sent`,
+      line_items: JSON.stringify([{ description: `see /estimate/${hex64} or /api/estimates/${b64} or /l/abc123x`, quantity: 1, unit_price: 5, amount: 5, category: `/track/${hex64}` }]),
+      payment_reference: `token ${hex64} id ${uuid} done` });
+    const list = json(await read('get_customer_invoices', { customer_id: Q }));
+    const detail = json(await read('get_invoice_detail', { invoice_id: row.id }));
+    for (const text of [list, detail]) {
+      expect(text).not.toContain(hex64.slice(0, 20));
+      expect(text).not.toContain(b64.slice(0, 20));
+      expect(text).not.toContain(row.token);
+      expect(text).not.toContain('abc123x');
+    }
+    expect(detail).toContain('/pay/[token]');
+    expect(detail).toContain('/receipt/[token]');
+    expect(detail).toContain('/estimate/[token]');
+    expect(detail).toContain('/api/estimates/[token]');
+    expect(detail).toContain('/l/[token]');
+    expect(detail).toContain('/track/[token]');
+    expect(detail).toContain(`token [token] id ${uuid} done`);
   });
 
   test('an email whose local part is a UUID is masked whole, while a standalone UUID stays', async () => {
