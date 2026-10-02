@@ -832,4 +832,30 @@ describe('default-product reads keep the current technician assignment boundary'
     expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(expected === 200 ? 1 : 0);
     if (expected === 404) expect(result.body).toEqual({ error: 'Service not found' });
   });
+
+  test('a visit reassigned while defaults resolve is not returned to the former technician', async () => {
+    let assigned = 'tech-7';
+    resolveCompletionProductDefaults.mockClear();
+    resolveCompletionProductDefaults.mockImplementationOnce(async () => { assigned = 'tech-9'; return { products: [{ id: 'p1' }] }; });
+    mockDbCurrent = () => {
+      let rows = [{ id: 'svc-1', technician_id: assigned, status: 'confirmed', scheduled_date: etDateString(new Date()) }];
+      const q = {
+        where(column, op, value) {
+          if (typeof column === 'object') rows = rows.filter(row => Object.entries(column).every(([key, target]) => row[key] === target));
+          else {
+            const key = column.split('.').pop();
+            rows = rows.filter(row => value === undefined ? row[key] === op : row[key] >= value);
+          }
+          return q;
+        },
+        whereNotIn(column, values) { rows = rows.filter(row => !values.includes(row[column.split('.').pop()])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const result = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-7' }, '/:serviceId/default-products');
+    expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(1);
+    expect(result.statusCode).toBe(404);
+    expect(result.body).toEqual({ error: 'Service not found' });
+  });
 });

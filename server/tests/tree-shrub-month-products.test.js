@@ -35,27 +35,28 @@ const ids = (date, rows = CATALOG) => resolveMonthProducts(date, rows).map((entr
 
 describe('resolveMonthProducts', () => {
   test('every month matches the protocol primary list; the ambiguous NutriRoot entry is skipped', () => {
-    expect(ids('2026-01-15')).toEqual(['snapshot', 'palm', 'orn']);
+    // Lines still waiting on an exact label (13-0-13, Copper) are withheld too.
+    expect(ids('2026-01-15')).toEqual(['snapshot', 'palm']);
     expect(ids('2026-02-10')).toEqual(['tritek']);
     // KPHITE and Sequestar lines say their method is unverified: withheld.
     expect(ids('2026-03-10')).toEqual(['mainspring', 'distance']);
-    expect(ids('2026-04-10')).toEqual(['snapshot', 'palm', 'orn']);
-    expect(ids('2026-05-10')).toEqual(['mainspring', 'palm', 'orn']);
+    expect(ids('2026-04-10')).toEqual(['snapshot', 'palm']);
+    expect(ids('2026-05-10')).toEqual(['mainspring', 'palm']);
     // June's "Fe/Mn micros" line is not a suggestion: Iron Plus is 12-0-0 N.
-    expect(ids('2026-06-10')).toEqual(['tritek', 'copper']);
+    expect(ids('2026-06-10')).toEqual(['tritek']);
     // The summer palm feeding is the 0-0-16 palm SKU, never the lawn winterizer.
     expect(ids('2026-07-10')).toEqual(['snapshot', 'palm16']);
     expect(ids('2026-08-10')).toEqual(['mainspring', 'distance', 'tritek', 'cytogro']);
     // Sep Talus is "(held: … prohibits residential use)" — never suggested.
     expect(ids('2026-09-10')).toEqual(['distance', 'tritek']);
-    expect(ids('2026-10-01')).toEqual(['snapshot', 'palm', 'orn']);
+    expect(ids('2026-10-01')).toEqual(['snapshot', 'palm']);
     expect(ids('2026-11-10')).toEqual(['tritek', 'espoma']);
     expect(ids('2026-12-10')).toEqual(['palm', 'cytogro']);
   });
 
   test('each entry carries the application method', () => {
     const october = Object.fromEntries(resolveMonthProducts('2026-10-01', CATALOG).map((e) => [e.productId, e.method]));
-    expect(october).toEqual({ snapshot: 'granular_broadcast', palm: 'granular_broadcast', orn: 'granular_broadcast' });
+    expect(october).toEqual({ snapshot: 'granular_broadcast', palm: 'granular_broadcast' });
     const november = Object.fromEntries(resolveMonthProducts('2026-11-10', CATALOG).map((e) => [e.productId, e.method]));
     expect(november.espoma).toBe('granular_broadcast');
   });
@@ -63,8 +64,10 @@ describe('resolveMonthProducts', () => {
   test('a line whose method is unverified is never suggested, even with an exact catalog row', () => {
     expect(NON_PRODUCT_LINE.test('KPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07')).toBe(true);
     expect(NON_PRODUCT_LINE.test('Sequestar EDDHA: exact container label needed; no verified dose or injector recipe')).toBe(true);
-    // A held DOSE with a known method still suggests (no amount is ever pre-filled).
-    expect(NON_PRODUCT_LINE.test('13-0-13 ornamental fertilizer: exact bag label needed; hold dose')).toBe(false);
+    // An exact label still needed / a held dose is withheld too (Codex r3 #5089).
+    expect(NON_PRODUCT_LINE.test('13-0-13 ornamental fertilizer: exact bag label needed; hold dose')).toBe(true);
+    expect(NON_PRODUCT_LINE.test('Copper: exact container label needed; separate from oil')).toBe(true);
+    expect(NON_PRODUCT_LINE.test('Snapshot 2.5TG Q4: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)')).toBe(false);
   });
 
   test('NutriRoot resolves when the catalog carries exactly one active row', () => {

@@ -55,7 +55,10 @@ const PROTOCOL_PRODUCTS = [
 // label and method", "no verified … injector recipe") is withheld too: a
 // suggested row's method is fixed on the sheet, so a guessed foliar/drench
 // method would be saved on the record (KPHITE, Sequestar; Codex r2 #5089).
-const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b/i;
+// Same for a line whose label or dose is still unverified ("exact bag label
+// needed; hold dose" — 13-0-13, Copper; Codex r3 #5089): the sheet cannot
+// show that hold, so the product is not offered until the recipe is confirmed.
+const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b|\bexact\b[^;]*\blabel needed\b|\bhold dose\b/i;
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 

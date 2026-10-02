@@ -311,12 +311,12 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx).toMatchObject({ ok: true, eligible: true, reason: null, lastVisit: null, warnings: [] });
     expect(ctx.warningsUnavailable).toBeUndefined();
     expect(ctx.service).toMatchObject({ id: 'visit-1', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1', serviceKey: 'tree_shrub_program' });
-    // October protocol: Snapshot, 8-0-12 palm, 13-0-13 — suggestions, no amounts
-    // invented. KPHITE's line says its method is unverified, so it is withheld.
+    // October protocol: Snapshot and 8-0-12 palm — suggestions, no amounts
+    // invented. KPHITE (method unverified) and 13-0-13 (exact label needed;
+    // hold dose) are withheld.
     expect(ctx.monthProducts).toEqual([
       { productId: 'snapshot', method: 'granular_broadcast' },
       { productId: 'palm', method: 'granular_broadcast' },
-      { productId: 'orn', method: 'granular_broadcast' },
     ]);
     expect(ctx.products.map((p) => p.id)).toEqual(['snapshot', 'palm', 'orn', 'kphite']);
     expect(ctx.products.find((p) => p.id === 'kphite').tsFlags).toMatchObject({ needsIracFrac: true });
@@ -404,12 +404,12 @@ describe('buildTreeShrubFastContext', () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
       service_products: [
-        { service_record_id: 'rec-inc', product_id: 'orn', total_amount: '3', amount_unit: 'lb' },
-        { service_record_id: 'rec-ok', product_id: 'orn', total_amount: '2', amount_unit: 'lb' },
+        { service_record_id: 'rec-inc', product_id: 'palm', total_amount: '3', amount_unit: 'lb' },
+        { service_record_id: 'rec-ok', product_id: 'palm', total_amount: '2', amount_unit: 'lb' },
       ],
     }));
     expect(ctx.lastVisit).toMatchObject({ serviceRecordId: 'rec-ok', plantGroups: ['Palms'] });
-    expect(ctx.monthProducts.find((m) => m.productId === 'orn').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'lb', serviceDate: '2026-09-20' });
+    expect(ctx.monthProducts.find((m) => m.productId === 'palm').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'lb', serviceDate: '2026-09-20' });
   });
 
   test('recent ledger rows produce warnings on the context', async () => {
