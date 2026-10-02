@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002130000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002135000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -29,7 +29,7 @@ jest.setTimeout(60000);
 
   test('one row per correction across the five sources, with the AI text and the human text side by side; non-corrections stay out', async () => {
     const ids = {
-      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(),
+      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(), parkedSend: randomUUID(), trainingEdited: randomUUID(), trainingOnCorrected: randomUUID(), trainingDecision: randomUUID(),
       labelWrong: randomUUID(), labelRight: randomUUID(),
       revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(),
       humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(),
@@ -96,6 +96,11 @@ jest.setTimeout(60000);
       // corrected, judged, but its settling send is not on record: the judgment's human text stands in
       decision(ids.linkedCorrectedNoSend, 'corrected', { entity_type: 'message_draft', entity_id: ids.shadowDraft4, correction_note: 'Agent Review draft edited and sent from SMS inbox.', reviewed_at: at(4.4) }),
     ]);
+    // A reply sent INSTEAD of a pending suggestion links it through metadata.parked_decision_ids (the decision reads ignored).
+    await trx('sms_log').insert({
+      id: ids.parkedSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
+      message_body: 'We will be there Thursday morning.', metadata: JSON.stringify({ parked_decision_ids: [ids.ignored] }), created_at: at(9.8),
+    });
     // What the person actually sent: the outbound text stamped with the decision id (the send that settled it).
     await trx('sms_log').insert({
       id: ids.settlingSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
@@ -108,18 +113,35 @@ jest.setTimeout(60000);
     });
     await trx('voice_profiles').insert([profile(ids.profileRejected, 'rejected', 900001), profile(ids.profilePending, 'pending', 900002)]);
 
+    // Reply training: the Agent Review page's reply controls write here only (the decision's human_verdict stays unset).
+    await trx('agent_decisions').insert(decision(ids.trainingDecision, null, { human_verdict: null, status: 'pending_review', reviewed_by: null, reviewed_at: null }));
+    const training = (id, source, verdict, reviewed_at) => ({
+      id, channel: 'sms', source_agent_decision_id: source, inbound_body: 'Can you come Thursday?', outbound_body: 'Thursday at 9 works, see you then.', agent_draft: `Draft ${id.slice(0, 4)}`,
+      agent_draft_edited: true, scenario_label: 'scheduling', capture_reason: 'agent_review_reply_verdict', status: 'reviewed', review_verdict: verdict,
+      review_note: 'Named the day', reviewed_by: 'office@test', reviewed_at, captured_at: reviewed_at,
+    });
+    await trx('reply_training_examples').insert([
+      training(ids.trainingEdited, ids.trainingDecision, 'edited', at(3.5)),
+      training(ids.trainingOnCorrected, ids.linkedCorrected, 'edited', at(3.4)), // its decision already records the correction: left out
+    ]);
     const rows = await trx('corrections').whereIn('source_id', Object.values(ids)).orderBy('corrected_at', 'asc');
     const byId = Object.fromEntries(rows.map((r) => [r.source_id, r]));
 
     expect(rows.map((r) => `${r.source}:${r.kind}`)).toEqual([
       'agent_decision:dismissed', 'agent_decision:corrected', 'agent_decision:ignored', 'typed_review:label_wrong',
-      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected',
+      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected', 'reply_training:edited',
     ]);
     // the person's own text, not the canned note: the settling send first, the judgment's human text when no send is on record, the note last
     expect(byId[ids.linkedCorrected]).toMatchObject({ source: 'agent_decision', kind: 'corrected', human_text: 'Tuesday at 2 is fine. See you then.' });
     expect(byId[ids.linkedCorrected].detail.correction_note).toBe('Agent Review draft edited and sent from SMS inbox.');
     expect(byId[ids.linkedCorrectedNoSend]).toMatchObject({ kind: 'corrected', human_text: 'Yes, Tuesday works. See you then.' });
-    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending]) {
+    // a reply sent instead of the suggestion reaches the ignored decision through the parked link
+    expect(byId[ids.ignored]).toMatchObject({ kind: 'ignored', human_text: 'We will be there Thursday morning.' });
+    expect(byId[ids.ignored].detail.correction_note).toBe('A staff reply to this thread was sent.');
+    // reply training: the draft beside the person's reply, the verdict as the kind, no version or model known
+    expect(byId[ids.trainingEdited]).toMatchObject({ source: 'reply_training', kind: 'edited', surface: 'sms', topic: 'scheduling', ai_text: `Draft ${ids.trainingEdited.slice(0, 4)}`, human_text: 'Thursday at 9 works, see you then.', version: null, model: null, corrected_by: 'office@test' });
+    expect(byId[ids.trainingEdited].detail).toMatchObject({ source_agent_decision_id: ids.trainingDecision, review_note: 'Named the day', capture_reason: 'agent_review_reply_verdict' });
+    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.trainingOnCorrected, ids.trainingDecision]) {
       expect(byId[absent]).toBeUndefined();
     }
     expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
@@ -159,5 +181,12 @@ jest.setTimeout(60000);
       const { rows: [{ can }] } = await trx.raw('SELECT has_table_privilege(?, ?, ?) AS can', [rolname, 'corrections', 'SELECT']);
       expect({ rolname, can }).toEqual({ rolname, can: false });
     }
+  });
+
+  test('the outbound-decision lookup is indexed: a partial expression index on the decision stamp and a GIN on the parked array', async () => {
+    const { rows } = await trx.raw("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'sms_log' AND indexname IN ('sms_log_agent_decision_id_idx', 'sms_log_parked_decision_ids_idx') ORDER BY indexname");
+    expect(rows.map((r) => r.indexname)).toEqual(['sms_log_agent_decision_id_idx', 'sms_log_parked_decision_ids_idx']);
+    expect(rows[0].indexdef).toMatch(/\(\(metadata ->> 'agent_decision_id'::text\)\), created_at DESC\) WHERE \(\(metadata ->> 'agent_decision_id'::text\) IS NOT NULL\)/);
+    expect(rows[1].indexdef).toMatch(/USING gin \(\(\(metadata -> 'parked_decision_ids'::text\)\) jsonb_path_ops\) WHERE \(\(metadata -> 'parked_decision_ids'::text\) IS NOT NULL\)/);
   });
 });
