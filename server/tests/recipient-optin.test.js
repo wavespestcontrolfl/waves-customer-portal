@@ -284,6 +284,8 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     const dispatchSrc = src.slice(src.indexOf('async function dispatchRecipientOptins'));
     expect(dispatchSrc.indexOf("const asked = await visitAskState(claim.visitId, claim.customerId)")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
     expect(dispatchSrc).toContain("if (asked.state !== 'live') continue;");
+    // A newer booked visit supersedes an undispatched ask still waiting on an earlier visit.
+    expect(src).toContain('.whereNot({ visit_id: visitId });');
     // The visit is stored on the row (fresh claim and re-claim alike).
     expect(src.split('visit_id: visitId || null,').length - 1).toBe(2);
     // ...but only AFTER the accepted-send reconcile: a delivered ask is marked
@@ -303,7 +305,7 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
 });
 
 describe('isOptinRailLive: the on-site opt-in ask needs a live rail', () => {
-  test('true only when the gate is on AND the request template exists and is active; a read error counts as dark', async () => {
+  test('true only when the gate is on AND the request template exists and is active; a read error throws (retry), never reads as dark', async () => {
     jest.resetModules();
     const dbMock = jest.fn();
     jest.doMock('../models/db', () => dbMock);
@@ -319,8 +321,9 @@ describe('isOptinRailLive: the on-site opt-in ask needs a live rail', () => {
     expect(await isOptinRailLive()).toBe(false);
     template({ is_active: true });
     expect(await isOptinRailLive()).toBe(true);
+    // A read error is not "dark": it throws, so the call's processing pass retries.
     dbMock.mockImplementation(() => { throw new Error('boom'); });
-    expect(await isOptinRailLive()).toBe(false);
+    await expect(isOptinRailLive()).rejects.toThrow('boom');
     jest.dontMock('../config/feature-gates');
     jest.dontMock('../models/db');
     jest.dontMock('../services/logger');

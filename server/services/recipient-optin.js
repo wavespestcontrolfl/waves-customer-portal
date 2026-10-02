@@ -31,16 +31,13 @@ function isDoubleOptinEnabled() {
 // opt-in gate is on AND the recipient_optin_request template row exists and is
 // active (the same lookup claimRecipientOptins uses to decide "dark"). The
 // call pipeline's on-site ask needs this: with the rail dark nobody can be
-// asked. Any read failure counts as NOT live (fail closed).
+// asked. A READ FAILURE throws (dark and broken are different, as in
+// claimRecipientOptins): the call's processing pass fails and is retried,
+// instead of finalizing as if the rail were intentionally dark.
 async function isOptinRailLive() {
   if (!isDoubleOptinEnabled()) return false;
-  try {
-    const row = await db('sms_templates').where({ template_key: OPTIN_TEMPLATE_KEY }).first();
-    return !!row && row.is_active !== false;
-  } catch (err) {
-    logger.warn(`[recipient-optin] rail check failed (${err.code || err.name || 'error'}) — treating as dark`);
-    return false;
-  }
+  const row = await db('sms_templates').where({ template_key: OPTIN_TEMPLATE_KEY }).first();
+  return !!row && row.is_active !== false;
 }
 
 // The customer's service_preferences object (jsonb, or a JSON string from a
@@ -403,6 +400,18 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
                 .whereNull('dispatched_at')
                 .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000));
             });
+          // A newer booked visit supersedes an on-site ask still waiting
+          // (undispatched) on an earlier visit — e.g. an office-review hold —
+          // so the live booking is the one asked about. A dispatched ask is
+          // never re-sent.
+          if (visitId) {
+            this.orWhere(function supersededVisitAsk() {
+              this.where({ status: 'pending' })
+                .whereNull('dispatched_at')
+                .whereNotNull('visit_id')
+                .whereNot({ visit_id: visitId });
+            });
+          }
         })
         .update({
           status: 'pending', requested_at: new Date(), dispatched_at: null, provider_sid: null, updated_at: new Date(),

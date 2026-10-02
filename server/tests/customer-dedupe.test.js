@@ -3751,6 +3751,14 @@ describe('merge carries the per-phone consent boundary (service_preferences)', (
     expect(backfills.service_preferences).toEqual({ interior_spray: true, unconsented_slot_phone_keys: ['5550100123'] });
   });
 
+  test('when the merge clears the winner\'s own stamp (mixed list), the winner\'s existing slot phones are recorded as covered', () => {
+    const w = { id: 'w', service_preferences: {}, service_contact_name: 'Sample Manager', service_contact_phone: '+15550100777', service_contacts_consent_at: '2026-07-22T00:00:00Z' };
+    const l = { id: 'l', service_contact2_name: 'Sample Tenant', service_contact2_phone: '+15550100888', service_preferences: {} };
+    const { backfills } = dedupe.predictWinnerBackfills(w, l);
+    expect(backfills.service_contacts_consent_at).toBeNull();
+    expect(backfills.service_preferences.consent_covered_phone_keys).toEqual(['5550100777']);
+  });
+
   test('no held phone moving = no service_preferences backfill', () => {
     const { backfills } = dedupe.predictWinnerBackfills(winner, { ...loser, service_preferences: {} });
     expect(backfills).not.toHaveProperty('service_preferences');

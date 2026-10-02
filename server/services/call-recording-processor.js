@@ -13715,14 +13715,17 @@ const CallRecordingProcessor = {
     // quoting that visit's address. Filled for a fresh slot write AND for a
     // contact already on record, so a retry of the call still asks.
     const pendingOnSiteAsks = [];
-    // Phones the V2 extraction itself captured for its other parties (the
-    // canonical singleton + every secondary_contacts[] entry): the only
-    // numbers an on-site opt-in ask may go to.
+    // Phones the V2 extraction itself captured for a party it ALSO flagged as
+    // on-site (role + on_site / wants_appointment_texts on that same V2 entry):
+    // the only numbers an on-site opt-in ask may go to. Binding phone and
+    // flags to one V2 party keeps a merge with V1 from moving one person's
+    // flags onto another person's number.
     const onSiteV2PhoneKeys = (() => {
       const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
       const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
-        .map((c) => ten(c?.phone)).filter(Boolean));
+        .filter((c) => c && onSiteOptinAskTrigger(c))
+        .map((c) => ten(c.phone)).filter(Boolean));
     })();
     let onSiteAsksHandled = false;
     // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for

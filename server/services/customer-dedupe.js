@@ -1286,6 +1286,17 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
     if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
   }
+  // When this merge CLEARED the winner's own stamp (a mixed list), the
+  // winner's existing slot phones were covered by it (grandfathered, often no
+  // recipient_optin row): record them as covered, as an ordinary unconsented
+  // add does, so a later YES can restore the account stamp.
+  if (Object.prototype.hasOwnProperty.call(backfills, 'service_contacts_consent_at') && backfills.service_contacts_consent_at === null) {
+    const winnerOwn = CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean);
+    carried.consent_covered_phone_keys = [...new Set([
+      ...(carried.consent_covered_phone_keys || (Array.isArray(winnerPrefs.consent_covered_phone_keys) ? winnerPrefs.consent_covered_phone_keys : [])),
+      ...winnerOwn,
+    ])];
+  }
   if (Object.keys(carried).length) {
     backfills.service_preferences = { ...winnerPrefs, ...carried };
     if (!isEmptyValue(winner.service_preferences)) winnerPriorValues.service_preferences = winner.service_preferences;
