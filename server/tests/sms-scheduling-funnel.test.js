@@ -83,3 +83,27 @@ describe('report boundaries', () => {
     expect(() => parseReportInstant('soon')).toThrow(/cannot read the date/);
   });
 });
+
+test('a person reply counts only when the provider took it (failed, blocked or scheduled rows reached nobody)', async () => {
+  const { loadFunnel } = require('../services/sms-scheduling-funnel');
+  const queries = [];
+  const rowsFor = { sms_log: [{ customer_id: 'c-1', body: 'Can we move my appointment to Friday?', created_at: new Date('2026-10-01T14:00:00Z') }] };
+  const dbh = (table) => {
+    const q = { table, calls: [] };
+    queries.push(q);
+    const builder = new Proxy({}, {
+      get(_, method) {
+        if (method === 'then') {
+          const rows = q.table === 'sms_log' && q.calls.some(([m, a]) => m === 'where' && a[0]?.direction === 'inbound') ? rowsFor.sms_log : [];
+          return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+        }
+        return (...args) => { q.calls.push([method, args]); return builder; };
+      },
+    });
+    return builder;
+  };
+  dbh.schema = { hasTable: async () => false };
+  await loadFunnel({ since: new Date('2026-09-28T00:00:00Z'), until: new Date('2026-10-02T00:00:00Z'), dbh });
+  const outbound = queries.find((q) => q.calls.some(([m, a]) => m === 'where' && a[0]?.direction === 'outbound'));
+  expect(outbound.calls).toContainEqual(['whereIn', ['status', ['queued', 'sent', 'delivered']]]);
+});

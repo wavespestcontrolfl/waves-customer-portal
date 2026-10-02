@@ -18,6 +18,9 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const FOLLOW_WINDOW_MS = 48 * 3600000;
 // A reply a person typed or approved (never a reminder or another automated text).
 const PERSON_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
+// Only a reply the provider took counts: a failed, blocked or still-scheduled
+// row reached nobody (same statuses sms-shadow-judge.js counts as sent).
+const PERSON_REPLY_STATUSES = ['queued', 'sent', 'delivered'];
 
 function isSchedulingText(body) {
   return Boolean(body) && (hasSchedulingIntent(body) || hasRescheduleOrAwayIntent(body));
@@ -180,9 +183,9 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
     dbh('sms_log').where({ direction: 'outbound' }).whereIn('customer_id', customerIds).whereIn('message_type', PERSON_REPLY_TYPES)
-      .where('created_at', '>=', from).select('customer_id', 'created_at'),
+      .whereIn('status', PERSON_REPLY_STATUSES).where('created_at', '>=', from).select('customer_id', 'created_at'),
   ]);
   return summarizeFunnel({ inbound, moves, cancels, bookings, personReplies, offers, now: to });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, PERSON_REPLY_TYPES, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, PERSON_REPLY_TYPES, PERSON_REPLY_STATUSES, FOLLOW_WINDOW_MS };
