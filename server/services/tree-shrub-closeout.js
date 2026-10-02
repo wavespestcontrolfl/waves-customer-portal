@@ -14,6 +14,55 @@ const VALID_POLLINATOR_STATUSES = new Set([
 // hasMlAmount in client/src/lib/measure-units.js.
 const ML_AMOUNT_TEXT = /(?:^|[^a-z])(?:ml|mls|milliliters?|millilitres?|cc)(?![a-z])/i;
 
+// A dose as a number of tsp or fl oz (owner ruling 2026-09-29). Mirrors
+// parseDose / quantityOf in client/src/lib/injection-dose.js (the same accepted
+// forms: "2", "1.5", ".5", "½", "1½", "1 1/2", "1/2", unit tsp / teaspoon(s) /
+// fl oz / floz / fluid ounce(s) / oz / ounce(s)); the server also needs the
+// amount above zero, so "0", "." and "1/0" are refused where the client's
+// while-typing form keeps them as drafts.
+const DOSE_FRACTIONS = { '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
+const DOSE_UNIT_WORDS = [
+  [/^(tsp|teaspoons?)$/, 'tsp'],
+  [/^(fl\.?\s*oz\.?|floz|fluid\s+ounces?|oz\.?|ounces?)$/, 'fl_oz'],
+];
+
+function doseQuantity(textValue) {
+  const t = textValue.trim();
+  if (/^(\d+\.?\d*|\.\d+)$/.test(t)) return Number(t);
+  let match = /^(?:(\d+)\s*)?([⅛¼⅜½⅝¾⅞])$/.exec(t);
+  if (match) return Number(match[1] || 0) + DOSE_FRACTIONS[match[2]];
+  match = /^(?:(\d+)\s+)?(\d+)\/(\d+)$/.exec(t);
+  if (match && Number(match[3]) > 0) return Number(match[1] || 0) + Number(match[2]) / Number(match[3]);
+  return NaN;
+}
+
+function parseInjectionDose(value) {
+  const match = /^\s*(.*?)\s*([a-z][a-z.\s]*)$/i.exec(String(value || ''));
+  if (!match) return null;
+  const amount = doseQuantity(match[1]);
+  const words = match[2].trim().toLowerCase();
+  const unit = DOSE_UNIT_WORDS.find(([pattern]) => pattern.test(words))?.[1];
+  return amount > 0 && unit ? { amount, unit } : null;
+}
+
+// Whether a catalog injection label is dosed per inch of trunk or per palm,
+// from its unit in mL or g ("ml/inch dbh", "g/inch dbh", "ml/palm"); null
+// otherwise. Mirrors injectionBasis in client/src/lib/injection-dose.js.
+function injectionBasisOf(catalog = {}) {
+  const match = /^\s*(?:ml|cc|millilit(?:er|re)s?|g|grams?)\s*\/\s*(.*)$/i.exec(String(catalog.default_unit ?? catalog.defaultUnit ?? ''));
+  if (!match) return null;
+  const per = match[1].trim().toLowerCase();
+  if (/^(inch|in\b)/.test(per)) return 'inch';
+  return /^palm/.test(per) ? 'palm' : null;
+}
+
+// A trunk size in inches ("10 in DBH", "10", "10\""); anything else is NaN.
+// Mirrors trunkInchesText in client/src/lib/injection-dose.js.
+function trunkInches(value) {
+  const match = /^\s*(\d+\.?\d*|\.\d+)\s*(?:(?:in\.?|inch(?:es)?|")\s*(?:dbh)?|dbh)?\s*$/i.exec(String(value || ''));
+  return match ? Number(match[1]) : NaN;
+}
+
 function text(value) {
   return String(value || '').trim();
 }
@@ -142,6 +191,7 @@ function normalizeTreeShrubCloseout(input = {}, service = {}) {
       numberOfPorts: nonnegativeIntegerOrNull(injectionRecord.numberOfPorts ?? injectionRecord.number_of_ports),
       targetIssue: compactText(injectionRecord.targetIssue ?? injectionRecord.target_issue, 240),
       followUpDate: compactText(injectionRecord.followUpDate ?? injectionRecord.follow_up_date, 40),
+      productId: compactText(injectionRecord.productId ?? injectionRecord.product_id, 80) || null,
     },
   };
 }
@@ -228,8 +278,24 @@ function isSnapshotProduct(productRef = {}) {
   return /\bsnapshot\b/.test(productText(productRef));
 }
 
+// A catalog label's own injection rate unit: mL or g per inch of trunk (DBH) or
+// per palm ("ml/inch dbh", "ml/palm", "g/inch dbh"). Mirrors injectionLabelRate
+// in client/src/lib/injection-dose.js.
+const INJECTION_LABEL_UNIT = /^\s*(?:ml|g)\s*\/\s*(?:inch|in\b|palm)/i;
+
+// Name regex OR the catalog row's own method / label unit: a row such as
+// "Arborjet PHOSPHO-Jet Systemic Fungicide" (application_method
+// 'trunk_injection', default_unit 'ml/inch dbh') names no injection word.
 function isInjectionProduct(productRef = {}) {
-  return /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productText(productRef));
+  if (/\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productText(productRef))) return true;
+  const catalog = productRef.catalog || productRef;
+  const input = productRef.input || productRef;
+  // The method the tech recorded on this visit counts as much as the
+  // catalog's default (the client reads the same row field).
+  const methods = [catalog.application_method ?? catalog.applicationMethod, input.applicationMethod ?? input.application_method]
+    .map((method) => text(method).toLowerCase());
+  const unit = text(catalog.default_unit ?? catalog.defaultUnit);
+  return methods.includes('trunk_injection') || INJECTION_LABEL_UNIT.test(unit);
 }
 
 function isInsectLikeProduct(productRef = {}) {
@@ -414,10 +480,21 @@ function validateTreeShrubCloseout({
   if (injectionRequired) {
     const injection = normalized.injectionRecord || {};
     if (!injection.plantSpecies) pushBlock(blocks, 'tree_shrub_injection_species_required', 'Injection record requires plant species.', 'injectionRecord.plantSpecies');
+    // The record's product, when it is one of this visit's catalog products
+    // (by the catalog id the form records, else by name), brings its injection
+    // label: a per-inch label needs the trunk in inches.
+    const labelRef =
+      (injection.productId && productRefs.find((ref) => String(ref.input?.productId) === injection.productId)) ||
+      productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
+    const basis = labelRef ? injectionBasisOf(labelRef.catalog) : null;
     if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
+    else if (basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
+      pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
+    }
     if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');
     if (!injection.dose) pushBlock(blocks, 'tree_shrub_injection_dose_required', 'Injection record requires dose.', 'injectionRecord.dose');
     else if (ML_AMOUNT_TEXT.test(injection.dose)) pushBlock(blocks, 'tree_shrub_injection_dose_ml', 'Injection dose must be in tsp or fl oz, not mL.', 'injectionRecord.dose');
+    else if (!parseInjectionDose(injection.dose)) pushBlock(blocks, 'tree_shrub_injection_dose_unreadable', 'Enter the injection dose as a number of tsp or fl oz.', 'injectionRecord.dose');
     if (injection.numberOfPorts === null) pushBlock(blocks, 'tree_shrub_injection_ports_required', 'Injection record requires number of ports.', 'injectionRecord.numberOfPorts');
     if (!injection.targetIssue) pushBlock(blocks, 'tree_shrub_injection_target_required', 'Injection record requires target issue.', 'injectionRecord.targetIssue');
     if (!injection.followUpDate) pushBlock(blocks, 'tree_shrub_injection_follow_up_required', 'Injection record requires follow-up date.', 'injectionRecord.followUpDate');
