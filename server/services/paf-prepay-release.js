@@ -5,26 +5,36 @@
  * The accept saves the card, mints the year invoice (left as an unsent draft)
  * and a payment_pending term, and stamps the durable charge job
  * (estimates.estimate_data.prepayAutoChargeJob) as 'awaiting_first_visit'
- * instead of 'pending'. Until the first visit is performed,
+ * instead of 'pending'. Until the year is paid,
  * annual-prepay-renewals.js pafDeferredPrepayCoversVisit holds the plan's
  * visits so none is billed per application.
  *
- * This pass, run at the start of every stranded-prepay sweep (every 15
- * minutes), moves each awaiting job on:
- *   - the year invoice was voided / cancelled / refunded, or the term was
- *     cancelled, before any visit → 'cancelled_before_visit' (nothing charged);
- *   - a visit of the plan was PERFORMED (completed, with a completed service
- *     record whose outcome is not inspection_only / customer_declined /
- *     incomplete), or the invoice already settled → released to 'pending'
- *     with an epoch created_at, and the invoice comes due today. The sweep
- *     that runs right after charges the bound method under the acknowledged
- *     cents (or less, owner R1) through its existing claim / fence / fallback;
- *   - no performed visit 14 days after the accept (owner R8) → one office
- *     alert; it closes itself on release or cancel.
+ * Two passes run at the start of every stranded-prepay sweep (every 15
+ * minutes), whether or not the gate is still on — an accept already deferred
+ * must still be collected:
  *
- * Every transition is a compare-and-swap on the job's status, so concurrent
- * sweeps release a job once. It runs whether or not the gate is still on: an
- * accept already deferred must still be collected.
+ * 1. Release: each awaiting job moves on, by compare-and-swap on its status:
+ *    - a visit of the plan was PERFORMED (completed, with a completed service
+ *      record whose outcome is not inspection_only / customer_declined /
+ *      incomplete), or the invoice already settled → the invoice comes due
+ *      today, then the job is released to 'pending' and the sweep that runs
+ *      right after charges the bound method for the acknowledged total or
+ *      less (owner R1);
+ *    - the year invoice was voided / cancelled / refunded, or the term was
+ *      cancelled → 'cancelled_before_visit' (nothing charged), or
+ *      'cancelled_after_visit' when a visit was already performed (that work
+ *      was held, not billed, so the office is told to bill it);
+ *    - no performed visit 14 days after the accept (owner R8) → the no-visit
+ *      alert is reserved on the job.
+ *
+ * 2. Alerts: every office alert is reconciled from the job's state, with its
+ *    own stamps, never fired once and forgotten — a failed raise or close is
+ *    simply done again on the next pass:
+ *    - no first visit (R8): raised while the job still waits, closed once it
+ *      does not;
+ *    - charge failed after the first visit (R2): raised while the delivered
+ *      year invoice is still unpaid, closed once it settles or dies;
+ *    - visit done but the year cancelled before it was charged: raised once.
  */
 
 const db = require('../models/db');
@@ -35,8 +45,12 @@ const AWAITING = 'awaiting_first_visit';
 const STALE_DAYS = 14;
 const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
 const DEAD_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid', 'processing'];
+const JOB = "estimate_data -> 'prepayAutoChargeJob'";
 
 const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
+const chargeAlertKey = (estimateId) => `paf-prepay-charge-failed:${estimateId}`;
+const unbilledAlertKey = (estimateId) => `paf-prepay-cancelled-after-visit:${estimateId}`;
 
 function parseData(raw) {
   if (typeof raw === 'string') {
@@ -45,20 +59,19 @@ function parseData(raw) {
   return raw && typeof raw === 'object' ? raw : null;
 }
 
-// Merge `patch` into the job only while it is still awaiting (CAS). Returns
-// true when this caller made the transition.
-async function casAwaiting(estimateId, patch) {
-  const rows = await db('estimates')
-    .where({ id: estimateId })
-    .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'status' = ?", [AWAITING])
-    .update({
-      estimate_data: db.raw(
-        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
-        [JSON.stringify(patch)],
-      ),
-    });
+// Merge `patch` into the job; `guard` adds the compare-and-swap conditions.
+// Returns true when this caller's write landed.
+async function patchJob(estimateId, patch, guard = (q) => q) {
+  const rows = await guard(db('estimates').where({ id: estimateId })).update({
+    estimate_data: db.raw(
+      "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+      [JSON.stringify(patch)],
+    ),
+  });
   return rows === 1;
 }
+const whileAwaiting = (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [AWAITING]);
+const whileUnset = (key) => (q) => q.whereRaw(`${JOB} ->> '${key}' IS NULL`);
 
 // The first performed visit of the accepted plan: a visit (or a child of a
 // series parent) carrying this estimate as its source.
@@ -75,107 +88,6 @@ async function firstPerformedVisit(estimateId, customerId) {
     .first('s.id');
 }
 
-// Returns false on failure so the caller keeps a retryable marker.
-async function closeStaleAlert(estimateId, resolution) {
-  try {
-    await require('./admin-alert-episodes').closeAdminAlertKeys(db, [staleAlertKey(estimateId)], 'resolved', { resolution });
-    return true;
-  } catch (err) {
-    logger.warn(`[paf-prepay] stale alert close failed for estimate ${estimateId}: ${err.message}`);
-    return false;
-  }
-}
-
-// Owner R2 (2026-10-01): the annual prepay charge run after the first visit
-// did not go through. The customer got the pay link (when one could be sent);
-// the plan's later visits stay held, not billed per visit
-// (annual-prepay-renewals.js pafDeferredPrepayCoversVisit), until the year is
-// paid or the office decides — so the office hears about it once. Returns
-// false on failure: the sweep then records a retryable pending_alert.
-async function raiseChargeFailedAlert({ estimateId, invoiceId, delivered }) {
-  try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('billing', {
-      area: 'Billing',
-      action: 'Collect an annual prepay that failed after visit 1',
-      why: delivered
-        ? 'The card charge after the first visit failed; the pay link went out and later visits are held, not billed.'
-        : 'The card charge after the first visit failed and the pay link could not be sent; later visits are held.',
-      severity: 'needs-you',
-      link: `/admin/invoices?invoice=${invoiceId}`,
-      subject: { type: 'invoice', id: String(invoiceId) },
-      doneWhen: 'invoice_paid',
-      who: 'person',
-    }, { dedupeKey: `paf-prepay-charge-failed:${estimateId}` });
-    return true;
-  } catch (err) {
-    logger.warn(`[paf-prepay] charge-failed alert failed for estimate ${estimateId}: ${err.message}`);
-    return false;
-  }
-}
-
-// Clear a pending_alert marker only while it still names this action.
-async function clearPendingAlert(estimateId, action) {
-  await db('estimates')
-    .where({ id: estimateId })
-    .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'pending_alert' = ?", [action])
-    .update({
-      estimate_data: db.raw(
-        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', ((estimate_data -> 'prepayAutoChargeJob') - 'pending_alert'))",
-      ),
-    });
-}
-
-// Office-alert work a job left behind after its state moved on (a failed
-// raise or close): retried every pass until it lands, whatever the job's
-// status now is, so a transient failure never loses or strands an alert.
-async function retryPendingAlerts() {
-  let rows = [];
-  try {
-    rows = await db('estimates')
-      .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'pending_alert' IS NOT NULL")
-      .orderBy('id', 'asc')
-      .limit(500)
-      .select('id', 'estimate_data');
-  } catch (err) {
-    logger.warn(`[paf-prepay] pending-alert scan failed: ${err.message}`);
-    return 0;
-  }
-  let done = 0;
-  for (const row of rows) {
-    const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
-    const action = job?.pending_alert;
-    let ok = false;
-    if (action === 'close_stale') {
-      ok = await closeStaleAlert(row.id, 'The annual prepay no longer waits for a first visit.');
-    } else if (action === 'charge_failed') {
-      ok = await raiseChargeFailedAlert({ estimateId: row.id, invoiceId: job.invoice_id, delivered: job.delivered !== false });
-    } else {
-      ok = true; // unknown marker: nothing to retry
-    }
-    if (ok) {
-      try { await clearPendingAlert(row.id, action); done += 1; } catch (err) {
-        logger.warn(`[paf-prepay] pending-alert clear failed for estimate ${row.id}: ${err.message}`);
-      }
-    }
-  }
-  return done;
-}
-
-async function raiseStaleAlert(estimateId, invoiceId) {
-  const { raiseAdminAlert } = require('./admin-alert-compose');
-  await raiseAdminAlert('billing', {
-    area: 'Billing',
-    action: 'Check an annual prepay with no first visit',
-    why: `Approved ${STALE_DAYS}+ days ago; the card is charged only after the first visit, and none was performed.`,
-    severity: 'needs-you',
-    link: `/admin/invoices?invoice=${invoiceId}`,
-    subject: { type: 'estimate', id: String(estimateId) },
-    doneWhen: 'first_visit_performed',
-    who: 'person',
-  }, { dedupeKey: staleAlertKey(estimateId) });
-}
-
 async function releaseOne(row, now) {
   const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.status !== AWAITING || !job.invoice_id) return null;
@@ -184,74 +96,174 @@ async function releaseOne(row, now) {
   const term = invoice
     ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status')
     : null;
-  if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled') {
+  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
+  const settled = !dead && SETTLED_INVOICE_STATUSES.includes(invStatus);
+  const visit = invoice && !settled ? await firstPerformedVisit(row.id, invoice.customer_id) : null;
+
+  if (dead) {
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
-    if (await casAwaiting(row.id, {
-      status: 'cancelled_before_visit', reason, resolved_at: now.toISOString(), resolved_by: 'paf_release',
-      ...(job.stale_alerted_at ? { pending_alert: 'close_stale' } : {}),
-    })) {
-      if (job.stale_alerted_at && await closeStaleAlert(row.id, 'The plan was cancelled before the first visit; nothing was charged.')) {
-        await clearPendingAlert(row.id, 'close_stale');
-      }
-      return 'cancelled';
-    }
-    return null;
+    const moved = await patchJob(row.id, {
+      // Work already done was held, not billed: it must reach the office.
+      status: visit ? 'cancelled_after_visit' : 'cancelled_before_visit',
+      reason,
+      ...(visit ? { performed_visit_id: visit.id, customer_id: invoice.customer_id } : {}),
+      resolved_at: now.toISOString(),
+      resolved_by: 'paf_release',
+    }, whileAwaiting);
+    return moved ? 'cancelled' : null;
   }
-  const settled = ['paid', 'prepaid', 'processing'].includes(invStatus);
-  const visit = settled ? null : await firstPerformedVisit(row.id, invoice.customer_id);
   if (settled || visit) {
-    const released = await casAwaiting(row.id, {
+    // Due date first, so the transition stays retryable until it lands: a
+    // declined charge's pay link and follow-ups then age from after the
+    // visit, never from the accept. A failure throws and leaves the job
+    // awaiting for the next pass.
+    if (!settled) {
+      await db('invoices').where({ id: invoice.id }).where('status', 'draft').update({ due_date: etDateString(now) });
+    }
+    const released = await patchJob(row.id, {
       // created_at stays the accept time, so the sweep's 15-minute age
       // filter takes the job on this same pass.
       status: 'pending',
       released_at: now.toISOString(),
       released_for_visit_id: visit?.id || null,
-      ...(job.stale_alerted_at ? { pending_alert: 'close_stale' } : {}),
-    });
-    if (!released) return null;
-    if (!settled) {
-      // The invoice comes due when the charge runs, so a declined charge's
-      // pay link and follow-ups age from after the visit, not from the accept.
-      try {
-        await db('invoices').where({ id: invoice.id }).where('status', 'draft').update({ due_date: etDateString(now) });
-      } catch (err) {
-        logger.warn(`[paf-prepay] due date update failed for invoice ${invoice.id}: ${err.message}`);
-      }
-    }
-    if (job.stale_alerted_at && await closeStaleAlert(row.id, 'The first visit was performed; the annual prepay charge ran.')) {
-      await clearPendingAlert(row.id, 'close_stale');
-    }
-    return 'released';
+    }, whileAwaiting);
+    return released ? 'released' : null;
   }
   const since = new Date(job.authorized_at || job.created_at || 0);
-  if (!job.stale_alerted_at && now - since >= STALE_DAYS * 24 * 60 * 60 * 1000) {
-    // Raise first (deduped by key), then stamp: a failed raise is retried on
-    // the next pass instead of being marked as sent.
-    await raiseStaleAlert(row.id, invoice.id);
-    if (await casAwaiting(row.id, { stale_alerted_at: now.toISOString() })) return 'stale_alerted';
+  if (!job.stale_alert_reserved_at && now - since >= STALE_DAYS * 24 * 60 * 60 * 1000) {
+    // Reserved atomically while still awaiting: a release racing this pass
+    // either lands first (no reservation) or leaves a reservation the alert
+    // pass will close.
+    const reserved = await patchJob(row.id, { stale_alert_reserved_at: now.toISOString() },
+      (q) => whileUnset('stale_alert_reserved_at')(whileAwaiting(q)));
+    return reserved ? 'stale_reserved' : null;
   }
   return null;
+}
+
+async function raise(spec, dedupeKey) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  await raiseAdminAlert('billing', { area: 'Billing', severity: 'needs-you', who: 'person', ...spec }, { dedupeKey });
+}
+
+async function close(key, resolution) {
+  await require('./admin-alert-episodes').closeAdminAlertKeys(db, [key], 'resolved', { resolution });
+}
+
+// Bring one job's office alerts in line with its state. Every step stamps
+// only after the external call succeeded, so a failure is redone next pass.
+async function reconcileJobAlerts(estimateId) {
+  const row = await db('estimates').where({ id: estimateId }).first('estimate_data');
+  const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
+  if (!job || job.deferred_to_first_visit !== true) return;
+  const nowIso = new Date().toISOString();
+
+  // R8: no first visit.
+  if (job.stale_alert_reserved_at && !job.stale_alert_closed_at) {
+    if (job.status === AWAITING) {
+      if (!job.stale_alert_raised_at) {
+        await raise({
+          action: 'Check an annual prepay with no first visit',
+          why: `Approved ${STALE_DAYS}+ days ago; the card is charged only after the first visit, and none was performed.`,
+          link: `/admin/invoices?invoice=${job.invoice_id}`,
+          subject: { type: 'estimate', id: String(estimateId) },
+          doneWhen: 'first_visit_performed',
+        }, staleAlertKey(estimateId));
+        await patchJob(estimateId, { stale_alert_raised_at: nowIso }, whileUnset('stale_alert_raised_at'));
+      }
+    } else {
+      await close(staleAlertKey(estimateId), 'The annual prepay no longer waits for a first visit.');
+      await patchJob(estimateId, { stale_alert_closed_at: nowIso });
+    }
+  }
+
+  // R2: the charge after the first visit failed and the pay link went out.
+  if (job.status === 'delivered_fallback' && !job.charge_alert_closed_at) {
+    const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
+    const invStatus = String(invoice?.status || '').toLowerCase();
+    const stillOwed = !!invoice && !SETTLED_INVOICE_STATUSES.includes(invStatus) && !DEAD_INVOICE_STATUSES.includes(invStatus);
+    if (stillOwed && !job.charge_alert_raised_at) {
+      await raise({
+        action: 'Collect an annual prepay that failed after visit 1',
+        why: 'The card charge after the first visit failed; the pay link went out and later visits are held, not billed.',
+        link: `/admin/invoices?invoice=${job.invoice_id}`,
+        subject: { type: 'invoice', id: String(job.invoice_id) },
+        doneWhen: 'invoice_paid',
+      }, chargeAlertKey(estimateId));
+      await patchJob(estimateId, { charge_alert_raised_at: nowIso }, whileUnset('charge_alert_raised_at'));
+    } else if (!stillOwed) {
+      if (job.charge_alert_raised_at) await close(chargeAlertKey(estimateId), 'The annual prepay invoice settled or was closed.');
+      await patchJob(estimateId, { charge_alert_closed_at: nowIso });
+    }
+  }
+
+  // The first visit was done, then the year was voided or cancelled before it
+  // was charged: that visit was held, not billed.
+  if (job.status === 'cancelled_after_visit' && !job.unbilled_alert_raised_at) {
+    await raise({
+      action: 'Bill a visit done before the prepay was cancelled',
+      why: 'The first visit was performed, then the annual prepay was cancelled before it was charged; the visit is unbilled.',
+      link: job.customer_id ? `/admin/customers?customerId=${job.customer_id}` : `/admin/invoices?invoice=${job.invoice_id}`,
+      subject: { type: 'visit', id: String(job.performed_visit_id) },
+      doneWhen: 'visit_billed',
+    }, unbilledAlertKey(estimateId));
+    await patchJob(estimateId, { unbilled_alert_raised_at: nowIso }, whileUnset('unbilled_alert_raised_at'));
+  }
+}
+
+// Jobs with alert work outstanding, page by page (keyset on id).
+async function reconcileAlerts({ pageSize = 200 } = {}) {
+  let afterId = null;
+  let checked = 0;
+  for (;;) {
+    let rows = [];
+    try {
+      rows = await db('estimates')
+        .whereRaw(`(${JOB} ->> 'deferred_to_first_visit') = 'true'`)
+        .whereRaw(`(
+          (${JOB} ->> 'stale_alert_reserved_at' IS NOT NULL AND ${JOB} ->> 'stale_alert_closed_at' IS NULL)
+          OR (${JOB} ->> 'status' = 'delivered_fallback' AND ${JOB} ->> 'charge_alert_closed_at' IS NULL)
+          OR (${JOB} ->> 'status' = 'cancelled_after_visit' AND ${JOB} ->> 'unbilled_alert_raised_at' IS NULL)
+        )`)
+        .modify((q) => { if (afterId) q.where('id', '>', afterId); })
+        .orderBy('id', 'asc')
+        .limit(pageSize)
+        .select('id');
+    } catch (err) {
+      logger.warn(`[paf-prepay] alert scan failed: ${err.message}`);
+      return checked;
+    }
+    for (const row of rows) {
+      try {
+        await reconcileJobAlerts(row.id);
+        checked += 1;
+      } catch (err) {
+        logger.warn(`[paf-prepay] alert reconcile failed for estimate ${row.id} (retried next pass): ${err.message}`);
+      }
+    }
+    if (rows.length < pageSize) return checked;
+    afterId = rows[rows.length - 1].id;
+  }
 }
 
 // Every awaiting job is visited on each pass, page by page (keyset on id):
 // jobs that stay waiting (no visit yet) never crowd a newer performed one out.
 async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() } = {}) {
-  const summary = { scanned: 0, released: 0, cancelled: 0, staleAlerted: 0, alertsRetried: 0 };
-  summary.alertsRetried = await retryPendingAlerts();
+  const summary = { scanned: 0, released: 0, cancelled: 0, staleReserved: 0, alertsChecked: 0 };
   let afterId = null;
   for (;;) {
     let rows = [];
     try {
       rows = await db('estimates')
         .where({ status: 'accepted' })
-        .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = ?", [AWAITING])
+        .whereRaw(`(${JOB} ->> 'status') = ?`, [AWAITING])
         .modify((q) => { if (afterId) q.where('id', '>', afterId); })
         .orderBy('id', 'asc')
         .limit(pageSize)
         .select('id', 'estimate_data');
     } catch (err) {
       logger.warn(`[paf-prepay] awaiting-job scan failed: ${err.message}`);
-      return summary;
+      break;
     }
     summary.scanned += rows.length;
     for (const row of rows) {
@@ -259,21 +271,24 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
         const outcome = await releaseOne(row, now);
         if (outcome === 'released') summary.released += 1;
         else if (outcome === 'cancelled') summary.cancelled += 1;
-        else if (outcome === 'stale_alerted') summary.staleAlerted += 1;
+        else if (outcome === 'stale_reserved') summary.staleReserved += 1;
       } catch (err) {
-        logger.warn(`[paf-prepay] release check failed for estimate ${row.id}: ${err.message}`);
+        logger.warn(`[paf-prepay] release check failed for estimate ${row.id} (retried next pass): ${err.message}`);
       }
     }
-    if (rows.length < pageSize) return summary;
+    if (rows.length < pageSize) break;
     afterId = rows[rows.length - 1].id;
   }
+  summary.alertsChecked = await reconcileAlerts();
+  return summary;
 }
 
 module.exports = {
   AWAITING,
-  raiseChargeFailedAlert,
-  retryPendingAlerts,
   STALE_DAYS,
   releaseDeferredPrepayCharges,
+  reconcileAlerts,
   staleAlertKey,
+  chargeAlertKey,
+  unbilledAlertKey,
 };

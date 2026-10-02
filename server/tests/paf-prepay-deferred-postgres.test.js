@@ -196,6 +196,12 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await covers(otherInvoice.parentId)).toBe(false);
     });
 
+    it('stops holding once a dispute suspends the paid year back to payment_pending', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'paid' } });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ dispute_suspended_at: new Date() });
+      expect(await covers(f.childId)).toBe(false);
+    });
+
     it('never holds a visit of a service the term does not cover', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.childId }).update({ service_type: 'Lawn Fertilization' });
@@ -266,13 +272,61 @@ postgres('annual prepay charged after the first visit', () => {
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
-    it('rings the office once when no visit is performed within 14 days (R8)', async () => {
+    it('rings the office once when no visit is performed within 14 days, and closes it once the job moves on (R8)', async () => {
       const f = await deferredAccept({ acceptedDaysAgo: 15 });
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
-      expect(await release()).toMatchObject({ staleAlerted: 1 });
-      expect(await release()).toMatchObject({ staleAlerted: 0 });
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      expect(await release()).toMatchObject({ staleReserved: 1 });
+      expect(await release()).toMatchObject({ staleReserved: 0 });
       expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
       expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ area: 'Billing', subject: { type: 'estimate', id: f.estimateId } });
+      await perform(f.parentId, f.customerId);
+      closeSpy.mockRejectedValueOnce(new Error('synthetic close failure'));
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'pending' });
+      expect(await jobOf(f)).not.toHaveProperty('stale_alert_closed_at');
+      await release();
+      expect(closeSpy).toHaveBeenCalledTimes(2);
+      expect(await jobOf(f)).toHaveProperty('stale_alert_closed_at');
+      closeSpy.mockRestore();
+    });
+
+    it('a no-visit alert reserved just before a release is still closed', async () => {
+      const f = await deferredAccept({ jobPatch: { stale_alert_reserved_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      await release();
+      expect(closeSpy).toHaveBeenCalledWith(expect.anything(), [`paf-prepay-no-first-visit:${f.estimateId}`], 'resolved', expect.anything());
+      expect(await jobOf(f)).toHaveProperty('stale_alert_closed_at');
+      closeSpy.mockRestore();
+    });
+
+    it('a year cancelled after the first visit was performed rings the office to bill that visit', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'visit', id: f.parentId } }),
+        { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    it('a failed due-date update leaves the job waiting for the next pass', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx.raw('SAVEPOINT due_fail');
+      await trx.raw(`CREATE OR REPLACE FUNCTION paf_test_fail() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'synthetic'; END $$ LANGUAGE plpgsql`);
+      await trx.raw('CREATE TRIGGER paf_test_fail BEFORE UPDATE OF due_date ON invoices FOR EACH ROW EXECUTE FUNCTION paf_test_fail()');
+      expect(await release()).toMatchObject({ released: 0 });
+      // The failed statement aborted the test transaction: undo to the
+      // savepoint (dropping the trigger) and read what the pass left.
+      await trx.raw('ROLLBACK TO SAVEPOINT due_fail');
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      expect(await release()).toMatchObject({ released: 1 });
     });
   });
 
@@ -298,30 +352,28 @@ postgres('annual prepay charged after the first visit', () => {
       expect(consent.consent_text_version).toBe(ConsentText.AFTER_VISIT_CONSENT_VERSION);
     });
 
-    it('a failed R2 alert is kept on the job and raised on the next pass', async () => {
+    it('a failed R2 alert is raised on the next pass; none is raised once the year is paid', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
       require('../services/stripe').chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       raiseAdminAlert.mockRejectedValueOnce(new Error('synthetic alert failure'));
       await sweep();
-      expect(await jobOf(f)).toMatchObject({ status: 'delivered_fallback', pending_alert: 'charge_failed' });
+      expect((await jobOf(f)).status).toBe('delivered_fallback');
+      expect(await jobOf(f)).not.toHaveProperty('charge_alert_raised_at');
       await release();
       expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
-      expect(await jobOf(f)).not.toHaveProperty('pending_alert');
-    });
+      expect(await jobOf(f)).toHaveProperty('charge_alert_raised_at');
 
-    it('a failed close of the no-visit alert is retried after the job is released', async () => {
-      const f = await deferredAccept({ jobPatch: { stale_alerted_at: new Date().toISOString() } });
-      await perform(f.parentId, f.customerId);
-      const episodes = require('../services/admin-alert-episodes');
-      const spy = jest.spyOn(episodes, 'closeAdminAlertKeys').mockRejectedValueOnce(new Error('synthetic close failure'));
+      const paidLater = await deferredAccept();
+      await perform(paidLater.parentId, paidLater.customerId);
+      raiseAdminAlert.mockClear();
+      raiseAdminAlert.mockRejectedValueOnce(new Error('synthetic alert failure'));
+      await sweep();
+      await trx('invoices').where({ id: paidLater.invoiceId }).update({ status: 'paid' });
       await release();
-      expect(await jobOf(f)).toMatchObject({ status: 'pending', pending_alert: 'close_stale' });
-      await release();
-      expect(spy).toHaveBeenCalledTimes(2);
-      expect(await jobOf(f)).not.toHaveProperty('pending_alert');
-      spy.mockRestore();
+      expect(raiseAdminAlert.mock.calls.filter((c) => c[2]?.dedupeKey === `paf-prepay-charge-failed:${paidLater.estimateId}`)).toHaveLength(1);
+      expect(await jobOf(paidLater)).toHaveProperty('charge_alert_closed_at');
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

@@ -1986,15 +1986,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
-      // Owner R2: one Billing alert; a failed raise is kept as a retryable
-      // pending_alert on the resolved job (paf-prepay-release.js).
-      let deferredAlertRaised = true;
-      if (deferredToFirstVisit) {
-        if (!fallbackSettled) {
-          deferredAlertRaised = await require('./paf-prepay-release')
-            .raiseChargeFailedAlert({ estimateId: row.id, invoiceId: job.invoice_id, delivered: fallbackDelivered });
-        }
-      } else await alertUncollected(
+      // Owner R2: a deferred job whose pay link went out (or settled) gets its
+      // Billing alert reconciled from the job's state (paf-prepay-release.js
+      // reconcileAlerts, run below and on every pass). Anything else keeps
+      // the stranded-charge alert.
+      if (!(deferredToFirstVisit && (fallbackDelivered || fallbackSettled))) await alertUncollected(
         'Annual prepay accepted — stranded auto-charge could not complete',
         `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). ${fallbackSettled
           ? (fallbackCreditCovered
@@ -2009,13 +2005,16 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // send must leave the job retryable (the stale-claim lease
       // re-attempts) instead of retiring it with no collection path at all.
       if (fallbackDelivered || fallbackSettled) {
-        await resolve('delivered_fallback', {
-          reason: err.message,
-          settled: fallbackSettled,
-          ...(deferredAlertRaised ? {} : { pending_alert: 'charge_failed', delivered: fallbackDelivered }),
-        });
+        await resolve('delivered_fallback', { reason: err.message, settled: fallbackSettled });
       }
     }
+  }
+  // Raise any R2 alert a deferred job's fallback just made due, now rather
+  // than on the next pass.
+  try {
+    await require('./paf-prepay-release').reconcileAlerts();
+  } catch (alertErr) {
+    logger.warn(`[recurring-cof] deferred prepay alert pass failed: ${alertErr.message}`);
   }
   return { scanned: rows.length, resumed };
 }

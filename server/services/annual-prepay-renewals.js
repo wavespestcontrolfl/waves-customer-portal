@@ -4107,6 +4107,9 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
     // term at all, so most calls end on this one indexed read.
     const terms = await conn('annual_prepay_terms')
       .where({ customer_id: scheduledService.customer_id, status: 'payment_pending' })
+      // A term a payment dispute suspended back to payment_pending is no
+      // longer backed by money: its visits bill normally during the dispute.
+      .whereNull('dispute_suspended_at')
       .whereNotNull('source_estimate_id')
       .whereNotNull('prepay_invoice_id')
       .select('id', 'source_estimate_id', 'prepay_invoice_id', 'coverage_service_type');
