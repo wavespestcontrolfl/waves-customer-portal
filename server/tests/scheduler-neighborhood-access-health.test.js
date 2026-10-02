@@ -67,6 +67,12 @@ test('a pass with failed filings records a failed run', async () => {
   expect(mockJobOutcomes['neighborhood-gate-codes']).toBe('failed: 1 gate-code filing(s) failed');
 });
 
+test('a pass with failed conflict bells records a failed run', async () => {
+  sweepSavedGateCodes.mockResolvedValue({ customers: 1, tally: { filed_conflict: 1 }, failed: 0, bellsFailed: 1, conflicts: 1 });
+  await sweepTick()();
+  expect(mockJobOutcomes['neighborhood-gate-codes']).toBe('failed: 1 gate-code conflict bell step(s) failed');
+});
+
 test('a tick skipped for no connection records a missed tick', async () => {
   mockLock.skip = 'no_connection';
   await sweepTick()();

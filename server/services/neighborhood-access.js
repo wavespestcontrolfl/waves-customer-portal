@@ -320,8 +320,15 @@ const SOURCE = 'profile';
 const UNCONFIRMED_MARK = 'is unconfirmed: confirm on site';
 const FINAL_OUTCOMES = new Set(['filed', 'duplicate', 'filed_conflict']);
 // The one hash expression, used by the candidate query and the ledger write
-// alike, so the two can never disagree on what "this value" is.
-const VALUE_HASH_SQL = "encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex')";
+// alike, so the two can never disagree on what "this value" is. It hashes the
+// value as fileNeighborhoodCode files it: trimmed, and for a keypad code (the
+// isKeypadCode pattern) with its inner whitespace removed — "# 1234" and
+// "#1234" are one code, "12 34" is an instruction. No "?" in the pattern:
+// knex reads one in raw SQL as a binding.
+const TRIMMED_VALUE_SQL = "regexp_replace(pp.neighborhood_gate_code, '^\\s+|\\s+$', '', 'g')";
+const CANONICAL_VALUE_SQL = `CASE WHEN ${TRIMMED_VALUE_SQL} ~ '^[#*]{0,1}\\s*\\d{3,8}\\s*[#*]{0,1}$'
+  THEN regexp_replace(${TRIMMED_VALUE_SQL}, '\\s+', '', 'g') ELSE ${TRIMMED_VALUE_SQL} END`;
+const VALUE_HASH_SQL = `encode(sha256(convert_to(${CANONICAL_VALUE_SQL}, 'UTF8')), 'hex')`;
 
 // The customers whose current code (non-empty, customer not deleted) is not
 // filed where their property now is: no filing for that exact value, or a
@@ -524,13 +531,16 @@ async function closeResolvedConflictBells() {
 
 // The bell side of a pass: ring for this pass's new conflicts, raise any
 // standing conflict whose bell never landed, and close the resolved ones.
+// Returns how many bell steps failed, so the pass reports them to job health.
 async function settleConflictBells(conflicts, logger) {
   const raisedNow = new Set();
+  let failed = 0;
   for (const [neighborhoodId, { customerId, firstName }] of conflicts) {
     try {
       await raiseConflictBell(neighborhoodId, customerId, firstName);
       raisedNow.add(neighborhoodId);
     } catch (err) {
+      failed += 1;
       logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
     }
   }
@@ -538,13 +548,16 @@ async function settleConflictBells(conflicts, logger) {
   try {
     await reconcileConflictBells(raisedNow);
   } catch (err) {
+    failed += 1;
     logger.warn(`[neighborhood-access] conflict bell reconcile failed (${err.code || err.name || 'error'})`);
   }
   try {
     await closeResolvedConflictBells();
   } catch (err) {
+    failed += 1;
     logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
   }
+  return failed;
 }
 
 async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) {
@@ -566,8 +579,8 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
       logger.warn(`[neighborhood-access] filing failed for customer ${customerId} (${err.code || err.name || 'error'})`);
     }
   }
-  await settleConflictBells(conflicts, logger);
-  return { customers: customerIds.length, tally, failed, conflicts: conflicts.size };
+  const bellsFailed = await settleConflictBells(conflicts, logger);
+  return { customers: customerIds.length, tally, failed, bellsFailed, conflicts: conflicts.size };
 }
 
 module.exports = {
@@ -580,4 +593,5 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  VALUE_HASH_SQL,
 };

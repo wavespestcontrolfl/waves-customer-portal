@@ -17,7 +17,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
   closeAdminAlertKeys: (...args) => mockClose(...args),
 }));
 const { randomUUID } = require('node:crypto');
-const { sweepSavedGateCodes } = require('../services/neighborhood-access');
+const { sweepSavedGateCodes, VALUE_HASH_SQL } = require('../services/neighborhood-access');
 
 jest.setTimeout(30000);
 postgres('neighborhood gate-code filing sweep', () => {
@@ -64,7 +64,7 @@ postgres('neighborhood gate-code filing sweep', () => {
     mockConnection = trx;
     // Only this test's rows: every customer already coded counts as filed.
     await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, neighborhood_id, outcome)
-      SELECT pp.customer_id, encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex'),
+      SELECT pp.customer_id, ${VALUE_HASH_SQL},
         (SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
          FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active), 'filed'
       FROM property_preferences pp WHERE btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''
@@ -268,6 +268,49 @@ postgres('neighborhood gate-code filing sweep', () => {
     await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2, neighborhood_source: 'office' });
     expect((await sweepSavedGateCodes()).customers).toBe(1);
     expect((await accessRows(n2)).map((r) => r.code)).toEqual(['2929']);
+  });
+
+  test('a keypad code resaved with different spacing is the same code: a retired copy stays retired', async () => {
+    const n = await neighborhood('Spacing Grove');
+    const customerId = await customerWithCode('#1234', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('neighborhood_access').where({ neighborhood_id: n }).update({ status: 'retired' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: ' # 1234 ' });
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['#1234', 'retired']]);
+  });
+
+  test('the canonical re-key drops a seed row that matched an instruction against a keypad code', async () => {
+    const canonical = require('../models/migrations/20261002121500_neighborhood_access_filings_canonical');
+    const n = await neighborhood('Spaced Pines');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1234', status: 'active', source: 'backfill' });
+    const spaced = await customerWithCode('12 34', { neighborhoodId: n });
+    const keypad = await customerWithCode(' # 5678', { neighborhoodId: n });
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '#5678', status: 'retired', source: 'backfill' });
+    // The old seed: btrim hash, either form matching.
+    const oldHash = "encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex')";
+    await trx('neighborhood_access_filings').whereIn('customer_id', [spaced, keypad]).del();
+    await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, neighborhood_id, outcome)
+      SELECT pp.customer_id, ${oldHash}, ?, 'filed' FROM property_preferences pp WHERE pp.customer_id = ANY(?)`, [n, [spaced, keypad]]);
+    await canonical.up(trx);
+    // "12 34" had no instruction row: unfiled again. " # 5678" = retired "#5678": re-keyed, stays filed.
+    expect(await trx('neighborhood_access_filings').where({ customer_id: spaced }).first()).toBeUndefined();
+    expect(await trx('neighborhood_access_filings').where({ customer_id: keypad }).first()).toBeDefined();
+    const r = await sweepSavedGateCodes();
+    expect(r.customers).toBe(1);
+    expect((await accessRows(n)).map((x) => [x.code, x.instructions, x.status])).toEqual(expect.arrayContaining([
+      [null, '12 34', 'needs_confirm'], ['#5678', null, 'retired'],
+    ]));
+  });
+
+  test('a conflict bell that fails is counted for job health', async () => {
+    const n = await neighborhood('Failing Bell');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '3131', status: 'active', source: 'backfill' });
+    await customerWithCode('3232', { neighborhoodId: n });
+    mockRaise.mockRejectedValueOnce(Object.assign(new Error('insert failed'), { code: 'EBELL' }));
+    const r = await sweepSavedGateCodes();
+    expect(r).toMatchObject({ failed: 0, conflicts: 1 });
+    expect(r.bellsFailed).toBeGreaterThanOrEqual(1);
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
