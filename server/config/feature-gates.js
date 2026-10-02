@@ -88,6 +88,7 @@
  *   GATE_STAMPED_ZERO_FREE=true (a scheduled_services.estimated_price stamped exactly 0 — not NULL, not '' — bills nothing in EVERY billing lane: per-application, per-visit, monthly_membership, legacy-null, annual prepay; owner ruling 2026-09-28, waves-billing skill invariant #8, "$0 means charge nothing", superseding invariant #6's monthly-fallback note while the gate is on. NULL/blank is unchanged — still falls through to per_application_fee / monthly_rate as today. Off = byte-identical to today on every path; canonical CALL-TIME reader stampedZeroFreeLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
+ *   GATE_RESERVICE_REPORT_CARD=true (re-service report card: on a pest/lawn callback report whose reserviceReport block composed, the payload carries `reserviceReportCard` — a "You told us" section from the customer's booking words FROZEN onto service_data.reserviceRequest at completion (scrubbed with the report writer's customer-words scrub; picker/text = quoted, call/office = never quoted), a "What we did" summary (pests from product targets, where from areas_serviced, activity from the technician's tapped rating, the safety line only with a recorded wet application; performed visits only) and the "Still seeing X? Tell us" topic for the existing portal Schedule link, on the web report and the PDF (-rcd1 cache key). Read at call time by services/service-report/reservice-report-card.js, exact 'true', and only ever alongside GATE_RESERVICE_REPORT_COPY; off = payload, page and PDF key byte-identical to before. Kill switch: unset.)
  *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
@@ -110,6 +111,7 @@
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
+ *   GATE_IB_OWNER_DIRECT=true (Intelligence Bar owner-direct mode, owner ruling 2026-10-01: for the owner login only (ibFullAccess) the bar takes the record it picks as the target with no target refusals, runs internal edits — lead/customer/property fields, statuses, notes, tech assignment, reschedule, stock — without a confirmation card, and answers in 1–3 lines; customer messages, money and bulk changes keep their one-tap card; every other login is unchanged; off = byte-identical to today; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
@@ -161,7 +163,7 @@
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
- *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. Never writes a rate, never sends a customer anything — the apply and notice lanes are later PRs.)
+ *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. The ranking never writes a rate or sends a customer anything. The APPLY lane (services/rate-review-apply.js, step 3) rides the same gate: an admin POST creates draft notice rows for approved rows (nothing sent — the comms lane sends), and the nightly 3:10 AM ET job writes the noticed rate on its effective date for SENT notices (per-application visits + per_application_fee + ledger slice, monthly dues + slice, or the prepaid term's next_term_prepay_amount), one transaction per notice, holds belled. Off = the apply tick returns before any query and the schedule route answers 404; customers keep the lower, current rate. The notice-sending lane is a later PR.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3183,6 +3185,18 @@ const gates = {
   // listing. Kill switch: unset the var (payload keeps `isCallback` as data).
   reserviceReportCopy: process.env.GATE_RESERVICE_REPORT_COPY === 'true',
 
+  // Re-service report card (2026-10-01, PR D of the Fast Complete scope,
+  // owner-approved card 2026-09-26): "You told us" (the customer's booking
+  // words, frozen on the record at completion), a "What we did" summary and
+  // the "Still seeing X? Tell us" button on a pest/lawn callback report.
+  // Dark in every environment until Adam flips it (exact 'true'); it only does
+  // anything while GATE_RESERVICE_REPORT_COPY is on (the card hangs off the
+  // reserviceReport block). reservice-report-card.js reads the env at call
+  // time so a flip needs no redeploy — cached PDFs re-render via the -rcd1
+  // key component. This entry is the status/log listing. Kill switch: unset
+  // the var — payload, page and PDF key return to today's bytes.
+  reserviceReportCard: process.env.GATE_RESERVICE_REPORT_CARD === 'true',
+
   // Server-persisted Intelligence Bar threads (owner-ratified 2026-08-31):
   // admin conversations survive refresh/route changes; the palette resumes
   // the latest thread. OFF everywhere until Adam flips it (explicit opt-in —
@@ -3249,6 +3263,15 @@ const gates = {
   // = the response is byte-identical to today. Kill switch: unset. Read at
   // CALL time so a flip needs no redeploy.
   ibToolActivity: gateEnvValue('GATE_IB_TOOL_ACTIVITY'),
+  // Intelligence Bar owner-direct mode (owner ruling 2026-10-01). When on,
+  // the owner login (ibFullAccess) gets no target refusals, no confirmation
+  // card on the internal edits listed in services/intelligence-bar/
+  // owner-direct.js, and a short-reply prompt. Customer messages, money and
+  // bulk changes keep their card; other logins and technicians are
+  // unchanged. OFF unless set, dev AND prod. Kill switch: unset. Read at
+  // CALL time (owner-direct.js ownerDirectLive) so a flip needs no redeploy;
+  // this map entry is for logGateStatus only.
+  ibOwnerDirect: gateEnvValue('GATE_IB_OWNER_DIRECT'),
   // Audio-synced call transcript (admin call log). When on, calls whose
   // call_log.transcript_structured carries diarized segments render them as
   // a clickable list that follows recording playback; click a line to seek.
@@ -3452,11 +3475,13 @@ const gates = {
   // off unless exactly 'true'. Read live per call by
   // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
   cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
-  // Annual rate review ranking backend (services/rate-review.js): monthly
-  // snapshot batch + ops email + admin read routes. Ships DARK: off unless
+  // Annual rate review (services/rate-review.js ranking + services/
+  // rate-review-apply.js apply): monthly snapshot batch + ops email + admin
+  // routes + the nightly apply of SENT notices. Ships DARK: off unless
   // exactly 'true'. Read live per call by rateReviewLive(); this entry is
-  // for logGateStatus only. Off = the cron returns before any query, the
-  // admin routes answer 404, nothing is written. Kill = unset the var.
+  // for logGateStatus only. Off = both crons return before any query, the
+  // admin routes answer 404, nothing is written, every customer keeps the
+  // lower current rate. Kill = unset the var.
   rateReview: process.env.GATE_RATE_REVIEW === 'true',
   // In-term placement for that reseed (owner ruling 2026-09-30): the added
   // visit goes into the widest gap left in the plan year that lost one,
