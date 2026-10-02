@@ -382,6 +382,26 @@ function resolveServiceLocation(customer = {}) {
   return WAVES_LOCATIONS[0];
 }
 
+/**
+ * The customer's HOME line office id (owner ruling 2026-10-02): the stored
+ * customers.home_line_location_id while it was set for the address the row
+ * holds now (home_line_address_key === addressKey of the current address),
+ * else resolveServiceLocation of that address. So a stored line only moves
+ * when the address does, never because the city map or a geocode changed.
+ *
+ * @param {object} customer  a customers row (address_line1/2, city, zip,
+ *   latitude, longitude, home_line_location_id, home_line_address_key)
+ * @returns {string} a WAVES_LOCATIONS id (never null)
+ */
+function homeLineLocationId(customer = {}) {
+  const stored = customer.home_line_location_id;
+  if (stored && customer.home_line_address_key != null && WAVES_LOCATIONS.some((l) => l.id === stored)) {
+    const { addressKey } = require('../services/customer-property-address-keys');
+    if (customer.home_line_address_key === addressKey(customer)) return stored;
+  }
+  return resolveServiceLocation(customer).id;
+}
+
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
 // non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
 // arbitrary Google Ads utm_content) from being stored as a customer's city.
@@ -418,6 +438,7 @@ module.exports = {
   isGbpUtmCampaign,
   resolveLocation,
   resolveServiceLocation,
+  homeLineLocationId,
   resolveLocationFromCandidates,
   isOfficeCity,
   nearestLocation,

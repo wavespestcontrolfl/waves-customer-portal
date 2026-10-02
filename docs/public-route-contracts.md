@@ -2860,6 +2860,18 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
+Forecast evidence: `baseline_comparison` is `above|below|near` the monthly
+seasonal model. The legacy `pests[].trend` stays `up|down|flat` with
+`trend_basis: seasonal_baseline` for existing embeds; it is not a temporal
+trend. `week_over_week` is null unless the same city's same model has a
+comparable-weather snapshot exactly seven ET calendar days earlier. When
+available it carries direction, score delta, and both dates, describing
+modeled change only. `model_version` identifies the scoring model and
+`evidence.observation_validation` remains `not_validated`. Public requests
+may READ `pest_forecast_snapshots` under `GATE_PEST_FORECAST_HISTORY`, but
+never write history or read customer observations. The gated 08:15/14:15 ET
+cron captures the first successful city forecast per day. History failure
+preserves the weather outlook with unavailable comparisons.
 Note: unlike the token-gated read routes, the forecast and `/locations`
 responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy

@@ -23,7 +23,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
-const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
+const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
 const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
@@ -77,6 +77,9 @@ function mapReview(row, subject) {
     baselineAnswers: parse(row.baseline_answers),
     sampledFor: row.sampled_for,
     servedModel: row.served_model,
+    provider: row.provider,
+    // The name the reviewer sees for whose answer this is (Jev, Clef).
+    providerLabel: providerLabel(row.provider),
     label: parse(row.label),
     labelStatus: row.label_status,
     labeledBy: row.labeled_by,

@@ -18,6 +18,7 @@
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
+ *   GATE_HOME_LINE=true (each customer's outbound texts use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -2643,6 +2644,10 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Daily city-level forecast snapshots + read-only historical comparisons.
+  // Opt-in everywhere after migration; live consumers use gateEnvValue at call time.
+  pestForecastHistory: gateEnvValue('GATE_PEST_FORECAST_HISTORY'),
+
   // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
   // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
   // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
@@ -3403,6 +3408,14 @@ const gates = {
   // those customers default to the Bradenton line. Mapped cities resolve the
   // same either way. Read at CALL time; this entry is for logGateStatus.
   smsLineAddressFallback: gateEnvValue('GATE_SMS_LINE_ADDRESS_FALLBACK'),
+
+  // Customer home line (owner ruling 2026-10-02, "local line everywhere").
+  // ON: deriveOutboundNumber picks a known customer's stored home line
+  // (homeLineLocationId) ahead of any per-call office, and the daily sweep
+  // (services/home-line.js) stamps it. OFF (unset is the kill switch):
+  // byte-identical to before. Read at CALL time via homeLineLive(); this
+  // entry is for logGateStatus.
+  homeLine: process.env.GATE_HOME_LINE === 'true',
 
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
@@ -4466,6 +4479,14 @@ function visitPrepTechAlertsLive() {
   return process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true';
 }
 
+// GATE_HOME_LINE read at CALL time — strict `=== 'true'`. The canonical
+// reader for the customer home line (twilio.js deriveOutboundNumber and the
+// home-line sweep); the `homeLine` gates-map entry above is for
+// logGateStatus only.
+function homeLineLive() {
+  return process.env.GATE_HOME_LINE === 'true';
+}
+
 // GATE_SMS_LINK_WRAP read at CALL time — strict `=== 'true'`, same convention
 // as visitPrepPhotosLive(). The canonical reader for the sendCustomerMessage
 // choke point's portal-link wrap (services/messaging/sms-link-wrap.js). Off =
@@ -4860,6 +4881,7 @@ module.exports.knownGateCatalog = knownGateCatalog;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
+module.exports.homeLineLive = homeLineLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
