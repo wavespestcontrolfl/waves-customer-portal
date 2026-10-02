@@ -4715,7 +4715,9 @@ const ReviewService = {
         : null;
     // The request row carries the same technician's name the text speaks as
     // (the rate page shows it next to their photo).
-    if (voiceVisit && !techName && voiceTechName) techName = voiceTechName;
+    // ...whenever the visit is authoritative, including no name at all: a
+    // sequence's cached name never rides along beside another tech's photo.
+    if (voiceVisit) techName = voiceTechName;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template

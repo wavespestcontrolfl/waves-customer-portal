@@ -5011,6 +5011,21 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.tech_name == null).toBe(true);
     });
 
+    test('#5524 r21: a record-anchored touch saves the resolved tech name, never the sequence cache', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-13', first_name: 'Ravi', last_name: 'P', phone: '+19410000084', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-tv-13', customer_id: 'tv-13', service_type: 'Quarterly Pest Control', technician_id: 'tech-real', status: 'completed', service_date: new Date() }],
+        technicians: [{ id: 'tech-real', name: 'Maria Lopez' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv13', sequenceStep: 1, serviceRecordId: 'sr-tv-13', technicianId: 'tech-real', techName: 'Cached Name',
+      });
+      expect(mock.__state.rows.review_requests[0].tech_name).toBe('Maria');
+    });
+
     test('#5524 r20 P1: the canonical sibling (the record the completion attempt pinned) wins over a newer row', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

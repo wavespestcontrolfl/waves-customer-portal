@@ -619,7 +619,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const monthAgo = et(new Date(Date.now() - 30 * 86400000));
     expect(timingUnsupported('I saw ants last week.', ['saw ants'], [], today)).toBe(true);
     expect(timingUnsupported('You mentioned ants 3 days ago.', ['ants'], [], today)).toBe(true);
-    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity for up to two weeks is normal'], [], today)).toBe(false);
+    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity for up to two weeks is normal'], ['- Observations: some activity for up to two weeks is normal'], today)).toBe(false);
     expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity'], [], today)).toBe(true);
     expect(timingUnsupported('It has been a week since the first treatment.', ['first of two treatments'], [], weekAgo)).toBe(false);
     expect(timingUnsupported('It has been a week since the first treatment.', ['first of two treatments'], [], monthAgo)).toBe(true);
@@ -663,6 +663,20 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(listsTreatedAreas('I treated the front entry and garage. Google review: {review_url}')).toBe(true);
     expect(listsTreatedAreas('Did the kitchen, under the sinks, appliance areas and wall voids.')).toBe(true);
     expect(listsTreatedAreas('I flagged moisture under the kitchen sink for your property group.')).toBe(false);
+  });
+
+  test('#5524 r21 P1: the record header never proves timing; the dated quote must carry the fact', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const today = require('../utils/datetime-et').etCalendarDayOf(new Date());
+    const lines = [`Today: ${today}. Each text, call and email below carries its own date.`, '- [customer, 2026-09-10 09:00 ET] I saw ants by the door'];
+    expect(timingUnsupported('I saw ants today.', [`Today: ${today}`, 'I saw ants by the door'], lines, '2026-09-10')).toBe(true);
+  });
+
+  test('#5524 r21: timing checks keep no regex state between calls', () => {
+    const { timingUnsupported } = Drafter.__private;
+    // A refused duration first (no weeks quote), then the same supported duration must still pass.
+    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity'], [], null)).toBe(true);
+    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity for up to two weeks is normal'], ['- Observations: some activity for up to two weeks is normal'], null)).toBe(false);
   });
 
   test('a bare link after a question stays with its sentence', () => {

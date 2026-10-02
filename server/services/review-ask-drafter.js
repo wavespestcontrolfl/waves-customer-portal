@@ -1053,23 +1053,43 @@ const YESTERDAY_RE = /\b(?:yesterday|last\s+night)\b/i;
 // since the visit" holds only 6-8 days after it; any other relative time
 // ("last week", "3 days ago", "recently", "the other day") is refused,
 // because nothing in code can prove it.
-const DURATION_RE = /\b(?:for\s+)?(?:up\s+to\s+)?(?:a\s+couple\s+(?:of\s+)?|two|2|a\s+few|several)\s+weeks?\b/gi;
-const VISIT_WEEK_RE = /\b(?:a|one)\s+week\s+(?:since|after|on\s+from|from)\s+(?:the|your|our)\s+(?:first\s+)?(?:visit|treatment|service)\b/gi;
+const DURATION_RE = /\b(?:for\s+)?(?:up\s+to\s+)?(?:a\s+couple\s+(?:of\s+)?|two|2|a\s+few|several)\s+weeks?\b/i;
+const VISIT_WEEK_RE = /\b(?:a|one)\s+week\s+(?:since|after|on\s+from|from)\s+(?:the|your|our)\s+(?:first\s+)?(?:visit|treatment|service)\b/i;
+// Non-global patterns for .test(); a fresh global copy for each replace, so
+// no lastIndex state carries from one request to the next.
+const allOf = (re) => new RegExp(re.source, "gi");
 const OTHER_RELATIVE_RE = /\b(?:last|next|this|past|coming)\s+(?:week|month|year|weekend)\b|\b\d+\s+(?:days?|weeks?|months?|years?)\b|\b(?:a|one|two|three|few|couple(?:\s+of)?|several)\s+(?:days?|weeks?|months?|years?)\b|\b(?:ago|earlier|recently|lately)\b|\bthe\s+other\s+day\b/i;
-function timingUnsupported(sentence, quotes, recordLines, visitDay) {
+// Only a DATA line can prove timing ("- [customer, ...] ..." / "- Call ..." /
+// a report field), never the record's own header lines ("Today: ...",
+// "Service: ..."), and only a quote that also carries the sentence's content:
+// the date has to belong to the fact being claimed.
+const RECORD_HEADER_RE = /^\s*(?:Customer first name|Service|Today|Termite service|Technician \(you\))\s*:/i;
+function timingEvidence(sentence, quotes, recordLines) {
+  return quotes.filter((q) => {
+    const nq = normalizeForMatch(q);
+    const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
+    return !!line && !RECORD_HEADER_RE.test(line) && sharesContentWord(sentence, q);
+  });
+}
+// At least one real content word in common (not filler, timing or request
+// words): the quote is about what the sentence says.
+function sharesContentWord(sentence, quote) {
+  const quoteWords = stemSet(quote);
+  return [...stemSet(sentence)].some((w) => !isStop(w) && !TIME_STEMS.has(w) && !GREETING_STEMS.has(w) && !ASK_STEMS.has(w) && quoteWords.has(w));
+}
+function timingUnsupported(sentence, allQuotes, recordLines, visitDay) {
+  const quotes = timingEvidence(sentence, allQuotes, recordLines);
   const today = etCalendarDayOf(new Date());
   let rest = String(sentence);
   if (DURATION_RE.test(rest)) {
     if (!quotes.some((q) => /\bweeks?\b/i.test(q))) return true;
-    rest = rest.replace(DURATION_RE, " ");
+    rest = rest.replace(allOf(DURATION_RE), " ");
   }
-  DURATION_RE.lastIndex = 0;
   if (VISIT_WEEK_RE.test(rest)) {
     const daysSince = visitDay ? Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${visitDay}T12:00:00Z`)) / 86400000) : null;
     if (daysSince == null || daysSince < 6 || daysSince > 8) return true;
-    rest = rest.replace(VISIT_WEEK_RE, " ");
+    rest = rest.replace(allOf(VISIT_WEEK_RE), " ");
   }
-  VISIT_WEEK_RE.lastIndex = 0;
   if (OTHER_RELATIVE_RE.test(rest)) return true;
   // A weekday ("last Friday", "thanks for Sunday") must be the weekday of a
   // cited line's date (undated report lines: the visit day).
