@@ -536,14 +536,13 @@ function judgeSafety(scores) {
 const isUniqueViolation = (err) => err && err.code === '23505';
 
 /**
- * Ask the first reader, and — only when it confirmed with a verified quote and
- * no deterministic second reader agreed — a second model pinned to the OTHER
- * provider, blind, on the same prompt. Returns { decision, modelAnswer,
+ * Ask the first reader, and — only when it confirmed with a verified quote —
+ * a second model pinned to the OTHER provider, blind, on the same prompt. Returns { decision, modelAnswer,
  * readers }, or null when a reader could not be reached (the caller leaves the
  * judgment un-adjudicated: unknown is not "disagreed", and storing a lead now
  * would let an outage permanently demote a real mistake).
  */
-async function readWithTwoReaders({ judgmentId, draft, predicates, contradicts, payload }) {
+async function readWithTwoReaders({ judgmentId, draft, predicates, payload }) {
   const { decideDisposition } = require('./ai-incidents/sms-adjudication');
   const { dispatchWithFallback } = require('./llm/call');
   const policy = MODELS.TEXT_POLICIES.fastStructured;
@@ -558,7 +557,7 @@ async function readWithTwoReaders({ judgmentId, draft, predicates, contradicts, 
   const modelAnswer = parseAdjudicatorResponse(routed.text);
   if (!modelAnswer) return null; // validate() makes this unreachable; belt only
   const readers = [{ provider: routed.provider || null, model: routed.model || null, answer: modelAnswer }];
-  const first = decideDisposition({ model: modelAnswer, predicates, draft, humanContradictsSchedule: contradicts });
+  const first = decideDisposition({ model: modelAnswer, predicates, draft });
   if (!first.needsSecondReader) return { decision: first, modelAnswer, readers };
 
   // Pinned to the leg that did NOT answer the first time; a single-leg policy
@@ -573,14 +572,14 @@ async function readWithTwoReaders({ judgmentId, draft, predicates, contradicts, 
   }
   const secondAnswer = parseAdjudicatorResponse(secondRouted.text);
   readers.push({ provider: secondRouted.provider || otherLeg.provider, model: secondRouted.model || null, answer: secondAnswer });
-  const decision = decideDisposition({ model: modelAnswer, predicates, draft, humanContradictsSchedule: contradicts, second: secondAnswer });
+  const decision = decideDisposition({ model: modelAnswer, predicates, draft, second: secondAnswer });
   return { decision, modelAnswer, readers };
 }
 
 /**
  * Nightly, after the classifier: every un-adjudicated `human_better` judgment
  * on a recent, non-backfill draft becomes ONE ai_incidents row — a confirmed
- * mistake only under the two-reader rule in ai-incidents/sms-adjudication.js,
+ * mistake only under the two-model rule in ai-incidents/sms-adjudication.js,
  * otherwise a lead or not_a_mistake. Idempotent (anti-join + the evidence
  * unique key); an unparseable or failed adjudication, or a second reader that
  * could not be reached, leaves the judgment un-adjudicated for the next run.
@@ -706,7 +705,6 @@ async function adjudicateHumanBetter({ batchLimit = ADJUDICATE_BATCH, lookbackDa
         judgmentId: row.judgment_id,
         draft,
         predicates,
-        contradicts,
         payload: {
           laneId: 'sms_pathology',
           text: buildAdjudicatorPrompt({

@@ -36,7 +36,7 @@ jest.setTimeout(60000);
   const row = (over = {}) => ({
     area: 'sms', evidence_type: 'judgment', evidence_id: randomUUID(), incident_key: randomUUID(),
     disposition: 'confirmed_mistake', surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta',
-    adjudication: JSON.stringify({ rule: 'model+predicate' }), ...over,
+    adjudication: JSON.stringify({ rule: 'two_models' }), ...over,
   });
 
   test('up is re-runnable and the defaults land', async () => {
@@ -128,12 +128,13 @@ jest.setTimeout(60000);
         area: 'sms', evidence_type: 'judgment', disposition: 'confirmed_mistake',
         surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', prompt_version: 'house_voice_v12_real_answers3_cfl',
       });
-      expect(stored.adjudication).toMatchObject({ rule: 'model+predicate', judge: { safety: 5 }, model: { quote_verified: true } });
+      expect(stored.adjudication).toMatchObject({ rule: 'two_models', judge: { safety: 5 }, model: { quote_verified: true } });
+      expect(stored.adjudication.readers).toHaveLength(2);
       expect(stored.produced_at.toISOString()).toBe('2026-10-01T15:00:00.000Z');
 
       const second = await adjudicateHumanBetter({ dbi: database, anthropicClient: {}, now: NOW });
       expect(second).toMatchObject({ adjudicated: 0 });
-      expect(llmCall.dispatchWithFallback).toHaveBeenCalledTimes(2);
+      expect(llmCall.dispatchWithFallback).toHaveBeenCalledTimes(4); // two readers per confirmed draft, none on the second run
     });
 
     test('the summary groups what the run stored, by when the draft was produced', async () => {

@@ -45,15 +45,15 @@ describe('runPredicates — deterministic readings of one draft', () => {
     expect(modes(runPredicates({ draft: 'Thanks for reaching out today!', facts: FACTS }))).toEqual([]);
   });
 
-  test('price, placeholder and billing are facts-checked; a promise and a call reference are presence-only signals', () => {
-    expect(runPredicates({ draft: 'That visit is $149.', facts: FACTS })).toEqual([{ mode: 'price_quote', token: '$149', corroborates: true }]);
-    expect(runPredicates({ draft: 'Hi [first name], thanks!', facts: FACTS })).toEqual([{ mode: 'placeholder_leak', token: '[first name]', corroborates: true }]);
-    expect(runPredicates({ draft: 'Your payment was received, thank you.', facts: FACTS })).toMatchObject([{ mode: 'invented_billing', corroborates: true }]);
-    expect(runPredicates({ draft: "I'll have the office call you back.", facts: FACTS })).toMatchObject([{ mode: 'invented_commitment', corroborates: false }]);
-    expect(runPredicates({ draft: 'As we discussed, the gate will be open.', facts: FACTS })).toMatchObject([{ mode: 'invented_call_reference', corroborates: false }]);
+  test('price, placeholder, billing, promise and call reference each read as one signal', () => {
+    expect(runPredicates({ draft: 'That visit is $149.', facts: FACTS })).toEqual([{ mode: 'price_quote', token: '$149' }]);
+    expect(runPredicates({ draft: 'Hi [first name], thanks!', facts: FACTS })).toEqual([{ mode: 'placeholder_leak', token: '[first name]' }]);
+    expect(modes(runPredicates({ draft: 'Your payment was received, thank you.', facts: FACTS }))).toEqual(['invented_billing']);
+    expect(modes(runPredicates({ draft: "I'll have the office call you back.", facts: FACTS }))).toEqual(['invented_commitment']);
+    expect(modes(runPredicates({ draft: 'As we discussed, the gate will be open.', facts: FACTS }))).toEqual(['invented_call_reference']);
   });
 
-  test('a billing phrase or an amount the facts state is supported', () => {
+  test('a billing phrase or an amount the facts state verbatim is quiet', () => {
     expect(modes(runPredicates({ draft: 'Your payment was received.', facts: 'BILLING: payment was received 2026-10-01' }))).toEqual([]);
     expect(modes(runPredicates({ draft: 'Your balance is $149.', facts: 'BILLING: balance $149.00 due' }))).toEqual([]);
     expect(modes(runPredicates({ draft: 'Your balance is $1,490.', facts: 'BILLING: balance $1,490.00 due' }))).toEqual([]);
@@ -63,9 +63,11 @@ describe('runPredicates — deterministic readings of one draft', () => {
     expect(amountInFacts('20 dollars', 'late fee $20')).toBe(true);
   });
 
-  test('a promise the facts authorize still reads as presence-only, so it can never confirm on its own', () => {
-    const hits = runPredicates({ draft: "We'll get back to you within the hour.", facts: 'FOLLOW-UP SLA RIGHT NOW: within the hour' });
-    expect(hits).toMatchObject([{ mode: 'invented_commitment', corroborates: false }]);
+  test('signals fire on supported claims worded differently, which is why they never vote', () => {
+    // Each of these drafts is fully supported by its facts.
+    expect(modes(runPredicates({ draft: 'Your autopay is on.', facts: 'Autopay: on' }))).toEqual(['invented_billing']);
+    expect(modes(runPredicates({ draft: 'See you tomorrow!', facts: 'UPCOMING: 2026-10-03' }))).toEqual(['invented_schedule_eta']);
+    expect(modes(runPredicates({ draft: "We'll get back to you within the hour.", facts: 'FOLLOW-UP SLA RIGHT NOW: within the hour' }))).toEqual(['invented_commitment']);
   });
 
   test('every predicate mode is a real failure mode; an empty draft reads as nothing', () => {
@@ -116,78 +118,65 @@ describe('quoteInDraft / humanContradictsSchedule', () => {
   });
 });
 
-describe('decideDisposition — two readers, same failure mode', () => {
+describe('decideDisposition — two models, different providers, same failure mode', () => {
   const draft = 'See you Wednesday at 9am!';
   const confirmed = { disposition: 'confirmed_mistake', surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', quote: 'Wednesday at 9am' };
-  const eta = [{ mode: 'invented_schedule_eta', token: '9am', corroborates: true }];
-  const promise = [{ mode: 'invented_commitment', token: "i'll call", corroborates: false }];
+  const agree = { disposition: 'confirmed_mistake', surface: 'prompt_discipline', failure_mode: 'invented_schedule_eta', quote: 'at 9am' };
+  const everySignal = [
+    { mode: 'invented_schedule_eta', token: '9am' }, { mode: 'price_quote', token: '$1' }, { mode: 'placeholder_leak', token: '[x]' },
+    { mode: 'invented_billing', token: 'x' }, { mode: 'invented_commitment', token: 'x' }, { mode: 'invented_call_reference', token: 'x' },
+  ];
 
-  test('model + a facts-checked predicate for the same mode confirms, with no second model needed', () => {
-    const out = decideDisposition({ model: confirmed, predicates: eta, draft });
-    expect(out).toMatchObject({ disposition: 'confirmed_mistake', rule: 'model+predicate', surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta' });
-    expect(out.needsSecondReader).toBeUndefined();
-  });
-
-  test('the person naming a different day is the second reader for a schedule claim the facts supported', () => {
-    // Facts carry Tuesday 2 PM, so no predicate fires.
-    const supported = 'We have you down for Tuesday at 2 PM.';
-    const model = { ...confirmed, quote: 'Tuesday at 2 PM' };
-    expect(runPredicates({ draft: supported, facts: FACTS })).toEqual([]);
-    expect(decideDisposition({ model, predicates: [], draft: supported, humanContradictsSchedule: true }))
-      .toMatchObject({ disposition: 'confirmed_mistake', rule: 'model+human_contradiction' });
-    // Only for a schedule finding.
-    expect(decideDisposition({ model: { ...model, failure_mode: 'invented_commitment' }, predicates: [], draft: supported, humanContradictsSchedule: true }))
-      .toMatchObject({ disposition: 'lead', rule: 'model_only', needsSecondReader: true });
-  });
-
-  test('with no deterministic second reader the first pass asks for a second model', () => {
-    for (const predicates of [[], promise, [{ mode: 'invented_billing', token: 'x', corroborates: true }]]) {
+  test('a first reader that confirms with a verified quote asks for a second model, whatever the signals say', () => {
+    for (const predicates of [[], everySignal]) {
       expect(decideDisposition({ model: confirmed, predicates, draft }))
         .toMatchObject({ disposition: 'lead', rule: 'model_only', needsSecondReader: true });
     }
-  });
-
-  test('a presence-only predicate never confirms, even for its own mode', () => {
-    const model = { ...confirmed, failure_mode: 'invented_commitment', quote: 'See you Wednesday' };
-    expect(decideDisposition({ model, predicates: [{ mode: 'invented_commitment', token: 'x', corroborates: false }], draft }))
+    // Inputs that used to vote are not read at all.
+    expect(decideDisposition({ model: confirmed, predicates: everySignal, draft, safety: 0, humanContradictsSchedule: true }))
       .toMatchObject({ disposition: 'lead', needsSecondReader: true });
   });
 
-  test('a second model confirms only on the same failure mode with its own verified quote', () => {
-    const agree = { disposition: 'confirmed_mistake', surface: 'prompt_discipline', failure_mode: 'invented_schedule_eta', quote: 'at 9am' };
-    expect(decideDisposition({ model: confirmed, predicates: [], draft, second: agree }))
-      .toMatchObject({ disposition: 'confirmed_mistake', rule: 'model+second_model', surface: 'facts_block_gap' });
+  test('the second model agreeing on the same failure mode with its own verified quote confirms', () => {
+    const out = decideDisposition({ model: confirmed, predicates: [], draft, second: agree });
+    // The cell stored is the first reader's.
+    expect(out).toMatchObject({ disposition: 'confirmed_mistake', rule: 'two_models', surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta' });
+    expect(out.needsSecondReader).toBeUndefined();
+  });
+
+  test('any disagreement leaves a lead, and no signal can rescue it', () => {
     const cases = [
       { ...agree, failure_mode: 'invented_commitment' }, // a different failure
       { ...agree, quote: 'Thursday at noon' }, // quote not in the draft
+      { ...agree, quote: '' },
       { ...agree, disposition: 'lead' },
       { ...agree, disposition: 'not_a_mistake' },
       null, // answered, but unusable
     ];
     for (const second of cases) {
-      const out = decideDisposition({ model: confirmed, predicates: [], draft, second });
+      const out = decideDisposition({ model: confirmed, predicates: everySignal, draft, second });
       expect(out).toMatchObject({ disposition: 'lead', rule: 'model_only' });
       expect(out.needsSecondReader).toBeUndefined();
     }
   });
 
-  test('a quote the draft does not contain never confirms and never asks for a second reader', () => {
+  test('a first-reader quote the draft does not contain never confirms and never asks for a second reader', () => {
     const invented = { ...confirmed, quote: 'Thursday at noon' };
-    const out = decideDisposition({ model: invented, predicates: eta, draft, humanContradictsSchedule: true });
-    expect(out).toMatchObject({ disposition: 'lead', rule: 'model_quote_unverified' });
-    expect(out.needsSecondReader).toBeUndefined();
+    for (const second of [undefined, agree]) {
+      const out = decideDisposition({ model: invented, predicates: everySignal, draft, second });
+      expect(out).toMatchObject({ disposition: 'lead', rule: 'model_quote_unverified' });
+      expect(out.needsSecondReader).toBeUndefined();
+    }
   });
 
-  test('the judge safety score is not an input: no score can confirm', () => {
-    expect(decideDisposition({ model: confirmed, predicates: [], draft, safety: 0 })).toMatchObject({ disposition: 'lead', needsSecondReader: true });
-  });
-
-  test('when the model clears the draft, only a facts-checked house-rule hit keeps it as a lead', () => {
+  test('when the first reader clears the draft, a price or placeholder signal keeps it visible as a lead', () => {
     const cleared = { disposition: 'not_a_mistake', surface: 'other', failure_mode: 'other', quote: '' };
-    expect(decideDisposition({ model: cleared, predicates: eta, draft, humanContradictsSchedule: true })).toMatchObject({ disposition: 'not_a_mistake', rule: 'model' });
-    expect(decideDisposition({ model: cleared, predicates: [{ mode: 'price_quote', token: '$149', corroborates: true }], draft: 'It is $149.' }))
+    expect(decideDisposition({ model: cleared, predicates: [{ mode: 'invented_schedule_eta', token: '9am' }, { mode: 'invented_commitment', token: 'x' }], draft }))
+      .toMatchObject({ disposition: 'not_a_mistake', rule: 'model' });
+    expect(decideDisposition({ model: cleared, predicates: [{ mode: 'price_quote', token: '$149' }], draft: 'It is $149.' }))
       .toMatchObject({ disposition: 'lead', rule: 'predicate_only', failure_mode: 'price_quote' });
-    expect(decideDisposition({ model: cleared, predicates: promise, draft })).toMatchObject({ disposition: 'not_a_mistake', rule: 'model' });
+    expect(decideDisposition({ model: cleared, predicates: [{ mode: 'placeholder_leak', token: '[name]' }], draft: 'Hi [name]' }))
+      .toMatchObject({ disposition: 'lead', rule: 'predicate_only', failure_mode: 'placeholder_leak' });
     const lead = { disposition: 'lead', surface: 'other', failure_mode: 'other', quote: '' };
     expect(decideDisposition({ model: lead, predicates: [], draft })).toMatchObject({ disposition: 'lead', rule: 'model' });
   });
@@ -305,12 +294,18 @@ describe('adjudicateHumanBetter — run contract', () => {
 
   test('a confirmed mistake is stored with its incident key, cell, version and the evidence behind it', async () => {
     const dbi = makeDb({ candidates: [candidate('j1')] });
-    dispatch.mockResolvedValueOnce(answer('openai', ETA));
+    dispatch
+      .mockResolvedValueOnce(answer('openai', ETA))
+      .mockResolvedValueOnce(answer('anthropic', { ...ETA, surface: 'prompt_discipline', quote: 'at 9am' }));
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
     expect(out).toMatchObject({ adjudicated: 1, byDisposition: { confirmed_mistake: 1 } });
-    expect(dispatch).toHaveBeenCalledTimes(1); // the facts-checked predicate agreed; no second model
+    expect(dispatch).toHaveBeenCalledTimes(2);
     expect(dispatch.mock.calls[0][0]).toBe(POLICY);
     expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'sms_pathology', jsonMode: false });
+    // Second call: a single-leg policy pinned to the provider that did not answer first, same prompt.
+    expect(dispatch.mock.calls[1][0]).toEqual({ name: POLICY.name, primary: POLICY.fallback });
+    expect(POLICY.fallback.provider).toBe('anthropic');
+    expect(dispatch.mock.calls[1][1].text).toBe(dispatch.mock.calls[0][1].text);
     expect(dbi.inserts).toHaveLength(1);
     expect(dbi.inserts[0]).toMatchObject({
       area: 'sms', evidence_type: 'judgment', evidence_id: 'j1', incident_key: 'draft-j1',
@@ -320,10 +315,13 @@ describe('adjudicateHumanBetter — run contract', () => {
     });
     const adjudication = JSON.parse(dbi.inserts[0].adjudication);
     expect(adjudication).toMatchObject({
-      rule: 'model+predicate', judge: { safety: 5 }, model: { disposition: 'confirmed_mistake', quote_verified: true },
-      readers: [{ provider: 'openai', model: 'openai-fast', disposition: 'confirmed_mistake', failure_mode: 'invented_schedule_eta', quote_verified: true }],
+      rule: 'two_models', judge: { safety: 5 }, model: { disposition: 'confirmed_mistake', quote_verified: true },
+      readers: [
+        { provider: 'openai', model: 'openai-fast', disposition: 'confirmed_mistake', failure_mode: 'invented_schedule_eta', quote_verified: true },
+        { provider: 'anthropic', model: 'anthropic-fast', disposition: 'confirmed_mistake', failure_mode: 'invented_schedule_eta', quote_verified: true },
+      ],
     });
-    expect(adjudication.predicates).toEqual(expect.arrayContaining([expect.objectContaining({ mode: 'invented_schedule_eta', corroborates: true })]));
+    expect(adjudication.predicates).toEqual(expect.arrayContaining([{ mode: 'invented_schedule_eta', token: expect.any(String) }]));
     // Idempotency + feed contract.
     expect(dbi.calls.some(([m, args]) => m === 'onConflict' && args[0].join() === 'area,evidence_type,evidence_id')).toBe(true);
     expect(dbi.calls.some(([m, args]) => m === 'where' && args[0] === 'j.verdict' && args[1] === 'human_better')).toBe(true);
@@ -334,27 +332,6 @@ describe('adjudicateHumanBetter — run contract', () => {
     const windowCall = dbi.calls.find(([m, args]) => m === 'where' && args[0] === 'md.created_at');
     expect(windowCall[1][1]).toBe('>=');
     expect(windowCall[1][2].toISOString()).toBe('2026-08-18T08:30:00.000Z');
-  });
-
-  test('with no deterministic second reader, the OTHER provider is asked blind and its agreement confirms', async () => {
-    const dbi = makeDb({ candidates: [candidate('j1', SVC_DRAFT)] });
-    dispatch
-      .mockResolvedValueOnce(answer('openai', SVC))
-      .mockResolvedValueOnce(answer('anthropic', { ...SVC, surface: 'prompt_discipline', quote: 'treated the whole lawn' }));
-    const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
-    expect(out.byDisposition).toEqual({ confirmed_mistake: 1 });
-    expect(dispatch).toHaveBeenCalledTimes(2);
-    // Second call: a single-leg policy pinned to the provider that did not answer first, same prompt.
-    expect(dispatch.mock.calls[1][0]).toEqual({ name: POLICY.name, primary: POLICY.fallback });
-    expect(POLICY.fallback.provider).toBe('anthropic');
-    expect(dispatch.mock.calls[1][1].text).toBe(dispatch.mock.calls[0][1].text);
-    const adjudication = JSON.parse(dbi.inserts[0].adjudication);
-    expect(adjudication.rule).toBe('model+second_model');
-    expect(adjudication.readers.map((r) => [r.provider, r.disposition, r.quote_verified])).toEqual([
-      ['openai', 'confirmed_mistake', true], ['anthropic', 'confirmed_mistake', true],
-    ]);
-    // The cell stored is the first reader's.
-    expect(dbi.inserts[0]).toMatchObject({ surface: 'facts_block_gap', failure_mode: 'invented_service_details' });
   });
 
   test('when the fallback leg answered first, the second reader is the primary leg', async () => {
@@ -377,20 +354,23 @@ describe('adjudicateHumanBetter — run contract', () => {
     expect(JSON.parse(dbi.inserts[1].adjudication).readers[1]).toMatchObject({ provider: 'anthropic', failure_mode: 'invented_commitment' });
   });
 
-  test('a low judge score and a promise in the draft do not confirm: the second model still decides', async () => {
+  test('every signal agreeing with a wrong first reader still does not confirm: the second model decides', async () => {
+    // The facts carry Tuesday 2 PM. The draft also promises a refund, the judge
+    // scored safety 2, and the person named another day: every old "second
+    // reader" lights up, and the first model wrongly calls the day invented.
     const dbi = makeDb({ candidates: [candidate('j1', {
       scores: JSON.stringify({ safety: 2 }),
-      draft_response: "We'll refund that and see you Tuesday at 2 PM.",
+      draft_response: "We'll refund that and see you Tuesday at 2 PM tomorrow.",
+      human_reply_text: 'I can call you Thursday about the refund.',
     })] });
-    // First reader wrongly calls the (facts-supported) Tuesday 2 PM a schedule invention.
     dispatch
       .mockResolvedValueOnce(answer('openai', { ...ETA, quote: 'Tuesday at 2 PM' }))
       .mockResolvedValueOnce(answer('anthropic', { disposition: 'confirmed_mistake', surface: 'prompt_discipline', failure_mode: 'invented_commitment', quote: "We'll refund that", summary: 's' }));
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
     expect(out.byDisposition).toEqual({ lead: 1 });
     const adjudication = JSON.parse(dbi.inserts[0].adjudication);
-    expect(adjudication).toMatchObject({ rule: 'model_only', judge: { safety: 2 } });
-    expect(adjudication.predicates).toMatchObject([{ mode: 'invented_commitment', corroborates: false }]);
+    expect(adjudication).toMatchObject({ rule: 'model_only', judge: { safety: 2 }, human_contradicts_schedule: true });
+    expect(adjudication.predicates.map((p) => p.mode)).toEqual(expect.arrayContaining(['invented_schedule_eta', 'invented_commitment']));
   });
 
   test('an unreachable second reader stores nothing: the judgment is retried, never demoted', async () => {
@@ -398,22 +378,10 @@ describe('adjudicateHumanBetter — run contract', () => {
     dispatch
       .mockResolvedValueOnce(answer('openai', SVC))
       .mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' })
-      .mockResolvedValueOnce(answer('openai', ETA));
+      .mockResolvedValueOnce(answer('openai', { disposition: 'lead', surface: 'other', failure_mode: 'other', quote: '', summary: 's' }));
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
-    expect(out).toMatchObject({ adjudicated: 1, byDisposition: { confirmed_mistake: 1 } });
+    expect(out).toMatchObject({ adjudicated: 1, byDisposition: { lead: 1 } });
     expect(dbi.inserts.map((r) => r.evidence_id)).toEqual(['j2']);
-  });
-
-  test("the run passes the person's conflicting day to the decision and records it", async () => {
-    const dbi = makeDb({ candidates: [candidate('j1', {
-      draft_response: 'We have you down for Tuesday at 2 PM.',
-      human_reply_text: 'We had to move you to Thursday morning, sorry about that!',
-    })] });
-    dispatch.mockResolvedValueOnce(answer('openai', { ...ETA, quote: 'Tuesday at 2 PM' }));
-    const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
-    expect(out.byDisposition).toEqual({ confirmed_mistake: 1 });
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(dbi.inserts[0].adjudication)).toMatchObject({ rule: 'model+human_contradiction', human_contradicts_schedule: true, predicates: [] });
   });
 
   test('a cleared row is stored as not_a_mistake with one call', async () => {
@@ -447,7 +415,7 @@ describe('adjudicateHumanBetter — run contract', () => {
 
   test('an incident already confirmed in the cell is stored as a duplicate, never counted twice', async () => {
     const dbi = makeDb({ candidates: [candidate('j1')], insertError: Object.assign(new Error('duplicate key'), { code: '23505' }) });
-    dispatch.mockResolvedValueOnce(answer('openai', ETA));
+    dispatch.mockResolvedValueOnce(answer('openai', ETA)).mockResolvedValueOnce(answer('anthropic', ETA));
     const out = await adjudicateHumanBetter({ dbi, anthropicClient: {}, now: NOW });
     expect(out.byDisposition).toEqual({ duplicate: 1 });
     expect(dbi.inserts).toHaveLength(1);

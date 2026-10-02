@@ -3148,9 +3148,9 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
   // The judge's human_better verdict is a lead, not a failure: this turns
-  // each one into a confirmed mistake ONLY when a model's quoted claim is
-  // really in the draft AND a deterministic predicate or the judge's own
-  // safety score agrees; everything else is stored as a lead. Writes
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
   // ai_incidents only — shadow data, nothing reads it at runtime. Same
   // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
   // =========================================================================
