@@ -111,7 +111,18 @@ function makeFakeDb(seed = {}) {
   }
   const conn = (table) => builder(String(table).split(' ')[0]);
   conn.transaction = async (fn) => fn(conn);
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  conn.raw = (sql, bindings) => {
+    // The first-name fulfilment query (utils/missing-first-name-card): each listed id is
+    // named when its row is live with a nonblank first name (no merge journal in this fake).
+    if (String(sql).includes('customer_merge_journal') && String(sql).includes('as named')) {
+      const ids = bindings?.[0] || [];
+      return { rows: ids.map((id) => {
+        const row = (tables.customers || []).find((c) => String(c.id) === String(id));
+        return { id, named: !!row && row.deleted_at == null && String(row.first_name || '').trim() !== '' };
+      }) };
+    }
+    return { __raw: sql, bindings };
+  };
   conn.schema = { hasTable: async () => false };
   return { conn, tables };
 }

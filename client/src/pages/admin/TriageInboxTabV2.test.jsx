@@ -348,6 +348,11 @@ describe('ConfirmEvidence — missing first name', () => {
     expect(screen.getByText(/the customer linked to this task/)).toBeInTheDocument();
   });
 
+  it('links the record the server resolved (a merged-away customer opens its survivor) — codex #5559 r18', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A] }} openCustomerIds={[B]} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+  });
+
   it('a pre-list card (scalar customer_id) reads as one listed customer', () => {
     render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: A }} />);
     expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);

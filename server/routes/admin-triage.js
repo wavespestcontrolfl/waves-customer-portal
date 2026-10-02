@@ -342,6 +342,20 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // A first-name card's "Open customer" links must reach an editable record: a listed customer
+    // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
+    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    if (nameCards.length) {
+      const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
+      for (const item of nameCards) {
+        try {
+          item.owed_customer_open_ids = [...new Set((await owedCustomerOpenTargets(db, item.payload)).map((t) => t.open_id))];
+        } catch (linkErr) {
+          logger.warn(`[admin-triage] first-name link targets read failed: ${linkErr.code || linkErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);

@@ -44,6 +44,36 @@ function owedCustomerNamedSql(idExpr) {
   )`;
 }
 
+// The record the office should OPEN for each listed customer: the id itself while it is
+// live, else the live survivor its active merge chain (the same hops as
+// owedCustomerNamedSql) ends at; a listed id with neither is returned unchanged.
+// Returns [{ id, open_id }] in listing order (codex #5559 r18).
+async function owedCustomerOpenTargets(conn, payload) {
+  const ids = owedCustomerIds(payload);
+  if (!ids.length) return [];
+  const result = await conn.raw(`
+    select ids.id, (
+      with recursive hop(cid, depth) as (
+        select ids.id, 0
+        union all
+        select j.winner_customer_id::text, hop.depth + 1
+        from hop
+        join customers dead on dead.id::text = hop.cid and dead.deleted_at is not null
+        join lateral (
+          select m.winner_customer_id from customer_merge_journal m
+          where m.loser_customer_id::text = hop.cid and m.undone_at is null
+          order by m.created_at desc limit 1
+        ) j on true
+        where hop.depth < 8
+      )
+      select hop.cid from hop join customers c on c.id::text = hop.cid and c.deleted_at is null
+      order by hop.depth desc limit 1
+    ) as open_id
+    from unnest(?::text[]) with ordinality as ids(id, ord) order by ids.ord`, [ids]);
+  const byId = new Map((result?.rows || []).map((r) => [String(r.id), r.open_id ? String(r.open_id) : null]));
+  return ids.map((id) => ({ id, open_id: byId.get(id) || id }));
+}
+
 // True only when the card lists at least one customer and EVERY listed customer is
 // fulfilled per owedCustomerNamedSql. The same rule the auto-resolve sweep applies.
 async function everyOwedCustomerNamed(conn, payload) {
@@ -56,4 +86,4 @@ async function everyOwedCustomerNamed(conn, payload) {
   return rows.length === ids.length && rows.every((r) => r.named === true);
 }
 
-module.exports = { UUID_RE, owedCustomerIds, owedCustomerNamedSql, everyOwedCustomerNamed };
+module.exports = { UUID_RE, owedCustomerIds, owedCustomerNamedSql, everyOwedCustomerNamed, owedCustomerOpenTargets };

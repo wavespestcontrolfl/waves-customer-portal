@@ -100,14 +100,17 @@ function parsePayload(payload) {
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function ConfirmEvidence({ payload, reasonCode = null }) {
+export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
   const p = parsePayload(payload);
   if (!p) return null;
   // A missing-first-name task is owed on EVERY customer it lists (payload.customer_ids; a
   // pre-list card's scalar customer_id is one), not the call's current link: a relink must
   // not send the office to edit some other account.
+  // The server resolves each listed customer to the record to open (a merged-away one opens
+  // its survivor); older responses fall back to the ids on the card.
   const firstNameCustomerIds = reasonCode === "missing_first_name"
-    ? [...new Set((Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
+    ? [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds
+      : Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
       .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))]
     : [];
   const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
@@ -1148,7 +1151,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} />}
+                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

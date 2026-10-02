@@ -423,4 +423,20 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await owed([loser])).toBe(false); // the survivor is still blank
     expect(await owed([])).toBe(false);
   });
+
+  test('the office link opens the live record: the id itself, else its merge survivor (codex #5559 r18)', async () => {
+    const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
+    await trx.raw('CREATE TEMP TABLE customers (id uuid PRIMARY KEY, first_name text, deleted_at timestamptz) ON COMMIT DROP');
+    await trx.raw('CREATE TEMP TABLE customer_merge_journal (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), winner_customer_id uuid, loser_customer_id uuid, created_at timestamptz DEFAULT clock_timestamp(), undone_at timestamptz) ON COMMIT DROP');
+    const [loser, mid, winner, live, gone] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    await trx('customers').insert([
+      { id: loser, first_name: '', deleted_at: new Date() }, { id: mid, first_name: '', deleted_at: new Date() },
+      { id: winner, first_name: '' }, { id: live, first_name: '' },
+    ]);
+    await trx('customer_merge_journal').insert([{ winner_customer_id: mid, loser_customer_id: loser }, { winner_customer_id: winner, loser_customer_id: mid }]);
+    expect(await owedCustomerOpenTargets(trx, { customer_ids: [live, loser, gone] })).toEqual([
+      { id: live, open_id: live }, { id: loser, open_id: winner }, { id: gone, open_id: gone },
+    ]);
+    expect(await owedCustomerOpenTargets(trx, {})).toEqual([]);
+  });
 });
