@@ -356,13 +356,27 @@ describe('runTranslationTrial', () => {
     expect(row.hold_reason).not.toBe('inbound_translation_failed:translation_not_english');
   });
 
-  test('a thank-you with a visit loop open goes to a person, as the live drafter routes it', async () => {
+  test('a thank-you with a visit loop open is drafted on the ordinary path (live ETA re-read) and held for a person', async () => {
     mockLoopsOpen.mockReturnValue(true);
+    const ctx = require('../services/context-aggregator');
+    ctx.getContextForCustomer.mockClear();
     scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you!' } });
     const row = await runTranslationTrial({ inboundMessage: '¡Muchas gracias!', customer, smsLogId: 's1' });
-    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'open_loop_thanks_to_person' });
-    expect(mockDraft).not.toHaveBeenCalled();
-    expect(require('../services/context-aggregator').getContextForCustomer.mock.calls.at(-1)[1]).toMatchObject({ includeVisitLoops: true });
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(mockDraft.mock.calls[0][0].intent).not.toMatchObject({ intent: 'gratitude_reply' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'open_loop_thanks_to_person', reply_translated: expect.any(String) });
+    expect(row.checks.open_loop_thanks).toBe(true);
+    expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(2);
+    expect(ctx.getContextForCustomer.mock.calls[1][1]).toMatchObject({ includeVisitLoops: true });
+  });
+
+  test('a closed-loop thank-you reads the context without the live ETA', async () => {
+    const ctx = require('../services/context-aggregator');
+    ctx.getContextForCustomer.mockClear();
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you!' } });
+    await runTranslationTrial({ inboundMessage: '¡Muchas gracias!', customer, smsLogId: 's1' });
+    expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(1);
+    expect(ctx.getContextForCustomer.mock.calls[0][1]).toMatchObject({ includeLiveEta: false, includeVisitLoops: true });
   });
 
   test('the thread stops at the triggering text: a later text is not drafted from', async () => {

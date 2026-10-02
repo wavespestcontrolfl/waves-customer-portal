@@ -704,11 +704,28 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   // the customer's thread and account, read before any other model call; the thread is cut at the triggering
   // text (threadAsOfTrigger), so a staff reply or newer text landing meanwhile never reaches the draft. Same
   // live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
+  // A thank-you-only text is answered with the approved gratitude reply, as draftShadowReply answers a live one,
+  // and like it the context is read WITHOUT the live ETA (the fixed reply cannot use one: no paid lookup). With a
+  // visit loop open (a delay, a passed window, a promise or ask) it is not a pure thank-you: the live drafter
+  // drafts it on the ordinary path, context re-read with the live ETA, and routes it to a person - so here.
+  const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
+  const gratitude = require('./sms-gratitude');
+  let gratitudeCandidate = !schedulingIntent && gratitude.isGratitudeOnly(inbound.english);
+  const realAnswers = gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const ContextAggregator = require('./context-aggregator');
-  const liveEtaFetchedAt = new Date();
-  // visit loops too, as the live drafter loads them: a "thanks" with something still open is not a pure thank-you
-  const liveContext = await threadAsOfTrigger(await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS'), includeVisitLoops: true }), smsLogId);
+  let liveEtaFetchedAt = new Date();
+  // visit loops too, as the live drafter loads them
+  const loadContext = async (includeLiveEta) => threadAsOfTrigger(await ContextAggregator.getContextForCustomer(customer, { includeLiveEta, includeVisitLoops: true }), smsLogId);
+  let liveContext = await loadContext(realAnswers && !gratitudeCandidate);
   if (!liveContext) return { stop: 'trigger_row_unread' };
+  let openLoopThanks = false;
+  if (gratitudeCandidate && require('./sms-shadow-drafter').visitLoopsNeedAnswer(liveContext)) {
+    gratitudeCandidate = false;
+    openLoopThanks = true;
+    liveEtaFetchedAt = new Date();
+    liveContext = await loadContext(realAnswers);
+    if (!liveContext) return { stop: 'trigger_row_unread' };
+  }
   const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english };
   // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
   const inboundParity = tokenParity(inbound.english, inboundMessage, { strictTimes: false });
@@ -721,15 +738,9 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
   const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
   // both read off the English: the webhook's own reads ran on the foreign text
-  let intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
-  const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
-  // a thank-you-only text gets the approved gratitude reply, as draftShadowReply does for a live one; with a
-  // visit loop open (a delay, a passed window, a promise or ask) the live drafter routes it to a person instead
-  const gratitude = require('./sms-gratitude');
-  if (!schedulingIntent && gratitude.isGratitudeOnly(inbound.english)) {
-    if (require('./sms-shadow-drafter').visitLoopsNeedAnswer(liveContext)) return { stop: 'open_loop_thanks_to_person', fields };
-    intent = { intent: gratitude.GRATITUDE_INTENT, confidence: 1, approvedReply: gratitude.buildGratitudeReply(customer.first_name) };
-  }
+  const intent = gratitudeCandidate
+    ? { intent: gratitude.GRATITUDE_INTENT, confidence: 1, approvedReply: gratitude.buildGratitudeReply(customer.first_name) }
+    : classifyCustomerSmsTriageIntent(inbound.english, { customer });
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const draft = await require('./sms-shadow-drafter').generateGroundedDraft({
@@ -747,14 +758,15 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
     facts_block: draft?.factsBlock || null,
     ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
   });
-  const checks = { inbound_parity: inboundParity, converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
+  const checks = { inbound_parity: inboundParity, ...(openLoopThanks ? { open_loop_thanks: true } : {}), converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows, english_lint: englishReply ? lintFailures(englishReply, liveContext) : [] };
   if (!draft?.parsed) return { stop: 'draft_unparseable', fields, checks };
-  if (!englishReply) return { skip: 'no_reply_needed', fields, checks };
+  // an open loop is never answered with silence: the live drafter routes an empty draft to a person
+  if (!englishReply) return openLoopThanks ? { stop: 'open_loop_thanks_to_person', fields, checks } : { skip: 'no_reply_needed', fields, checks };
   if (!draft.converged) return { stop: 'english_checks_not_passed', fields, checks };
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
   const fault = postDraftFault(englishReply, liveContext, draft?.factsBlock);
   if (fault) return { stop: fault, fields, checks };
-  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks };
+  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks, toPerson: openLoopThanks };
 }
 
 // Steps 3-4: translate, then check the exact stored text.
@@ -821,6 +833,8 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     const fields = { ...en.fields, ...tr.fields };
     const checks = { ...en.checks, ...tr.checks };
     if (tr.stop) return await save('held', tr.stop, fields, checks);
+    // drafted, translated and checked, but the live drafter would put it in front of a person, never send it
+    if (en.toPerson) return await save('held', 'open_loop_thanks_to_person', fields, checks);
     return await save('ready', null, fields, checks);
   } catch (err) {
     logger.warn(`[sms-translation] trial failed (customer=${customer.id}): ${err.code || err.name || 'error'}`);
