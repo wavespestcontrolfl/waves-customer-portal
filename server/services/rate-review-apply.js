@@ -1270,43 +1270,41 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   const prepayNotices = await dbh('price_change_notices')
     .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
     .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
+  // Per term: the noticed family, the renewal day its APPLIED notice named,
+  // and the amount a delivered-but-unapplied notice told the customer.
   const familyByTerm = new Map();
+  const appliedDay = new Map();
   const deliveredCents = new Map();
-  const appliedEffective = new Map();
   for (const n of prepayNotices) {
-    const termId = parseMetadata(n.metadata).term_id;
+    const key = String(parseMetadata(n.metadata).term_id || '');
+    const day = ymd(n.effective_date);
+    if (n.applied_at) {
+      familyByTerm.set(key, n.family_key);
+      appliedDay.set(key, day);
+      continue;
+    }
     // Delivered with the 30-day lead the apply requires (applyNotice's
     // notice_too_recent rule): a notice the apply refuses guards nothing.
-    const told = !n.applied_at && wasDelivered(n)
-      && daysBetweenYmd(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS
-      && Number(n.noticed_new_cents ?? n.new_amount_cents);
-    if (told > 0) deliveredCents.set(String(termId), { cents: told, effectiveDate: ymd(n.effective_date) });
-    if (termId && n.applied_at && ymd(n.effective_date)) {
-      const key = String(termId);
-      if (!appliedEffective.has(key)) appliedEffective.set(key, new Set());
-      appliedEffective.get(key).add(ymd(n.effective_date));
+    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
+    if (told > 0) {
+      familyByTerm.set(key, n.family_key);
+      deliveredCents.set(key, { cents: told, day });
     }
-    if (termId && (n.applied_at || told > 0)) familyByTerm.set(String(termId), n.family_key);
   }
-  // A delivered-but-unapplied notice guards only the renewal window it
-  // named (effective_date = term_end + 1, applyPrepay's
-  // renewal_window_changed rule): a term whose dates were edited since is a
-  // different renewal, and the apply will never write that amount for it.
-  const deliveredCentsOf = (t) => {
-    const d = deliveredCents.get(String(t.id));
-    return d && addDaysYmd(ymd(t.term_end), 1) === d.effectiveDate ? d.cents : null;
-  };
-  // The frozen amount follows the same rule: the term-date editor keeps
-  // next_term_prepay_amount when the dates move, so once the applied notice
-  // that wrote it names a different renewal day than this term's end + 1,
-  // it is another window's price and guards nothing.
-  const frozenCentsOf = (t) => {
+  // Either amount guards only the renewal window its notice named
+  // (effective_date = term_end + 1, applyPrepay's renewal_window_changed
+  // rule): a term whose dates were edited since is a different renewal —
+  // the term-date editor keeps next_term_prepay_amount when the dates move,
+  // and the apply never writes a delivered notice's amount for it. A frozen
+  // amount with no applied notice on record keeps guarding.
+  const noticedCentsOf = (t) => {
+    const key = String(t.id);
+    const renewalDay = addDaysYmd(ymd(t.term_end), 1);
     const frozen = cents(t.next_term_prepay_amount);
-    if (frozen == null) return null;
-    const applied = appliedEffective.get(String(t.id));
-    return !applied || applied.has(addDaysYmd(ymd(t.term_end), 1)) ? frozen : null;
+    if (frozen != null && [undefined, null, renewalDay].includes(appliedDay.get(key))) return frozen;
+    const delivered = deliveredCents.get(key);
+    return delivered && delivered.day === renewalDay ? delivered.cents : null;
   };
-  const noticedCentsOf = (t) => frozenCentsOf(t) ?? deliveredCentsOf(t) ?? null;
   const term = terms
     .filter((t) => noticedCentsOf(t) != null && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => {
