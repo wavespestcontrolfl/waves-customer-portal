@@ -46,7 +46,7 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 // here, so modules load at `error`; the level goes back to `warn` before the
 // reads below, because hub-read / ops-queue report an unreadable attention
 // source only as a warning and that warning is the report's own signal.
-process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error';
+process.env.LOG_LEVEL = 'error';
 for (const gate of ['GATE_LLM_COST_TRACKING', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY']) process.env[gate] ??= 'true';
 const RECORDER_GATES = ['GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
 const recorderState = Object.fromEntries(RECORDER_GATES.map((g) => [g, process.env[g] == null ? null : ['1', 'true', 'on'].includes(String(process.env[g]).toLowerCase())]));
@@ -57,7 +57,12 @@ process.env.GATE_LLM_DISPATCH_METRICS = 'true';
 // The typed-decisions review surface is dark without its gate (the routes 404,
 // no review item is raised), so its queue is reported only when the portal's
 // gate was passed through and is on.
-const typedDecisionsGate = process.env.GATE_TYPED_DECISIONS == null ? null : ['1', 'true', 'on'].includes(String(process.env.GATE_TYPED_DECISIONS).toLowerCase());
+const passedGate = (name) => (process.env[name] == null ? null : ['1', 'true', 'on'].includes(String(process.env[name]).toLowerCase()));
+const typedDecisionsGate = passedGate('GATE_TYPED_DECISIONS');
+// Likewise the content email approvals: with their gate off the scheduler
+// never polls replies and a reply never executes, so a sent approval is not
+// something the owner can act on.
+const emailApprovalsGate = passedGate('GATE_CONTENT_EMAIL_APPROVALS');
 
 // stdout is the report only (with --json, one document a consumer parses).
 // App modules print at load and inside reads with console.log as well as the
@@ -70,9 +75,13 @@ console.info = (...args) => console.error(...args);
 
 const path = require('path');
 const SERVER = path.join(__dirname, '..', '..', 'server');
-const db = require(path.join(SERVER, 'models', 'db'));
+// The logger comes first, with every record routed to stderr BEFORE any other
+// app module loads, so no module-load line can reach stdout.
 const logger = require(path.join(SERVER, 'services', 'logger'));
-const { readAreas, readLanes } = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
+for (const t of logger.transports) if (t.name === 'console') t.stderrLevels = Object.fromEntries(Object.keys(logger.levels).map((l) => [l, true]));
+const db = require(path.join(SERVER, 'models', 'db'));
+const { readLanes } = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
+const { AREAS } = require(path.join(SERVER, 'services', 'model-switchboard'));
 const { REVIEW_WINDOW_DAYS } = require(path.join(SERVER, 'services', 'typed-decisions', 'daily-review-item'));
 const { etDateString, addETDays, parseETDateTime } = require(path.join(SERVER, 'utils', 'datetime-et'));
 
@@ -104,7 +113,7 @@ async function waitingOnYou(now) {
       .where('created_at', '>=', since).count({ n: '*' }).first().then((r) => Number(r?.n || 0)).catch(() => null),
     // Only approvals whose email actually went out (email_sent_at is stamped
     // after SMTP confirms): an in-flight or failed send is machinery's, not yours.
-    db('content_email_approvals').where({ status: 'awaiting_reply' }).whereNotNull('email_sent_at').count({ n: '*' }).first()
+    emailApprovalsGate !== true ? Promise.resolve(emailApprovalsGate) : db('content_email_approvals').where({ status: 'awaiting_reply' }).whereNotNull('email_sent_at').count({ n: '*' }).first()
       .then((r) => Number(r?.n || 0)).catch(() => null),
   ]);
   return { typedDecisionLabels: typed, contentEmailApprovals: approvals };
@@ -112,10 +121,6 @@ async function waitingOnYou(now) {
 
 // Integrations the reads load lazily announce themselves as warnings too
 // (push providers, GBP); those are not about a source this report reads.
-// Every log record goes to stderr: stdout is the report (and, with --json,
-// one JSON document a consumer parses), so a recoverable source warning
-// must never land in it.
-for (const t of logger.transports) if (t.name === 'console') t.stderrLevels = Object.fromEntries(Object.keys(logger.levels).map((l) => [l, true]));
 const STARTUP_NOISE = /^\[(apns|fcm|push|gbp)\]/;
 const rawWarn = logger.warn.bind(logger);
 logger.warn = (msg, ...rest) => (typeof msg === 'string' && STARTUP_NOISE.test(msg) ? logger : rawWarn(msg, ...rest));
@@ -123,29 +128,42 @@ logger.warn = (msg, ...rest) => (typeof msg === 'string' && STARTUP_NOISE.test(m
 async function main() {
   logger.level = 'warn';
   const now = new Date();
-  const [areas, lanes, waiting] = await Promise.all([readAreas({ window: WINDOW, now }), readLanes({ window: WINDOW, now }), waitingOnYou(now)]);
+  // ONE hub read: the area table is folded from the same lane rows, so the
+  // two can never disagree and the production queries run once.
+  const [lanes, waiting] = await Promise.all([readLanes({ window: WINDOW, now }), waitingOnYou(now)]);
+  const hasAttention = (att) => Object.values(att || {}).some((n) => n > 0);
+  const shownLanes = lanes.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL);
+  const areas = AREAS.map((area) => {
+    const rows = lanes.lanes.filter((l) => l.area === area.key);
+    const attention = {};
+    for (const l of rows) for (const [p, n] of Object.entries(l.attention || {})) attention[p] = (attention[p] || 0) + n;
+    const priced = rows.filter((l) => l.estCostUsd != null);
+    return {
+      key: area.key, label: area.label, lanes: rows.length, active: rows.filter((l) => l.calls > 0).length,
+      calls: rows.reduce((n, l) => n + l.calls, 0), attention,
+      estCostUsd: priced.length ? Number(priced.reduce((n, l) => n + l.estCostUsd, 0).toFixed(4)) : null,
+    };
+  }).filter((a) => a.calls > 0 || hasAttention(a.attention) || SHOW_ALL);
+  // ledgerRecording / chainRecording in `basis` are what THIS process's env
+  // says, not the portal's — replaced with the passed-through portal values.
+  const basis = { ...lanes.basis, ledgerRecording: recorderState.GATE_LLM_CALL_LEDGER, chainRecording: recorderState.GATE_LLM_DISPATCH_METRICS, recorderGatesFrom: 'portal service via wrapper; null = not passed' };
   if (JSON_OUT) {
-    // ledgerRecording / chainRecording in `basis` are what THIS process's env
-    // says, not the portal's — replaced with the passed-through portal values.
-    const basis = { ...lanes.basis, ledgerRecording: recorderState.GATE_LLM_CALL_LEDGER, chainRecording: recorderState.GATE_LLM_DISPATCH_METRICS, recorderGatesFrom: 'portal service via wrapper; null = not passed' };
-    process.stdout.write(`${JSON.stringify({ window: WINDOW, generatedAt: now.toISOString(), basis, areas: areas.areas, lanes: lanes.lanes, waiting }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ window: WINDOW, generatedAt: now.toISOString(), basis, counts: lanes.counts, areas, lanes: shownLanes, waiting }, null, 2)}\n`);
     return;
   }
-  const basis = lanes.basis || {};
   const costNote = basis.cost == null ? 'cost: unavailable' : basis.cost.priced === false ? 'cost: waiting for the first price pull' : null;
   out(`Agents report — ${WINDOW} — ${now.toISOString()}${costNote ? `  (${costNote})` : ''}`);
   const gateWord = (v) => (v == null ? 'unknown' : v ? 'on' : 'OFF');
   out(`lanes: ${lanes.counts.active} active, ${lanes.counts.attention} need attention, ${lanes.counts.idle} idle`);
   out(`recording (portal gates): ledger ${gateWord(recorderState.GATE_LLM_CALL_LEDGER)}, chains ${gateWord(recorderState.GATE_LLM_DISPATCH_METRICS)}${recorderState.GATE_LLM_DISPATCH_METRICS === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
 
-  const hasAttention = (att) => Object.values(att || {}).some((n) => n > 0);
-  const areaRows = areas.areas.filter((a) => a.calls > 0 || hasAttention(a.attention) || SHOW_ALL).map((a) => [
-    a.label, a.calls, pct(a.okRate), pct(a.fallbackRate), ms(a.p95LatencyMs), usd(a.estCostUsd),
+  const areaRows = areas.map((a) => [
+    a.label, `${a.active}/${a.lanes}`, a.calls, usd(a.estCostUsd),
     Object.entries(a.attention).filter(([, n]) => n > 0).map(([p, n]) => `${p}:${n}`).join(' ') || '',
   ]);
-  out(table(['area', 'calls', 'ok', 'fallback', 'p95', 'est $', 'attention'], areaRows, new Set([1, 2, 3, 4, 5])));
+  out(table(['area', 'lanes', 'calls', 'est $', 'attention'], areaRows, new Set([1, 2, 3])));
 
-  const laneRows = lanes.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL).map((l) => [
+  const laneRows = shownLanes.map((l) => [
     l.status === 'attention' ? '!' : l.status === 'active' ? '' : '·',
     l.id, l.area, l.calls, pct(l.okRate), pct(l.fallbackRate), ms(l.p50LatencyMs), ms(l.p95LatencyMs),
     // Shown as the ledger's own counters, never summed: cached input is inside
@@ -168,7 +186,8 @@ async function main() {
   if (w.typedDecisionLabels === false) items.push('typed decisions: review surface off (gate off)');
   else if (w.typedDecisionLabels == null) items.push(typedDecisionsGate == null ? 'typed decisions: gate not passed (run via the wrapper)' : 'typed-decision labels: unreadable');
   else if (w.typedDecisionLabels > 0) items.push(`${w.typedDecisionLabels} typed-decision review${w.typedDecisionLabels === 1 ? '' : 's'} unlabeled (last ${REVIEW_WINDOW_DAYS} days)`);
-  if (w.contentEmailApprovals == null) items.push('content email approvals: unreadable');
+  if (w.contentEmailApprovals === false) items.push('content email approvals: off (gate off)');
+  else if (w.contentEmailApprovals == null) items.push(emailApprovalsGate == null ? 'content email approvals: gate not passed (run via the wrapper)' : 'content email approvals: unreadable');
   else if (w.contentEmailApprovals > 0) items.push(`${w.contentEmailApprovals} content email approval${w.contentEmailApprovals === 1 ? '' : 's'} awaiting your reply`);
   out(`\nwaiting on you: ${items.length ? items.join('; ') : 'nothing'}`);
 }
