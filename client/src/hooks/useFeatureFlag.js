@@ -5,12 +5,18 @@ import { useEffect, useState } from 'react';
 let cache = null; // null = unloaded, object = loaded (empty object on error = fail-closed)
 let inflight = null;
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// A flag read that never answers (a field dead zone) must not hold a gated
+// screen on its loading state: give up and fail closed like any other error.
+export const FLAGS_FETCH_TIMEOUT_MS = 15000;
 
 async function loadFlags() {
   if (cache !== null) return cache;
   if (inflight) return inflight;
 
   inflight = (async () => {
+    // Headers and body share the one bound.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), FLAGS_FETCH_TIMEOUT_MS) : null;
     try {
       const token = localStorage.getItem('waves_admin_token');
       if (!token) {
@@ -19,6 +25,7 @@ async function loadFlags() {
       }
       const res = await fetch(`${API_BASE}/admin/feature-flags`, {
         headers: { Authorization: `Bearer ${token}` },
+        ...(abort ? { signal: abort.signal } : {}),
       });
       if (!res.ok) throw new Error(`flags fetch failed: ${res.status}`);
       const data = await res.json();
@@ -29,6 +36,7 @@ async function loadFlags() {
       cache = {}; // fail closed — everyone gets stable UI
       return cache;
     } finally {
+      if (timer) clearTimeout(timer);
       inflight = null;
     }
   })();
