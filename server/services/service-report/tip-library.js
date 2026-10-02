@@ -62,12 +62,19 @@ const TIP_GROUPS = Object.freeze([
   { id: 'termite', label: 'Termite' },
   { id: 'lawn', label: 'Lawn' },
   { id: 'tree_shrub', label: 'Trees and shrubs' },
-  { id: 'fleas', label: 'Pets and fleas' },
+  { id: 'fleas', label: 'Fleas and ticks' },
+  { id: 'bed_bugs', label: 'Bed bugs' },
+  { id: 'roaches', label: 'Roaches' },
+  { id: 'fire_ants', label: 'Fire ants' },
+  { id: 'stinging', label: 'Bees and wasps' },
+  { id: 'wildlife', label: 'Wildlife' },
 ]);
 const GROUP_ORDER = Object.freeze({
-  wet: ['moisture', 'water', 'lighting', 'exterior', 'kitchen', 'sealing', 'rodent', 'termite', 'lawn', 'tree_shrub', 'fleas'],
-  dry: ['lighting', 'sealing', 'exterior', 'moisture', 'kitchen', 'water', 'rodent', 'termite', 'lawn', 'tree_shrub', 'fleas'],
+  wet: ['moisture', 'water', 'lighting', 'exterior', 'kitchen', 'sealing', 'rodent', 'termite', 'lawn', 'tree_shrub', 'fleas', 'bed_bugs', 'roaches', 'fire_ants', 'stinging', 'wildlife'],
+  dry: ['lighting', 'sealing', 'exterior', 'moisture', 'kitchen', 'water', 'rodent', 'termite', 'lawn', 'tree_shrub', 'fleas', 'bed_bugs', 'roaches', 'fire_ants', 'stinging', 'wildlife'],
 });
+// The leading group of a visit whose service has its own tips.
+const FOR_SERVICE_GROUP = Object.freeze({ id: 'for_service', label: 'For this service' });
 
 const TIPS = Object.freeze([
   // ── Moisture ──────────────────────────────────────────────────────────
@@ -308,6 +315,337 @@ const TIPS = Object.freeze([
     keywords: ['flea', 'dog', 'cat', 'bedding', 'vacuum', 'eggs'], lines: ['pest'], season: 'all',
     copy: "Flea eggs and larvae live in the bedding and carpet where the pet sleeps, not on the pet. A hot wash of the bedding weekly and a daily vacuum of those spots for a couple of weeks removes the stages a treatment can't reach — and empty the vacuum outside.",
   },
+  // ── Bed bugs (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────────────
+  {
+    id: 'bb_dryer_heat', group: 'bed_bugs', label: "Dryer on high, 30 minutes",
+    keywords: ["laundry", "dryer", "bedding", "clothes", "heat"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "Heat is what bed bugs can't take. Run bedding, clothes, and anything else that can handle it through the dryer on high for at least 30 minutes; the dryer does the work, not the wash. Bag it at the bed and carry the bag to the machine so nothing drops on the way.",
+  },
+  {
+    id: 'bb_stay_put', group: 'bed_bugs', label: "Keep sleeping in your own bed",
+    keywords: ["couch", "bedroom", "sleep", "spread", "move rooms"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "It's natural to want to sleep on the couch, but bed bugs follow the person, and moving rooms carries them to a new spot that then needs treating too. Keep sleeping in your own bed so they keep coming to the treated room.",
+  },
+  {
+    id: 'bb_no_foggers', group: 'bed_bugs', label: "Skip store-bought foggers",
+    keywords: ["fogger", "bug bomb", "spray", "store", "over the counter"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "Foggers and store sprays don't reach where bed bugs hide, and they push them deeper into the walls and into the next room. If you want to help, vacuum the mattress seams and the bed frame, then empty the vacuum outside.",
+  },
+  {
+    id: 'bb_encasements', group: 'bed_bugs', label: "Zippered mattress encasements",
+    keywords: ["encasement", "mattress", "box spring", "cover", "zipper"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "A zippered encasement made for bed bugs closes in any that are inside the mattress and box spring, and its smooth outside leaves them nowhere to hide. Leave it on for at least a year; they can go many months without feeding.",
+  },
+  {
+    id: 'bb_travel', group: 'bed_bugs', label: "Luggage on the rack when traveling",
+    keywords: ["hotel", "travel", "suitcase", "luggage", "trip"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "Most bed bugs come home in a suitcase. At a hotel, keep the bag on the luggage rack instead of the bed or the floor, and when you get home, run the clothes through the dryer before putting them away.",
+  },
+  {
+    id: 'bb_clutter', group: 'bed_bugs', label: "Clear the floor around the bed",
+    keywords: ["clutter", "boxes", "under the bed", "storage", "piles"], lines: ["pest"], season: 'all',
+    services: ["bed_bug_treatment"],
+    copy: "Every box and pile near the bed is another hiding place the treatment can't reach. Clearing the floor around and under the bed, and keeping it clear between visits, leaves them in the places I treat.",
+  },
+
+  // ── German roaches (service tips, owner-approved 2026-10-02) ──────────────────────────────────────────────
+  {
+    id: 'gr_bait_spots', group: 'roaches', label: "Clean around the bait spots",
+    keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    copy: "The small dots of bait in the cabinet corners and hinges are doing the work. Cleaner wiped over them, or anything sprayed near them, makes roaches stay away, so for the next few weeks clean around those spots instead of over them.",
+  },
+  {
+    id: 'gr_no_store_spray', group: 'roaches', label: "No store-bought roach spray",
+    keywords: ["spray", "fogger", "raid", "store", "over the counter"], lines: ["pest"], season: 'all',
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    copy: "Store sprays and foggers scatter German roaches into the walls and teach them to avoid the bait. If you see one, a paper towel and the trash is the better move while the bait works through the colony.",
+  },
+  {
+    id: 'gr_dry_at_night', group: 'roaches', label: "Counters and sink dry at bedtime",
+    keywords: ["sink", "counter", "dishes", "water", "night"], lines: ["pest"], season: 'all',
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    copy: "German roaches can't go long without water. Wiping the counters and sink dry before bed, with no dishes left soaking, takes away what they come out for at night and leaves the bait as their easiest meal.",
+  },
+  {
+    id: 'gr_hitchhikers', group: 'roaches', label: "Unpack deliveries outside",
+    keywords: ["delivery", "grocery", "appliance", "secondhand", "moving"], lines: ["pest"], season: 'all',
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    copy: "German roaches usually ride in: grocery boxes, used appliances, and secondhand furniture. Unpack deliveries in the garage or outside, and get the cardboard out of the house the same day.",
+  },
+
+  // ── Palmetto bugs (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────────
+  {
+    id: 'pal_dry_drains', group: 'moisture', label: "Run water in unused drains",
+    keywords: ["drain", "guest bath", "tub", "laundry sink", "palmetto"], lines: ["pest"], season: 'all',
+    services: ["pest_initial_palmetto_knockdown", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_onetime"],
+    copy: "A drain nobody uses (a guest tub, a laundry sink, a floor drain in the garage) dries out its trap, and palmetto bugs come up through it from the line. Run water in each one once a week so the trap stays full.",
+  },
+
+  // ── Fleas and ticks (service tips, owner-approved 2026-10-02) ─────────────────────────────────────────────
+  {
+    id: 'flea_keep_vacuuming', group: 'fleas', label: "Keep vacuuming after the treatment",
+    keywords: ["vacuum", "carpet", "after treatment", "still seeing fleas", "cocoon"], lines: ["pest"], season: 'all',
+    services: ["flea_tick"],
+    copy: "Flea pupae sit in cocoons the treatment can't reach and hatch when something moves nearby, so you may still see a few for a couple of weeks. Vacuuming every day brings them out sooner, onto the treated carpet.",
+  },
+  {
+    id: 'flea_pet_prevention', group: 'fleas', label: "Pets on their flea prevention",
+    keywords: ["pet", "dog", "cat", "vet", "flea collar"], lines: ["pest"], season: 'all',
+    services: ["flea_tick"],
+    copy: "Treating the house and yard handles the fleas waiting there, but a pet without its own protection carries new ones back in. Ask your vet which preventive fits your pet and keep it on schedule while we work.",
+  },
+  {
+    id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
+    keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
+    services: ["flea_tick"],
+    copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",
+  },
+  {
+    id: 'tick_mow_edges', group: 'fleas', label: "Mow short, clear the yard edges",
+    keywords: ["tall grass", "brush", "leaf litter", "edges", "mow"], lines: ["pest"], season: 'all',
+    services: ["tick_control", "flea_tick"],
+    copy: "Ticks wait on tall grass and brush for something to walk past. Keeping the lawn mowed and the leaf litter raked up along the edges of the yard takes away the places they wait.",
+  },
+  {
+    id: 'tick_wood_line', group: 'fleas', label: "A dry strip at the wood line",
+    keywords: ["woods", "wood chips", "gravel", "border", "play set"], lines: ["pest"], season: 'all',
+    services: ["tick_control", "flea_tick"],
+    copy: "Where the lawn meets woods or brush, a 3-foot strip of wood chips or gravel makes a dry border ticks don't like to cross. Keep play sets and seating on the lawn side of it.",
+  },
+  {
+    id: 'tick_check', group: 'fleas', label: "Check for ticks after yard work",
+    keywords: ["check", "kids", "pets", "after yard work", "bite"], lines: ["pest"], season: 'all',
+    services: ["tick_control", "flea_tick"],
+    copy: "After time at the edges of the yard, check yourself, the kids, and the pets: behind the knees, the waistband, the hairline, and the ears. Checking soon after you come in finds a tick before it settles in.",
+  },
+
+  // ── Fire ants (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────────────
+  {
+    id: 'fa_leave_mounds', group: 'fire_ants', label: "Leave the mounds alone",
+    keywords: ["mound", "dig", "kick", "drench", "bait"], lines: ["pest"], season: 'all',
+    services: ["fire_ant"],
+    copy: "After a fire ant treatment, digging, kicking, or drenching a mound sends the colony to start over a few feet away. Leave the mounds alone and let the workers carry the bait back to the queen; it works through the colony over the next few weeks.",
+  },
+  {
+    id: 'fa_bait_dry', group: 'fire_ants', label: "Skip the next sprinkler cycle",
+    keywords: ["sprinkler", "irrigation", "rain", "bait", "dry"], lines: ["pest"], season: 'all',
+    services: ["fire_ant"],
+    copy: "Fire ant bait only works while it's dry enough for the workers to pick it up. If your sprinklers are set to run the morning after a treatment, skipping that one cycle gives the bait its chance.",
+  },
+  {
+    id: 'fa_no_store_products', group: 'fire_ants', label: "Nothing else on the mounds",
+    keywords: ["store", "drench", "dust", "granules", "home depot"], lines: ["pest"], season: 'all',
+    services: ["fire_ant"],
+    copy: "Store-bought drenches and dusts kill the foragers that carry the bait home, so it never reaches the queen. Give the treatment a few weeks before using anything else on the mounds.",
+  },
+  {
+    id: 'fa_spot_a_mound', group: 'fire_ants', label: "Show the kids what a mound looks like",
+    keywords: ["kids", "stings", "pets", "mound", "yard"], lines: ["pest"], season: 'all',
+    services: ["fire_ant"],
+    copy: "A fire ant mound is a loose pile of soil with no opening on top, and new ones pop up after a rain. Showing the kids what one looks like, and keeping pet bowls off the lawn, keeps stings down while the treatment works.",
+  },
+
+  // ── Bees, wasps and mud daubers (service tips, owner-approved 2026-10-02) ─────────────────────────────────
+  {
+    id: 'bw_dont_seal_active', group: 'stinging', label: "Don't seal a gap bees are using",
+    keywords: ["bees", "gap", "wall", "soffit", "seal"], lines: ["pest"], season: 'all',
+    services: ["bee_wasp_removal"],
+    copy: "If bees are flying in and out of a gap in the wall or soffit, sealing it from outside traps them, and they look for another way out, sometimes into the house. Let me know first; the gap gets sealed once the colony is handled.",
+  },
+  {
+    id: 'bw_cover_sweets', group: 'stinging', label: "Lids on drinks and trash outside",
+    keywords: ["yellowjacket", "soda", "juice", "lanai", "trash"], lines: ["pest"], season: 'wet',
+    services: ["bee_wasp_removal"],
+    copy: "Late in the summer, yellowjackets go after sweets and come to open cans, juice boxes, and fruit on the lanai. Cups with lids and trash cans that close keep them from settling in around where you sit.",
+  },
+  {
+    id: 'bw_call_early', group: 'stinging', label: "Call early about a new nest",
+    keywords: ["nest", "eaves", "paper wasp", "small", "spring"], lines: ["pest"], season: 'all',
+    services: ["bee_wasp_removal"],
+    copy: "Paper wasps start a nest under the eaves as a small cluster in spring. A nest the size of a golf ball is a quick visit; by late summer the same spot can hold a few dozen wasps. If you see one starting, let me know.",
+  },
+  {
+    id: 'md_rarely_sting', group: 'stinging', label: "Wash off old mud tubes",
+    keywords: ["mud dauber", "mud tubes", "eaves", "hose", "lanai"], lines: ["pest"], season: 'all',
+    services: ["mud_dauber_removal"],
+    copy: "Mud daubers are solitary wasps and rarely sting; the mud tubes on the eaves and the lanai are their nurseries. Once the tubes are empty, washing them off with the hose keeps the eaves clean and shows you right away if new building starts.",
+  },
+  {
+    id: 'md_fewer_spiders', group: 'stinging', label: "Fewer spiders, fewer mud daubers",
+    keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
+    services: ["mud_dauber_removal"],
+    copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. Warm porch bulbs and swept eaves cut down the insects the spiders live on.",
+  },
+
+  // ── Mosquito (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────────────
+  {
+    id: 'mq_pool', group: 'water', label: "Keep the pool and its cover dry",
+    keywords: ["pool", "pool cover", "green pool", "pump", "chlorine"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    copy: "A pool that's running and chlorinated is no trouble, but a green pool, or a pool cover holding rainwater, can breed mosquitos all season. Keep the pump on its schedule and pump the cover dry after a rain.",
+  },
+  {
+    id: 'mq_tree_holes', group: 'water', label: "Fill holes in trees",
+    keywords: ["tree hole", "trunk", "rainwater", "oak", "fill"], lines: ["mosquito"], season: 'all',
+    services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    copy: "Holes and crotches in large trees hold rainwater, and some mosquitos breed nowhere else. Filling them with sand or expanding foam takes them off the list of breeding spots in the yard.",
+  },
+
+  // ── Rodent trapping (service tips, owner-approved 2026-10-02) ─────────────────────────────────────────────
+  {
+    id: 'rt_leave_traps', group: 'rodent', label: "Leave the traps where they are",
+    keywords: ["traps", "move", "check", "attic", "garage"], lines: ["rodent"], season: 'all',
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    copy: "Rats are wary of anything new, so traps work best once they've sat in place a few nights. Moving them or checking them yourself starts that over; I check them at every visit.",
+  },
+  {
+    id: 'rt_note_noises', group: 'rodent', label: "Note when and where you hear them",
+    keywords: ["noise", "scratching", "night", "ceiling", "attic"], lines: ["rodent"], season: 'all',
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    copy: "The time of night and the room you hear scratching above show me where they're running. A quick note on your phone, like \"2 a.m., over the kitchen,\" helps me put the next traps right on that path.",
+  },
+  {
+    id: 'rt_no_store_bait', group: 'rodent', label: "No store-bought rat bait inside",
+    keywords: ["poison", "bait", "smell", "wall", "store"], lines: ["rodent"], season: 'all',
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    copy: "A rat that eats store-bought bait usually dies wherever it is, often inside a wall or the attic, where the smell lasts for weeks. Leave the attic to the traps, and let me know before adding anything of your own.",
+  },
+  {
+    id: 'rt_doors_closed', group: 'rodent', label: "Attic and garage doors closed",
+    keywords: ["pets", "kids", "dog", "attic door", "garage"], lines: ["rodent"], season: 'all',
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "rodent_general_one_time"],
+    copy: "The traps go where rodents run, not where people go, but a curious dog or child can still reach one in the garage. Keep the garage and attic doors closed while the traps are out.",
+  },
+
+  // ── Rodent exclusion (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────
+  {
+    id: 'rx_garage_door', group: 'rodent', label: "Garage door closed at night",
+    keywords: ["garage door", "night", "open", "dusk", "entry"], lines: ["rodent"], season: 'all',
+    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_wire_mesh", "rodent_bird_box", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
+    copy: "An open garage door at night is the widest way into the house; rats and mice walk right in and climb to the attic from there. Closing it at dusk keeps the sealed house sealed.",
+  },
+  {
+    id: 'rx_leave_seals', group: 'rodent', label: "Leave the seals in place",
+    keywords: ["mesh", "flashing", "roofer", "a/c tech", "cable"], lines: ["rodent"], season: 'all',
+    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_wire_mesh", "rodent_bird_box", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
+    copy: "The mesh, flashing, and sealant at the entry points are what keep them out. If a roofer, A/C tech, or cable installer needs to open one, let me know so it gets checked afterward.",
+  },
+  {
+    id: 'rx_dryer_vent', group: 'rodent', label: "Dryer vent flap closes",
+    keywords: ["dryer vent", "flap", "lint", "mouse", "wall vent"], lines: ["rodent"], season: 'all',
+    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_wire_mesh", "rodent_bird_box", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
+    copy: "A dryer vent flap stuck open or broken is an easy way in for a mouse. Make sure it swings shut when the dryer is off, and clear the lint so it keeps closing.",
+  },
+  {
+    id: 'rx_after_storms', group: 'rodent', label: "Look at the roofline after storms",
+    keywords: ["storm", "hurricane", "soffit", "roof tile", "wind"], lines: ["rodent"], season: 'all',
+    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_wire_mesh", "rodent_bird_box", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
+    copy: "High wind can lift a soffit panel or a roof tile and open a gap that wasn't there before. After a storm, a walk around the house looking up at the roofline for anything hanging or out of line catches it early.",
+  },
+
+  // ── Rodent bait stations (service tips, owner-approved 2026-10-02) ────────────────────────────────────────
+  {
+    id: 'rb_leave_stations', group: 'rodent', label: "Leave the rodent stations in place",
+    keywords: ["station", "landscaper", "moved", "mulch", "box"], lines: ["rodent"], season: 'all',
+    services: ["rodent_bait", "rodent_bait_quarterly", "rodent_bait_setup", "rodent_monitoring", "pest_rodent_quarterly"],
+    copy: "The stations along the wall are anchored where rodents travel. If a landscaper moves one or it gets buried in mulch, let me know and I'll set it back at the next visit.",
+  },
+  {
+    id: 'rb_nothing_added', group: 'rodent', label: "Nothing extra in the stations",
+    keywords: ["bait", "food", "station", "add", "store"], lines: ["rodent"], season: 'all',
+    services: ["rodent_bait", "rodent_bait_quarterly", "rodent_bait_setup", "rodent_monitoring", "pest_rodent_quarterly"],
+    copy: "Adding your own bait or food to the stations changes what I'm reading at each visit, and not every product belongs in an outdoor station. If you see more activity, tell me instead and I'll adjust.",
+  },
+  {
+    id: 'rb_clear_wall', group: 'rodent', label: "Keep the wall line clear",
+    keywords: ["wall", "hoses", "pots", "foundation", "path"], lines: ["rodent"], season: 'all',
+    services: ["rodent_bait", "rodent_bait_quarterly", "rodent_bait_setup", "rodent_monitoring", "pest_rodent_quarterly"],
+    copy: "Rodents run along walls, so stations work best with a clear path along the foundation. Keeping hoses, pots, and stored things a foot off the wall keeps them on the route past the station.",
+  },
+
+  // ── Rodent sanitation (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────
+  {
+    id: 'rs_plastic_bins', group: 'rodent', label: "Attic storage in plastic bins",
+    keywords: ["attic", "storage", "cardboard", "bins", "nesting"], lines: ["rodent"], season: 'all',
+    services: ["rodent_sanitation_light", "rodent_sanitation_medium", "rodent_sanitation_heavy", "rodent_sanitation_standard", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation"],
+    copy: "Rodents nest in cardboard, paper, and old fabric. Anything stored in the attic or garage does better in plastic bins with lids, which keeps the nesting material out of their reach.",
+  },
+
+  // ── Termite bait stations (service tips, owner-approved 2026-10-02) ───────────────────────────────────────
+  {
+    id: 'tb_save_swarmers', group: 'termite', label: "Save a few swarmers and call",
+    keywords: ["swarmers", "winged", "flying", "window", "spring"], lines: ["termite"], season: 'all',
+    services: ["termite_bait", "termite_active_bait_quarterly", "termite_monitoring", "termite_cartridge_replacement", "pest_termite_bait_quarterly", "termite_installation_setup", "termite_active_annual"],
+    copy: "Winged termites at a window or a light in spring are swarmers, a mature colony sending out new ones. Save a few in a zip bag or on tape and call me; they show exactly which termite it is and where to look.",
+  },
+  {
+    id: 'tb_no_spray_stations', group: 'termite', label: "No insecticide near the stations",
+    keywords: ["spray", "insecticide", "station", "bug spray", "perimeter"], lines: ["termite"], season: 'all',
+    services: ["termite_bait", "termite_active_bait_quarterly", "termite_monitoring", "termite_cartridge_replacement", "pest_termite_bait_quarterly", "termite_installation_setup", "termite_active_annual"],
+    copy: "Termites have to keep feeding at a station for the bait to reach the colony. Insecticide sprayed around a station can turn them away, so leave a clear foot around each one.",
+  },
+
+  // ── Termite treatment (liquid, trench, spot, foam) (service tips, owner-approved 2026-10-02) ──────────────
+  {
+    id: 'tl_before_digging', group: 'termite', label: "Call before digging by the foundation",
+    keywords: ["digging", "planting", "edging", "pavers", "landscaper"], lines: ["termite"], season: 'all',
+    services: ["termite_liquid", "termite_trench", "termite_trenching", "termite_spot_treatment", "foam_drill", "foam_recurring"],
+    copy: "The treated soil along the foundation is the barrier. New plantings, edging, or pavers dug into that strip break it, so let me know before any work there starts.",
+  },
+  {
+    id: 'tl_water_off_soil', group: 'termite', label: "Keep water off the treated soil",
+    keywords: ["downspout", "sprinkler", "erosion", "foundation", "washout"], lines: ["termite"], season: 'all',
+    services: ["termite_liquid", "termite_trench", "termite_trenching", "termite_spot_treatment", "foam_drill", "foam_recurring"],
+    copy: "Downspouts and sprinklers that wash soil away from the foundation take the treated soil with them. Turn sprinkler heads away from the wall and run downspouts out a few feet.",
+  },
+  {
+    id: 'tl_new_slabs', group: 'termite', label: "Tell us before new concrete",
+    keywords: ["patio", "addition", "driveway", "slab", "concrete"], lines: ["termite"], season: 'all',
+    services: ["termite_liquid", "termite_trench", "termite_trenching", "termite_spot_treatment", "foam_drill", "foam_recurring"],
+    copy: "A new patio, addition, or walkway poured against the house covers soil that hasn't been treated. Let me know before it's poured; treating the soil first is far simpler than treating through new concrete.",
+  },
+
+  // ── Termite inspection (service tips, owner-approved 2026-10-02) ──────────────────────────────────────────
+  {
+    id: 'ti_clear_garage', group: 'termite', label: "Clear the base of the garage walls",
+    keywords: ["garage", "walls", "storage", "inspection", "slab edge"], lines: ["termite"], season: 'all',
+    services: ["termite_inspection"],
+    copy: "Termites usually show up first along the garage walls and the slab edge. Keeping a few inches clear along the base of the garage walls lets me see the whole line at every inspection.",
+  },
+  {
+    id: 'ti_fix_leaks', group: 'termite', label: "Fix leaks by the foundation",
+    keywords: ["leak", "spigot", "a/c line", "damp", "downspout"], lines: ["termite"], season: 'all',
+    services: ["termite_inspection"],
+    copy: "Subterranean termites go where the soil stays damp. A leaking spigot, A/C line, or downspout soaking one spot by the slab makes that spot the likeliest place for them to start.",
+  },
+
+  // ── Bora-Care (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────────────
+  {
+    id: 'bc_keep_dry', group: 'termite', label: "Seal treated wood exposed to rain",
+    keywords: ["borate", "wood", "rain", "paint", "sealant"], lines: ["termite"], season: 'all',
+    services: ["bora_care"],
+    copy: "Borate treatment soaks into the wood and stays there as long as the wood stays dry. Where treated wood is open to the weather, a coat of paint or sealant once it's dry keeps rain from washing it back out.",
+  },
+
+  // ── Wildlife trapping (service tips, owner-approved 2026-10-02) ───────────────────────────────────────────
+  {
+    id: 'wl_trap_hands_off', group: 'wildlife', label: "Leave a trapped animal alone",
+    keywords: ["raccoon", "opossum", "trap", "bite", "cage"], lines: ["pest"], season: 'all',
+    services: ["wildlife_trapping"],
+    copy: "A trapped raccoon or opossum is frightened and can bite or scratch through the cage. Keep pets and kids away from the trap and call when something is in it.",
+  },
+  {
+    id: 'wl_feed_inside', group: 'wildlife', label: "Feed pets inside",
+    keywords: ["pet food", "lanai", "raccoon", "bowl", "night"], lines: ["pest"], season: 'all',
+    services: ["wildlife_trapping"],
+    copy: "Pet food left outside overnight is the meal that brings raccoons, opossums, and rats to the lanai. Feeding inside, or picking the bowl up at dusk, takes away the reason to come back.",
+  },
 ]);
 
 // Deep-frozen: the registry is the screened source of customer copy, and
@@ -341,21 +679,30 @@ function registryLineFor(serviceLine) {
 
 /**
  * The picker payload for one visit: tips for the visit’s service line, grouped in seasonal order.
- * Out-of-season tips remain available within that line.
+ * Out-of-season tips remain available within that line. A tip written for
+ * particular services (`services`: catalog service keys, owner-approved
+ * 2026-10-02) leads those visits' list in its own group ("For this service")
+ * and stays out of every other visit's list.
  */
-function tipsForVisit({ serviceLine, date = new Date() } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, date = new Date() } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
   const inSeason = (tip) => tip.season === 'all' || tip.season === season;
+  const bySeason = (a, b) => Number(inSeason(b)) - Number(inSeason(a));
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
       const group = TIP_GROUPS.find((g) => g.id === groupId);
-      const tips = TIPS.filter((tip) => tip.group === groupId && tip.lines.includes(line))
-        .sort((a, b) => Number(inSeason(b)) - Number(inSeason(a)));
+      const tips = TIPS.filter((tip) => tip.group === groupId && tip.lines.includes(line) && !tip.services)
+        .sort(bySeason);
       return { ...group, primary: tips.some((tip) => tip.lines.includes(line)), tips };
     })
     .filter((group) => group.tips.length > 0);
-  return { line, season, groups };
+  const forService = serviceKey ? TIPS.filter((tip) => tip.services?.includes(serviceKey)).sort(bySeason) : [];
+  return {
+    line,
+    season,
+    groups: forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups,
+  };
 }
 
 /**

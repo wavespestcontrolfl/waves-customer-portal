@@ -221,7 +221,7 @@ describe('tipsForVisit', () => {
     const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
     const all = groups.flatMap((group) => group.tips);
     expect(line).toBe(serviceLine);
-    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine)).map((tip) => tip.id).sort());
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services).map((tip) => tip.id).sort());
     expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
@@ -240,6 +240,35 @@ describe('tipsForVisit', () => {
     const allTip = water.tips.findIndex((t) => t.season === 'all');
     const wetTip = water.tips.findIndex((t) => t.season === 'wet');
     expect(allTip).toBeLessThan(wetTip);
+  });
+
+  test('a visit whose service has its own tips leads with them; other visits never list them (owner-approved 2026-10-02)', () => {
+    const bedBug = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bed_bug_treatment', date: '2026-10-02' });
+    expect(bedBug.groups[0]).toMatchObject({ id: 'for_service', label: 'For this service', primary: true });
+    expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter']);
+    expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
+    const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
+    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    for (const serviceKey of [null, 'lawn_care', 'not_a_service']) {
+      const visit = tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' });
+      expect(visit.groups.map((group) => group.id)).not.toContain('for_service');
+      expect(visit.groups.flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
+    }
+  });
+
+  test('a service tip sorts in-season first in its lead group', () => {
+    const dry = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bee_wasp_removal', date: '2026-01-20' });
+    expect(dry.groups[0].tips.map((tip) => tip.id)).toEqual(['bw_dont_seal_active', 'bw_call_early', 'bw_cover_sweets']);
+  });
+
+  test('every service tip names catalog-shaped service keys', () => {
+    const withServices = TIPS.filter((tip) => tip.services);
+    expect(withServices).toHaveLength(50);
+    for (const tip of withServices) {
+      expect(tip.services.length).toBeGreaterThan(0);
+      expect(new Set(tip.services).size).toBe(tip.services.length);
+      for (const key of tip.services) expect(key).toMatch(/^[a-z][a-z0-9_]+$/);
+    }
   });
 
   test('a lawn visit leads with the lawn group', () => {

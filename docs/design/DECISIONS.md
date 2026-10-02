@@ -2955,3 +2955,22 @@ another customer's id, or a failed lookup is `office`, which is never quoted.
 The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
 natural-language opt-outs (the inbound opt-out detector's own rules), and
 spam or voicemail calls. Nothing is sent to a customer.
+
+## 2026-10-02 — Service tips: 50 owner-approved tips for the services the general pest tips don't fit
+
+Owner "ok go" on the Fast Complete mockup v8 (call 12), then approval of all
+50 drafts ("looks good, approve"). The tip registry
+(`server/services/service-report/tip-library.js`) gains tips for bed bugs,
+German roaches, palmetto bugs, fleas and ticks, fire ants, bees, wasps and
+mud daubers, mosquitoes, rodent trapping, exclusion, bait stations and
+sanitation, termite bait stations, termite treatment (liquid, trench, spot,
+foam), termite inspections, Bora-Care and wildlife trapping. Each names the
+catalog services it is for (`services`, service keys). A visit of one of
+those services leads its picker with them as "For this service"; they stay
+out of every other visit's list. `GET /admin/dispatch/:serviceId/tech-tips`
+reads the visit's service key from its completion profile (fail-soft: no
+lead group). The 42 existing tips, and the lawn and tree & shrub tips, are
+unchanged. Every new tip passes the same customer-copy screen and
+visit-claim lint as the rest. Two rest on product-label guidance the owner
+approved as written (fire ant bait kept dry; Bora-Care sealed where
+exposed).

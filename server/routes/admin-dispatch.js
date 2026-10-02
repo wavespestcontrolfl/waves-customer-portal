@@ -527,6 +527,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         'current_property.address_line1 as current_property_address_line1',
         'current_property.address_line2 as current_property_address_line2',
         'current_property.city as current_property_city', 'current_property.zip as current_property_zip',
+        'scheduled_services.service_id as service_id', 'scheduled_services.service_key_snapshot as service_key_snapshot',
+        'scheduled_services.is_recurring as is_recurring',
       );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's tip
@@ -568,8 +570,14 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         previousRecommendations,
       });
     }
+    // The visit's catalog service leads with its own tips (owner-approved
+    // service tips, 2026-10-02); an unresolved identity only loses that lead.
+    const serviceKey = await resolveCompletionProfileForScheduledService(svc)
+      .then((profile) => profile?.serviceKey || null)
+      .catch(() => null);
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
+      serviceKey,
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current
