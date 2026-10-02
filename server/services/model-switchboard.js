@@ -435,6 +435,7 @@ const LANES = [
   L('sms_draft', 'SMS auto-reply draft (routine)', 'sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('sms_translation', 'SMS test answers in the customer\'s language', 'sms-translation.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true, note: 'GATE_SMS_ANY_LANGUAGE_TRIAL only; never sends' }),
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   // response-drafter.js picks the policy per intent: cancellations, complaints
   // and high-severity flags ride highStakes; everything else rides customerCopy.
@@ -607,6 +608,7 @@ const LANE_AREA = {
   'email-operational-actions': 'email',
   sms_intent: 'sms',
   sms_service_identity: 'sms',
+  sms_translation: 'sms',
   contact_correction: 'sms',
   sms_pathology: 'sms',
   sms_verifier: 'sms',
@@ -760,6 +762,7 @@ const LANE_DESCRIBE = {
   'email-operational-actions': 'Captures customer asks and staff promises from email',
   sms_intent: 'Works out what an inbound text is asking for',
   sms_service_identity: 'Picks which visit or service a reply\'s open times are for',
+  sms_translation: 'Translates a foreign-language text and a test answer to it (never sent)',
   contact_correction: 'Pulls corrected names, emails and addresses out of texts',
   sms_pathology: 'Groups failed drafts by what went wrong',
   sms_verifier: 'Fact-checks a draft before it can send',

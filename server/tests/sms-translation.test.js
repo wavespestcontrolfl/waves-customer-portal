@@ -1,0 +1,136 @@
+// sms-translation.js: test answers to customer texts in another language
+// (GATE_SMS_ANY_LANGUAGE_TRIAL, owner 2026-10-02). The reply is written and
+// checked in English, then translated and double-checked; nothing is sent and
+// only an sms_translation_trials row is written. The figure check is
+// deterministic, so it gets its own coverage independent of the model mocks.
+const mockDispatch = jest.fn();
+const mockInsert = jest.fn();
+const mockDraft = jest.fn();
+let mockGateOn = true;
+
+jest.mock('../models/db', () => jest.fn(() => ({
+  insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
+})));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, gateEnvValue: (name) => (name === 'GATE_SMS_ANY_LANGUAGE_TRIAL' ? mockGateOn : actual.gateEnvValue(name)) };
+});
+jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: jest.fn(async () => ({ customer: { id: 'c1' } })) }));
+jest.mock('../services/estimate-conversion-agent', () => ({ classifyCustomerSmsTriageIntent: jest.fn(() => ({ intent: 'GENERAL', confidence: 0.9 })) }));
+jest.mock('../services/sms-shadow-drafter', () => ({ generateGroundedDraft: (...a) => mockDraft(...a) }));
+jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
+
+const { runTranslationTrial, tokenParity, needsTranslation } = require('../services/sms-translation');
+
+const SPANISH = 'Hola, ¿cuándo pueden salir los perros después del tratamiento de hoy?';
+const ENGLISH_IN = 'Hi, when can the dogs go out after today\'s treatment?';
+const REPLY = 'Once the spray dries, about 30 minutes, they can go back out. Your next visit is Tuesday, Oct 14 at 2 PM.';
+const REPLY_ES = 'Cuando el producto se seque, unos 30 minutos, pueden volver a salir. Su próxima visita es el martes 14 de octubre a las 14 h.';
+const customer = { id: 'c1', city: 'Parrish' };
+
+function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, meaning = { same_meaning: true, differences: [] } }) {
+  mockDispatch.mockImplementation(async (policy, payload) => {
+    const sys = payload.system;
+    if (sys.startsWith('You read text messages')) return { ok: true, json: inbound };
+    if (sys.startsWith('Translate a text message from a pest control company')) return { ok: true, json: { text: translated } };
+    if (sys.startsWith('Translate this')) return { ok: true, json: { text: back } };
+    if (sys.startsWith('Compare two English versions')) return { ok: true, json: meaning };
+    throw new Error(`unexpected prompt: ${sys.slice(0, 40)}`);
+  });
+}
+
+const SPANISH_INBOUND = { is_english: false, language: 'Spanish', language_code: 'es', english: ENGLISH_IN };
+
+beforeEach(() => {
+  mockGateOn = true;
+  mockDispatch.mockReset();
+  mockInsert.mockReset();
+  mockDraft.mockReset();
+  mockDraft.mockResolvedValue({ parsed: { reply: REPLY, intended_actions: [] }, converged: true, passes: 1, model: 'm', factsBlock: 'FACTS', promptVersion: 'house_voice_v12' });
+});
+
+describe('tokenParity', () => {
+  test('a translation that keeps every figure passes, 12-hour times may read as 24-hour', () => {
+    expect(tokenParity(REPLY, REPLY_ES)).toEqual({ ok: true, missing: [], added: [] });
+  });
+
+  test('a changed, dropped or added figure fails', () => {
+    expect(tokenParity(REPLY, REPLY_ES.replace('30', '20'))).toMatchObject({ ok: false, missing: ['30'], added: ['20'] });
+    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['50'] });
+    expect(tokenParity('We will call you back.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: false, added: ['2'] });
+  });
+
+  test('links and emails must come through exactly', () => {
+    const en = 'Pick a time here: https://portal.example.com/l/abc12 or email contact@example.com.';
+    expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc12 o escriba a contact@example.com.').ok).toBe(true);
+    expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc13 o escriba a contact@example.com.')).toMatchObject({ ok: false });
+  });
+});
+
+describe('runTranslationTrial', () => {
+  test('gate off: no model call, no row', async () => {
+    mockGateOn = false;
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('a text the English checks already read is never sent to a model', async () => {
+    expect(needsTranslation('When can the dogs go out?')).toBe(false);
+    expect(await runTranslationTrial({ inboundMessage: 'When can the dogs go out?', customer, smsLogId: 's1' })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('the model calling it English stops the trial with no row', async () => {
+    scriptModels({ inbound: { is_english: true, language: 'English', language_code: 'en', english: SPANISH } });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toBeNull();
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('a Spanish text: drafted on the English translation, translated back, every check passed, stored as ready', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: ENGLISH_IN }));
+    expect(row).toMatchObject({ verdict: 'ready', language_code: 'es', reply_english: REPLY, reply_translated: REPLY_ES, back_translation: REPLY });
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockInsert.mock.calls[0][0].checks)).toMatchObject({ converged: true, token_parity: { ok: true }, meaning: { same: true } });
+  });
+
+  test('a draft that did not pass the English checks is held before any translation', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    mockDraft.mockResolvedValue({ parsed: { reply: REPLY }, converged: false, passes: 3 });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'english_checks_not_passed' });
+    expect(row).not.toHaveProperty('reply_translated');
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a translation that changes a figure is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, translated: REPLY_ES.replace('30', '20') });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'figures_changed_in_translation' });
+  });
+
+  test('a back-translation that says something different is held, with the differences kept', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, meaning: { same_meaning: false, differences: ['BACK says the dogs can go out right away'] } });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'meaning_changed_in_translation' });
+    expect(row.checks.meaning.differences).toEqual(['BACK says the dogs can go out right away']);
+  });
+
+  test('a model miss holds the trial; nothing throws', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'anthropic_timeout' });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:anthropic_timeout' });
+  });
+
+  test('an empty reply (nothing to answer) is stored as skipped', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    mockDraft.mockResolvedValue({ parsed: { reply: '' }, converged: true, passes: 1 });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'skipped', hold_reason: 'no_reply_needed' });
+  });
+});

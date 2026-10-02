@@ -88,6 +88,8 @@ const LANE_RUNTIME = {
   // customer's texts + completion notes and stores it on review_sequences —
   // no customer-visible output of its own, so internal_write like sms_intent.
   review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // test answers to foreign-language texts, stored in sms_translation_trials and never sent
+  sms_translation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.

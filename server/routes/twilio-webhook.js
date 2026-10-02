@@ -1559,6 +1559,15 @@ router.post('/sms', async (req, res) => {
           source: 'live_webhook',
           hasMedia: inboundMedia.length > 0,
         }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
+        // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside):
+        // stored for the owner to read, never sent; the draft above is unchanged.
+        void require('../services/sms-translation').runTranslationTrial({
+          inboundMessage: Body,
+          fromPhone: From,
+          customer,
+          smsLogId: smsLogEntry?.id || null,
+          schedulingIntent,
+        }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
