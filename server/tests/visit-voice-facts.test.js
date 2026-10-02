@@ -465,6 +465,18 @@ describe('validateVoiceFacts', () => {
     ])).toEqual(['ants', 'roaches']);
   });
 
+  test('a sentence that only names the pests takes the treatment the note gives them (codex local r23 on #5538)', () => {
+    const read = (note, names) => validateVoiceFacts({ areas: [], pests: names.map((name) => ({ name, quote: name })), spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('The target pests were ants and roaches. Applied bait inside the kitchen for those pests.', ['ants', 'roaches'])).toEqual(['ants', 'roaches']);
+    expect(read('Sprayed the kitchen. Ants and roaches were the issue.', ['ants', 'roaches'])).toEqual(['ants', 'roaches']);
+    // A treatment that names another pest is that pest's, across sentences
+    // and through a phrase ("applied bait for roaches").
+    expect(read('Sprayed for ants. Customer mentioned roaches.', ['ants', 'roaches'])).toEqual(['ants']);
+    expect(read('The pests were ants and roaches. Applied bait for roaches.', ['ants', 'roaches'])).toEqual(['roaches']);
+    // A denied treatment ties nothing.
+    expect(read("Ants and roaches in the kitchen. Didn't spray today.", ['ants', 'roaches'])).toEqual([]);
+  });
+
   test('an undone word is said of what it names, never of another place in its clause (codex local r22 on #5538)', () => {
     const note = 'Sprayed inside for ants and left the garage untreated. Sprayed outside and the inside was left untreated. Sprayed outside, left the garage and the shed untreated.';
     const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

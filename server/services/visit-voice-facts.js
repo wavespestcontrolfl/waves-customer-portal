@@ -209,10 +209,17 @@ const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DE
 //     sprayed for roaches");
 //   - else, with no observation before it in its clause, a treatment word
 //     earlier in its sentence ties it ("treated for ants outside, roaches
-//     inside").
+//     inside");
+//   - a sentence with no treatment or observation word at all takes the
+//     next treatment in the note, else the last before it, unless denied or
+//     it names another pest ("the target pests were ants and roaches.
+//     Applied bait inside the kitchen for those pests").
 // So a pest only seen stays out: "treated for ants outside and saw roaches
 // inside" (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
+// Between two treatment words of one phrase ("applied bait", "placed bait
+// stations"): nothing, or only an article.
+const PHRASE_GAP_RE = /^\s*(?:(?:the|a|an|some|more)\s+)*$/;
 const OBSERVATION_WORDS_RE = /\b(?:saw|see|sees|seen|seeing|noticed|notice|found|find|spotted|observed|checked|check(?:ing)?|inspected|inspect(?:ing)?|looked|look(?:ing)?|heard|showed|shows)\b/;
 function wordsIn(note, from, to, re, kind) {
   return [...note.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
@@ -225,15 +232,21 @@ function treatedInSentence(name, note, others) {
   const mentionsOf = (words) => new RegExp(`(?<![a-z])${escapeRegExp(words)}(?![a-z])`, 'g');
   const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at));
   // What a treatment word names after it is its own, up to the next
-  // treatment word: in "for ants I baited inside and sprayed outside for
-  // roaches" the baiting names no pest (codex local r22 on #5538).
+  // treatment word that starts another action: in "for ants I baited inside
+  // and sprayed outside for roaches" the baiting names no pest (codex local
+  // r22 on #5538). The words of one phrase read on together: "applied bait
+  // for roaches" names the roaches.
   const namesAnother = (word) => {
     const clauseEnd = Math.min(note.length, ...clauseBreaks.filter((i) => i >= word.end));
     const following = new RegExp(TREATMENT_WORD_RE.source, 'g');
     following.lastIndex = word.end;
-    const nextWord = following.exec(note);
-    const rest = note.slice(word.end, nextWord ? Math.min(clauseEnd, nextWord.index) : clauseEnd);
-    return others.some((other) => mentionsOf(other).test(rest));
+    let end = clauseEnd;
+    let from = word.end;
+    for (let next = following.exec(note); next && next.index < clauseEnd; next = following.exec(note)) {
+      if (!PHRASE_GAP_RE.test(note.slice(from, next.index))) { end = next.index; break; }
+      from = next.index + next[0].length;
+    }
+    return others.some((other) => mentionsOf(other).test(note.slice(word.end, end)));
   };
   return [...note.matchAll(mentionsOf(name))].some(({ index: at }) => {
     const end = at + name.length;
@@ -242,6 +255,15 @@ function treatedInSentence(name, note, others) {
     const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
     const words = [...wordsIn(note, start, stop, TREATMENT_WORD_RE, 'treatment'), ...wordsIn(note, start, stop, OBSERVATION_WORDS_RE, 'observation')]
       .sort((a, b) => a.at - b.at);
+    if (!words.length) {
+      // A sentence that names the pests and nothing done to them ("the
+      // target pests were ants and roaches") takes the next treatment in the
+      // note, else the last one before it, unless the note denies it or it
+      // names another pest heard (codex local r23 on #5538).
+      const all = wordsIn(note, 0, note.length, TREATMENT_WORD_RE, 'treatment');
+      const tie = all.find((w) => w.at >= stop) || all.filter((w) => w.end <= start).pop();
+      return !!tie && undenied(tie) && !namesAnother(tie);
+    }
     const before = words.filter((w) => w.end <= at);
     const nearest = before.filter((w) => w.at >= clauseStart).pop();
     if (nearest?.kind === 'treatment') return undenied(nearest);
