@@ -1248,7 +1248,7 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
   const noticedCents = cents(term.next_term_prepay_amount);
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
-  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };
+  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(Math.round(Number(amount) * 100)) };
 }
 
 // The 409 every renewal writer returns when noticedRenewalAmountConflict
@@ -1261,8 +1261,32 @@ function noticedRenewalAmountError(conflict) {
       error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
       code: 'RENEWAL_AMOUNT_NOTICED',
       noticedAmount: conflict.noticedAmount,
+      chargedAmount: conflict.chargedAmount,
       termId: conflict.termId,
     },
+  });
+}
+
+// Owner ruling 2026-10-01: staff may charge a renewal amount other than the
+// noticed one, deliberately (acknowledgeNoticedAmount). Each renewal writer
+// records who did it and both amounts, inside its own write transaction —
+// no savepoint: an override that cannot be recorded does not commit.
+async function recordNoticedAmountOverride(trx, { customerId, conflict, adminUserId = null, adminName = null, source, invoiceId = null }) {
+  await trx('activity_log').insert({
+    customer_id: customerId,
+    admin_user_id: adminUserId || null,
+    action: 'rate_review_noticed_amount_overridden',
+    description: `Renewal charged at $${conflict.chargedAmount.toFixed(2)}; the annual rate review told the customer $${conflict.noticedAmount.toFixed(2)}. Staff confirmed the different amount.`,
+    metadata: JSON.stringify({
+      noticed_amount: conflict.noticedAmount,
+      charged_amount: conflict.chargedAmount,
+      predecessor_term_id: conflict.termId,
+      predecessor_term_end: conflict.termEnd || null,
+      invoice_id: invoiceId,
+      source,
+      overridden_by: adminUserId || null,
+      overridden_by_name: adminName || null,
+    }),
   });
 }
 
@@ -1307,6 +1331,7 @@ module.exports = {
   retireDraftNotices,
   noticedRenewalAmountConflict,
   noticedRenewalAmountError,
+  recordNoticedAmountOverride,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,

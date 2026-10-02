@@ -47,6 +47,7 @@ import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDi
 import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constants/retiredSaleLabels';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
+import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -4357,10 +4358,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
           assertSubmitCurrent();
           assertManualPrepayMintEligible({ fresh, manualPrepay });
-          const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+          const minted = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
             method: 'POST',
-            body: JSON.stringify(fresh.mintPayload),
-          });
+            body: JSON.stringify({ ...fresh.mintPayload, ...ack }),
+          }));
           assertSubmitCurrent();
           // Advisory notes from the mint (e.g. the promised first visit overlaps
           // another job) ride the same warnings[] shape as the booking itself
@@ -4371,14 +4372,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           showSubmitFeedback({ alertText: outcome.blockingAlert });
         } catch (e) {
           assertSubmitCurrent();
-          // Loud, never silent: the appointment IS booked, so the operator must
-          // know the year was not invoiced and where to finish it.
-          // Deliberately NOT "the invoice was not created": the mint commits the
-          // invoice and term, sends, and only then writes its audit row, so a
-          // 500 (or a lost response) can mean the customer already HAS the
-          // invoice. Telling the operator to mint another would double-bill the
-          // year (Codex #3161 r3 P2).
-          alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+          // Staff declined the noticed-amount confirm: the mint wrote nothing.
+          if (e?.code === NOTICED_AMOUNT_DECLINED) {
+            alert(`Appointment booked. The annual prepay invoice was not created: ${e.message}\n\nCreate it from Customer 360 → Annual prepay.`);
+          } else {
+            // Loud, never silent: the appointment IS booked, so the operator must
+            // know the year was not invoiced and where to finish it.
+            // Deliberately NOT "the invoice was not created": the mint commits the
+            // invoice and term, sends, and only then writes its audit row, so a
+            // 500 (or a lost response) can mean the customer already HAS the
+            // invoice. Telling the operator to mint another would double-bill the
+            // year (Codex #3161 r3 P2).
+            alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+          }
         }
       }
       // A prepaid year is NOT billed per service report — say what actually

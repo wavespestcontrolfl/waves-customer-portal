@@ -2220,6 +2220,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
             .first('term_start');
           const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+          if (noticed) {
+            await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: termCustomerId, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'invoice_annual_prepay', invoiceId: invoice.id });
+          }
         }
 
         return AnnualPrepayRenewals.createTermForAnnualPrepay({

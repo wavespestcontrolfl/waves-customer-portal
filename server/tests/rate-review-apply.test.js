@@ -1173,7 +1173,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
   const renew = (amount, extra = {}) => apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(1), amount, coverageServiceType: 'Quarterly Pest Control', termStart: '2027-05-15', today: '2027-05-14', ...extra });
   test('a renewal of the predecessor term at a different amount than its noticed successor amount is a conflict; the noticed amount is not', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
-    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(484)).toBeNull();
   });
   test('the predecessor is matched by coverage family and the new term\'s start — a pest notice never blocks a lawn prepay, nor a renewal a year away', async () => {
@@ -1182,12 +1182,12 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(await renew(468, { termStart: '2028-05-15', today: '2028-05-14' })).toBeNull();
     // the nearest-ending candidate is the predecessor when two of the family carry noticed amounts
     mockDb.reset({ annual_prepay_terms: [term(), term({ id: TERM(2), term_start: '2025-05-15', term_end: '2026-05-14', next_term_prepay_amount: '450.00' })] });
-    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
   });
   test('a Renew DECISION is not a successor: the amount stays enforceable until a successor term exists; a successor on the books settles it', async () => {
     // recordDecision('renew') marks the term renewed without creating the successor — the guard must still hold
     mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' })] });
-    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     // a successor term already created (at whatever amount) → the guard has done its job
     mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' }), { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) }] });
     expect(await renew(468)).toBeNull();
@@ -1195,7 +1195,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
   test('a legacy unlabeled predecessor (family from its applied notice): a named successor of that family settles it', async () => {
     const notice = { id: 'n-legacy', customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-02-01T08:00:00Z'), metadata: JSON.stringify({ term_id: TERM(1) }) };
     mockDb.reset({ annual_prepay_terms: [term({ coverage_service_type: null })], price_change_notices: [notice] });
-    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     mockDb.reset({
       annual_prepay_terms: [term({ coverage_service_type: null }), { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null }],
       price_change_notices: [notice],
@@ -1227,12 +1227,12 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(await renew(468)).toBeNull();
     // the apply recorded the notice for this term under the pest line → the pest renewal is guarded
     mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), metadata: { term_id: TERM(1) } })] });
-    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull(); // another family's renewal is not blocked
   });
   test('inside a write transaction the candidate terms are read FOR UPDATE — whatever their noticed amount is right now — so the nightly apply\'s first write serializes against the renewal', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
-    expect(await renew(468, { lock: true })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(await renew(468, { lock: true })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(true);
     // a predecessor with NO noticed amount yet is still locked (the apply may be writing its first one)
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })] });
@@ -1295,9 +1295,56 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });
   test('noticedRenewalAmountError carries the 409 body both route modules return', () => {
-    const err = apply.noticedRenewalAmountError({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
-    expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, termId: TERM(1) });
+    const err = apply.noticedRenewalAmountError({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
+    expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, chargedAmount: 468, termId: TERM(1) });
     expect(err.noticedRenewalAmount.error).toMatch(/\$484\.00/);
+  });
+  test('an acknowledged override is recorded in the activity log with who overrode and both amounts', async () => {
+    mockDb.reset({ activity_log: [] });
+    await apply.recordNoticedAmountOverride(mockDb, {
+      customerId: CUSTOMER(1),
+      conflict: { termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 },
+      adminUserId: 'tech-1',
+      adminName: 'Office User',
+      source: 'customer360_annual_prepay',
+      invoiceId: 'inv-1',
+    });
+    expect(mockDb.store.activity_log).toEqual([expect.objectContaining({
+      customer_id: CUSTOMER(1),
+      admin_user_id: 'tech-1',
+      action: 'rate_review_noticed_amount_overridden',
+    })]);
+    const row = mockDb.store.activity_log[0];
+    expect(row.description).toMatch(/\$484\.00/);
+    expect(row.description).toMatch(/\$468\.00/);
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    expect(meta).toMatchObject({ noticed_amount: 484, charged_amount: 468, predecessor_term_id: TERM(1), invoice_id: 'inv-1', source: 'customer360_annual_prepay', overridden_by: 'tech-1', overridden_by_name: 'Office User' });
+  });
+  test('all three renewal writers record the override, inside the write transaction, right after the acknowledgement check', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const customers = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
+    const invoices = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    const draftRoute = customers.slice(customers.indexOf("router.post('/:id/annual-prepay-invoice'"), customers.indexOf("router.post('/:id/annual-prepay',"));
+    const collectedRoute = customers.slice(customers.indexOf("router.post('/:id/annual-prepay',"), customers.indexOf("router.post('/:id/refund'"));
+    const invoiceRoute = invoices.slice(invoices.indexOf("router.post('/:id/annual-prepay'"), invoices.indexOf("router.delete('/:id/annual-prepay'"));
+    for (const [route, conflictVar, invoiceExpr, source] of [
+      [draftRoute, 'noticedInTrx', 'invoice.id', 'customer360_annual_prepay_invoice'],
+      [collectedRoute, 'noticedInTrx', 'updatedInvoice.id', 'customer360_annual_prepay'],
+      [invoiceRoute, 'noticed', 'invoice.id', 'invoice_annual_prepay'],
+    ]) {
+      const check = route.indexOf(`if (${conflictVar} && req.body?.acknowledgeNoticedAmount !== true)`);
+      expect(check).toBeGreaterThan(0);
+      const record = route.indexOf('recordNoticedAmountOverride(trx, {', check);
+      expect(record).toBeGreaterThan(check);
+      expect(record - check).toBeLessThan(400);
+      const call = route.slice(record, record + 400);
+      expect(call).toContain(`conflict: ${conflictVar}`);
+      expect(call).toContain('adminUserId: req.technicianId');
+      expect(call).toContain(`invoiceId: ${invoiceExpr}`);
+      expect(call).toContain(`source: '${source}'`);
+      expect(record).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay(', check));
+    }
   });
 });
 
