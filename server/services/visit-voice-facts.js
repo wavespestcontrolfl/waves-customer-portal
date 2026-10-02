@@ -123,10 +123,10 @@ const TREATMENT_WORD_RE = /\b(?:spray|treat|bait|dust|spread|granul|plac|appli|a
 // garage was not needed"). A pest's absence never denies a treatment
 // ("baited inside, nothing found" still baited inside), and a clause about
 // something else denies nothing ("sprayed the perimeter, no activity seen").
-const DENIAL_LEAD = String.raw`^\s*[,:\-–—]?\s*(?:(?:was|were)\s+)?(?:no|none|not|nothing|never|wasn'?t|weren'?t)`;
+const DENIAL_LEAD = String.raw`^\s*[,:\-–—]?\s*(?:(?:was|were|is|are)\s+)?(?:no|none|not|nothing|never|wasn'?t|weren'?t|isn'?t|aren'?t)`;
 const trailingDenial = (words) => new RegExp(`${DENIAL_LEAD}(?:\\s+(?:${words})){0,2}\\s*(?:[.,;!?]|$)`);
 const TRAILING_DENIAL = {
-  pest: trailingDenial('found|seen|present|there|today|anywhere|at all'),
+  pest: trailingDenial('found|seen|present|there|today|anywhere|at all|an? issue|an? problem'),
   treatment: trailingDenial('treated|sprayed|baited|dusted|needed|done|today'),
 };
 
@@ -154,19 +154,21 @@ function clauseBounds(quote, offset) {
   };
 }
 const spanOf = (match) => (match ? { offset: match.index, length: match[0].length } : null);
-// Work said as not done yet is never a treatment done today: "will spray
-// inside next time", "need to treat for roaches" (codex local r24 on #5538).
+// Work said for another day is never a treatment done today: later ("will
+// spray inside next time", "need to treat for roaches", codex local r24 on
+// #5538) or earlier ("last visit we sprayed inside", codex local r25). "Same
+// as last time" compares, so it says nothing about when.
 const FUTURE_BEFORE_RE = /\b(?:\w+'ll|will|won'?t|shall|going\s+to|gonna|plan(?:s|ned|ning)?\s+to|needs?\s+to|ha(?:ve|s)\s+to|should|would|could|might|may|wants?\s+to)\s+(?:(?:also|then|come\s+back\s+and)\s+)?$/;
-const FUTURE_CLAUSE_RE = /\b(?:tomorrow|next\s+(?:time|visit|service|month|week|quarter|year))\b/;
-function notDoneYet(text, at) {
+const OTHER_DAY_RE = /\b(?:tomorrow|yesterday|previously|next\s+(?:time|visit|service|month|week|quarter|year)|(?<!\b(?:like|as)\s)last\s+(?:time|visit|service|month|week|quarter|year))\b/;
+function notToday(text, at) {
   const { from, to } = clauseBounds(text, at);
   if (FUTURE_BEFORE_RE.test(text.slice(from, at))) return true;
-  // A time said for later ("tomorrow", "next visit") is the nearest action's
-  // in its clause, never another's: in "sprayed outside for ants and will
-  // treat inside next visit" only the treating inside waits (pre-push P1 on
-  // #5538).
+  // A time said for another day ("tomorrow", "next visit", "last visit") is
+  // the nearest action's in its clause, never another's: in "sprayed outside
+  // for ants and will treat inside next visit" only the treating inside
+  // waits (pre-push P1 on #5538).
   const actions = governingWords(text, from, to).filter((w) => w.kind === 'treatment' && w.at !== at);
-  return [...text.slice(from, to).matchAll(new RegExp(FUTURE_CLAUSE_RE.source, 'g'))].some((m) => {
+  return [...text.slice(from, to).matchAll(new RegExp(OTHER_DAY_RE.source, 'g'))].some((m) => {
     const timeAt = from + m.index;
     const [low, high] = timeAt > at ? [at, timeAt] : [timeAt, at];
     return !actions.some((w) => w.at > low && w.at < high);
@@ -204,11 +206,11 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    // Said for later where it stands in the note ("will spray inside
-    // tomorrow" quoted as "spray inside") reads as not done (pre-push P1 on
-    // #5538).
+    // Said for another day where it stands in the note ("will spray inside
+    // tomorrow" quoted as "spray inside") reads as not done today (pre-push
+    // P1 on #5538).
     const denied = DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at + from)) || denialAfter.test(note.slice(at + to))
-      || (!!span && notDoneYet(note, at + from));
+      || (!!span && notToday(note, at + from));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
@@ -240,7 +242,6 @@ const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DE
 // So a pest only seen stays out: "treated for ants outside and saw roaches
 // inside" (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
-const PEST_NEGATED_AFTER_RE = /^\s*(?:[,:]\s*)?(?:(?:were|was|are|is)\s+)?(?:not|no|none|never|weren'?t|wasn'?t|aren'?t|isn'?t)\b/;
 // Between two treatment words of one phrase ("applied bait", "placed bait
 // stations"): nothing, or only an article.
 const PHRASE_GAP_RE = /^\s*(?:(?:the|a|an|some|more)\s+)*$/;
@@ -273,8 +274,8 @@ function treatedInSentence(name, note, others) {
   const sentenceBreaks = breaksOf(SENTENCE_BREAK_RE);
   const clauseBreaks = breaksOf(CLAUSE_BREAK_RE);
   const mentionsOf = (words) => new RegExp(`(?<![a-z])${escapeRegExp(words)}(?![a-z])`, 'g');
-  // A treatment counts only done: not denied, not said for later.
-  const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at)) && !notDoneYet(note, word.at);
+  // A treatment counts only done today: not denied, not said for another day.
+  const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at)) && !notToday(note, word.at);
   // What a treatment word names after it is its own, up to the next
   // treatment word that starts another action: in "for ants I baited inside
   // and sprayed outside for roaches" the baiting names no pest (codex local
@@ -295,8 +296,9 @@ function treatedInSentence(name, note, others) {
   return [...note.matchAll(mentionsOf(name))].some(({ index: at }) => {
     const end = at + name.length;
     // A mention whose own words deny the pest ties nothing: "no roaches",
-    // "roaches weren't an issue" (codex local r24 on #5538).
-    if (DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at)) || PEST_NEGATED_AFTER_RE.test(note.slice(end))) return false;
+    // "roaches weren't an issue" (codex local r24 on #5538); "ants, no
+    // roaches" denies the roaches, not the ants (codex local r25).
+    if (DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, at)) || TRAILING_DENIAL.pest.test(note.slice(end))) return false;
     const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
     const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
     const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
@@ -446,7 +448,7 @@ function placesTreatedInNote(note) {
     if (AREA_DENIED_RE[area].test(note.slice(from, end)) || UNDONE_RE.test(note.slice(from, to))) return false;
     const governor = placeGovernor(note, at, end);
     return governor?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at))
-      && !notDoneYet(note, governor.at);
+      && !notToday(note, governor.at);
   })));
 }
 const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [
@@ -597,7 +599,7 @@ function sprayInNote(note) {
     if (SPOT_WORDS_RE.test(note.slice(from, to)) || UNDONE_RE.test(note.slice(from, to))) return false;
     const governor = placeGovernor(note, m.index, m.index + m[0].length);
     return governor?.kind === 'treatment' && SPRAY_ACTION_RE.test(governor.word)
-      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at)) && !notDoneYet(note, governor.at);
+      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at)) && !notToday(note, governor.at);
   });
   const denied = [...note.matchAll(/\bspray(?:ed|ing|s)?\b/g)].some((m) => DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, m.index)));
   return { perimeter, denied };

@@ -540,6 +540,26 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'spot', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });
 
+  test('a pest denial is its own pest\'s, and work from another visit is not today\'s (codex local r25 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note);
+    // "ants, no roaches" denies the roaches, never the ants.
+    expect(read('Sprayed outside for ants, no roaches. Baited inside for spiders.', [
+      { name: 'ants', quote: 'Sprayed outside for ants' },
+      { name: 'spiders', quote: 'Baited inside for spiders' },
+    ]).pests.map((pest) => pest.name)).toEqual(['ants', 'spiders']);
+    // What was done on an earlier visit holds nothing today, and is no target.
+    const history = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Today I sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'sprayed outside for ants' }, { name: 'roaches', quote: 'sprayed inside for roaches' }],
+      spray: { method: 'not_said', quote: '' },
+    }, 'Last visit we sprayed inside for roaches. Today I sprayed outside for ants. Sprayed the garage yesterday.');
+    expect(history).toMatchObject({ unclearAreas: [], unclearPests: [], unclearSpray: false });
+    expect(history.pests.map((pest) => pest.name)).toEqual(['ants']);
+    // "Same as last time" compares; it says nothing about when.
+    expect(placeIn(validateVoiceFacts({ areas: [{ area: 'inside', quote: 'Treated inside same as last time' }], pests: [], spray: { method: 'not_said', quote: '' } },
+      'Treated inside same as last time.'), 'Inside')).toBe('heard');
+  });
+
   test('a spray reading needs its own grounded quote that says it sprayed (pre-push P1 on #5538)', () => {
     const note = 'Did not spray today; placed bait inside for ants.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
