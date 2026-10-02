@@ -70,7 +70,7 @@ describe('recordDecisions', () => {
     const { conn, calls } = stubConn();
     const digest = 'a'.repeat(64);
     const out = await recordDecisions({
-      capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: '11111111-1111-4111-8111-111111111111', result: ok(0.9),
+      capability: 'call_judge', pkg, provider: 'typesafe', subjectType: 'call_log', subjectId: '11111111-1111-4111-8111-111111111111', result: ok(0.9),
       baselines: { is_spam: { production: false, deep_judge: false, note: undefined }, quote_promised: { production: true } },
       subjectHash: digest,
       random: () => 0.99,
@@ -83,7 +83,7 @@ describe('recordDecisions', () => {
     expect(Object.keys(row).sort()).toEqual([
       'baseline_answers', 'capability', 'jev_answer', 'package_hash', 'package_id', 'provider', 'question_id', 'sampled_for', 'served_model', 'subject_hash', 'subject_id', 'subject_type',
     ]);
-    expect(row.provider).toBe('typesafe'); // the default provider is Jev
+    expect(row.provider).toBe('typesafe'); // the provider the caller named
     expect(row).toMatchObject({ capability: 'call_judge', package_id: 'call_judge.v2', package_hash: packageHash(pkg), served_model: 'jev-1.13.0', subject_type: 'call_log', subject_id: '11111111-1111-4111-8111-111111111111' });
     expect(JSON.parse(row.jev_answer)).toEqual(noul(0.9));
     expect(JSON.parse(row.baseline_answers)).toEqual({ production: false, deep_judge: false });
@@ -98,13 +98,13 @@ describe('recordDecisions', () => {
 
   test('a subject hash that is not a sha256 hex digest is stored as null', async () => {
     const { conn, calls } = stubConn();
-    await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), subjectHash: 'Caller: hi this is text', conn });
+    await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), subjectHash: 'Caller: hi this is text', conn });
     expect(calls.inserted.every((r) => r.subject_hash === null)).toBe(true);
   });
 
   test('upserts on the unique key and merges only answer columns, only onto unlabeled rows', async () => {
     const { conn, calls } = stubConn();
-    await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
+    await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
     expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
@@ -118,7 +118,7 @@ describe('recordDecisions', () => {
     const { conn, calls } = stubConn();
     const sms = packageFor('sms_courtesy.v1');
     const result = { ok: true, packageHash: packageHash(sms), servedModel: null, answers: { is_courtesy_only: noul(0.95) } };
-    const out = await recordDecisions({ capability: 'sms_courtesy', pkg: sms, subjectType: 'sms_log', subjectId: 's1', result, baselines: { is_courtesy_only: { rules: false } }, random: () => 0.5, conn });
+    const out = await recordDecisions({ provider: 'typesafe', capability: 'sms_courtesy', pkg: sms, subjectType: 'sms_log', subjectId: 's1', result, baselines: { is_courtesy_only: { rules: false } }, random: () => 0.5, conn });
     expect(out.recorded).toBe(1);
     expect(calls.inserted[0]).toMatchObject({ question_id: 'is_courtesy_only', served_model: null, sampled_for: 'disagreement' });
   });
@@ -126,7 +126,7 @@ describe('recordDecisions', () => {
   test('without a test draw, the random audit is a stable per-row hash: re-recording never re-rolls it', async () => {
     const run = async (p, production) => {
       const { conn, calls } = stubConn();
-      await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c-stable', result: ok(p),
+      await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c-stable', result: ok(p),
         baselines: { is_lead: { production } }, conn });
       return calls.inserted.find((r) => r.question_id === 'is_lead');
     };
@@ -146,7 +146,7 @@ describe('recordDecisions', () => {
   test('gate off: nothing written', async () => {
     delete process.env.GATE_TYPED_DECISIONS;
     const { conn, calls } = stubConn();
-    expect(await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn })).toEqual({ recorded: 0, skipped: 'gate_off' });
+    expect(await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn })).toEqual({ recorded: 0, skipped: 'gate_off' });
     expect(calls.table).toBeNull();
   });
 
@@ -157,13 +157,21 @@ describe('recordDecisions', () => {
     ['no subject id', ok(), 'call_log', ''],
   ])('%s: nothing written', async (_name, result, subjectType, subjectId) => {
     const { conn, calls } = stubConn();
-    const out = await recordDecisions({ capability: 'call_judge', pkg, subjectType, subjectId, result, conn });
+    const out = await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType, subjectId, result, conn });
     expect(out.recorded).toBe(0);
     expect(calls.table).toBeNull();
   });
 });
 
 describe('provider (one row per provider per subject and question; Codex r1 on #5546)', () => {
+  test('an omitted provider is refused before any read or write: nothing is attributed to Jev by default (Codex r6, #5555)', async () => {
+    const { conn, calls } = stubConn();
+    const out = await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: '11111111-1111-4111-8111-111111111111', result: ok(0.9), conn });
+    expect(out).toEqual({ recorded: 0, skipped: 'bad_provider' });
+    expect(calls.table).toBeNull();
+    expect(calls.inserted).toBeNull();
+  });
+
   test('a named provider is written on every row and is part of the conflict key', async () => {
     const { conn, calls } = stubConn();
     const out = await recordDecisions({ capability: 'call_judge', pkg, provider: 'cloudflare', subjectType: 'call_log', subjectId: 'c1', result: { ...ok(), servedModel: 'clef-flash' }, conn });

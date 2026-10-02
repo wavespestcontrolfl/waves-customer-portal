@@ -25,7 +25,7 @@
 const db = require('../../models/db');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const crypto = require('crypto');
-const { packageHash, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER } = require('./packages');
+const { packageHash, DECISION_PROVIDERS } = require('./packages');
 
 const TABLE = 'decision_reviews';
 const SUBJECT_TYPES = ['call_log', 'sms_log'];
@@ -171,13 +171,15 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
  * Gate off, a failed answer or a bad subject returns early with no write.
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
-async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PROVIDER, subjectType, subjectId, result, baselines = {}, siblingAnswers = {}, subjectHash = null, random = null, conn = db } = {}) {
+async function recordDecisions({ capability, pkg, provider, subjectType, subjectId, result, baselines = {}, siblingAnswers = {}, subjectHash = null, random = null, conn = db } = {}) {
   if (!typedDecisionsLive()) return { recorded: 0, skipped: 'gate_off' };
   if (!pkg || !pkg.questions) return { recorded: 0, skipped: 'no_package' };
   if (!result || result.ok !== true || !result.answers) return { recorded: 0, skipped: 'no_answers' };
   if (!SUBJECT_TYPES.includes(subjectType) || !subjectId) return { recorded: 0, skipped: 'bad_subject' };
   // The table's CHECK closes this set; an unknown provider is refused here so
   // shadow work never fails on a constraint.
+  // Required: a caller names the provider whose answers these are (Codex r6, #5555);
+  // an omitted or unknown provider is refused, never attributed to Jev.
   if (!DECISION_PROVIDERS.includes(provider)) return { recorded: 0, skipped: 'bad_provider' };
   const rows = buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, siblingAnswers, subjectHash, random });
   if (!rows.length) return { recorded: 0, skipped: 'no_answers' };
