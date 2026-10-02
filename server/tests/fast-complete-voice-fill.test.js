@@ -1463,3 +1463,31 @@ describe('Codex #5580 round 13', () => {
     expect(out.customerNote).toBe(t);
   });
 });
+
+describe('Codex #5580 round 14', () => {
+  test.each(['Password is bluebird.', 'Door password is palm tree.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe(line);
+  });
+
+  test('the model\'s whole comma sentence is routed clause by clause', () => {
+    const t = 'Treated the exterior for ants, gate was locked.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.officeNote).toBe('gate was locked.');
+  });
+
+  test('"four ounces. No, it was five ounces." corrects across the sentence break', () => {
+    const t = 'Used Taurus, four ounces. No, it was five ounces.';
+    const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, t).products[0].amount;
+    expect(run(4)).toBeNull();
+  });
+
+  test('a clause in both note fields appears once', () => {
+    const out = validateFill(answer({ customerNote: 'Treated outside.', officeNote: 'Treated outside.' }), ctx, 'Treated outside.');
+    expect(out.customerNote).toBe('Treated outside.');
+    expect(out.officeNote).toBe('');
+  });
+});

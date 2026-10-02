@@ -544,8 +544,10 @@ function isRetracted(tokens, breaks, start, end, stops = []) {
     if (breaks[j]) break;
   }
   // (never past a sentence stop: "four ounces. Actually, the customer was home.")
-  for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER && !stops[j]; j += 1) {
+  // ...unless the new sentence IS the correction ("four ounces. No, it was five.")
+  for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER; j += 1) {
     if (isCorrectingNo(tokens, j)) return true;
+    if (stops[j]) break;
     if (readSpokenNumber(tokens, j)) break;
     if (CORRECTION_CUES.some((cue) => cue.every((w, k) => tokens[j + k] === w))) return true;
   }
@@ -1265,7 +1267,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
@@ -1316,44 +1318,61 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   });
   const customer = [];
   const office = [];
-  for (const sentence of String(customerRaw ?? '').split(SENTENCE_SPLIT_RE)) {
-    const text = sentence.trim();
-    if (!text) continue;
+  // A said sentence whose internal topic sits in one comma clause ("Treated the
+  // exterior for ants, gate was locked.") is routed clause by clause.
+  const pieces = (raw) => String(raw ?? '').split(SENTENCE_SPLIT_RE).map((t) => t.trim()).filter(Boolean).flatMap((text) => {
+    if (!text.includes(',') || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)
+      || OFFICE_ADDRESSED_RE.test(text) || COMPLETION_ACCESS_CODE_RE.test(text)) return [text];
+    const parts = text.replace(/[.!?]+$/, '').split(/,\s*/).map((t) => t.trim()).filter(Boolean);
+    return parts.length > 1 && parts.every((part) => spokenClauseScope(part, spoken)) ? parts.map((part) => `${part}.`) : [text];
+  });
+  // one copy of a clause, wherever both note fields carried it
+  const placed = new Set();
+  const place = (list, text) => {
+    const key = norm(text);
+    if (placed.has(key)) return;
+    placed.add(key);
+    list.push(text);
+  };
+  for (const text of pieces(customerRaw)) {
     // Said first (either note), then routed: internal-sounding text is office-only.
     const said = spokenClauseScope(text, spoken);
     const scope = said && isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : said;
-    if (scope === 'office') office.push(text);
+    if (scope === 'office') place(office, text);
     // no pesticide is "safe", "pet-safe" or "EPA-approved" on a customer surface
     // (AGENTS.md compliance language): even said word for word, it is a Check
     else if (scope === 'customer' && reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
     else if (scope === 'customer' && saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
-    else if (scope === 'customer') customer.push(text);
+    else if (scope === 'customer') place(customer, text);
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }
   // The office note is held to the same rule: only clauses the tech said.
   // the model's office label is not trusted either: a plain customer clause goes
   // back to the customer note (through the same safety screen)
   const officeSaid = [];
-  for (const sentence of String(officeRaw ?? '').split(SENTENCE_SPLIT_RE)) {
-    const text = sentence.trim();
-    if (!text) continue;
+  for (const text of pieces(officeRaw)) {
     const said = spokenClauseScope(text, spoken);
     if (!said) pushUnclear(unclear, text, 'note_not_heard');
-    else if (said !== 'customer' || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) officeSaid.push(text);
+    else if (said !== 'customer' || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) place(officeSaid, text);
     else if (reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
     else if (saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
-    else customer.push(text);
+    else place(customer, text);
   }
   const officeText = [...officeSaid, ...office].join(' ');
   // An office line the tech said that neither note carries is a Check, so access or
   // billing words never vanish from an apparently complete fill.
-  const keptClauses = [...officeSaid, ...office].map((clause) => ` ${norm(clause)} `);
+  // (a line split clause by clause may sit partly in each note)
+  const keptClauses = [...officeSaid, ...office, ...customer].map((clause) => ` ${norm(clause)} `);
   for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
     // kept only when the notes carry ALL of its words (a shared "gate" is not "gate code 1234")
     const words = norm(text).split(' ').filter((w) => (w.length >= 3 || /\d/.test(w)) && !/^(office|dispatch|note|tell|that|this|with|from|the|and|for|was|were|has|had)$/.test(w));
-    if (words.length && !keptClauses.some((kept) => words.every((w) => kept.includes(` ${w} `)))) pushUnclear(unclear, text, 'office_said_not_filled');
+    // carried by the kept clauses taken FROM this line, together (a line kept clause
+    // by clause still counts); a clause from another line never covers it
+    const line = ` ${norm(text)} `;
+    const fromLine = keptClauses.filter((kept) => kept.trim() && line.includes(kept)).join(' ');
+    if (words.length && !words.every((w) => fromLine.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
   }
   return {
     customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
