@@ -534,3 +534,18 @@ describe('Codex r5 (#5542): customer words on a public permanent page', () => {
     expect(words('Ants are back in the kitchen.')).toBe('Ants are back in the kitchen.');
   });
 });
+
+describe('pre-push P1 after r5 (#5542)', () => {
+  test('the PDF cache lookup loads the activity fields its label key needs', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'pdf-queue.js'), 'utf8');
+    expect(src).toContain("'client_pest_rating', 'client_pest_rating_source', 'client_pest_rating_defaulted',");
+  });
+  test('lookup and store agree when the tech tapped an activity', () => {
+    const cardModule = require('../services/service-report/reservice-report-card');
+    const svc = frozenService(null, { client_pest_rating: 3, client_pest_rating_defaulted: false });
+    const block = { serviceLine: 'pest', outcome: 'treated' };
+    const payloadLabel = card(svc, { block }).whatWeDid.found.label;
+    expect(payloadLabel).toBeTruthy();
+    expect(cardModule.activityLabelFor(svc, block, null)).toBe(payloadLabel);
+  });
+});

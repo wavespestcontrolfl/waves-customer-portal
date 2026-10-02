@@ -585,7 +585,12 @@ async function getOrRenderServiceReportPdf(recordId, {
     // (20260830000050), so during the Railway rollout overlap the column
     // may not exist yet — probe once and select it conditionally instead
     // of failing every PDF lookup (codex r8 P1).
-    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_date', ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
+    // The activity fields ride along for the re-service card's printed
+    // "Activity seen" label key (reservice-report.js activityLabelFor):
+    // without them lookup computes no label while the render stores one.
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_date',
+      'client_pest_rating', 'client_pest_rating_source', 'client_pest_rating_defaulted',
+      ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
