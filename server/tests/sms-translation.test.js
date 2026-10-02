@@ -194,6 +194,13 @@ describe('tokenParity', () => {
     expect(tokenParity('Pay at https://portal.wavespestcontrol.com/pay.', '请在 https://portal.wavespestcontrol.com/pay。付款')).toMatchObject({ ok: true });
   });
 
+  test('a dotted date keeps its order: 05.10.2026 is not 10.05.2026; a two-part 5.10 stays a decimal', () => {
+    expect(tokenParity('Your visit is on 05.10.2026.', 'Ihr Termin ist am 10.05.2026.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your visit is on 05.10.2026.', 'Ihr Termin ist am 5.10.2026.')).toMatchObject({ ok: true });
+    expect(tokenParity('Your visit is on 2026.10.05.', '您的预约在2026.05.10。')).toMatchObject({ ok: false });
+    expect(tokenParity('It costs $5.10.', 'Cuesta $5,10.')).toMatchObject({ ok: true });
+  });
+
   test('a signed rate keeps its sign: -10% is not 10%', () => {
     expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un 10%.')).toMatchObject({ ok: false });
     expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un -10 %.')).toMatchObject({ ok: true });

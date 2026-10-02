@@ -354,7 +354,9 @@ function trimZeros(n) {
 // An international number ("+44 20 7946 0958") is one value the same way.
 const PHONE_RE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}\b|(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
 
-const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g;
+// slash and hyphen dates, and dotted ones with a year ("05.10.2026", "5.10.26", "2026.10.05"); a two-part
+// "5.10" stays a decimal
+const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|\b\d{1,2}\.\d{1,2}\.(?:\d{4}|\d{2})\b|\b\d{4}\.\d{1,2}\.\d{1,2}\b/g;
 
 function numberValues(text, { strictTimes = false } = {}) {
   const out = [];
@@ -364,7 +366,7 @@ function numberValues(text, { strictTimes = false } = {}) {
   });
   // a date is one value, its parts in order ("10/14" never matches "14/10"; the translator keeps dates as written)
   const withoutDates = withoutPhones.replace(DATE_RE, (d) => {
-    out.push({ value: `date:${d.split(/[/-]/).map(trimZeros).join('/')}`, pm: false, time: false });
+    out.push({ value: `date:${d.split(/[/.-]/).map(trimZeros).join('/')}`, pm: false, time: false });
     return ' ';
   });
   // "14h30" and "14時30分" / "14点30分" / "14시 30분" are 14:30
