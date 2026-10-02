@@ -293,7 +293,38 @@ function httpResult(out) {
   return { status: 200, body: out };
 }
 
-/** One staff control on the customer's OPEN schedule. Returns { status, body }. */
+const CONTROL_LABELS = Object.freeze({
+  'send-now': 'Send now', pause: 'Pause', resume: 'Resume', release: 'Release',
+});
+
+/**
+ * Who pressed which combined-reminder control, when, and what happened (owner 10-01: every press of
+ * send-now / pause / resume / release is on the customer's activity log). One activity_log row per press
+ * that reached a schedule, refusals included. Best effort: a failed write is logged, never fails the press.
+ */
+async function recordStaffControl({ customerId, control, adminId = null, reason = null, result, via = 'customer' }) {
+  const label = CONTROL_LABELS[control] || control;
+  const ok = result?.status === 200;
+  const body = result?.body || {};
+  const what = ok ? 'done' : `not done: ${String(body.error || 'refused').replace(/\.$/, '')}`;
+  const why = control === 'pause' && reason ? ` Reason: ${String(reason).slice(0, 200)}` : '';
+  try {
+    await db('activity_log').insert({
+      customer_id: customerId,
+      admin_user_id: UUID.test(String(adminId || '')) ? adminId : null,
+      action: `combined_reminders_${control.replace('-', '_')}`,
+      description: `Combined overdue reminders: ${label} pressed — ${what}.${why}`,
+      metadata: JSON.stringify({
+        control, via, scheduleId: body.scheduleId || null, httpStatus: result?.status ?? null,
+        code: body.code || null, outcome: body.outcome || null,
+      }),
+    });
+  } catch (err) {
+    logger.warn(`[customer-dunning] staff control activity_log insert failed (customer ${customerId}, ${control}): ${redactContact(err.message)}`);
+  }
+}
+
+/** One staff control on the customer's OPEN schedule. Returns { status, body }. Every press that reaches a schedule is recorded. */
 async function controlCustomerSchedule(customerId, control, { adminId = null, reason = null, now = new Date() } = {}) {
   const run = CONTROLS[control];
   if (!run) return { status: 404, body: { error: 'Unknown control', code: 'UNKNOWN_CONTROL' } };
@@ -302,7 +333,9 @@ async function controlCustomerSchedule(customerId, control, { adminId = null, re
   const schedule = await Schedule.openScheduleFor(customerId);
   if (!schedule) return NO_OPEN_SCHEDULE;
   const out = await run(schedule, { adminId, reason, now });
-  return httpResult({ scheduleId: schedule.id, ...out });
+  const result = httpResult({ scheduleId: schedule.id, ...out });
+  await recordStaffControl({ customerId, control, adminId, reason, result });
+  return result;
 }
 
 module.exports = {
@@ -314,6 +347,7 @@ module.exports = {
   combinedScheduleClosed,
   customerScheduleSummary,
   controlCustomerSchedule,
+  recordStaffControl,
   httpResult,
   _test: { resetReadMemory: () => { lastReadSawOpen = false; } },
 };
