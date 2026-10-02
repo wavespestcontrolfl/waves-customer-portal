@@ -185,8 +185,12 @@ describe('secondary_contact V2 mapping', () => {
   });
 
   test('resolveCallSecondaryContact: V2 on-site flags carry V2\'s role for the ask decision (V1 role differs)', () => {
-    const v1Other = { first_name: 'Joseph', last_name: 'Haught', phone: '+19542901693', email: null, role: 'other', wants_notifications: false, notes: null };
-    const merged = resolveCallSecondaryContact({ secondary_contact: v1Other }, { secondary_contact: { ...v2Contact, role: 'spouse_partner', on_site: true } });
+    const v1Other = { first_name: 'Sample', last_name: 'Partner', phone: '+15550100177', email: null, role: 'other', wants_notifications: false, notes: null };
+    const v2Partner = {
+      ...v2Contact, name_full: 'Sample Partner', first_name: 'Sample', last_name: 'Partner',
+      phone_e164: '+15550100177', email: null, role: 'spouse_partner', on_site: true,
+    };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1Other }, { secondary_contact: v2Partner });
     expect(merged.role).toBe('other');
     expect(merged.on_site).toBe(true);
     expect(merged.on_site_role).toBe('spouse_partner');
