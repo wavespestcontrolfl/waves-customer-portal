@@ -19,7 +19,11 @@ const ROUTES = path.join(ROOT, 'server', 'routes');
 const OUT = path.join(ROOT, 'docs', 'technician-reachable-routes.md');
 const { technicianMayReach, TECHNICIAN_ALLOW_LIST } = require('../server/middleware/technician-scope');
 
+// Core staff mounts: every route counts. Mixed mounts (customer + staff
+// routers, or a staff router under a public prefix): only routes that run
+// adminAuthenticate (directly, via the router, or via an authStack) count.
 const STAFF_PREFIX = /^\/api\/(admin|tech|dispatch|knowledge|ai)(\/|$)/;
+const MIXED_MOUNTS = new Set(['/api', '/api/stripe/terminal', '/api/service/records', '/api/badges']);
 
 function readIndexMounts() {
   const src = fs.readFileSync(INDEX, 'utf8');
@@ -29,7 +33,7 @@ function readIndexMounts() {
   const re = /app\.use\(\s*'([^']+)'\s*,([^;]*?)\);/gs;
   for (const m of src.matchAll(re)) {
     const mount = m[1];
-    if (!STAFF_PREFIX.test(mount)) continue;
+    if (!STAFF_PREFIX.test(mount) && !MIXED_MOUNTS.has(mount)) continue;
     const expr = m[2];
     const files = new Set();
     for (const r of expr.matchAll(/require\('\.\/routes\/([\w-]+)'\)(\.(\w+))?/g)) files.add(r[3] ? `${r[1]}#${r[3]}` : r[1]);
@@ -48,6 +52,7 @@ function parseRouter(fileSpec) {
   // file exporting several routers (serviceRouter/propertyRouter) is read as
   // one; its own guards are per-route in practice.
   const adminWide = /\brouter\.use\([^)]*\brequireAdmin\b[^)]*\)/.test(src);
+  const routerStaffAuth = /\brouter\.use\([^)]*\badminAuthenticate\b[^)]*\)/.test(src);
   const routes = [];
   const re = /\b(router|serviceRouter|propertyRouter)\.(get|post|put|patch|delete|all)\(\s*(['"`])([^'"`]+)\3\s*,([^]*?)(?=\n(?:[a-zA-Z/]|\s*\}\);|\s*$))/g;
   for (const m of src.matchAll(re)) {
@@ -56,8 +61,10 @@ function parseRouter(fileSpec) {
     const method = m[2].toUpperCase();
     const routePath = m[4];
     const head = m[5].split('\n').slice(0, 6).join('\n');
-    const perRouteAdmin = /\brequireAdmin\b/.test(head.split('async')[0]);
-    routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin });
+    const guards = head.split('async')[0];
+    const perRouteAdmin = /\brequireAdmin\b/.test(guards);
+    const staffAuth = routerStaffAuth || /\b(adminAuthenticate|authStack)\b/.test(guards);
+    routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin, staffAuth });
   }
   return { routes, adminWide, missing: false };
 }
@@ -80,6 +87,7 @@ function census() {
     const r = parseRouter(file);
     if (r.missing) continue;
     for (const route of r.routes) {
+      if (MIXED_MOUNTS.has(mount) && !route.staffAuth) continue;
       const full = joinPath(mount, route.routePath);
       const today = !(r.adminWide || route.perRouteAdmin);
       const after = today && technicianMayReach(route.method, samplePath(full));

@@ -62,6 +62,13 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote|void)$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/pricing-config\/(estimate|quick-quote)$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/job-costs(\/.*)?$/ },
+  // Tap to Pay at the visit: the technician mints the handoff and captures;
+  // the terminal-scoped token (not a staff session) does the rest.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/stripe\/terminal\/(handoff|capture)$/ },
+  // Visual service notes on a job (visibility and customer caption stay admin).
+  { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/jobs\/[^/]+\/visual-moments$/ },
+  { bucket: 'own-visits', methods: ['PATCH', 'DELETE'], pattern: /^\/api\/visual-moments\/[^/]+$/ },
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/service\/records\/[^/]+\/validate-photo-chain$/ },
 
   // Own timesheet and mileage.
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/tech\/timetracking(\/.*)?$/ },
@@ -95,6 +102,8 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'knowledge-read', methods: ['POST'], pattern: /^\/api\/admin\/knowledge\/query$/ },
   { bucket: 'knowledge-read', methods: ANY, pattern: /^\/api\/tech\/knowledge(\/.*)?$/ },
   { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/knowledge(\/.*)?$/ },
+  // Field wiki reads (review, tier, update and generate carry requireAdmin).
+  { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/admin\/wiki(\/.*)?$/ },
 
   // Equipment and inventory: read only.
   { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/equipment(-systems|-maintenance)?(\/.*)?$/ },
