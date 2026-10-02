@@ -66,6 +66,8 @@ describe('classifyListing', () => {
     expect(linked.status).toBe('mismatched');
     expect(linked.detail.mismatches.map((m) => m.field)).toEqual(expect.arrayContaining(['address', 'city']));
     expect(classifyListing(page(`${body}${ld({ '@graph': [biz] })}${ld(addrNode)}`), expected).status).toBe('mismatched'); // across blocks
+    const split = ld({ '@id': '_:address', addressLocality: 'Tampa' }) + ld([biz, { '@id': '_:address', streetAddress: BRAND.address.split(',')[0] }]); // our street, Tampa city
+    expect(classifyListing(page(`${body}${split}`), expected).status).toBe('mismatched'); // one node split across blocks
     const dangling = classifyListing(page(`${body}${ld([biz])}`), expected);
     expect(dangling.status).toBe('unverified');
     expect(dangling.detail.reason).toBe('address_unconfirmed');
@@ -461,6 +463,8 @@ describe('classifyListing', () => {
       expect(text('<p>99 Palm Terrace, Atlanta, GA</p>').status).toBe('unverified'); // no ZIP shown
       expect(text('<p>99 palm terrace, boise, ID · open now</p>').status).toBe('unverified');
       expect(text('<p>99 Palm Terrace, Atlanta, Georgia</p>').status).toBe('unverified');
+      expect(text('<p>99 Palm Terrace</p><p>Atlanta</p><p>GA</p>').status).toBe('unverified'); // fields in separate elements
+      expect(text('<p>99 palm terrace atlanta georgia</p>').status).toBe('unverified');
       expect(text('<p>Open 7 days, or call us</p>').status).toBe('verified'); // a count, and lowercase "or" is a word
       expect(text('<p>Serving 3 counties, in Manatee and Sarasota</p>').status).toBe('verified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');

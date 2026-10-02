@@ -229,7 +229,12 @@ function jsonLdNodes(html) {
       const node = stack.pop();
       if (!node || typeof node !== 'object') continue;
       if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i -= 1) stack.push(node[i]); continue; }
-      if (typeof node['@id'] === 'string' && !isLdRef(node)) byId.set(node['@id'], node);
+      // A node split across blocks under one @id is one node: merge its properties (the first
+    // value of a property stands), so no block's stated field is dropped.
+    if (typeof node['@id'] === 'string' && !isLdRef(node)) {
+      const prev = byId.get(node['@id']);
+      byId.set(node['@id'], prev ? { ...node, ...prev } : node);
+    }
       if (node.name || node.telephone || node.address) out.push(node);
       if (node.mainEntity) stack.push(node.mainEntity);
       if (node['@graph']) stack.push(node['@graph']);
@@ -374,12 +379,14 @@ const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${
 const COUNT_NOUNS = 'reviews?|ratings?|photos?|pictures?|videos?|years?|yrs?|stars?|followers?|likes?|jobs?|hires?|views?|answers?|questions?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|miles?|mi|employees?|projects?|results?|listings?|customers?|clients?';
 const ID_LABELS = 'listing|order|account|acct|member|customer|client|ref|reference|user|business|profile|case|ticket|invoice|tax|employer|record|vendor|license|licence|transaction|tracking|item|product|ad|company|provider|location|store|claim|policy|confirmation|booking|job|lead|quote';
 const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?(?<!\\b(?:${ID_LABELS}))\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
-// Some directories show no ZIP ("99 Palm Terrace, Atlanta, GA"): a house number, then a comma
-// and a state ending the address, still means an address is shown. Codes that are also words
-// ("…, or", "…, in") count only in upper case here; other codes and names in any case.
+// Some directories show no ZIP ("99 Palm Terrace, Atlanta, GA", or fields in separate elements:
+// "99 Palm Terrace Atlanta GA"): a house number, then a state ending the address, still means an
+// address is shown. After a comma any code or name counts (codes that are also words, "…, or",
+// only in upper case); without one, an upper-case code or a state name.
 const caseFree = (w) => w.replace(/[a-z]/gi, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`);
-const NO_ZIP_STATE_ALTS = [...BARE_STATE_CODES.map(caseFree), ...AMBIGUOUS_STATE_CODES, ...US_STATE_NAMES.map((n) => caseFree(n).replace(/ /g, '\\s+'))].join('|');
-const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?,\\s*(?:${NO_ZIP_STATE_ALTS})(?![\\w-])(?!\\.?,?\\s*\\d)`);
+const NAME_ALTS_ANY_CASE = US_STATE_NAMES.map((n) => caseFree(n).replace(/ /g, '\\s+')).join('|');
+const NO_ZIP_STATE = `(?:,\\s*(?:${BARE_STATE_CODES.map(caseFree).join('|')}|${[...AMBIGUOUS_STATE_CODES].join('|')})|\\s(?:${BARE_STATE_CODES.join('|')})|[,\\s]\\s*(?:${NAME_ALTS_ANY_CASE}))`;
+const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?${NO_ZIP_STATE}(?![\\w-])(?!\\.?,?\\s*\\d)`);
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 

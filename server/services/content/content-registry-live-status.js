@@ -159,131 +159,110 @@ function visibleText(html) {
 // so an article titled "Why Termites Were Not Found" is not an error page.
 const NOT_FOUND_HEADING_RE = /^(?:(?:oops|sorry|error|http|404)\W+)*not found\b|\b(?:page|file|url|resource|document|listing|profile|business|content)\b(?:\s+\S+){0,4}?\s+not found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
 const HEADING_TAGS = new Set(['title', 'h1']);
-// Raw-text and RCDATA elements: the parser builds no elements inside them, so an <h1> written
-// in a script, iframe fallback or textarea is text, never a heading.
-const RAW_TEXT_TAGS = ['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes'];
+// Raw-text and RCDATA elements: the tokenizer builds no tags inside them, so an <h1> written in
+// a script, iframe fallback or textarea is text, never a heading. They end at the first real
+// "</name" end tag, whatever quotes their text contains.
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes']);
 // Templates never render; SVG and MathML are foreign content, where <title> is an icon's
-// accessible name, not the document's. Each nests, so it ends at its matching close.
-const NESTING_INERT_TAGS = ['template', 'svg', 'math'];
-const INERT_TAGS = new Set(['!--', ...NESTING_INERT_TAGS, ...RAW_TEXT_TAGS]);
-const TAG_RE = /<(\/?)(!--|[a-z][a-z0-9-]*)/y;
-// Inert regions are already cut out of `inner`, so only tags remain to strip. `[^<>]*` cannot run
-// past the next '<', so stray '<' characters keep this linear (visibleText's /<[^>]+>/ is not).
-const headingText = (inner) => decodeHTML(inner.replace(/<[^<>]*>/g, ' ')).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
-
-// indexOf that never searches the same stretch twice: each needle's last hit (Infinity once it
-// is exhausted) is reused until the caller moves past it, so a whole scan stays linear.
-function forwardFinder(lower) {
-  const last = new Map();
-  return (needle, from) => {
-    const hit = last.get(needle);
-    if (hit !== undefined && (hit === Infinity || hit >= from)) return hit;
-    const at = lower.indexOf(needle, from);
-    last.set(needle, at === -1 ? Infinity : at);
-    return at === -1 ? Infinity : at;
-  };
-}
-
-// Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
-// "-->", a raw-text element (script, style, iframe, textarea…) at its close, a template, svg or
-// math element just past its matching close tag (they nest; a self-closing <svg/> is empty).
-// Comments and raw-text bodies inside one are skipped whole, so a "</template>" written in one
-// never closes it. A tag name counts only when a delimiter follows it, as in the HTML
-// tokenizer: "</scripture>" inside a script string does not end the script.
+// accessible name, not the document's. They nest, and inside them tags are still tokenized
+// (quotes and all) so only a real close tag ends them; a self-closing <svg/> is empty.
+const INERT_CONTAINERS = new Set(['template', 'svg', 'math']);
+const TAG_NAME_RE = /[a-z][a-z0-9-]*/y;
 const TAG_DELIM_RE = /[\s/>]/;
-const tagAt = (lower, find, needle, from) => {
-  let at = find(needle, from);
-  while (at !== Infinity && at + needle.length < lower.length && !TAG_DELIM_RE.test(lower[at + needle.length])) {
-    at = find(needle, at + 1);
-  }
-  return at;
-};
-const RAW_TEXT_OPENS = RAW_TEXT_TAGS.map((t) => `<${t}`);
-const selfClosing = (lower, gt) => gt !== Infinity && lower[gt - 1] === '/';
-function inertEnd(lower, find, name, lt, gt) {
-  if (name === '!--') return find('-->', lt + 4) + 3;
-  if (!NESTING_INERT_TAGS.includes(name)) return tagAt(lower, find, `</${name}`, gt + 1);
-  if (name !== 'template' && selfClosing(lower, gt)) return gt + 1;
-  const open = `<${name}`;
-  const close = `</${name}`;
-  const needles = [open, close, '<!--', ...RAW_TEXT_OPENS];
-  let depth = 1;
-  let at = gt + 1;
-  while (depth > 0 && at !== Infinity) {
-    let needle = null;
-    let hit = Infinity;
-    for (const n of needles) {
-      const h = n === '<!--' ? find(n, at) : tagAt(lower, find, n, at);
-      if (h < hit) { hit = h; needle = n; }
-    }
-    if (hit === Infinity) return Infinity;
-    if (needle === open) {
-      const end = tagClose(lower, hit + needle.length); // skip the whole nested tag, so no stretch is read twice
-      if (name === 'template' || !selfClosing(lower, end)) depth += 1;
-      at = end + 1;
-    } else if (needle === close) { depth -= 1; at = hit + needle.length; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
-    else at = tagAt(lower, find, `</${needle.slice(1)}`, hit + needle.length) + 1;
-  }
-  return at === Infinity ? at : find('>', at) + 1; // past the whole closing tag
-}
+const headingText = (text) => decodeHTML(text).replace(/[   ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // The '>' that ends a tag whose name ends just before `from`, as the tokenizer finds it: a
-// quoted attribute value ("if (n > 0) show('<h1>…')") is skipped whole. Infinity when the tag
-// never closes. Each call reads only that tag, and tags never overlap in the forward pass.
+// quoted attribute value ("if (n > 0) show('<h1>…')") is skipped whole. -1 when the tag never
+// closes. Each call reads only its own tag, and tags never overlap.
 function tagClose(src, from) {
   let j = from;
   while (j < src.length) {
     const c = src[j];
     if (c === '>') return j;
+    j += 1;
     if (c === '=') {
-      j += 1;
       while (j < src.length && /\s/.test(src[j])) j += 1;
       if (src[j] === '"' || src[j] === "'") {
         const q = src.indexOf(src[j], j + 1);
-        if (q === -1) return Infinity;
+        if (q === -1) return -1;
         j = q + 1;
-        continue;
       }
-    } else {
-      j += 1;
     }
   }
-  return Infinity;
+  return -1;
 }
 
-// Text of every <title>/<h1> in one forward pass, so malformed or unclosed tags in a 600 KB
-// fetched page cannot make it quadratic. Inert regions are skipped both between and inside
-// headings; a heading left open runs to the end of the document, as it renders.
+// Just past the end tag that closes raw-text element `name` (searching from `from`), or -1.
+function rawTextEnd(lower, name, from) {
+  const needle = `</${name}`;
+  let at = lower.indexOf(needle, from);
+  while (at !== -1 && at + needle.length < lower.length && !TAG_DELIM_RE.test(lower[at + needle.length])) {
+    at = lower.indexOf(needle, at + 1);
+  }
+  if (at === -1) return -1;
+  const gt = lower.indexOf('>', at + needle.length);
+  return gt === -1 ? -1 : gt + 1;
+}
+
+// Text of every <title>/<h1>, by one forward tokenizer pass (linear on any input up to the
+// 600 KB fetch cap): comments, raw-text bodies and inert containers are skipped, tags inside a
+// heading contribute no text, and a heading left open runs to the end of the document, as it
+// renders. The document <title> is RCDATA: its text is read up to </title> as written.
 function headingTexts(html) {
   const src = String(html || '');
   const lower = src.toLowerCase();
-  const find = forwardFinder(lower);
   const out = [];
-  let open = null; // { name, parts, from } of the heading being read
+  const inert = []; // open inert containers, innermost last
+  let heading = null; // { name, parts }
+  const text = (from, to) => { if (heading && !inert.length && to > from) heading.parts.push(src.slice(from, to)); };
   let i = 0;
-  while (i < lower.length) {
-    const lt = find('<', i);
-    TAG_RE.lastIndex = lt;
-    const tag = lt === Infinity ? null : TAG_RE.exec(lower);
-    if (!tag) { i = lt + 1; continue; }
-    const [, closing, name] = tag;
-    const gt = name === '!--' ? lt + 3 : tagClose(src, lt + 1 + closing.length + name.length);
-    if (!closing && INERT_TAGS.has(name)) {
-      const end = inertEnd(lower, find, name, lt, gt);
-      if (open) { open.parts.push(src.slice(open.from, lt)); open.from = end; }
-      i = end;
-    } else if (!closing && !open && HEADING_TAGS.has(name)) {
-      open = { name, parts: [], from: gt + 1 };
-      i = gt + 1;
-    } else if (closing && open && name === open.name) {
-      out.push([...open.parts, src.slice(open.from, lt)].join(' '));
-      open = null;
-      i = gt + 1;
-    } else {
-      i = gt + 1;
+  while (i < src.length) {
+    const lt = lower.indexOf('<', i);
+    if (lt === -1) { text(i, src.length); break; }
+    text(i, lt);
+    if (lower.startsWith('<!--', lt)) {
+      const e = lower.indexOf('-->', lt + 4);
+      if (e === -1) break;
+      i = e + 3;
+      continue;
+    }
+    const closing = lower[lt + 1] === '/';
+    TAG_NAME_RE.lastIndex = lt + (closing ? 2 : 1);
+    const m = TAG_NAME_RE.exec(lower);
+    if (!m) {
+      if (closing || lower[lt + 1] === '!' || lower[lt + 1] === '?') { // bogus comment, up to '>'
+        const e = lower.indexOf('>', lt);
+        if (e === -1) break;
+        i = e + 1;
+      } else { text(lt, lt + 1); i = lt + 1; } // a literal '<'
+      continue;
+    }
+    const name = m[0];
+    const gt = tagClose(lower, TAG_NAME_RE.lastIndex);
+    if (gt === -1) break; // the rest of the document is inside this tag
+    i = gt + 1;
+    if (closing) {
+      const k = inert.lastIndexOf(name);
+      if (k !== -1) inert.length = k;
+      else if (!inert.length && heading && heading.name === name) { out.push(heading.parts.join(' ')); heading = null; }
+      continue;
+    }
+    if (RAW_TEXT_TAGS.has(name)) {
+      const e = rawTextEnd(lower, name, i);
+      if (e === -1) break;
+      i = e;
+    } else if (INERT_CONTAINERS.has(name)) {
+      if (name === 'template' || lower[gt - 1] !== '/') inert.push(name);
+    } else if (!inert.length && !heading && name === 'title') {
+      const e = rawTextEnd(lower, 'title', i);
+      out.push(src.slice(i, e === -1 ? src.length : lower.lastIndexOf('</title', e)));
+      if (e === -1) break;
+      i = e;
+    } else if (!inert.length && !heading && HEADING_TAGS.has(name)) {
+      heading = { name, parts: [] };
     }
   }
-  if (open) out.push([...open.parts, src.slice(open.from)].join(' '));
+  if (heading) out.push(heading.parts.join(' '));
   return out.map(headingText);
 }
 function notFoundHeading(html) {

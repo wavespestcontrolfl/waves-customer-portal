@@ -601,7 +601,8 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
       expect(Date.now() - t0).toBeLessThan(1500);
     }
     for (const html of [`<div a="${'>'.repeat(300000)}`, `${'<a b=">" '.repeat(60000)}`, `${'<a b=c '.repeat(80000)}`,
-      `<svg>${'<svg a=">"'.repeat(60000)}`, `<template>${'<template a=">"'.repeat(60000)}`]) {
+      `<svg>${'<svg a=">"'.repeat(60000)}`, `<template>${'<template a=">"'.repeat(60000)}`,
+      `${'<title>'.repeat(80000)}`, `${'</x'.repeat(150000)}`, `<script>${'</scriptx'.repeat(60000)}`, `${'<svg>'.repeat(100000)}`]) {
       const t0 = Date.now();
       notFoundHeading(html);
       expect(Date.now() - t0).toBeLessThan(1500);
@@ -634,6 +635,11 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<button onclick="if (n > 0) show(\'<h1>Not Found</h1>\')">Go</button><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<div data-template="><h1>Page not found</h1>"></div><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<h1 class="a>b">Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<h1><span title="> Page not found">Waves Pest Control</span></h1>')).toBe(false);
+    expect(notFoundHeading('<template><div data-x="</template>"></div><h1>Page not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div data-x="<template>"></div><h1>Page not found</h1>')).toBe(true); // a quoted open hides nothing
+    expect(notFoundHeading('<title>Page Not Found</title>')).toBe(true);
+    expect(notFoundHeading('<title>Waves <b>Pest</b></title><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<svg data-x="/>"><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
