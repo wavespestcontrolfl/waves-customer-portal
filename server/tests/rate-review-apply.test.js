@@ -38,7 +38,11 @@ jest.mock('../services/price-change-notices', () => ({
   lockNoticeEvent: jest.fn(async (conn, event) => { mockDb.log.push(['noticeEventLock', event]); }),
 }));
 const mockCloseAlertKeys = jest.fn(async () => 0);
-jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...args) => mockCloseAlertKeys(...args) }));
+const mockRaiseWithReopen = jest.fn(async (...args) => mockNotifyAdmin(...args));
+jest.mock('../services/admin-alert-episodes', () => ({
+  closeAdminAlertKeys: (...args) => mockCloseAlertKeys(...args),
+  raiseAdminAlertWithReopen: (...args) => mockRaiseWithReopen(...args),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: (dbh, today) => dbh('annual_prepay_terms as t')
     .whereIn('t.status', ['active', 'renewal_pending'])
@@ -144,6 +148,7 @@ const customer1 = () => mockDb.store.customers.find((c) => c.id === CUSTOMER(1))
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockRaiseWithReopen.mockImplementation(async (...args) => mockNotifyAdmin(...args));
   process.env.GATE_RATE_REVIEW = 'true';
   mockSchedule.guardThrows = null;
   mockSchedule.seriesLockBusy = false;
@@ -265,6 +270,13 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/rate-review-apply.js'), 'utf8');
     expect(src).toMatch(/await dbh\.transaction\(async \(sp\) => \{\n\s+await sp\('activity_log'\)\.insert\(/);
   });
+  test('a successful schedule clears the row\'s earlier notice_hold flags and keeps every other ranking flag', async () => {
+    const book = pestBook(1, { snapshot: { flags: ['notice_hold:no_future_visit', 'tier_moved'] } });
+    const out = await scheduleBook(book);
+    expect(out.created).toBe(1);
+    const flags = snapshots()[0].flags;
+    expect(Array.isArray(flags) ? flags : JSON.parse(flags)).toEqual(['tier_moved']);
+  });
   test('idempotent: a second call schedules nothing new and reports the row as already scheduled', async () => {
     await scheduleBook(pestBook());
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
@@ -370,6 +382,12 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     expect(out.created).toBe(0);
     expect(notices()).toHaveLength(0);
   });
+  test('annual_prepay: a send on the renewal reminder\'s own day (term_end − 30) leaves no apply tick before the reminder → held; one day earlier schedules', async () => {
+    let out = await scheduleBook(prepayBook(), { plannedSendDate: '2027-04-14' });
+    expect(out.held.map((h) => h.reason)).toEqual(['renewal_too_soon']);
+    out = await scheduleBook(prepayBook(), { plannedSendDate: '2027-04-13' });
+    expect(out.created).toBe(1);
+  });
   test('annual_prepay: a term renewing inside the notice window, or already reminded, is held', async () => {
     let out = await scheduleBook(prepayBook({ term_end: '2026-11-28' }));
     expect(out.held.map((h) => h.reason)).toEqual(['renewal_too_soon']);
@@ -407,6 +425,15 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     twice.scheduled_services[2].annual_prepay_term_id = TERM(2);
     out = await scheduleBook(twice);
     expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_ambiguous']);
+  });
+  test('annual_prepay: the account\'s plan lines are counted with the ranking\'s live statuses — a second line with only a NULL-status or on-site visit makes an unlabeled term ambiguous', async () => {
+    for (const status of [null, 'on_site', 'en_route']) {
+      const book = prepayBook({ coverage_service_type: null });
+      const lawn = fixture.pestSeries(2, ['2026-12-20'], { parentOverrides: { customer_id: CUSTOMER(1), _line: 'lawn_care' }, childOverrides: { customer_id: CUSTOMER(1), _line: 'lawn_care', status } });
+      book.scheduled_services.push(...lawn.all);
+      const out = await scheduleBook(book);
+      expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_ambiguous']);
+    }
   });
   test('annual_prepay: an unlabeled term is matched only on a single-line ACCOUNT — a second line outside the batch still counts', async () => {
     const book = prepayBook({ coverage_service_type: null });
@@ -634,6 +661,27 @@ describe('applyDueRateChanges — per_application', () => {
     const keys = mockCloseAlertKeys.mock.calls.at(-1)[1];
     expect(keys).not.toContain(`rate-review-apply-hold:${id}:plan_on_hold`);
     expect(keys).toContain(`rate-review-apply-hold:${id}:rate_moved_since_notice`);
+  });
+  test('hold bells ride the episode-aware raise: a reason that comes back after its bell was closed (A → B → A) rings again through raiseAdminAlertWithReopen', async () => {
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-20' }];
+    await runApply(book);
+    const id = notices()[0].id;
+    expect(mockRaiseWithReopen).toHaveBeenCalledTimes(1);
+    expect(mockRaiseWithReopen.mock.calls[0][3]).toMatchObject({ dedupeKey: `rate-review-apply-hold:${id}:plan_on_hold` });
+    // kill switch: ALERT_EPISODES off → the plain composer raise, no close pass
+    process.env.ALERT_EPISODES = 'off';
+    try {
+      mockRaiseWithReopen.mockClear(); mockCloseAlertKeys.mockClear(); mockNotifyAdmin.mockClear();
+      const again = sentBook();
+      again.plan_holds = book.plan_holds;
+      await runApply(again);
+      expect(mockRaiseWithReopen).not.toHaveBeenCalled();
+      expect(mockCloseAlertKeys).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.ALERT_EPISODES;
+    }
   });
   test('the fee stays untouched when it is not the amount the customer was told (a two-line account), visits still reprice', async () => {
     const book = sentBook({ book: { customer: { per_application_fee: '40.54' } } });

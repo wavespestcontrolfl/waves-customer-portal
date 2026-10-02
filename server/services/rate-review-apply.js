@@ -97,7 +97,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { rateReviewLive, isEnabled } = require('../config/feature-gates');
+const { rateReviewLive, isEnabled, alertEpisodesLive } = require('../config/feature-gates');
 const { MIN_NOTICE_DAYS, lockNoticeEvent } = require('./price-change-notices');
 const PlanRateLedger = require('./plan-rate-ledger');
 const { hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
@@ -279,13 +279,16 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, 
 // alone (a second line outside the batch is still a second line).
 async function loadAccountPlanLineCount(dbh, { customerId, fromDate }) {
   const { LINE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
+  // The ranking's live upcoming-row predicate (NULL or a counting status):
+  // the account's plan lines are counted the way the ranking counted them.
+  const { LIVE_STATUS_SQL } = require('./rate-review')._private;
   const { rows } = await dbh.raw(`
     SELECT count(DISTINCT ${LINE_SQL})::int AS n
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ?
       AND s.scheduled_date >= ?
-      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND ${LIVE_STATUS_SQL}
       AND ${PLAN_ROW_SQL}
   `, [customerId, fromDate]);
   return Math.max(1, Number(rows[0] && rows[0].n) || 0);
@@ -428,9 +431,11 @@ function effectiveDateFor(lane, { floor, visits = [], billingDay = 1, term = nul
     if (!term) throw hold('prepay_term_not_found');
     const renewalDay = addDaysYmd(ymd(term.term_end), 1);
     // The notice must precede the renewal reminder ladder (30/15/7 days
-    // before term_end): at least MIN_NOTICE_DAYS + 1 days before the
-    // successor starts = on or before term_end − 30.
-    if (daysBetweenYmd(plannedSend, renewalDay) < MIN_NOTICE_DAYS + 1) throw hold('renewal_too_soon', { renewalDay });
+    // before term_end) by an apply tick: delivered on the send day, the
+    // nightly apply (03:10) writes the successor amount the next morning,
+    // before that day's 10:12 reminder — so the send is on or before
+    // term_end − 31 (MIN_NOTICE_DAYS + 2 days before the successor starts).
+    if (daysBetweenYmd(plannedSend, renewalDay) < MIN_NOTICE_DAYS + 2) throw hold('renewal_too_soon', { renewalDay });
     // The same floors every lane honours: a term that renews before the
     // line's review date (its anniversary occurrence in the batch window)
     // is not this review's to reprice — it waits for the next one.
@@ -447,9 +452,13 @@ function cadenceLabelFor(lane) {
   return 'application';
 }
 
+function withoutNoticeHolds(rawFlags) {
+  const flags = Array.isArray(rawFlags) ? rawFlags : (() => { try { return JSON.parse(rawFlags || '[]'); } catch { return []; } })();
+  return flags.filter((f) => !String(f).startsWith('notice_hold:'));
+}
+
 async function flagSnapshotHold(dbh, row, code) {
-  const flags = Array.isArray(row.flags) ? row.flags : (() => { try { return JSON.parse(row.flags || '[]'); } catch { return []; } })();
-  const next = flags.filter((f) => !String(f).startsWith('notice_hold:'));
+  const next = withoutNoticeHolds(row.flags);
   next.push(`notice_hold:${code}`);
   await dbh('rate_review_snapshots').where({ id: row.id }).update({ flags: JSON.stringify(next), updated_at: new Date() });
 }
@@ -551,7 +560,9 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
       if (err && err.code === '23505') throw hold('notice_event_collision', { effectiveDate });
       throw err;
     }
-    await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
+    // An earlier scheduling hold is resolved now: its notice_hold flag goes,
+    // every other ranking flag stays.
+    await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, flags: JSON.stringify(withoutNoticeHolds(row.flags)), updated_at: new Date() });
     return { noticeId: inserted[0].id };
   });
   if (noticeId.alreadyScheduled) return { alreadyScheduled: true, rowId: row.id };
@@ -1054,6 +1065,7 @@ async function recordHold(dbh, noticeRow, code, detail, now) {
 // once the notice applies, the earlier reasons' when a hold changes reason
 // (the bell copy is per reason, so a stale one would ask for the wrong fix).
 async function closeHoldAlerts(dbh, noticeRow, reason, keepCode = null) {
+  if (!alertEpisodesLive()) return;
   try {
     const keys = Object.keys(HOLD_COPY).filter((c) => c !== keepCode).map((c) => `rate-review-apply-hold:${noticeRow.id}:${c}`);
     await require('./admin-alert-episodes').closeAdminAlertKeys(dbh, keys, reason);
@@ -1062,10 +1074,14 @@ async function closeHoldAlerts(dbh, noticeRow, reason, keepCode = null) {
   }
 }
 
+// Episode-aware (ALERT_EPISODES): a reason whose bell closeHoldAlerts
+// auto-cleared (A → B → A) rings again through raiseAdminAlertWithReopen,
+// composed by the same rule-checked composer raiseAdminAlert uses; killed,
+// the plain raiseAdminAlert (no closes, no reopen).
 async function raiseHoldAlert(noticeRow, code) {
   try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('billing', {
+    const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+    const spec = {
       area: 'Billing',
       action: 'finish an annual rate change by hand',
       why: HOLD_COPY[code] || HOLD_COPY.apply_error,
@@ -1074,10 +1090,19 @@ async function raiseHoldAlert(noticeRow, code) {
       subject: { type: 'customer', id: String(noticeRow.customer_id) },
       doneWhen: 'rate_review_notice_applied',
       who: 'person',
-    }, {
+    };
+    const opts = {
       dedupeKey: `rate-review-apply-hold:${noticeRow.id}:${code}`,
       refreshOnDedupe: true,
       metadata: { noticeId: noticeRow.id, rateReviewRowId: noticeRow.rate_review_row_id, familyKey: noticeRow.family_key, reason: code },
+    };
+    if (!alertEpisodesLive()) {
+      await raiseAdminAlert('billing', spec, opts);
+      return;
+    }
+    const composed = composeAdminAlert(spec);
+    await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+      ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata },
     });
   } catch (err) {
     logger.warn(`[rate-review-apply] hold alert failed for notice ${noticeRow.id}: ${err.message}`);
