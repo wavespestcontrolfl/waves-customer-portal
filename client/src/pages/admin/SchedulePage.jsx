@@ -43,6 +43,7 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
@@ -13611,6 +13612,15 @@ export function CompletionPanel({
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
+  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): every service
+  // but WDO, termite pre-treat, lawn and tree, shrub & palm; the search
+  // answers available:false elsewhere and while the switch is off.
+  // Whether the server offers the blog search for this visit: "checking"
+  // until it answers, then "yes" or "no"; "unknown" when it could not be
+  // asked. A pick (a restored draft's) stays and is sent unless the answer
+  // is a firm "no": /complete checks it either way.
+  const [blogPostOffer, setBlogPostOffer] = useState("no");
+  const [blogPost, setBlogPost] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
   // state: they ground the AI draft, the recap and the photo context, but
@@ -14992,6 +15002,33 @@ export function CompletionPanel({
     });
   }, [techTips, selectedTipIds]);
 
+  // The blog search is offered wherever the server answers available (an
+  // empty query reads nothing but the visit): only where /complete keeps the
+  // pick, every service but WDO, termite pre-treat, lawn and tree, shrub &
+  // palm (blogPostAllowedFor). The lawn and tree, shrub & palm forms never
+  // ask: another lane owns those completions.
+  useEffect(() => {
+    let cancelled = false;
+    setBlogPost(null);
+    if (!service.id || ["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout)) {
+      setBlogPostOffer("no");
+      return () => { cancelled = true; };
+    }
+    setBlogPostOffer("checking");
+    adminFetch(`/admin/dispatch/${service.id}/blog-posts`)
+      .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
+      .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
+    return () => { cancelled = true; };
+  }, [service.id, serviceLineForCloseout]);
+  const blogPostKept = !!blogPost && blogPostOffer !== "no";
+  // A kept pick shows while the answer is pending or failed, so it can be
+  // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
+  const blogPostShown = blogPostOffer === "yes" || blogPostKept;
+  const searchBlogPosts = useCallback(
+    (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
+
   useEffect(() => {
     let cancelled = false;
     setTechTips(null);
@@ -15465,6 +15502,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A picked blog post is tech input on its own.
+      blogPost ||
       // A promise mark is tech input on its own (a mark-only draft saves).
       promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
@@ -15611,6 +15650,9 @@ export function CompletionPanel({
         recommendationsText,
         selectedTipIds,
         customTip,
+        // The picked blog post comes back with the draft, or the completion
+        // after a reload or billing detour would silently leave it off.
+        blogPost,
         parkedFound,
         parkedNext,
         // Which deselect model the label arrays were saved under — a restored
@@ -15758,6 +15800,8 @@ export function CompletionPanel({
     service.propertyAddress,
     // A mark is operator input: a mark-only change must save the draft.
     promiseMarks,
+    // So is a picked blog post.
+    blogPost,
   ]);
 
   function restoreDraft() {
@@ -16029,6 +16073,13 @@ export function CompletionPanel({
         : [],
     );
     setCustomTip(restoredCustom);
+    // The pick as the search answered it; /complete re-checks it is still a
+    // live post. Older drafts have none.
+    const draftBlogPost = savedDraft.blogPost;
+    setBlogPost(draftBlogPost && typeof draftBlogPost === "object"
+      && ["id", "title", "url"].every((key) => typeof draftBlogPost[key] === "string" && draftBlogPost[key])
+      ? { id: draftBlogPost.id, title: draftBlogPost.title, url: draftBlogPost.url }
+      : null);
     setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
     setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
@@ -18268,6 +18319,9 @@ export function CompletionPanel({
         techTips: techTips?.available === true
           ? { ids: selectedTipIds, custom: customTip.trim() || null }
           : null,
+        // The Waves blog post picked for the customer: the id only; the server
+        // checks it is live on the site and freezes its title and URL.
+        ...(blogPostKept ? { blogPostId: blogPost.id } : {}),
         internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
@@ -20252,6 +20306,17 @@ export function CompletionPanel({
                     chipBorder: M.hairline,
                     chipText: M.ink2,
                   }}
+                />
+              </Field>
+            )}
+            {blogPostShown && (
+              <Field label="Blog post for the customer">
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
                 />
               </Field>
             )}
@@ -22745,6 +22810,18 @@ export function CompletionPanel({
                     chipBorder: D.border,
                     chipText: D.text,
                   }}
+                />
+              </div>
+            )}
+            {blogPostShown && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Blog post for the customer</label>{" "}
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
                 />
               </div>
             )}

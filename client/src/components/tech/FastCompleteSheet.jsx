@@ -80,8 +80,8 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  PromisesSection, ReportCard, SentSummary, StepFooter, TraceSection, WritingView, customerHomeWriterLabel,
-  factsHold, perimeterFeetOf, photoCaptionsOf, useVisitPhotos, useVisitPromises, useVisitTrace,
+  BlogPostSection, PromisesSection, ReportCard, SentSummary, StepFooter, TraceSection, WritingView, customerHomeWriterLabel,
+  factsHold, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import {
@@ -811,6 +811,9 @@ function reportCompletionBody({
     reportDraftBase: draft.base,
     ...(promiseMarks.length ? { promiseMarks } : {}),
     techTips: techTipsOf(form, tipsAvailable),
+    // The picked Waves blog post; /complete checks it is still live and
+    // freezes it onto the report.
+    ...(form.blogPost ? { blogPostId: form.blogPost.id } : {}),
     sendCompletionSms: true,
     includePayLink: !isReservice,
     requestReview: !isReservice,
@@ -984,10 +987,12 @@ function ReportFlowForm({
     tipId: '',
     customTip: '',
     promiseMarks: {},
+    blogPost: null,
   }));
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
+  const blog = useBlogPostOffer({ base, request });
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version });
   const trace = useVisitTrace({ serviceId: service.id, request });
   const report = useReportDraft({ request, base });
@@ -1118,6 +1123,7 @@ function ReportFlowForm({
           rated: ratingAllowed && Number.isInteger(form.rating),
         })}
         photoCount={visitPhotos.photos.length}
+        blogPost={form.blogPost}
         onWrite={write}
         onSubmit={submit}
         onTrace={openTracer}
@@ -1142,6 +1148,7 @@ function ReportFlowForm({
       active={active}
       sprayMethod={reportSprayMethod(draft?.facts)}
       tips={tips}
+      blog={blog}
       visitPromises={visitPromises}
       photos={visitPhotos.photos}
       onPhotos={photos.open}
@@ -1166,7 +1173,7 @@ function ReportFlowForm({
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, sources, photoCount,
-  onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm, onBackFromPrompt,
+  blogPost, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm, onBackFromPrompt,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1208,6 +1215,7 @@ function ReportStep({
             locked={locked}
             photoCount={photoCount}
             traced={!!trace?.zone}
+            blogPost={blogPost}
             onEdit={() => setEditing(true)}
             onDoneEditing={() => setEditing(false)}
             onChangeText={report.editText}
@@ -1225,7 +1233,7 @@ function ReportStep({
 // The visit step: talk, products, photos, the three taps, the tip, the
 // promise check, then write the report (or go back to it while current).
 function VisitStep({
-  service, ctx, form, setForm, products, active, sprayMethod, tips, visitPromises, photos, onPhotos, locked, dictationPending,
+  service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
@@ -1291,6 +1299,9 @@ function VisitStep({
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />
+          )}
+          {blog.available && (
+            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
           )}
           {visitPromises.available && visitPromises.promises.length > 0 && (
             <PromisesSection

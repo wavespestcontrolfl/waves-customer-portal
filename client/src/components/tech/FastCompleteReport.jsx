@@ -12,6 +12,7 @@ import {
   PROMISE_MARKS, STILL_LEFT_MAX, currentMark, promiseCountLabel, promiseSourceLabel, toggledMarks,
 } from '../schedule/PromiseCheck';
 import { Chip, ChoiceSection } from './FastCompleteParts';
+import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
 import { Button, Field, Input, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -170,6 +171,71 @@ export function useVisitPromises({ base, request }) {
   }, [base, request, reloads]);
   const reload = useCallback(() => setReloads((n) => n + 1), []);
   return { ...state, reload };
+}
+
+// The Waves blog search (GATE_REPORT_BLOG_POST): offered while the server
+// answers available for this visit (its own service line is pest). A failed
+// read is no section.
+export function useBlogPostOffer({ base, request }) {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => request(`${base}/blog-posts`))
+      .then((data) => { if (!cancelled) setAvailable(data?.available === true); })
+      .catch(() => { if (!cancelled) setAvailable(false); });
+    return () => { cancelled = true; };
+  }, [base, request]);
+  const search = useCallback((query) => request(`${base}/blog-posts?q=${encodeURIComponent(query)}`), [base, request]);
+  return { available, search };
+}
+
+function BlogPostOption({ post, pressed = false, locked, onPick }) {
+  return (
+    <Button type="button" variant="secondary" className="tech-visit-action tech-visit-tip" aria-pressed={pressed} disabled={locked} onClick={onPick}>
+      <span>
+        {post.title}
+        <span className="tech-visit-tip-copy">{blogPostPath(post.url)}</span>
+      </span>
+    </Button>
+  );
+}
+
+// One Waves blog post for the customer, searched the way Quick Links searches
+// links. It goes at the bottom of their report as "From the Waves blog".
+// Optional; the server checks the pick is still live when the visit completes.
+export function BlogPostSection({ search, value, locked, onChange }) {
+  const { query, setQuery, results, status } = useBlogPostSearch(search);
+  return (
+    <section className="tech-visit-choice-section" aria-label="Blog post for the customer">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Blog post for the customer</h3>
+        <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>
+      </div>
+      {value ? (
+        <>
+          <div className="tech-visit-tip-list">
+            <BlogPostOption post={value} pressed locked={locked} onPick={() => onChange(null)} />
+          </div>
+          <div className="tech-visit-tile-grid">
+            <Chip disabled={locked} label="Remove" onClick={() => onChange(null)} />
+          </div>
+        </>
+      ) : (
+        <>
+          <Field label="Search the Waves blog" className="tech-visit-field">
+            <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+          </Field>
+          <div className="tech-visit-tip-list">
+            {results.map((post) => <BlogPostOption key={post.id} post={post} locked={locked} onPick={() => onChange(post)} />)}
+            {status === 'searching' && <p className="tech-visit-muted">Searching…</p>}
+            {status === 'failed' && <p className="tech-visit-muted">The blog search didn’t answer. Try again.</p>}
+            {status === 'done' && !results.length && <p className="tech-visit-muted">No live posts match.</p>}
+          </div>
+        </>
+      )}
+    </section>
+  );
 }
 
 export function PromisesSection({ promises, total, marks, locked, onChange }) {
@@ -376,7 +442,7 @@ function withLine(photoCount, traced) {
 }
 
 export function ReportCard({
-  draft, editing, stale, locked, photoCount, traced, onEdit, onDoneEditing, onChangeText, onWriteAgain,
+  draft, editing, stale, locked, photoCount, traced, blogPost, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
   const edited = draft.text.trim() !== draft.base.trim();
@@ -409,6 +475,7 @@ export function ReportCard({
         </div>
       )}
       {extra && <p className="tech-visit-muted">{extra}</p>}
+      {blogPost && <p className="tech-visit-muted">At the bottom, from the Waves blog: {blogPost.title}</p>}
       <HeardLine facts={draft.facts} />
       <div className="tech-visit-tile-grid">
         <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />

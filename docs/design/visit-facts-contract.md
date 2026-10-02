@@ -105,6 +105,7 @@ stay internal, without a decision either way.
 | `recommendations` | prefill, tap | `structured_notes.recommendations` | Recommendations | hidden |
 | `form_recommendations` | prefill, tap | `structured_notes.formRecommendations` | Recommendations, form-sourced only | hidden |
 | `tech_tips` | prefill, tap | `structured_notes.techTips` | Tips from your tech (`techNote`, `GATE_TECH_TIPS`) | hidden |
+| `blog_post` | tap only | `structured_notes.blogPost` | From the Waves blog (`payload.blogPost`, `GATE_REPORT_BLOG_POST`) | hidden |
 | `protocol_actions_completed` | prefill, tap | `structured_notes.protocolActionsCompleted` | What we did (protocol actions) | hidden |
 | `protocol_action_scopes_completed` | derived | `structured_notes.protocolActionScopesCompleted` | Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (`structuredActionScope`/`treatmentScope`, report-data.js) | fallback to area-text/product-based scope classification |
 | `technician_notes` (internal) | voice, tap, derived | `service_records.technician_notes` | AI report writer prompt ("Service Notes", `redactAccessCodes`); Visit summary / Today's Result body **only** through `technicianReportCustomerCopy`'s screened parse | fallback to the deterministic summary |
