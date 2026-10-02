@@ -61,6 +61,24 @@ const ORDINARY_INTENTS = Object.freeze([
   'customer_nudge_needs_reply',
 ]);
 
+// Topics the owner kept with staff (money, cancellations, complaints, safety)
+// and legal threats, read from the CUSTOMER'S OWN WORDS. The intent label is
+// too coarse: an unmatched text falls through to the general intent, and with
+// a real-answers category gate on the drafter answers it without escalating.
+// Deliberately broad; a false match only means a person answers it.
+const SENSITIVE_TOPICS = Object.freeze([
+  ['legal', /\b(lawyers?|attorneys?|lawsuits?|sue|suing|sued|legal|court|small claims|bbb|better business|fdacs|epa|report(?:ing)? you|news|reporter)\b/i],
+  ['health_safety', /\b(sick|ill|illness|hospital|er\b|emergency|doctor|vet|poison\w*|toxic|allerg\w*|rash|vomit\w*|breath\w*|asthma|pregnan\w*|bit(?:ten)?|stung|sting|died|dead|dying|safe|safety|chemicals?|pesticides?|exposed|exposure)\b/i],
+  ['complaint', /\b(complain\w*|unhappy|upset|angry|furious|disappointed|terrible|awful|horrible|worst|unacceptable|ridiculous|damage\w*|broke|broken|ruin\w*|scam\w*|rip(?:ped)? ?off|never (?:showed|came)|no.?show|stood (?:me )?up)\b/i],
+  ['money', /\b(refund\w*|charge\w*|overcharg\w*|chargeback|dispute\w*|bill(?:ed|ing)?|invoice\w*|pay(?:ment|ing)?|paid|credit|discount|price|cost|fee|\$)/i],
+  ['cancellation', /\b(cancel\w*|stop (?:service|coming)|quit|terminate|end (?:my|the) (?:service|plan|contract))\b/i],
+]);
+
+function sensitiveTopic(text) {
+  const body = String(text || '');
+  return SENSITIVE_TOPICS.find(([, pattern]) => pattern.test(body))?.[0] || null;
+}
+
 // The answered suggestion's terminal status. human_verdict stays NULL: no
 // person decided anything, so it is never a graduation outcome or a correction.
 const ANSWERED_STATUS = 'auto_answered';
@@ -172,6 +190,7 @@ function candidateRefusal({ row, meta, snapshot, now, dueAt }) {
     // The card a person would have sent must be the verified draft, word for word.
     ['draft_mismatch', () => reply !== row.draft_response],
     ['intent_not_ordinary', () => !ORDINARY_INTENTS.includes(row.detected_intent) || row.draft_intent !== row.detected_intent],
+    ['sensitive_topic', () => sensitiveTopic(row.inbound_message) !== null],
     ['not_stamped', () => stamp.policy_version !== STAMP_VERSION],
     ['not_verified', () => stamp.verifier_enabled !== true || jsonObject(meta.verify)?.converged !== true],
     ['review_required', () => stamp.require_review !== false],
@@ -229,8 +248,9 @@ async function readinessRefusal({ row, meta, snapshot }) {
   });
   if (!backstop.clear) return { reason: 'backstop_not_clear' };
 
-  if (await visitChangedSince(db, { customerId: row.customer_id, factsAt: factsReadAt(row, snapshot) })) {
-    return { reason: 'visit_changed' };
+  const changed = await accountChangedSince(db, { customerId: row.customer_id, factsAt: factsReadAt(row, snapshot) });
+  if (changed) {
+    return { reason: changed };
   }
   return { reason: null };
 }
@@ -254,13 +274,31 @@ async function threadOwnerRefusal(dbh, { customerId, fromPhone, toPhone }) {
   return null;
 }
 
-/** Did any of the customer's visits change after the reply's facts were read? */
-async function visitChangedSince(dbh, { customerId, factsAt }) {
-  if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return true; // fail closed
-  return Boolean(await dbh('scheduled_services')
+// The customer's records a reply's facts are read from (VISITS, PENDING
+// ESTIMATE, BILLING) and that change without touching the SMS thread.
+const ACCOUNT_TABLES = Object.freeze([
+  ['scheduled_services', 'visit_changed'],
+  ['estimates', 'estimate_changed'],
+  ['invoices', 'invoice_changed'],
+]);
+
+/**
+ * Which of the customer's visits, estimates or invoices changed after the
+ * reply's facts were read, in one statement. Returns a reason or null; an
+ * unreadable facts time fails closed.
+ */
+async function accountChangedSince(dbh, { customerId, factsAt }) {
+  if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return 'visit_changed';
+  const probes = ACCOUNT_TABLES.map(([table]) => dbh(table)
     .where({ customer_id: customerId })
     .where('updated_at', '>', factsAt)
-    .first('id'));
+    .select(dbh.raw('1')));
+  const { rows: [changed] } = await dbh.raw(
+    `SELECT ${ACCOUNT_TABLES.map((_, i) => `EXISTS (?) AS c${i}`).join(', ')}`,
+    probes,
+  );
+  const hit = ACCOUNT_TABLES.find((_, i) => changed?.[`c${i}`] !== false);
+  return hit ? hit[1] : null;
 }
 
 /** Did anyone call this customer, or the customer call in, since the text? */
@@ -332,8 +370,9 @@ function handoffCheck(claim) {
     const owner = await threadOwnerRefusal(dbi, { customerId, fromPhone, toPhone });
     if (owner) return { ok: false, code: owner, reason: owner };
     // A reschedule during the claim or provider preparation makes the reply stale.
-    if (await visitChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null })) {
-      return { ok: false, code: 'visit_changed', reason: 'visit_changed' };
+    const changed = await accountChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null });
+    if (changed) {
+      return { ok: false, code: changed, reason: changed };
     }
     // Then the thread, in ONE statement, as the last read: a text or a call
     // landing between two separate queries cannot slip past.
@@ -546,7 +585,8 @@ module.exports = {
   candidateRefusal,
   readinessRefusal,
   callSinceInbound,
-  visitChangedSince,
+  accountChangedSince,
+  sensitiveTopic,
   threadOwnerRefusal,
   claimGuard,
   handoffCheck,

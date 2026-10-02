@@ -15,6 +15,10 @@ same send-once key per inbound, same send-time rechecks and policy-checked provi
   reply's facts were read (so "today"/"tomorrow" still mean what they said).
 - Intent is `general_customer_sms_needs_review` or `customer_nudge_needs_reply`. Money,
   cancellations, complaints, photos, lookups and unclassified texts stay with staff.
+- The customer's own words pass a deliberately broad topic screen (`SENSITIVE_TOPICS`): legal,
+  health/chemical safety, complaints, money and cancellations stay with staff even when the
+  intent label is the general one. A false match only means a person answers.
+- No photo on the text, and nothing the drafter recorded as missing information.
 - The draft was stamped at draft time **while the gate was on** as verified, action-free,
   lint-clean and not owed a review. Drafts from before the flip are never candidates.
 - No price, no redaction placeholder, no unowned follow-up promise; the draft's voice profile is

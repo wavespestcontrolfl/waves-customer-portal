@@ -63,7 +63,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     trx = await database.transaction();
     const schema = `sms_unanswered_${randomUUID().replaceAll('-', '')}`;
     await trx.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services', 'customers']) {
+    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services', 'customers', 'estimates', 'invoices']) {
       await trx.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
@@ -88,6 +88,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
   async function waitingSuggestion({
     inboundAt = INBOUND_AT, intent = 'general_customer_sms_needs_review', reply = REPLY, phone = CUSTOMER_PHONE,
     stamp = {}, actions = [], snapshot = {}, missingInfo = null, media = [], promptVersion = 'house_voice_v11',
+    inboundText = 'When is my next visit?',
   } = {}) {
     const inboundId = randomUUID();
     const draftId = randomUUID();
@@ -95,11 +96,11 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     const draftedAt = new Date(inboundAt.getTime() + 5000);
     await trx('sms_log').insert({
       id: inboundId, customer_id: customerId, direction: 'inbound', from_phone: phone, to_phone: WAVES_LINE,
-      message_body: 'When is my next visit?', status: 'received', created_at: inboundAt, updated_at: inboundAt,
+      message_body: inboundText, status: 'received', created_at: inboundAt, updated_at: inboundAt,
       metadata: JSON.stringify(media === null ? {} : { media }), // null = no media list recorded
     });
     await trx('message_drafts').insert({
-      id: draftId, sms_log_id: inboundId, customer_id: customerId, inbound_message: 'When is my next visit?',
+      id: draftId, sms_log_id: inboundId, customer_id: customerId, inbound_message: inboundText,
       draft_response: reply, intent, status: 'suggested', model: 'synthetic-model', prompt_version: promptVersion,
       scheduling_intent: false, created_at: draftedAt,
       intended_actions: JSON.stringify({
@@ -117,7 +118,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
       id: decisionId, workflow: suggest.SUGGEST_WORKFLOW, agent_name: 'synthetic-unanswered-test', decision_version: 'test-v1',
       mode: 'suggest', status: 'pending_review', entity_type: 'message_draft', entity_id: draftId, customer_id: customerId,
       source_channel: 'sms', sms_log_id: inboundId, detected_intent: intent, suggested_message: reply,
-      input_snapshot: JSON.stringify({ sms: { body: 'When is my next visit?' }, draft_id: draftId, facts_generated_at: draftedAt.toISOString(), ...snapshot }),
+      input_snapshot: JSON.stringify({ sms: { body: inboundText }, draft_id: draftId, facts_generated_at: draftedAt.toISOString(), ...snapshot }),
       prompt_version: promptVersion, idempotency_key: `${suggest.SUGGEST_WORKFLOW}:draft:${draftId}`,
       created_at: draftedAt, updated_at: draftedAt,
     });
@@ -226,6 +227,11 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     ['media_or_unknown', { media: [{ url: 'https://example.invalid/photo.jpg', contentType: 'image/jpeg' }] }],
     ['media_or_unknown', { media: null }],
     ['prompt_cohort_mismatch', { promptVersion: 'house_voice_v9' }],
+    ['sensitive_topic', { inboundText: "You'll hear from my lawyer about this." }],
+    ['sensitive_topic', { inboundText: 'My dog got sick after the spray, is that normal?' }],
+    ['sensitive_topic', { inboundText: 'Why was I charged twice?' }],
+    ['sensitive_topic', { inboundText: 'Please cancel my service.' }],
+    ['sensitive_topic', { inboundText: 'The tech never showed, really disappointed.' }],
   ])('%s keeps the card for a person', async (reason, overrides) => {
     const s = await waitingSuggestion(overrides);
     const totals = await sweep();
@@ -296,6 +302,32 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     });
     const totals = await sweep();
     await expectUntouched(s, totals, 'visit_changed');
+  });
+
+  test.each([
+    ['estimate_changed', 'estimates', () => ({ id: randomUUID(), customer_id: customerId, updated_at: at('2026-10-06T16:00:00Z') })],
+    ['invoice_changed', 'invoices', () => ({
+      id: randomUUID(), customer_id: customerId, token: randomUUID(), invoice_number: `QA-${Date.now()}`,
+      updated_at: at('2026-10-06T16:00:00Z'),
+    })],
+  ])('%s after the facts were read blocks the send', async (reason, table, row) => {
+    const s = await waitingSuggestion({ inboundText: 'Can I still accept that estimate?' });
+    await trx(table).insert(row());
+    const totals = await sweep();
+    await expectUntouched(s, totals, reason);
+  });
+
+  test('an estimate that changes after the claim is caught at the provider boundary', async () => {
+    const s = await waitingSuggestion();
+    sendCustomerMessage.mockImplementation(async (input) => {
+      await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, updated_at: at('2026-10-06T17:59:30Z') });
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.estimate_changed).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
   });
 
   test('a staff reply after the text blocks the send', async () => {
