@@ -346,9 +346,16 @@ const CANONICAL_PEST_RE = new RegExp(`\\b(?:${[...new Set(PEST_TARGET_SUGGESTION
 // termites, and what draws pests in.
 const CONDITION_TALK_RE = /\b(?:standing\s+water|pool(?:s|ing)?\s+(?:of\s+)?water|water\s+(?:is\s+)?(?:pooling|collecting|standing)|puddles?|buckets?|saucers?|containers?|gutters?|downspouts?|breed(?:ing|s)?|soffits?|vents?|eaves?|attic|crawl\s*space|roof(?:line)?|rafters?|screens?|loose|torn|ripped|broken|rott?(?:ed|ing|en)?|wood\s+damage|soft\s+wood|leak(?:s|ing)?|moisture|damp|mulch|overgrown|debris|clutter|trash|garbage|compost|pet\s+food|bird\s*seed)\b/i;
 const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.test(sentence) || CONDITION_TALK_RE.test(sentence);
-function scrub(text) {
+// Lawn talk, for a caller that opts in with { lane: 'lawn' } (the re-service
+// report card on a lawn callback). Same access-detail and credential
+// protections; only the relevance test widens. Default callers are unchanged.
+const LAWN_TALK_RE = /\b(?:lawn|grass|turf|sod|yard|weeds?|weedy|crabgrass|dollarweed|clover|sedge|nutsedge|brown(?:ing)?|yellow(?:ing)?|dead|dying|patch(?:es|y)?|spots?|thin(?:ning)?|bare|fungus|fungal|mushrooms?|disease|chinch|grubs?|armyworms?|webworms?|mole\s*crickets?|fertiliz\w*|sprinklers?|irrigation|watering)\b/i;
+function scrub(text, { lane } = {}) {
+  const relevant = lane === 'lawn'
+    ? (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence)
+    : pestTalk;
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !accessSentence(sentence) && pestTalk(sentence))
+    .filter((sentence) => !accessSentence(sentence) && relevant(sentence))
     .map((sentence) => {
       const shouted = shoutedSentence(sentence);
       return sentence.replace(/\S+/g, (word) => {

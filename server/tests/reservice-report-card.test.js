@@ -438,7 +438,42 @@ describe('paraphrases written about the customer are left out (production phrasi
   test('a fragment in the customer\'s own frame still reads under the lead', () => {
     expect(youToldUs(frozen('call', 'Spiders on the front porch and pool cage.'))).toMatchObject({ lead: 'On your call, you mentioned', text: 'spiders on the front porch and pool cage.' });
   });
+  test('"they" about the pests keeps a real complaint (Codex r1)', () => {
+    expect(youToldUs(frozen('call', 'Ants are in the kitchen; they keep coming back.'))).toMatchObject({ lead: 'On your call, you mentioned', text: 'ants are in the kitchen; they keep coming back.' });
+  });
   test('verbatim picker / text words are never screened', () => {
     expect(youToldUs(frozen('picker', 'My husband saw roaches by her crib'))).toMatchObject({ quoted: true, text: 'My husband saw roaches by her crib' });
+  });
+});
+
+describe('independent review fixes (#5542)', () => {
+  test('a NULL defaulted flag (pre-flag record) never prints as the tech\'s finding', () => {
+    const svc = frozenService(null, { client_pest_rating: 5, client_pest_rating_defaulted: null });
+    expect(card(svc).whatWeDid.found).toBeNull();
+  });
+  test('the Dispatch "Service recap" closeout freezes the booking words too', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
+    expect(src).toMatch(/'customer_request', 'customer_request_source', 'customer_request_pests'\);/);
+    expect((src.match(/freezeReserviceRequest\(locked\)/g) || []).length).toBe(2);
+    expect(src).toContain('missing.reserviceRequest = frozenRequest;');
+    expect(src).toContain('return frozenRequest ? { reserviceRequest: frozenRequest } : {};');
+  });
+});
+
+describe('lawn words through the real scrub (pre-push P1 on #5542)', () => {
+  const lawnFrozen = (text) => ({ version: 1, source: 'picker', text, pests: [] });
+  test.each([
+    'Weeds are back in the lawn.',
+    'Brown patches are spreading by the driveway.',
+  ])('lawn callback keeps %p', (text) => {
+    const out = card(frozenService(lawnFrozen(text)), { block: { serviceLine: 'lawn', outcome: 'treated' }, scrub: scrubCustomerText });
+    expect(out.youToldUs).toMatchObject({ quoted: true, text });
+  });
+  test('the lawn mode keeps the access-detail protection', () => {
+    const out = card(frozenService(lawnFrozen('Weeds are back. The gate code is 4545.')), { block: { serviceLine: 'lawn', outcome: 'treated' }, scrub: scrubCustomerText });
+    expect(out.youToldUs.text).toBe('Weeds are back.');
+  });
+  test('a pest callback is unchanged: lawn-only talk is still dropped', () => {
+    expect(card(frozenService(lawnFrozen('Weeds are back in the lawn.')), { scrub: scrubCustomerText })?.youToldUs ?? null).toBeNull();
   });
 });

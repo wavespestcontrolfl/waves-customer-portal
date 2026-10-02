@@ -144,11 +144,11 @@ function withPeriod(text) {
   return /[.!?…]$/.test(text) ? text : `${text}.`;
 }
 
-function scrubbedWords(raw, scrub) {
+function scrubbedWords(raw, scrub, lane) {
   if (typeof scrub !== 'function') return '';
   let words = '';
   try {
-    words = compact(scrub(compact(raw)));
+    words = compact(scrub(compact(raw), { lane }));
   } catch {
     return '';
   }
@@ -163,7 +163,9 @@ function scrubbedWords(raw, scrub) {
 // voice, read from production 2026-10-01) cannot sit under "On your call,
 // you mentioned" or "As reported to our office" addressed to that customer.
 // Such words are left out; the pest chips still show.
-const THIRD_PERSON_RE = /\b(caller|customer|client|homeowner|tenant|she|her|hers|he|him|his|they|them|their)\b/i;
+// "they / them / their" are left out on purpose: in a pest complaint they
+// usually mean the pests ("Ants in the kitchen; they keep coming back").
+const THIRD_PERSON_RE = /\b(caller|customer|client|homeowner|tenant|she|her|hers|he|him|his)\b/i;
 const SUBJECTLESS_LEAD_RE = /^(wants|needs|asked|asks|requested|requests|reports|reported|is|was|has|had|would|says|said|called)\b/i;
 
 function readsAsAddressedToCustomer(words) {
@@ -172,7 +174,7 @@ function readsAsAddressedToCustomer(words) {
 
 function buildYouToldUs(frozen, lane, scrub) {
   if (!frozen) return null;
-  let words = frozen.text && REQUEST_SOURCES.has(frozen.source) ? scrubbedWords(frozen.text, scrub) : '';
+  let words = frozen.text && REQUEST_SOURCES.has(frozen.source) ? scrubbedWords(frozen.text, scrub, lane) : '';
   // Paraphrases only: the customer's own verbatim words are theirs to phrase.
   if (words && (frozen.source === 'call' || frozen.source === 'office') && !readsAsAddressedToCustomer(words)) words = '';
   // Canonical order, lane-valid keys only (the picker's own normalizer).
@@ -206,7 +208,10 @@ function foundActivity(service, lane, labels) {
   const rating = Number(service.client_pest_rating);
   if (!Number.isInteger(rating) || rating < 0 || rating > 5) return null;
   if (String(service.client_pest_rating_source || '').toLowerCase() !== 'technician') return null;
-  if (service.client_pest_rating_defaulted === true) return null;
+  // Only an explicit false proves a real tap: records completed between the
+  // first-visit default (2026-09-24) and its flag column (2026-09-29) carry
+  // NULL, and an untouched default must never print as a finding.
+  if (service.client_pest_rating_defaulted !== false) return null;
   const name = activityScaleNames(Array.isArray(labels) ? labels : null)[rating];
   return name ? { rating, label: name.charAt(0).toUpperCase() + name.slice(1) } : null;
 }

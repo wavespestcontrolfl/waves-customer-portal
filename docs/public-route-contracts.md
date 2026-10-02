@@ -107,7 +107,8 @@ is the pure builder.
   locked `scheduled_services.customer_request` / `_source` / `_pests` row;
   never read live, so a later booking edit cannot rewrite a permanent report;
   records completed before the freeze carry none). `source` is
-  `picker` | `text` | `call` | `office`. Picker and text words are the
+  `picker` | `text` | `call` | `office`, or `null` when only pest chips are
+  on file (no words shown). Picker and text words are the
   customer's verbatim words (`quoted: true`); a call paraphrase
   (`lead: 'On your call, you mentioned'`) and office words
   (`lead: 'As reported to our office:'`) are never quoted. `text` always passes
