@@ -276,6 +276,38 @@ postgres('annual prepay charged after the first visit', () => {
     spy.mockRestore();
   });
 
+  describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
+    async function completeWithText(f, visitId, visitOutcome = 'completed') {
+      const techId = randomUUID();
+      const catalogId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+      await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+      await trx('scheduled_services').where({ id: visitId })
+        .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+      const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
+      send.mockClear();
+      send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      await completeScheduledService({ serviceId: visitId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: techId, technician: null },
+        body: { customerRecap: 'done', visitOutcome, products: [], areasTreated: [], sendCompletionSms: true, requestReview: false } });
+      return send.mock.calls.map((c) => c[0]?.body || '').join('\n');
+    }
+
+    it('the visit that releases the year says it is being charged now', async () => {
+      const f = await deferredAccept();
+      const text = await completeWithText(f, f.parentId);
+      expect(text).toMatch(/Your Waves annual plan payment of \$480\.00 is being charged to your card on file now - receipt to follow\./);
+      expect(text).not.toMatch(/nothing due today/);
+    });
+
+    it('a later visit of a year already released keeps the regular text', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending' } });
+      const text = await completeWithText(f, f.childId);
+      expect(text).not.toMatch(/being charged/);
+    });
+  });
+
   describe('releasing the charge after the first performed visit', () => {
     it('leaves the job waiting while no visit is performed, and for an inspection-only visit', async () => {
       const f = await deferredAccept();
