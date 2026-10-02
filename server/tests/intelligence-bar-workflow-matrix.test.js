@@ -247,7 +247,7 @@ describe('request tally script', () => {
       { tool: 'adjust_stock', confirmed: 3, succeeded: 0, partial: 1, failed: 1, unknown: 1 },
     ]);
     const s = tally.summarize([], [], [], tally.classifyConfirmed(rows));
-    expect(tally.formatText({ days: 14, generated_at: 'now', summary: s })).toMatch(/Committed-write outcomes[\s\S]*1 failed \/\s+0 partial \/\s+1 unknown \/\s+4 committed  send_sms/);
+    expect(tally.formatText({ days: 14, generated_at: 'now', summary: s })).toMatch(/Committed-write outcomes[\s\S]*2 succeeded \/\s+1 failed \/\s+0 partial \/\s+1 unknown \/\s+4 committed  send_sms/);
   });
 });
 

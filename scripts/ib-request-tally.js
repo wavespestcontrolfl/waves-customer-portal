@@ -224,7 +224,7 @@ function formatText(report) {
   lines.push('Committed-write outcomes per tool (ib_pending_actions consumed rows: a Confirm click, or an owner-direct commit with no card)');
   const confirmed = report.summary.confirmed || [];
   if (!confirmed.length) lines.push('  (no committed writes in the window)');
-  for (const c of confirmed) lines.push(`  ${String(c.failed).padStart(5)} failed / ${String(c.partial).padStart(4)} partial / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} committed  ${c.tool}`);
+  for (const c of confirmed) lines.push(`  ${String(c.succeeded).padStart(5)} succeeded / ${String(c.failed).padStart(5)} failed / ${String(c.partial).padStart(4)} partial / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} committed  ${c.tool}`);
   return lines.join('\n');
 }
 
