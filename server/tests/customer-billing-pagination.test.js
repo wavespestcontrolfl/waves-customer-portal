@@ -21,7 +21,7 @@ let payerInvoiceIds;
 
 function thenableBuilder(resolveRows, resolveFirst) {
   const builder = {};
-  for (const method of ['where', 'whereNotNull', 'whereRaw', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
+  for (const method of ['where', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
     builder[method] = jest.fn(() => builder);
   }
   builder.first = jest.fn(async () => resolveFirst());
@@ -72,7 +72,8 @@ beforeEach(() => {
     if (table === 'payments') {
       return thenableBuilder(
         () => rawPayments.map(({ metadata, payer_id }) => ({ metadata, payer_id })),
-        () => ({ count: String(rawPayments.length) }),
+        // The COUNT path's SQL excludes direct payer stamps; mirror that here.
+        () => ({ count: String(rawPayments.filter((p) => p.payer_id == null && !(p.metadata && p.metadata.payer_id != null)).length) }),
       );
     }
     throw new Error(`Unexpected table ${table}`);

@@ -166,13 +166,26 @@ const isPayerLinked = (p) => {
     return !!(num && payerInvoiceNumbers.has(num));
   };
   // `total` counts exactly the rows pagination will serve: the same
-  // hold-deferral exclusion and the same payer predicate (a payer stamp on
-  // the row itself counts even with no payer invoice on file). Every field
-  // isPayerLinked reads is selected.
-  const countRows = await excludeHoldDeferralPlaceholders(db('payments')
-    .where({ customer_id: customerId }), 'payments')
-    .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
-  const total = countRows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
+  // hold-deferral exclusion and the same payer predicate. The direct payer
+  // stamps (payments.payer_id, metadata.payer_id) are SQL, so the common
+  // case (no payer invoice on file) stays one COUNT(*) per page; only an
+  // account with payer invoices scans its rows for the invoice-linked ones.
+  const notDirectlyPayerOwned = (q) => q
+    .whereNull('payments.payer_id')
+    .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
+  let total;
+  if (payerInvoiceIds.size === 0) {
+    const countRow = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(db('payments')
+      .where({ customer_id: customerId }), 'payments'))
+      .count('* as count')
+      .first();
+    total = Number(countRow?.count || 0);
+  } else {
+    const rows = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(db('payments')
+      .where({ customer_id: customerId }), 'payments'))
+      .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
+    total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
+  }
 
   // `cursor` is the raw payment-history offset. Scan bounded chunks so a
   // page still contains up to `limit` customer-visible rows when third-party
