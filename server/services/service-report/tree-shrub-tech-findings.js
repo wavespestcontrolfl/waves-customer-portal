@@ -84,6 +84,10 @@ const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|excellent|vibrant|full|
 // can't-assess marker sits in the few words before it ("not healthy", "poor
 // health", "couldn't check ... health") or a not-shown marker right after it.
 const NEGATED_BEFORE = /(?:\b(?:not|no longer|never|hardly|barely|far from|without|poor|poorly|declining|decline|declined|reduced|lack|lacking|loss|compromised|weak|weakened|failing|worsening|unable|cannot|unclear|unknown|uncertain|unsure|out of (?:view|sight|reach)|too (?:high|tall))\b|n['’]t\b|\bcould not\b)/i;
+// "no healthy fronds" / "No healthy spear leaf was visible" are adverse: a bare
+// "no" right before the health word negates it. Only directly before — "No
+// problems, the crown looks healthy" and "no visible damage" stay claims.
+const NO_DIRECTLY_BEFORE = /\bno\s+$/i;
 const NOT_SHOWN_AFTER = /^\W*(?:\w+\W+){0,3}?(?:not\s+(?:shown|visible|possible|clear\w*|assess\w*|check\w*|inspect\w*|in view|able)|out of (?:view|sight)|unknown|unclear)\b/i;
 
 // True when the clause makes a POSITIVE health / normal claim. A ground-level
@@ -95,6 +99,7 @@ function makesPositiveHealthClaim(clause) {
   for (const m of c.matchAll(HEALTH_TERM)) {
     const before = c.slice(0, m.index).split(/\s+/).slice(-5).join(' ');
     const after = c.slice(m.index + m[0].length, m.index + m[0].length + 60);
+    if (NO_DIRECTLY_BEFORE.test(c.slice(0, m.index))) continue;
     if (!NEGATED_BEFORE.test(before) && !NOT_SHOWN_AFTER.test(after)) return true;
   }
   return false;

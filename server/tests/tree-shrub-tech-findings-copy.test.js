@@ -192,6 +192,12 @@ describe('palm-crown rule', () => {
     expect(stripCrownHealthClaims('The palm crown looks weak.')).toBe('The palm crown looks weak.');
     expect(stripCrownHealthClaims('The crown is declining.')).toBe('The crown is declining.');
     expect(stripCrownHealthClaims('The newest fronds show poor health.')).toBe('The newest fronds show poor health.');
+    // A bare "no" right before the health word is adverse, not reassurance.
+    expect(stripCrownHealthClaims('No healthy spear leaf was visible.')).toBe('No healthy spear leaf was visible.');
+    expect(stripCrownHealthClaims('The crown has no healthy fronds.')).toBe('The crown has no healthy fronds.');
+    // ...but a "no" further back, or "no visible damage", still reads as a claim.
+    expect(stripCrownHealthClaims('No problems, crown looks healthy.')).toBe('');
+    expect(stripCrownHealthClaims('The crown shows no visible damage.')).toBe('');
     // Pure can't-assess disclaimers are kept.
     expect(stripCrownHealthClaims("We couldn't check the crown from the ground.")).toBe("We couldn't check the crown from the ground.");
     expect(stripCrownHealthClaims('Crown health is not visible from the ground.')).toBe('Crown health is not visible from the ground.');
