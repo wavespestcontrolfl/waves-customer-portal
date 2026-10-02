@@ -26,7 +26,6 @@ const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quar
 const fullLoops = () => ({
   lateAlert: { type: 'tech_late', severity: 'warning', visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
   pastWindow: { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 },
-  missedVisit: { type: 'Lawn Care', date: '2026-06-08', windowDisplay: '10am-12pm', status: 'confirmed', reason: 'not_completed' },
   weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the wasp nest quote', since: '2026-06-10', source: 'call' }],
   customerWaiting: [{ id: 'cc-2', kind: 'question', description: 'Asked whether sprinklers need to be off', since: '2026-06-09' }],
 });
@@ -47,7 +46,7 @@ describe('renderVisitLoopsSection', () => {
     expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
     expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
     expect(out).not.toContain('no tech location');
-    expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology\n');
+    expect(out).not.toContain('MISSED VISIT'); // split out of #5499 into its own PR
     expect(out).not.toContain('live note');
     expect(out).toContain('- WE OWE THEM: callback — Call back about the wasp nest quote (since Wednesday, Jun 10)\n');
     expect(out).toContain('- THEY ARE WAITING ON US FOR: question — Asked whether sprinklers need to be off (since Tuesday, Jun 9)\n');
@@ -181,10 +180,10 @@ describe('system prompt', () => {
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
     expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
-    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
+    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
     expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
-    expect(on).toContain('With MISSED VISIT, apologize in one plain sentence');
+    expect(on).not.toContain('MISSED VISIT');
     for (const banned of ['"Good question"', '"Great question"', '"I hear you"', '"Totally fine"', '"Good news"']) expect(on).toContain(banned);
     expect(on).toContain('at most TWO sentences');
   });
@@ -252,7 +251,7 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
     expect(validateOpenLoopAnswer({ reply: '   ', factsBlock: owed }).ok).toBe(false);
     expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: owed }).ok).toBe(true);
-    for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- MISSED VISIT: x', '- THEY ARE WAITING ON US FOR: x']) {
+    for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- THEY ARE WAITING ON US FOR: x']) {
       expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(false);
     }
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
@@ -274,8 +273,6 @@ describe('visitLoopStatus', () => {
     const late = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'tech_late', missingTracking: false };
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull(); // facts without the section
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false' });
-    expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } } }, WITH))
-      .toEqual({ signature: 'missed:Lawn:2026-09-30@09:00:00:not_completed' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
       .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00:' });
     // the section was rendered with nothing time-sensitive: a null signature is still

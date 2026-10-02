@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/visit-loops-facts', () => ({
   loadVisitLoops: jest.fn(),
-  emptyVisitLoops: () => ({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] }),
+  emptyVisitLoops: () => ({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] }),
 }));
 
 const db = require('../models/db');
@@ -57,17 +57,17 @@ describe('getContextForCustomer visitLoops', () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const context = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(loadVisitLoops).not.toHaveBeenCalled();
-    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
+    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] });
   });
 
   test('gate on but no opt-in (email replies, briefs, assistant): the loader is never called', async () => {
     const context = await ContextAggregator.getContextForCustomer(customer);
     expect(loadVisitLoops).not.toHaveBeenCalled();
-    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
+    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] });
   });
 
   test('attaches the loader result, passing customer id and the aggregator deriveWindow (the loader reads all of today itself)', async () => {
-    const loops = { lateAlert: { visitId: 'visit-1', type: 'tech_late' }, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
+    const loops = { lateAlert: { visitId: 'visit-1', type: 'tech_late' }, pastWindow: null, weOwe: [], customerWaiting: [] };
     loadVisitLoops.mockResolvedValue(loops);
     const context = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(context.visitLoops).toBe(loops);
@@ -81,11 +81,11 @@ describe('getContextForCustomer visitLoops', () => {
     loadVisitLoops.mockRejectedValue(new Error('boom'));
     const context = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(context.known).toBe(true);
-    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
+    expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] });
   });
 
   test('visitLoops is non-enumerable: serialization and spreads of the context never carry it', async () => {
-    loadVisitLoops.mockResolvedValue({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'raw promise text' }], customerWaiting: [] });
+    loadVisitLoops.mockResolvedValue({ lateAlert: null, pastWindow: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'raw promise text' }], customerWaiting: [] });
     const context = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(context.visitLoops.weOwe[0].description).toBe('raw promise text');
     expect(Object.keys(context)).not.toContain('visitLoops');

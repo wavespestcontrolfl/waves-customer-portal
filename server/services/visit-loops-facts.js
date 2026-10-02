@@ -1,8 +1,9 @@
 /**
  * Visit status and open loops: the READ-ONLY facts the texting AI was missing
- * in the 2026-09-30 blind bake-off (lateness, a passed window, a missed
- * visit, promises we owe, asks the customer is still waiting on). Everything
- * here is already in Postgres; nothing writes, nothing sends.
+ * in the 2026-09-30 blind bake-off (lateness, a passed window, promises we
+ * owe, asks the customer is still waiting on). Everything here is already in
+ * Postgres; nothing writes, nothing sends. (A missed-visit fact was split out of
+ * PR #5499 into its own PR, owner 10-02.)
  *
  * No visit note: scheduled_services.notes is staff/booking scratch (booking
  * notes, office remarks, access details) and only sometimes the tech's own
@@ -14,9 +15,9 @@
  * dispatch table can never take the whole customer context down with it.
  *
  * Interpretation notes (the drafter decides what to say, not this module):
- *  - "today's visit" = the first upcoming row whose scheduled_date is today
- *    (ET). Position, late alert, passed-window and live-note facts are about
- *    today's visit(s) only.
+ *  - "today's visits" = the customer's live rows dated today (ET), plus
+ *    yesterday's while their window still runs past midnight. Late-alert and
+ *    passed-window facts are about those occurrences only.
  *  - The window judged "passed" is the CUSTOMER-FACING one (window_start plus
  *    the standard arrival window, exactly what deriveWindow quotes), not the
  *    internal job block in window_end: calling a 9-11 visit "late" at 10:15
@@ -37,13 +38,12 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 const DESCRIPTION_MAX = 120;
 const LIST_MAX = 5;
-const MISSED_LOOKBACK_DAYS = 7;
 const LATE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 // A visit nobody has performed or started: the only statuses a "window passed"
 // or a "never completed" reading is true of.
 const NOT_STARTED_STATUSES = ['pending', 'confirmed'];
 // The tracker can lead a lagging status column (customer-lifecycle-guard): a row
-// only reads as not-started — missed, or past its window — while its tracker is
+// only reads as not-started (past its window) while its tracker is
 // unset or still 'scheduled' (never live, complete, cancelled or skipped).
 const NOT_STARTED_TRACK_STATES = ['scheduled'];
 const trackNotStarted = (state) => state == null || NOT_STARTED_TRACK_STATES.includes(state);
@@ -52,7 +52,6 @@ function emptyVisitLoops() {
   return {
     lateAlert: null,
     pastWindow: null,
-    missedVisit: null,
     weOwe: [],
     customerWaiting: [],
   };
@@ -93,20 +92,6 @@ const nowEtMinutes = (now) => {
   return p.hour * 60 + p.minute;
 };
 
-// Coarse service family for "was a later visit of the same service booked":
-// the same buckets the customer would use, never a price or plan rule.
-function familyKey(serviceType) {
-  const t = String(serviceType || '').toLowerCase();
-  // explicit tree/shrub tokens first: "Tree & Shrub Fertilization" is not lawn
-  if (/tree|shrub|ornamental/.test(t)) return 'tree_shrub';
-  if (/lawn|turf|fertiliz|weed|sod/.test(t)) return 'lawn';
-  if (/mosquito/.test(t)) return 'mosquito';
-  if (/termite|wdo|wood.destroying/.test(t)) return 'termite';
-  if (/rodent|\brats?\b|mice|mouse/.test(t)) return 'rodent';
-  if (/pest|roach|\bants?\b|spider|perimeter|general|bug/.test(t)) return 'pest';
-  return t.trim() || null;
-}
-
 // The customer-facing end of the arrival window, in ET minutes since midnight of
 // the visit day; a window that crosses midnight (23:00-01:00) ends past 1440.
 // Only from window_start's arrival range: window_end is the internal job block,
@@ -145,8 +130,7 @@ async function loadTodayRows(customerId, { conn, now }) {
     .select('ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.route_order', 'ss.scheduled_date', 'ss.status', 'ss.track_state',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
   // yesterday's rows only while their arrival window still runs past midnight
-  // (a 23:00 visit is live until 01:00) — the same rule that keeps them out of
-  // missed visits until then
+  // (a 23:00 visit is live until 01:00)
   const nowMin = nowEtMinutes(now);
   return (rows || []).filter((r) => calendarDay(r.scheduled_date) === today || crossesIntoNow(r, nowMin));
 }
@@ -192,7 +176,7 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
     .where('ss.customer_id', customerId)
     .whereIn('a.type', LATE_ALERT_TYPES).whereNull('a.resolved_at')
     .orderBy('a.created_at', 'desc')
-    .select('a.type', 'a.severity', 'a.payload', 'ss.id', 'ss.status', 'ss.track_state', 'ss.scheduled_date',
+    .select('a.type', 'a.severity', 'a.payload', 'ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.status', 'ss.track_state', 'ss.scheduled_date',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type');
   const today = etDateString(now);
   const yesterday = etDateString(addETDays(now, -1));
@@ -200,9 +184,13 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   const liveNow = (occ) => occ.date === today || (occ.date === yesterday && crossesIntoNow({ window_start: occ.startHms }, nowMin));
   // Every applicable alert, newest first; a confirmed delay outranks a tracking
   // gap (a gap is not a must-answer loop, so it must never hide a real delay).
+  // a lagging member of a stop whose sibling is already underway or done carries no
+  // delay either (the same stop rule as the passed-window read)
+  const startedStops = await startedStopKeys(conn, customerId, alerts || []);
   const applicable = [];
   for (const row of alerts || []) {
-    if (!preArrival(row)) continue;
+    const key = stopKey(row);
+    if (!preArrival(row) || (key && startedStops.has(key))) continue;
     const payload = parseJson(row.payload);
     const occ = alertOccurrence(payload, row);
     if (!occ || !liveNow(occ)) continue;
@@ -246,7 +234,7 @@ const stopKey = (r) => {
   return r.window_start ? `t:${r.technician_id}|${day}|${r.window_start}` : null;
 };
 // The stops (stopKey) on these days where some row is underway or done, by status
-// or tracker — shared by the passed-window and missed-visit reads.
+// or tracker — used by the passed-window read.
 async function startedStopKeys(conn, customerId, rows) {
   const dates = [...new Set(rows.map((r) => calendarDay(r.scheduled_date)).filter(Boolean))];
   if (!dates.length) return new Set();
@@ -258,8 +246,8 @@ async function startedStopKeys(conn, customerId, rows) {
 }
 async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }) {
   const nowMin = nowEtMinutes(now);
-  // the same not-started rule loadMissedVisit honors (tracker unset or
-  // 'scheduled'), plus the service-record and sibling checks below
+  // not started (tracker unset or 'scheduled'), plus the service-record,
+  // street-level-hold and sibling checks below
   const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
   if (!candidates.length) return null;
   const ids = candidates.map((r) => r.id);
@@ -282,166 +270,6 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }
   return null;
 }
 
-// ── missed visit ────────────────────────────────────────────────────────────
-// Missed-visit reads page through the lookback (stable order) until an unresolved
-// occurrence is found: the resolution rules run in JS, so a page of resolved rows
-// must never hide an older open one. The 7-day window bounds it; the page cap is a
-// backstop.
-const MISSED_SCAN_MAX = 10;
-const MISSED_SCAN_PAGES = 20;
-// Yields each page of fetchPage(offset) until a short or empty page (or the cap).
-async function* scanPages(fetchPage) {
-  for (let p = 0; p < MISSED_SCAN_PAGES; p += 1) {
-    const rows = (await fetchPage(p * MISSED_SCAN_MAX)) || [];
-    if (rows.length) yield rows;
-    if (rows.length < MISSED_SCAN_MAX) return;
-  }
-}
-// The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
-// internal job block as the end, so only the start is the promised window.
-function missedWindowStart(originalWindow) {
-  const start = /^\s*(\d{1,2}:\d{2})/.exec(String(originalWindow || ''));
-  if (!start) return null;
-  return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
-}
-function missedWindowLabel(originalWindow, deriveWindow) {
-  const startHms = missedWindowStart(originalWindow);
-  return startHms ? windowLabel({ window_start: startHms }, deriveWindow) : null;
-}
-// A pending/confirmed visit from the lookback that nobody performed.
-async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { today, since }) {
-  const page = (offset) => conn('scheduled_services')
-    .where({ customer_id: customerId })
-    .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
-    .whereIn('status', NOT_STARTED_STATUSES)
-    // The tracker leads a lagging status: only an unset / 'scheduled' tracker is
-    // not started (live, complete, cancelled, skipped are not misses), and a
-    // written service record means the work was done (an invoice alone proves
-    // nothing — they can be minted before the visit).
-    .where((b) => b.whereNull('track_state').orWhereIn('track_state', NOT_STARTED_TRACK_STATES))
-    .whereNotExists(function serviceRecorded() {
-      this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
-    })
-    // an uncleared street-level address hold was never dispatched: not a miss (the
-    // same exclusion the missed-appointment sweep and the no-show detector use)
-    .whereNotExists(function unclearedAddressHold() {
-      require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
-    })
-    // a row with a logged customer no-show belongs to loadOpenNoshow, which applies
-    // the follow-up rules (the missed-appointment sweep logs it and leaves the row
-    // pending/confirmed, so this read alone would keep it "missed" after a rebook)
-    .whereNotExists(function loggedNoshow() {
-      this.select(1).from('reschedule_log as rl_ns').whereRaw('rl_ns.scheduled_service_id = scheduled_services.id')
-        .where('rl_ns.reason_code', 'customer_noshow');
-    })
-    .orderBy('scheduled_date', 'desc').orderBy('id', 'asc')
-    .offset(offset).limit(MISSED_SCAN_MAX)
-    .select('id', 'visit_id', 'technician_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
-  // Yesterday's late visit whose window runs past midnight (23:00-01:00) is
-  // still open, not missed, until that window ends.
-  const yesterday = etDateString(addETDays(now, -1));
-  const nowMin = nowEtMinutes(now);
-  const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday && crossesIntoNow(row, nowMin);
-  let unfinished = null;
-  for await (const rows of scanPages(page)) {
-    // A lagging row whose sibling at the same stop (tech, day, window) is underway
-    // or done is not a miss — the same rule the passed-window read applies.
-    const startedStops = await startedStopKeys(conn, customerId, rows);
-    const siblingStarted = (row) => { const key = stopKey(row); return Boolean(key) && startedStops.has(key); };
-    unfinished = rows.find((row) => !stillOpen(row) && !siblingStarted(row)) || null;
-    if (unfinished) break;
-  }
-  if (!unfinished) return null;
-  return {
-    type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,
-    windowDisplay: windowLabel(unfinished, deriveWindow), status: unfinished.status, reason: 'not_completed',
-  };
-}
-
-// The newest customer no-show in the lookback that was not followed up.
-async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since }) {
-  const page = (offset) => conn('reschedule_log as rl')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
-    .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
-    .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
-    .orderBy('rl.original_date', 'desc').orderBy('rl.id', 'asc')
-    .offset(offset).limit(MISSED_SCAN_MAX)
-    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
-      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status', 'ss.track_state',
-      // the same completion evidence loadUnfinishedVisit honors
-      conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'));
-  // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
-  for await (const noshows of scanPages(page)) {
-    for (const noshow of noshows) {
-      const date = calendarDay(noshow.original_date);
-      const family = familyKey(noshow.service_type);
-      const liveOrDone = [...UPCOMING_SERVICE_STATUSES, 'completed'];
-      // The logged row itself is the follow-up when it is live or done AND no longer
-      // the missed occurrence: the soft path stamps new_date; a no-show logged
-      // without one (missed-appointment onSkip) can still be rebooked on the same
-      // row later (another day or a later window) or completed.
-      const missedStartHms = missedWindowStart(noshow.original_window);
-      const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
-        || (missedStartHms != null && hhmmToMinutes(noshow.window_start) !== hhmmToMinutes(missedStartHms));
-      // ...or it was performed after all: a tracker 'complete' ahead of a lagging
-      // status, or a written service record (the same evidence loadUnfinishedVisit uses)
-      const performed = noshow.track_state === 'complete' || noshow.recorded === true;
-      const movedSelf = performed || (liveOrDone.includes(noshow.status)
-        && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
-      // Otherwise another visit of the same service on or after the missed day
-      // (a same-day replacement counts), never the logged row itself.
-      // No property on the missed row (legacy, or the property was deleted): another
-      // visit cannot be shown to be at the same address, so only the row itself can
-      // resolve it.
-      const later = !movedSelf && date && family && noshow.property_id
-        ? await conn('scheduled_services')
-          .where({ customer_id: customerId }).where('scheduled_date', '>=', date)
-          .whereIn('status', liveOrDone)
-          .modify((b) => {
-            if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
-            // the same property: another address's visit does not resolve this miss
-            b.where('property_id', noshow.property_id);
-            // booked in response: a recurring series pre-creates its future children,
-            // so a visit that already existed before the no-show was logged is not one
-            if (noshow.logged_at) b.where('created_at', '>', noshow.logged_at);
-          })
-          .select('service_type', 'scheduled_date', 'window_start')
-        : [];
-      // A same-day visit counts only when its window starts AFTER the missed slot (an
-      // earlier visit that day preceded the no-show); unknown starts do not count.
-      const missedStart = hhmmToMinutes(missedStartHms);
-      const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
-        || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
-      const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family && afterMiss(r));
-      if (!followedUp) {
-        return {
-          type: noshow.service_type || null, date, windowStart: missedStartHms,
-          // The window that was MISSED, as the customer was promised it: the logged
-          // original START through the arrival-window formatter (writers store
-          // "start-end" with the internal job block as the end), never the joined
-          // row's current (possibly moved) window.
-          windowDisplay: missedWindowLabel(noshow.original_window, deriveWindow),
-          status: noshow.status || 'no_show', reason: 'customer_noshow',
-        };
-      }
-    }
-  }
-  return null;
-}
-
-// The most recent of the two missed-visit sources.
-async function loadMissedVisit(ctx) {
-  const range = {
-    today: etDateString(ctx.now),
-    // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
-    since: etDateString(addETDays(ctx.now, -MISSED_LOOKBACK_DAYS)),
-  };
-  const candidates = (await Promise.all([loadUnfinishedVisit(ctx, range), loadOpenNoshow(ctx, range)])).filter(Boolean);
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => String(b.date).localeCompare(String(a.date)));
-  return candidates[0];
-}
-
 // ── open promises / asks ────────────────────────────────────────────────────
 // A short fingerprint of the commitment fields a draft can restate (kind, wording):
 // a staff edit that keeps the row open changes it.
@@ -457,6 +285,23 @@ const safeDescription = (value) => clip(require('./context-aggregator').redactAc
 const rowSourceAt = (r) => (r.source === 'human' ? toDate(r.created_at) : null)
   || toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
 
+// Every open Waves-owned call promise for the customer. The canonical reader pages in
+// its own order (overdue / due first, oldest call first), but the facts render the
+// newest five — so it is read to the end (bounded) rather than one capped page, and
+// a fresh promise behind many older ones is never dropped. Shared with the send check.
+const CALL_PAGE = 200;
+const CALL_PAGES_MAX = 10;
+async function allOpenCallCommitments(conn, { customerId, now = new Date() }) {
+  const { listOpenCommitments } = require('./call-commitments');
+  const rows = [];
+  for (let p = 0; p < CALL_PAGES_MAX; p += 1) {
+    const page = (await listOpenCommitments(conn, { customerId, party: 'waves', limit: CALL_PAGE, offset: p * CALL_PAGE, now })) || [];
+    rows.push(...page);
+    if (page.length < CALL_PAGE) break;
+  }
+  return rows;
+}
+
 async function loadCommitments({ conn, customerId, now, strict }) {
   // strict (a send-time rebuild): every nested read throws instead of reading as empty
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
@@ -464,9 +309,7 @@ async function loadCommitments({ conn, customerId, now, strict }) {
   // Call promises: read regardless of GATE_CALL_COMMITMENTS — it gates
   // writing; rows recorded while it was on are still owed after a rollback.
   {
-    const { listOpenCommitments } = require('./call-commitments');
-    // party 'waves' in the query, so the limit bounds the rows actually rendered
-    const calls = await read('call commitments', [], () => listOpenCommitments(conn, { customerId, party: 'waves', limit: 50, now }));
+    const calls = await read('call commitments', [], () => allOpenCallCommitments(conn, { customerId, now }));
     for (const r of calls) rows.push({ ...r, __source: 'call' });
   }
   // SMS + email rows share one reader; each channel keeps its own gate.
@@ -555,9 +398,8 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const todayRows = await read('today visits', [], () => loadTodayRows(customerId, ctx));
   const pastWindow = await read('past window', null, () => findPastWindow(todayRows, ctx));
 
-  const [lateAlert, missedVisit, commitments] = await Promise.all([
+  const [lateAlert, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(ctx)),
-    read('missed visit', null, () => loadMissedVisit(ctx)),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
@@ -565,7 +407,6 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 
   out.lateAlert = lateAlert;
   out.pastWindow = pastWindow;
-  out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;
   return out;
@@ -573,8 +414,8 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 
 // The time-sensitive VISIT STATUS facts a reply can restate, as one comparable
 // string (null when none): a delay or tracking gap (its visit occurrence, service
-// and kind), a passed window (its occurrence and service), a missed visit (type,
-// day, window, reason). The send boundary rebuilds the facts for the customer and
+// and kind) and a passed window (its occurrence and service). The send boundary
+// rebuilds the facts for the customer and
 // refuses when this changed — a reschedule, a completion or a resolved alert all
 // show up here, with no recheck per fact. Raw window_start, never the display
 // label (the rebuild has no deriveWindow).
@@ -586,9 +427,8 @@ function visitStatusSignature(visitLoops) {
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
     v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}`,
-    v.missedVisit && `missed:${key(v.missedVisit.type, `${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}`, v.missedVisit.reason)}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, commitmentRevision, visitStatusSignature };
+module.exports = { loadVisitLoops, emptyVisitLoops, commitmentRevision, visitStatusSignature, allOpenCallCommitments };

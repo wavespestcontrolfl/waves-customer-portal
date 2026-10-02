@@ -318,7 +318,7 @@ function openLoopsProviderPreSendCheck({ commitmentIds, customerId = null, statu
 }
 
 // The gratitude lane's fixed thank-you (PR #5499 audit): it sends after a quiet
-// period, so a window can pass, a delay or a miss appear, or a promise be recorded
+// period, so a window can pass, a delay appear, or a promise be recorded
 // while it waits. At the provider boundary the customer's facts are rebuilt (strict,
 // commitments included); anything that must be answered refuses the courtesy
 // reply. An unreadable rebuild refuses retryably. Gate-off: no check.
@@ -421,8 +421,8 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // rendered call_commitments row as "id:rev" (rev = visit-loops-facts
 // commitmentRevision of what it restated); every one must still be open, live and
 // unedited at send time.
-// VISIT STATUS (visit_loop_status): a draft that showed a delay, a passed window or
-// a missed visit has its facts rebuilt for the customer at send: any change to that
+// VISIT STATUS (visit_loop_status): a draft that showed a delay or a passed window
+// has its facts rebuilt for the customer at send: any change to that
 // signature (a reschedule, a completion, a resolved alert) refuses — one check for
 // every such line, whatever wording the reply used.
 // Fails closed on a read error. Returns null or a reason code.
@@ -440,12 +440,11 @@ function commitmentDayChanged(snapshot, now) {
 // the revision covers a staff edit to a row that stayed open.
 async function commitmentsChanged(conn, refs, customerId) {
   if (!customerId) return true;
-  const { listOpenCommitments } = require('./call-commitments');
   const { listSmsCommitments } = require('./sms-operational-actions');
-  const { commitmentRevision } = require('./visit-loops-facts');
+  const { commitmentRevision, allOpenCallCommitments } = require('./visit-loops-facts');
   // each rendered SMS/email lane on its own page, as the facts loader reads them
   const [calls, promises, requests] = await Promise.all([
-    listOpenCommitments(conn, { customerId, party: 'waves', limit: 200 }),
+    allOpenCallCommitments(conn, { customerId }),
     listSmsCommitments(conn, { customerId, limit: 201, lane: 'promise' }),
     listSmsCommitments(conn, { customerId, limit: 201, lane: 'request' }),
   ]);

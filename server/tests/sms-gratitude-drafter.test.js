@@ -224,7 +224,7 @@ describe('live-webhook gratitude drafter boundary', () => {
   // which the fixed gratitude reply cannot do — it leaves the gratitude lane.
   test('gate on + an open loop: the thanks takes the operational path under its classified intent', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    const visitLoops = { techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
+    const visitLoops = { lateAlert: null, pastWindow: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
     const result = await runDraft({
       reply: 'Glad to help, Casey. We still owe you that callback about the quote.',
       intended_actions: [{ type: 'none' }],
@@ -240,7 +240,7 @@ describe('live-webhook gratitude drafter boundary', () => {
 
   test('gate on + an open loop + an empty model reply: revised, never passed as "no reply warranted"', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    const visitLoops = { techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
+    const visitLoops = { lateAlert: null, pastWindow: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
     const result = await runDraft({
       reply: '',
       intended_actions: [{ type: 'none', note: 'no reply warranted' }],
@@ -253,9 +253,9 @@ describe('live-webhook gratitude drafter boundary', () => {
     expect(result.maybeAutoSend).not.toHaveBeenCalled();
   });
 
-  test('gate on + only a tech position (no loop): still a gratitude candidate', async () => {
+  test('gate on + nothing that must be answered (a tracking gap only): still a gratitude candidate', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    const visitLoops = { techPosition: { techName: 'Sam', status: 'en_route', stopsAhead: 1 }, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
+    const visitLoops = { lateAlert: { type: 'tech_late', missingTracking: true }, pastWindow: null, weOwe: [], customerWaiting: [] };
     const result = await runDraft({
       reply: 'Our pleasure, Casey!',
       intended_actions: [{ type: 'none' }],

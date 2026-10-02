@@ -646,7 +646,7 @@ describe('open-loop commitments recheck', () => {
 
   describe('visit status (visit_loop_status): rebuilt-facts signature', () => {
     const facts = require('../services/visit-loops-facts');
-    const loops = (over = {}) => ({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [], ...over });
+    const loops = (over = {}) => ({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [], ...over });
     const lateAlert = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', type: 'tech_late', missingTracking: false };
     const drafted = loops({ lateAlert });
     const signature = facts.visitStatusSignature(drafted);
@@ -670,16 +670,6 @@ describe('open-loop commitments recheck', () => {
         nowFacts(changed);
         await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBe('visit_status_changed');
       }
-    });
-
-    test('a missed visit that was rebooked or completed since drafting refuses', async () => {
-      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } });
-      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
-      nowFacts(missed);
-      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
-      spy.mockRestore();
-      nowFacts(loops());
-      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
     });
 
     test('a null signature (section rendered, nothing time-sensitive) is still rechecked: a delay that appeared refuses', async () => {
@@ -759,7 +749,7 @@ describe('open-loop commitments recheck', () => {
     });
 
     test('rebuilds strict with commitments; refuses when something must be answered, passes otherwise; repeatable', async () => {
-      const loops = { lateAlert: null, pastWindow: { visitId: 'v1' }, missedVisit: null, weOwe: [], customerWaiting: [] };
+      const loops = { lateAlert: null, pastWindow: { visitId: 'v1' }, weOwe: [], customerWaiting: [] };
       spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(loops);
       const check = gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' });
       expect(check.afterMarker).toBe(check);

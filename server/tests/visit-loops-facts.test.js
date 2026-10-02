@@ -12,7 +12,7 @@ const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
 const { listOpenCommitments } = require('../services/call-commitments');
 const { smsCommitmentsEnabled, listSmsCommitments } = require('../services/sms-operational-actions');
-const { loadVisitLoops, emptyVisitLoops, familyKey } = require('../services/visit-loops-facts');
+const { loadVisitLoops, emptyVisitLoops } = require('../services/visit-loops-facts');
 
 // 2026-10-01 12:00 ET (EDT, UTC-4).
 const NOW = new Date('2026-10-01T16:00:00Z');
@@ -51,7 +51,6 @@ function fakeConn(handlers) {
   return conn;
 }
 const hasOp = (ops, op, pred) => ops.some((o) => o.op === op && (!pred || pred(o.args)));
-const isUnfinishedQuery = (ops) => hasOp(ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '<');
 
 const todayEntry = (over = {}) => ({ type: 'Pest Control', date: '2026-10-01', isToday: true, tech: 'Jamie Rivera', scheduledServiceId: 'visit-1', ...over });
 const todayRow = (over = {}) => ({
@@ -149,6 +148,13 @@ describe('lateAlert', () => {
       const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, departed, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
       expect((await run(alertRow({ payload }))).lateAlert).toMatchObject({ missingTracking: false, visitId: 'visit-1' });
     }
+  });
+
+  test('a lagging member of a stop whose sibling is underway or done carries no delay', async () => {
+    const delay = alertRow({ payload: STAMP }, { visit_id: 'g1', status: 'confirmed' });
+    const conn = (advanced) => fakeConn({ scheduled_services: (ops) => (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date') ? advanced : []), dispatch_alerts: () => [delay] });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).lateAlert).toBeNull();
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([]) })).lateAlert).toMatchObject({ visitId: 'visit-1' });
   });
 
   test('a confirmed delay outranks a newer tracking gap on another visit', async () => {
@@ -309,200 +315,6 @@ describe('pastWindow', () => {
   });
 });
 
-describe('missedVisit', () => {
-  const run = ({ unfinished = null, noshow = null, later = [] }) => loadVisitLoops({
-    customerId: 'c1', upcomingServices: [], now: NOW, deriveWindow,
-    conn: fakeConn({
-      scheduled_services: (ops) => (isUnfinishedQuery(ops) ? (unfinished ? [].concat(unfinished) : []) : later),
-      reschedule_log: () => (noshow ? [].concat(noshow) : []),
-    }),
-  });
-
-  test('a pending visit from the last week reads as not completed', async () => {
-    const out = await run({ unfinished: { id: 'v0', service_type: 'Lawn Care', scheduled_date: '2026-09-29', window_start: '09:00:00', status: 'confirmed' } });
-    expect(out.missedVisit).toEqual({ type: 'Lawn Care', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM', status: 'confirmed', reason: 'not_completed' });
-  });
-
-  test("a lagging row whose sibling at the same stop finished is not missed after midnight", async () => {
-    const lagging = { id: 'v0', technician_id: 'tech-1', service_type: 'Lawn Care', scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed' };
-    const at = (advanced) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({
-      scheduled_services: (ops) => {
-        if (isUnfinishedQuery(ops)) return [lagging];
-        if (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date')) return advanced;
-        return [];
-      },
-      reschedule_log: () => [],
-    }) });
-    // the pest sibling at the same stop (tech, day, window) was completed yesterday
-    expect((await at([{ technician_id: 'tech-1', scheduled_date: '2026-09-30', window_start: '09:00:00' }])).missedVisit).toBeNull();
-    // a different stop that day finished: this one is still missed
-    expect((await at([{ technician_id: 'tech-1', scheduled_date: '2026-09-30', window_start: '13:00:00' }])).missedVisit).toMatchObject({ reason: 'not_completed' });
-  });
-
-  test('queries the last 7 ET days, before today, pending/confirmed only', async () => {
-    const conn = fakeConn({ scheduled_services: () => null, reschedule_log: () => null });
-    await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, conn });
-    const q = conn.calls.find((c) => c.table === 'scheduled_services' && isUnfinishedQuery(c.ops));
-    expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '<' && a[2] === '2026-10-01')).toBe(true);
-    expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-09-24')).toBe(true);
-    // ET calendar days across spring DST: 00:30 EDT on Mar 9 2026 looks back to Mar 2, not Mar 1
-    const dst = fakeConn({ scheduled_services: () => null, reschedule_log: () => null });
-    await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: new Date('2026-03-09T04:30:00Z'), conn: dst });
-    const dq = dst.calls.find((c) => c.table === 'scheduled_services' && isUnfinishedQuery(c.ops));
-    expect(hasOp(dq.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-03-02')).toBe(true);
-    expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
-    // a service record, an uncleared street-level address hold, and a logged customer
-    // no-show (owned by the no-show read and its follow-up rules) each exclude the row
-    expect(q.ops.filter((o) => o.op === 'whereNotExists')).toHaveLength(3);
-    // only an unset / 'scheduled' tracker is not started (live, complete, cancelled, skipped are excluded)
-    const seen = [];
-    const stub = { whereNull: (...a) => { seen.push(['whereNull', ...a]); return stub; }, orWhereIn: (...a) => { seen.push(['orWhereIn', ...a]); return stub; } };
-    q.ops.filter((o) => o.op === 'where' && typeof o.args[0] === 'function').forEach((o) => o.args[0](stub));
-    expect(seen).toEqual([['whereNull', 'track_state'], ['orWhereIn', 'track_state', ['scheduled']]]);
-    expect(hasOp(q.ops, 'whereNotExists')).toBe(true);
-  });
-
-  test('a soft no-show moved later the SAME day (new_date set, row still live) is not a miss', async () => {
-    const noshow = { scheduled_service_id: 'v9', original_date: '2026-10-01', original_window: '9-11 AM', new_date: '2026-10-01', service_type: 'Pest Control', window_start: '15:00:00', status: 'confirmed' };
-    expect((await run({ noshow })).missedVisit).toBeNull();
-  });
-
-  test('a same-day replacement visit counts as the follow-up; the logged row itself never does', async () => {
-    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-10-01', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
-    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : [{ service_type: 'Pest Control', scheduled_date: '2026-10-01', window_start: '15:00:00' }]), reschedule_log: () => [noshow] });
-    const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, deriveWindow, conn });
-    expect(out.missedVisit).toBeNull();
-    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && c.terminal === 'all' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin'));
-    expect(hasOp(probe.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-10-01')).toBe(true);
-  });
-
-  test('the missed window is the promised arrival window from the logged start, never the stored job-block end or the moved row', async () => {
-    // writers store "start-end" with the internal block as the end (missed-appointment.js)
-    const noshow = { original_date: '2026-09-30', original_window: '09:00:00-10:30:00', service_type: 'Mosquito Control', window_start: '13:00:00', status: 'no_show' };
-    expect((await run({ noshow })).missedVisit).toMatchObject({ windowDisplay: '9:00 AM–11:00 AM' });
-    expect((await run({ noshow: { ...noshow, original_window: null } })).missedVisit).toMatchObject({ windowDisplay: null });
-  });
-
-  test('a replacement at ANOTHER property does not resolve the miss', async () => {
-    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
-    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] });
-    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
-    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin') && hasOp(c.ops, 'whereIn'));
-    // the query's modify() narrows to the logged row's property (and never the row itself)
-    const seen = [];
-    const stub = { where: (...a) => { seen.push(['where', ...a]); return stub; }, whereNot: (...a) => { seen.push(['whereNot', ...a]); return stub; } };
-    probe.ops.filter((o) => o.op === 'modify').forEach((o) => o.args[0](stub));
-    expect(seen).toEqual(expect.arrayContaining([['where', 'property_id', 'prop-A'], ['whereNot', 'id', 'v9']]));
-  });
-
-  test('a no-show logged without new_date, later rebooked or completed on the SAME row, is resolved', async () => {
-    const base = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control' };
-    const run1 = (noshow) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] }) });
-    // rebooked to another day, or to a later window the same day, or completed
-    expect((await run1({ ...base, ss_scheduled_date: '2026-10-03', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toBeNull();
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '15:00:00', status: 'confirmed' })).missedVisit).toBeNull();
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'completed' })).missedVisit).toBeNull();
-    // performed in the original slot after all (lagging status): tracker complete or a service record
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed', track_state: 'complete' })).missedVisit).toBeNull();
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'no_show', recorded: true })).missedVisit).toBeNull();
-    // still the missed occurrence, untouched: still missed
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
-    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'no_show' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
-  });
-
-  test('a same-day visit counts as the follow-up only when it starts AFTER the missed slot', async () => {
-    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-09-30', original_window: '13:00:00-14:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
-    const at = (later) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : later), reschedule_log: () => [noshow] }) });
-    // a morning pest visit that day preceded the 1 PM no-show: not a replacement
-    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '09:00:00' }])).missedVisit).toMatchObject({ reason: 'customer_noshow' });
-    // a 4 PM visit that day, or any later day: a replacement
-    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '16:00:00' }])).missedVisit).toBeNull();
-    expect((await at([{ service_type: 'Pest Control', scheduled_date: '2026-10-02', window_start: '09:00:00' }])).missedVisit).toBeNull();
-  });
-
-  test('more than one page of resolved no-shows never hides an older open one (paged scan)', async () => {
-    const resolved = (i) => ({ scheduled_service_id: `r${i}`, original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: '2026-10-03', service_type: 'Pest Control', status: 'confirmed', ss_scheduled_date: '2026-10-03', window_start: '09:00:00' });
-    const open = { scheduled_service_id: 'v-open', original_date: '2026-09-26', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Mosquito Control', status: 'no_show' };
-    const pages = [Array.from({ length: 10 }, (_, i) => resolved(i)), [open]];
-    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: (ops) => pages[(ops.find((o) => o.op === 'offset')?.args[0] || 0) / 10] || [] });
-    const out = await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
-    expect(out.missedVisit).toMatchObject({ type: 'Mosquito Control', date: '2026-09-26', reason: 'customer_noshow' });
-  });
-
-  test('more than one page of skipped unfinished rows never hides an older miss (paged scan)', async () => {
-    const yesterdayLate = (i) => ({ id: `y${i}`, technician_id: null, service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '23:00:00', status: 'confirmed' });
-    const older = { id: 'v-old', technician_id: null, service_type: 'Lawn Care', scheduled_date: '2026-09-27', window_start: '09:00:00', status: 'confirmed' };
-    const pages = [Array.from({ length: 10 }, (_, i) => yesterdayLate(i)), [older]];
-    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? (pages[(ops.find((o) => o.op === 'offset')?.args[0] || 0) / 10] || []) : []), reschedule_log: () => [] });
-    // 00:30 ET: yesterday's 23:00 rows are still open, so the scan pages past them
-    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T04:30:00Z'), deriveWindow, conn });
-    expect(out.missedVisit).toMatchObject({ type: 'Lawn Care', date: '2026-09-27', reason: 'not_completed' });
-  });
-
-  test('a rebooked newest no-show does not hide an older open one', async () => {
-    const rebooked = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: '2026-10-03', service_type: 'Pest Control', status: 'confirmed' };
-    const open = { scheduled_service_id: 'v8', original_date: '2026-09-27', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Mosquito Control', status: 'no_show' };
-    expect((await run({ noshow: [rebooked, open] })).missedVisit).toMatchObject({ type: 'Mosquito Control', date: '2026-09-27', reason: 'customer_noshow' });
-  });
-
-  test('yesterday\'s 23:00 visit is not missed while its window (to 01:00) is still open', async () => {
-    const late = { id: 'v7', service_type: 'Pest Control', scheduled_date: '2026-09-30', window_start: '23:00:00', window_end: '23:45:00', status: 'confirmed' };
-    const at = (iso) => loadVisitLoops({ customerId: 'c1', now: new Date(iso), deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [late] : []), reschedule_log: () => [] }) });
-    expect((await at('2026-10-01T04:30:00Z')).missedVisit).toBeNull(); // 00:30 ET
-    expect((await at('2026-10-01T05:30:00Z')).missedVisit).toMatchObject({ date: '2026-09-30', reason: 'not_completed' }); // 01:30 ET
-  });
-
-  test('a customer no-show not followed by a later visit of the same service counts', async () => {
-    const out = await run({ noshow: { original_date: '2026-09-30', service_type: 'Mosquito Control', window_start: '13:00:00', status: 'no_show' } });
-    expect(out.missedVisit).toMatchObject({ type: 'Mosquito Control', date: '2026-09-30', reason: 'customer_noshow', status: 'no_show' });
-  });
-
-  test('a no-show already followed by a later visit of the same family is not missed; another family does not cancel it', async () => {
-    const noshow = { property_id: 'prop-A', original_date: '2026-09-30', service_type: 'Mosquito Control', window_start: null, status: 'no_show' };
-    expect((await run({ noshow, later: [{ service_type: 'Mosquito Barrier Spray', scheduled_date: '2026-10-03' }] })).missedVisit).toBeNull();
-    expect((await run({ noshow, later: [{ service_type: 'Lawn Care', scheduled_date: '2026-10-03' }] })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
-  });
-
-  test('no property on the missed row: another visit cannot prove the follow-up (fail closed, no probe)', async () => {
-    const noshow = { scheduled_service_id: 'v9', property_id: null, original_date: '2026-09-30', original_window: '09:00:00-10:00:00', service_type: 'Mosquito Control', status: 'no_show' };
-    const conn = fakeConn({ scheduled_services: (ops) => (isUnfinishedQuery(ops) ? [] : [{ service_type: 'Mosquito Control', scheduled_date: '2026-10-03' }]), reschedule_log: () => [noshow] });
-    const out = await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
-    expect(out.missedVisit).toMatchObject({ reason: 'customer_noshow' });
-    expect(conn.calls.some((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin'))).toBe(false);
-  });
-
-  test('both present: the most recent date wins', async () => {
-    const out = await run({
-      unfinished: { id: 'v0', service_type: 'Lawn Care', scheduled_date: '2026-09-26', status: 'pending' },
-      noshow: { original_date: '2026-09-30', service_type: 'Pest Control', status: 'no_show' },
-    });
-    expect(out.missedVisit).toMatchObject({ date: '2026-09-30', reason: 'customer_noshow' });
-  });
-
-  test('a recurring child that already existed before the no-show was logged is not a follow-up', async () => {
-    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', logged_at: '2026-09-30T15:00:00Z', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', service_type: 'Pest Control', status: 'no_show' };
-    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] });
-    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
-    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin') && hasOp(c.ops, 'whereIn'));
-    const seen = [];
-    const stub = { where: (...a) => { seen.push(['where', ...a]); return stub; }, whereNot: (...a) => { seen.push(['whereNot', ...a]); return stub; } };
-    probe.ops.filter((o) => o.op === 'modify').forEach((o) => o.args[0](stub));
-    expect(seen).toContainEqual(['where', 'created_at', '>', '2026-09-30T15:00:00Z']);
-  });
-
-  test('familyKey buckets', () => {
-    expect(familyKey('Tree & Shrub Fertilization')).toBe('tree_shrub');
-    // word-bounded: "Plant Health Program" is not ants; "Pirate" is not rats
-    expect(familyKey('Plant Health Program')).not.toBe('pest');
-    expect(familyKey('Fire Ant Treatment')).toBe('pest');
-    expect(familyKey('Rat Exclusion')).toBe('rodent');
-    expect(familyKey('Lawn Fertilization')).toBe('lawn');
-    expect(familyKey('Quarterly Pest Control')).toBe('pest');
-    expect(familyKey('Mosquito Barrier')).toBe('mosquito');
-    expect(familyKey(null)).toBeNull();
-  });
-});
-
 describe('weOwe and customerWaiting', () => {
   const callRow = (over) => ({ id: 'c-1', party: 'waves', kind: 'send_estimate', description: 'Send the estimate', due_text: 'by tomorrow', due_at: null, effective_due_at: null, call_started_at: '2026-09-30T14:00:00Z', ...over });
   const smsRow = (over) => ({ id: 's-1', party: 'waves', kind: 'callback', description: 'Call back about ants', due_at: '2026-10-01T21:00:00Z', sms_started_at: '2026-10-01T10:00:00Z', channel: 'sms', ...over });
@@ -524,7 +336,9 @@ describe('weOwe and customerWaiting', () => {
       callRow({ id: 'c-2', party: 'customer', kind: 'send_photos', description: 'Send photos of the fence', call_started_at: '2026-09-29T14:00:00Z' }),
     ]);
     const out = await run(ctxConn({}));
-    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves', limit: 50 }));
+    // every open Waves-owned call promise, paged from the canonical reader (it orders
+    // oldest/overdue first; the facts show the newest five)
+    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves', limit: 200, offset: 0 }));
     // no resolved deadline: the spoken words, dated to the call
     expect(out.weOwe).toEqual([{ id: 'c-1', rev: expect.stringMatching(/^[0-9a-f]{12}$/), kind: 'send_estimate', description: 'Send the estimate', since: '2026-09-30', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
@@ -540,6 +354,15 @@ describe('weOwe and customerWaiting', () => {
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
     expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', since: '2026-10-01', source: 'sms' }]);
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
+  });
+
+  test('call promises are read to the end of the canonical reader\'s pages, so a new one behind 200 older ones still shows', async () => {
+    const older = Array.from({ length: 200 }, (_, i) => callRow({ id: `old-${i}`, call_started_at: '2026-09-01T14:00:00Z' }));
+    const fresh = callRow({ id: 'new-1', source: 'human', created_at: '2026-10-01T13:00:00Z' });
+    listOpenCommitments.mockImplementation(async (_c, { offset }) => (offset === 0 ? older : [fresh]));
+    const out = await run(ctxConn({}));
+    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ offset: 200 }));
+    expect(out.weOwe[0]).toMatchObject({ id: 'new-1' });
   });
 
   test('a human promise added later to an older call is dated (and sorted) by its own creation, like the canonical timing', async () => {
