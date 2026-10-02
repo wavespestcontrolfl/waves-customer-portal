@@ -30,7 +30,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
 
-const { runTranslationTrial, tokenParity, needsTranslation } = require('../services/sms-translation');
+const { runTranslationTrial, tokenParity, protectedTokens, needsTranslation } = require('../services/sms-translation');
 
 const SPANISH = 'Hola, ¿cuándo pueden salir los perros después del tratamiento de hoy?';
 const ENGLISH_IN = 'Hi, when can the dogs go out after today\'s treatment?';
@@ -145,6 +145,19 @@ describe('tokenParity', () => {
   test('a number in words in our reply compares as digits', () => {
     expect(tokenParity('We can come in two hours.', 'Podemos ir en 3 horas.')).toMatchObject({ ok: false });
     expect(tokenParity('We can come in two hours.', 'Podemos ir en 2 horas.')).toMatchObject({ ok: true });
+  });
+
+  test('digits in any script are compared: Arabic-Indic and full-width numerals read as their values', () => {
+    expect(tokenParity('Your visit is at 14:00 on 10/14.', 'موعدك الساعة ١٤:٠٠ في ١٠/١٤.')).toMatchObject({ ok: true });
+    expect(tokenParity('Your visit is at 14:00.', 'موعدك الساعة ١٥:٠٠.')).toMatchObject({ ok: false });
+    expect(tokenParity('About 45 minutes.', '約４５分です。')).toMatchObject({ ok: true });
+    expect(tokenParity('About 45 minutes.', '約４６分です。')).toMatchObject({ ok: false });
+  });
+
+  test('the bare portal domain is a protected link; a misspelt one is caught', () => {
+    expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontrol.com.')).toMatchObject({ ok: true });
+    expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontol.com.')).toMatchObject({ ok: false });
+    expect(protectedTokens('Email contact@wavespestcontrol.com').links).toEqual([]);
   });
 
   test('a signed number keeps its sign; a range dash is not a sign', () => {
@@ -293,6 +306,14 @@ describe('runTranslationTrial', () => {
     expect(row.hold_reason).not.toBe('inbound_translation_failed:translation_not_english');
   });
 
+  test('a duration whose unit changes in the read-back holds the trial (30 minutes is not 30 hours)', async () => {
+    const reply = 'Thanks! Your technician will text about 30 minutes before arriving.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su técnico le enviará un mensaje unas 30 horas antes de llegar.', back: 'Thanks! Your technician will text about 30 hours before arriving.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'duration_changed_in_translation' });
+  });
+
   test('trial drafting is metered on the translation lane', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
@@ -386,13 +407,22 @@ describe('runTranslationTrial', () => {
     expect(row).toMatchObject({ verdict: 'held', hold_reason: 'translation_in_other_language' });
   });
 
-  test('an English lint failure is recorded beside the answer, not a hold (live demotes it to a card)', async () => {
+  test('a re-entry sentence copied from the facts block is not held for the re-entry rule; it is still recorded', async () => {
     const withTime = 'Thanks! Pets can go back out in 2 hours. Next visit: Tuesday, Oct 14 at 2 PM.';
     scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Las mascotas pueden salir en 2 horas. Próxima visita: martes 14 de octubre, 14 h.', back: withTime });
-    mockDraft.mockResolvedValueOnce({ parsed: { reply: withTime }, converged: true, passes: 1 });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: withTime }, converged: true, passes: 1, factsBlock: 'LABEL FACTS:\nPets can go back out in 2 hours.' });
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row.hold_reason).not.toBe('reply_failed_comms_lint');
     expect(Array.isArray(row.checks.english_lint)).toBe(true);
+  });
+
+  test('an English lint failure in the drafter\'s own words holds the trial (it could not have sent)', async () => {
+    const perVisit = 'Thanks! Your service is $117 per visit.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su servicio cuesta $117 por visita.', back: perVisit });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: perVisit }, converged: true, passes: 1, factsBlock: 'COMPANY FACTS: none' });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'reply_failed_comms_lint' });
+    expect(row.checks.english_lint).toContain('per-application-wording');
   });
 
   test('language tags compare canonically: "spa" = "es"; "zh-TW" = "zh-Hant"; "zh" (Simplified) is not Traditional', async () => {

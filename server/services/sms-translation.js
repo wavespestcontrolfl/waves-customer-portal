@@ -246,7 +246,8 @@ async function inboundMeaningCheck({ original, english, language }) {
 // Every figure a customer could act on, compared between two versions of one
 // message: links and emails exactly, phone numbers and other numbers whole
 // (see numberValues).
-const LINK_RE = /https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+/gi;
+// our own bare domain counts too: the drafter writes the portal without a scheme (portal.wavespestcontrol.com)
+const LINK_RE = /https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+|(?<![@\w.-])(?:[a-z0-9-]+\.)*wavespestcontrol\.com(?:\/[^\s<>"')]*)?/gi;
 const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
 // "$50.45" cannot stand in for "$45.50"). Spelling is normalised so a faithful
@@ -365,8 +366,22 @@ function numberValues(text, { strictTimes = false } = {}) {
   return out;
 }
 
+// Any script's decimal digits read as ASCII ("٢" is 2, "２" is 2), so a figure written in Arabic-Indic,
+// Devanagari or full-width numerals is compared, never skipped. Each Unicode digit run is whole decades
+// starting at zero, so a digit's value is its distance from its run's start, mod 10.
+const DIGIT_RE = /\p{Nd}/u;
+function asciiDigits(text) {
+  return String(text || '').replace(/[\u066B\u066C]/g, (c) => (c === '\u066B' ? '.' : ',')).replace(/\p{Nd}/gu, (d) => {
+    const cp = d.codePointAt(0);
+    if (cp < 128) return d;
+    let start = cp;
+    while (DIGIT_RE.test(String.fromCodePoint(start - 1))) start -= 1;
+    return String((cp - start) % 10);
+  });
+}
+
 function protectedTokens(text, opts = {}) {
-  const str = String(text || '');
+  const str = asciiDigits(text);
   const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?]+$/, ''));
   const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').replace(/@.*$/, (d) => d.toLowerCase()));
   const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '), opts);
@@ -435,7 +450,7 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   const digits = strictTimes ? { missing: missingDigits, added: addedDigits } : pairTwentyFourHour(missingDigits, addedDigits, en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
-  const order = addressOrderFaults(englishReply, translated);
+  const order = addressOrderFaults(englishReply, asciiDigits(translated));
   // loose mode (a customer's text): the same hour stated on both sides must keep its half of the day ("2 AM" is not "2 PM")
   if (!strictTimes) {
     const halves = (list) => list.filter((n) => n.half).map((n) => `${n.value.split(':')[0]}|${n.half}`);
@@ -507,14 +522,24 @@ function lintFailures(text, context = null) {
 }
 
 // The checks draftShadowReply WITHHOLDS a converged draft on: a copied
-// redaction placeholder and an amount the billing facts do not hold. Its
-// comms-lint verdict only demotes a draft to a person's card (flags shown), so
-// the trial records it beside the answer (checks.english_lint) rather than
-// holding: an approved LABEL FACTS timing trips the re-entry rule there too.
-// Banned product-safety copy is the drafter's own LABEL FACTS-aware loop's.
-function postDraftFault(englishReply, context) {
+// redaction placeholder and an amount the billing facts do not hold. A
+// comms-lint failure keeps a live draft from sending on its own, so a trial
+// answer with one is held too ("ready" = could have gone out). A sentence
+// copied word for word from the facts block (an approved LABEL FACTS timing,
+// which the re-entry rule flags) is the server's own copy and is not linted;
+// the SMS length rule is the translation's (checked on the translated text).
+// Every rule the reply trips is still recorded (checks.english_lint).
+function withoutCopiedFacts(reply, factsBlock) {
+  const facts = String(factsBlock || '');
+  if (!facts) return reply;
+  return reply.split(/(?<=[.!?])\s+/).filter((s) => !(s.trim().length >= 20 && facts.includes(s.trim()))).join(' ');
+}
+
+function postDraftFault(englishReply, context, factsBlock) {
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
   if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
+  const own = withoutCopiedFacts(englishReply, factsBlock);
+  if (own.trim() && lintFailures(own, context).some((r) => r !== 'sms-segment-limit')) return 'reply_failed_comms_lint';
   return null;
 }
 
@@ -532,6 +557,20 @@ function bannedCopyCounts(text) {
   const { SMS_COMPLIANCE_CLAIM_RE } = require('./sms-shadow-drafter');
   const t = require('./sms-label-facts').sanctionSafeOnceDry(String(text || ''));
   return [...BANNED_CUSTOMER_COPY, SMS_COMPLIANCE_CLAIM_RE].map((rx) => (t.match(new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : `${rx.flags}g`)) || []).length);
+}
+
+// A duration keeps its unit: "30 minutes" is not "30 hours". The unit is read off the English read-back,
+// so it holds for any language; numbers in words count as digits on both sides ("two hours" = "2 hours").
+const DURATION_RE = /(\d+(?:[.,]\d+)?)\s*(min(?:ute)?s?|h(?:ou)?rs?|hours?|days?|weeks?|months?|years?)\b/gi;
+function durationTokens(text) {
+  const str = require('./sms-shadow-drafter').normalizeNumberWords(asciiDigits(text));
+  return [...str.matchAll(DURATION_RE)].map(([, n, unit]) => `${n.replace(',', '.')} ${unit.toLowerCase().replace(/^(min|h|day|week|month|year).*$/, '$1')}`);
+}
+
+function durationFaults(englishReply, backTranslation) {
+  const en = durationTokens(englishReply);
+  const back = durationTokens(backTranslation);
+  return { missing: diffCounts(en, back), added: diffCounts(back, en) };
 }
 
 function translationAddedFault(englishReply, backTranslation, context) {
@@ -597,7 +636,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!englishReply) return { skip: 'no_reply_needed', fields, checks };
   if (!draft.converged) return { stop: 'english_checks_not_passed', fields, checks };
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
-  const fault = postDraftFault(englishReply, liveContext);
+  const fault = postDraftFault(englishReply, liveContext, draft?.factsBlock);
   if (fault) return { stop: fault, fields, checks };
   return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks };
 }
@@ -625,6 +664,8 @@ async function translateAndCheck({ englishReply, language, languageCode, context
   if (!sameWrittenLanguage(languageCode, back.languageCode)) return { stop: 'translation_in_other_language', fields, checks: { token_parity: parity, language: { asked: languageCode, written: back.languageCode } } };
   const backFault = translationAddedFault(englishReply, back.text, context);
   if (backFault) return { stop: `back_translation_${backFault}`, fields, checks: { token_parity: parity } };
+  const durations = durationFaults(englishReply, back.text);
+  if (durations.missing.length || durations.added.length) return { stop: 'duration_changed_in_translation', fields, checks: { token_parity: parity, durations } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
   if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };
