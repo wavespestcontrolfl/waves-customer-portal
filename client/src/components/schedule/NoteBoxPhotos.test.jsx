@@ -73,6 +73,8 @@ describe('NoteBoxPhotos', () => {
   });
 
   it('words from the open session land in its description', () => {
+    // The mic answers without staying open, so Save is free to take them.
+    dictation.toggle.mockImplementation(() => {});
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
     fireEvent.click(screen.getByRole('button', { name: 'Describe by voice' }));

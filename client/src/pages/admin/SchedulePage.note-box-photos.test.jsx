@@ -87,6 +87,25 @@ describe('photos in the notes box', () => {
     expect(sent[1]).not.toHaveProperty('aiTags');
   });
 
+  it('Escape in a description cancels only the description, never the form (codex local r1 on #5589)', async () => {
+    const onClose = vi.fn();
+    const service = { ...base, noteBoxPhotosEnabled: true };
+    const draft = {
+      serviceId: service.id, draftId: 'draft-one', savedAt: '2099-01-01T12:00:00Z',
+      notes: 'Treated the exterior perimeter.', generationPhotoCount: photos.length, servicePhotos: photos, sendSms: false,
+    };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify(metadata));
+    await putCompletionDraft(service.id, draft);
+    render(<CompletionPanel service={service} products={[]} onClose={onClose} onSubmit={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByText('Loading saved draft…')).toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.keyDown(screen.getByLabelText('Description for photo 2'), { key: 'Escape' });
+    expect(screen.queryByLabelText('Description for photo 2')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('removing a photo from the notes box drops it and its description', async () => {
     await restoreWithPhotos({ ...base, noteBoxPhotosEnabled: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Remove photo 1' }));

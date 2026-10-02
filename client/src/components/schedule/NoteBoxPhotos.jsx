@@ -134,11 +134,17 @@ function CaptionEditor({ index, initial, disabled, palette, button, dictationSer
     (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
     { uploadServiceId: dictationServiceId },
   );
+  // A dictation still opening, recording or transcribing has words on the
+  // way: Save waits for them, so a caption never closes on what was said.
+  const hearing = dictation.starting || dictation.listening || dictation.uploading;
+  const saveOff = disabled || hearing;
   const save = () => {
-    if (!disabled) onSave(draft.trim());
+    if (!saveOff) onSave(draft.trim());
   };
+  // Escape cancels the description, never the form around it
+  // (useModalFocus leaves an owned Escape to its owner).
   return (
-    <div style={{ display: 'grid', gap: 8 }}>
+    <div style={{ display: 'grid', gap: 8 }} data-modal-escape-owned="true">
       <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
         {`Description for photo ${index + 1}`}
         <span style={{ position: 'relative', display: 'block' }}>
@@ -194,8 +200,8 @@ function CaptionEditor({ index, initial, disabled, palette, button, dictationSer
         </span>
       </label>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button type="button" onClick={save} disabled={disabled} style={{ ...button, background: palette.text, color: palette.card, borderColor: palette.text }}>
-          Save description
+        <button type="button" onClick={save} disabled={saveOff} style={{ ...button, opacity: saveOff ? 0.5 : 1, background: palette.text, color: palette.card, borderColor: palette.text }}>
+          {dictation.uploading ? 'Transcribing…' : 'Save description'}
         </button>
         <button type="button" onClick={onCancel} style={{ ...button, cursor: 'pointer', opacity: 1 }}>
           Cancel
