@@ -435,12 +435,15 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
   // only the linked body, so it could tell the sheet a boundary note fits
   // when commit() — which already checked both — would then refuse it,
   // after the dispatcher had already acted on "fits").
+  // A grouped stop's Custom body quotes the projected stop start — measured
+  // on the SAME window commit() renders, so the sheet and enforcer agree.
+  const customWindow = isCustom ? await projectedStopWindow(service, target) : null;
   const measured = await measureWorstLinkVariant((rescheduleUrl) => (isCustom
     ? renderCustomMovedBody({
       firstName: service.first_name,
       serviceType: service.service_type,
       date: target.date,
-      window: target.window,
+      window: customWindow,
       customMessage: message || CUSTOM_DEFAULT_MESSAGE,
       rescheduleUrl,
       serviceId,
@@ -1618,7 +1621,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // to move online again — including a plain read failure, {failed:true},
     // which also lands rescheduleUrl on null).
     if (prebuiltSms?.body && prebuiltSms.windowStart && chosen.window?.start
-      && String(prebuiltSms.windowStart).slice(0, 5) !== String(chosen.window.start).slice(0, 5)) {
+      && toHHMM(prebuiltSms.windowStart) !== toHHMM(chosen.window.start)) {
       // The pre-move body quotes a stop start that is not where the stop
       // landed (its members changed between the projection and the move):
       // never send an arrival time nobody holds. The sheet reports it.
@@ -1901,8 +1904,9 @@ async function projectedStopWindow(service, target) {
     requestedStart: target.window.start, requestedEnd: target.window.end, newDateStr: String(target.date),
   });
   if (!predicted.ok) return target.window;
-  const earliest = predicted.targets.map((t) => t.start).filter(Boolean).map((t) => String(t).slice(0, 5)).sort()[0];
-  return earliest && earliest < String(target.window.start).slice(0, 5) ? { start: earliest, end: null } : target.window;
+  // Zero-padded HH:MM (toHHMM) so '9:00' never sorts after '10:00'.
+  const earliest = predicted.targets.map((t) => t.start).filter(Boolean).map(toHHMM).sort()[0];
+  return earliest && earliest < toHHMM(target.window.start) ? { start: earliest, end: null } : target.window;
 }
 
 async function prepareCustomRungSms({ serviceId, service, target, note, notifyCustomer }) {

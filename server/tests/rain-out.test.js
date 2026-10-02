@@ -3422,6 +3422,36 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 12:00 PM - 2:00 PM');
     });
 
+    test('gate on: the sheet preview measures the same stop-start body commit() renders', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireGrouped();
+      await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE, target: COMMIT_ARGS.target });
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls.length).toBeGreaterThan(0);
+      for (const call of customCalls) expect(call[1].new_option).toContain('12:00 PM - 2:00 PM');
+    });
+
+    test('gate on: an unpadded start (9:00) is never ranked after 10:00 — the text keeps 9 AM', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, visit_id: 'v1' }) }),
+          chain({ rows: [
+            { id: 'svc-1', scheduled_date: '2026-06-11', window_start: '09:00', window_end: '10:00', status: 'confirmed' },
+            { id: 'pest-1', scheduled_date: '2026-06-11', window_start: '10:00', window_end: '11:00', status: 'confirmed' },
+          ] }),
+        ],
+        service_visits: [chain({ first: jest.fn().mockResolvedValue({ window_start: '09:00' }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) })],
+      });
+      SmartRebooker.reschedule.mockResolvedValueOnce({ visitMove: { visitId: 'v1', visitStart: '09:00', moved: ['svc-1', 'pest-1'] } });
+      const result = await RainOut.commit({ ...COMMIT_ARGS, target: { date: '2026-06-12', window: { start: '9:00', end: '10:00' } } });
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 9:00 AM - 11:00 AM');
+    });
+
     test('gate on: a grouped stop that landed elsewhere than projected — the Custom text is not sent', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
