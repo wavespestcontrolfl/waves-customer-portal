@@ -222,6 +222,11 @@ postgres('annual prepay charged after the first visit', () => {
       const { annualCoverageVerdictForPrediction } = require('../services/annual-prepay-renewals');
       const visit = await trx('scheduled_services').where({ id: f.childId }).first();
       expect(await annualCoverageVerdictForPrediction(visit, trx)).toBe(true);
+      const { deferredPrepayHoldCustomerIds } = require('../services/annual-prepay-renewals');
+      const ids = await deferredPrepayHoldCustomerIds(trx, [f.customerId, randomUUID()]);
+      expect([...ids]).toEqual([f.customerId]);
+      expect(await annualCoverageVerdictForPrediction(visit, trx, { deferredCustomerIds: ids })).toBe(true);
+      expect(await annualCoverageVerdictForPrediction(visit, trx, { deferredCustomerIds: new Set() })).toBeNull();
       await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: JSON.stringify({}) });
       expect(await annualCoverageVerdictForPrediction(visit, trx)).toBeNull();
     });

@@ -5965,6 +5965,13 @@ router.get('/', async (req, res, next) => {
     }
 
     // Enrich with property prefs and last service
+    // GATE_PAF_PREPAY: which customers have a deferred annual prepay at all
+    // (one query), so the billing card checks only their unstamped visits.
+    let deferredPrepayCustomerIds = null;
+    try {
+      deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
+        .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
+    } catch { deferredPrepayCustomerIds = null; }
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -6043,7 +6050,9 @@ router.get('/', async (req, res, next) => {
       // as covered, as completion will treat it.
       try {
         const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-        annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db);
+        annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db, {
+          deferredCustomerIds: deferredPrepayCustomerIds,
+        });
       } catch { annualCoverageValidated = null; }
       // Present-tense money state for the sheet's billing card: what the
       // customer already owes (collectible invoices) and, for members,
@@ -6585,6 +6594,13 @@ router.get('/week', async (req, res, next) => {
         }
       }
 
+      // GATE_PAF_PREPAY: which customers have a deferred annual prepay at all
+      // (one query), so the billing card checks only their unstamped visits.
+      let deferredPrepayCustomerIds = null;
+      try {
+        deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
+          .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
+      } catch { deferredPrepayCustomerIds = null; }
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
         const serviceAddons = addonsByServiceId.get(s.id) || [];
@@ -6631,7 +6647,9 @@ router.get('/week', async (req, res, next) => {
         // as covered, as completion will treat it.
         try {
           const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-          annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db);
+          annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db, {
+            deferredCustomerIds: deferredPrepayCustomerIds,
+          });
         } catch { annualCoverageValidated = null; }
         // Present-tense money state for the sheet's billing card: what the
         // customer already owes (collectible invoices) and, for members,

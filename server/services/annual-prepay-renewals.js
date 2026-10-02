@@ -4161,11 +4161,32 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
 // deferred annual prepay (GATE_PAF_PREPAY) reads as covered, exactly as
 // completion will treat it; anything else stays null (no stamp to validate).
 // Throws like the strict check, so each caller keeps its own failure posture.
-async function annualCoverageVerdictForPrediction(visit, conn = db) {
+// `deferredCustomerIds` (from deferredPrepayHoldCustomerIds, one query for a
+// whole board) skips the per-visit check for every customer with no deferred
+// year at all.
+async function annualCoverageVerdictForPrediction(visit, conn = db, { deferredCustomerIds = null } = {}) {
   if (visit?.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
     return annualPrepayCoversVisit(visit, conn, { throwOnError: true });
   }
+  if (deferredCustomerIds && !deferredCustomerIds.has(String(visit?.customer_id))) return null;
   return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
+}
+
+// The customers (of `customerIds`) that have a year whose charge waits for
+// the first visit: a payment_pending, undisputed term whose estimate carries a
+// deferred job. One query, so a schedule board checks only those customers'
+// visits one by one. A failure throws; callers keep their own posture.
+async function deferredPrepayHoldCustomerIds(conn, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return new Set();
+  const rows = await conn('annual_prepay_terms as t')
+    .join('estimates as e', 'e.id', 't.source_estimate_id')
+    .whereIn('t.customer_id', ids)
+    .where('t.status', 'payment_pending')
+    .whereNull('t.dispute_suspended_at')
+    .whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
+    .distinct('t.customer_id');
+  return new Set(rows.map((r) => String(r.customer_id)));
 }
 
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
@@ -6606,6 +6627,8 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         'c.ach_status as customer_ach_status',
         'c.per_application_fee', 'c.payer_id as customer_payer_id',
       );
+    // GATE_PAF_PREPAY: customers with a deferred year, one query for the batch.
+    const deferredCustomerIds = await deferredPrepayHoldCustomerIds(conn, (visits || []).map((v) => v.customer_id));
     for (const v of visits || []) {
       const customerId = String(v.customer_id);
       if (!evaluable(customerId)) continue;
@@ -6613,7 +6636,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // a malformed stamp (no amount / no term) or a failed coverage query
       // must fail toward the warning, not fall back to trusting the stamp
       // (predictCompletionBilling treats null as "trust the stamp").
-      const annualCoverageValidated = await annualCoverageVerdictForPrediction(v, conn);
+      const annualCoverageValidated = await annualCoverageVerdictForPrediction(v, conn, { deferredCustomerIds });
       const payer = await resolveForInvoice({
         database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
         scheduledServiceId: v.id, throwOnError: true,
@@ -10931,6 +10954,7 @@ module.exports = {
   annualPrepayCoversVisit,
   pafDeferredPrepayCoversVisit,
   annualCoverageVerdictForPrediction,
+  deferredPrepayHoldCustomerIds,
   PAF_PREPAY_HOLD_STATUSES,
   coveredTermsAsOf,
   retryPaidLapseReconciles,
