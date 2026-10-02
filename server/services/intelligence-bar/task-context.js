@@ -861,10 +861,12 @@ async function resolveCustomerSelector(params, input, context, schema) {
   const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
   const fitsEverySelector = customer => (!suppliedId || customer.id === suppliedId)
     && (!params.phone || digits(customer.phone) === digits(params.phone));
-  // A name that matched nobody beside an id or phone is a conflict too (Codex
-  // r4): the reader would answer about the id while the operator named
-  // someone it could not find.
-  if ((suppliedId || (named && params.phone)) && (named || matches.length) && !matches.some(fitsEverySelector)) {
+  // Any two selectors that no single customer satisfies — a name that
+  // matched nobody beside an id, an id beside a phone nobody carries — are a
+  // conflict too (Codex r4): the reader would answer about one selector
+  // while the operator supplied another it could not reconcile.
+  const selectorCount = [params.customer_name, suppliedId, params.phone].filter(Boolean).length;
+  if (selectorCount >= 2 && !matches.some(fitsEverySelector)) {
     return { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
   }
   const conflict = { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
