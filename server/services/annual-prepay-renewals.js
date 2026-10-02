@@ -4067,8 +4067,66 @@ async function stampedTermStillCoversVisit(term, scheduledService, conn) {
   return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
 }
 
+// Pay after the first visit, annual prepay (GATE_PAF_PREPAY, PR-D). The accept
+// mints the year invoice and a payment_pending term but defers the charge
+// until the first visit is PERFORMED (estimate_data.prepayAutoChargeJob,
+// deferred_to_first_visit). Until the term is paid its visits carry no prepay
+// stamp, so without this every visit — the first one included — would be
+// billed per application on top of the year invoice. Covered: an unstamped
+// visit of THAT estimate's plan, while the term is still payment_pending on
+// the job's own invoice and the job is still collecting it (or its charge was
+// declined: owner R2, later visits are held, not billed, until it is paid or
+// the office decides). Keyed off the job's frozen flag, not the live gate, so
+// an accept already deferred stays held if the gate is turned off.
+const PAF_PREPAY_HOLD_STATUSES = new Set([
+  'awaiting_first_visit', 'pending', 'claimed', 'processing', 'paid', 'delivered_fallback',
+]);
+
+async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError = false } = {}) {
+  if (scheduledService.prepaid_method) return false;
+  if (!scheduledService.customer_id) return false;
+  try {
+    if (!(await annualPrepayTableExists())) return false;
+    // Cheapest question first: almost every customer has no payment_pending
+    // term at all, so most calls end on this one indexed read.
+    const terms = await conn('annual_prepay_terms')
+      .where({ customer_id: scheduledService.customer_id, status: 'payment_pending' })
+      .whereNotNull('source_estimate_id')
+      .whereNotNull('prepay_invoice_id')
+      .select('id', 'source_estimate_id', 'prepay_invoice_id', 'coverage_service_type');
+    if (!terms.length) return false;
+    let estimateId = scheduledService.source_estimate_id || null;
+    if (scheduledService.recurring_parent_id) {
+      const parent = await conn('scheduled_services')
+        .where({ id: scheduledService.recurring_parent_id, customer_id: scheduledService.customer_id })
+        .first('source_estimate_id');
+      const parentEstimateId = parent?.source_estimate_id || null;
+      if (estimateId && parentEstimateId && String(estimateId) !== String(parentEstimateId)) return false;
+      estimateId = estimateId || parentEstimateId;
+    }
+    if (!estimateId) return false;
+    const term = terms.find((t) => String(t.source_estimate_id) === String(estimateId));
+    if (!term) return false;
+    const estimate = await conn('estimates').where({ id: estimateId }).first('estimate_data');
+    let data = estimate?.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+    const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
+    if (!job || job.deferred_to_first_visit !== true) return false;
+    if (String(job.invoice_id || '') !== String(term.prepay_invoice_id)) return false;
+    if (!PAF_PREPAY_HOLD_STATUSES.has(String(job.status || ''))) return false;
+    return !(term.coverage_service_type && scheduledService.service_type
+      && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type)));
+  } catch (err) {
+    if (throwOnError) throw err;
+    logger.warn(`[annual-prepay] deferred-prepay coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
+    return false;
+  }
+}
+
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
+
+  if (await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   // Codex round-7 P1 (owner ruling 2026-09-26, P2-4): an UNPAID termite
   // renewal successor stays covered through its OWN GRACE_DAYS payment
@@ -10826,6 +10884,8 @@ module.exports = {
   restoreWaveguardExtensionCredits,
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
+  pafDeferredPrepayCoversVisit,
+  PAF_PREPAY_HOLD_STATUSES,
   coveredTermsAsOf,
   retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,

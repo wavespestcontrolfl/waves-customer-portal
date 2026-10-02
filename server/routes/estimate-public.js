@@ -10564,6 +10564,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const isTermiteAnnualSignBeforePay = annualPrepaySelected
       && require('../services/estimate-converter').isTermiteAnnualSignBeforePayAccept(estimate, estData, billingTerm);
     let prepayChargePlan = null; // { method, quote } once acknowledged
+    // Pay after the first visit (GATE_PAF_PREPAY, owner ruling 2026-09-30):
+    // the in-lane prepay accept still quotes and binds the exact cents and
+    // method, but nothing is charged at approval — the card is charged after
+    // the first visit is performed, for that total or less (owner R1). The
+    // customer authorizes THAT under the after_visit_prepay text, so the
+    // quote names it and the resubmit must attest it.
+    const prepayChargeAfterFirstVisit = annualPrepaySelected && !isTermiteAnnualSignBeforePay && recurringCardLaneActive
+      && RecurringCards.isPrepayCardAndChargeEnabled() && require('../config/feature-gates').pafPrepayLive();
     if (annualPrepaySelected && !isTermiteAnnualSignBeforePay && recurringCardLaneActive && RecurringCards.isPrepayCardAndChargeEnabled()) {
       // Resolved once above (with the tax-rate hoist) — the quote's method
       // fallback and credit projections use the SAME customer the accept
@@ -10684,9 +10692,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // attestation and the server would charge AND record a consent
         // snapshot that was never attested.
         const prepayConsentAccepted = req.body?.prepayChargeConsentAccepted === true;
+        // The tab attests WHICH authorization it rendered: the after-visit
+        // text exactly when this accept defers the charge, and never that
+        // text for a charge-now accept (a gate flip between quote and
+        // resubmit re-quotes instead of recording a promise not shown).
+        const attestedPrepayVariant = req.body?.prepayChargeConsentVariant || null;
+        const prepayVariantAttested = prepayChargeAfterFirstVisit
+          ? attestedPrepayVariant === 'after_visit_prepay'
+          : attestedPrepayVariant !== 'after_visit_prepay';
         if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
           || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey
-          || !prepayConsentAccepted) {
+          || !prepayConsentAccepted || !prepayVariantAttested) {
           return res.status(402).json({
             code: 'PREPAY_CHARGE_QUOTE',
             error: 'Confirm your exact annual prepay total to finish booking',
@@ -10709,10 +10725,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // (e.g. Auto Pay enabled in another tab between capture and
               // requote) must render its own quote-step authorization.
               capturedMethod: prepayChargeMethod.source === 'fresh_capture',
+              // Present only when deferred (gate-off quote byte-identical).
+              ...(prepayChargeAfterFirstVisit ? { chargedAfterFirstVisit: true, consentVariant: 'after_visit_prepay' } : {}),
             },
           });
         }
-        prepayChargePlan = { method: prepayChargeMethod, quote: chargeInfo, projectedOfferAmount: prepayQuoteOfferContribution };
+        prepayChargePlan = {
+          method: prepayChargeMethod,
+          quote: chargeInfo,
+          projectedOfferAmount: prepayQuoteOfferContribution,
+          ...(prepayChargeAfterFirstVisit ? { afterFirstVisit: true } : {}),
+        };
       }
     }
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
@@ -13292,6 +13315,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // booking. Carries the BOUND method + the exact acknowledged cents —
       // recovery may charge only these; anything else falls back to
       // pay-link delivery + an office alert.
+      const prepayDeferredToFirstVisitResult = !!prepayChargePlan?.afterFirstVisit
+        && invoiceKindResult === 'annual_prepay' && !!invoiceIdResult && !prepayCoveredInTrxResult;
       if (prepayChargePlan && invoiceKindResult === 'annual_prepay' && invoiceIdResult) {
         // Atomic JSON-path write (pre-push Codex P0 r5) — never a full
         // estimate_data rewrite that could erase a concurrent writer's keys.
@@ -13332,7 +13357,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // customer-default check.
               payer_scope_scheduled_service_id: recurringCardScopeSsId
                 || annualPrepayConversionResult?.firstScheduledServiceId || null,
-              status: 'pending',
+              // GATE_PAF_PREPAY: nothing is charged now. The job waits for
+              // the first PERFORMED visit (paf-prepay-release.js), and until
+              // then the plan's visits are held, not billed per visit
+              // (annual-prepay-renewals.js pafDeferredPrepayCoversVisit).
+              // A year the in-trx credit already covered has nothing to
+              // defer and settles as before.
+              ...(prepayDeferredToFirstVisitResult
+                ? { status: 'awaiting_first_visit', deferred_to_first_visit: true }
+                : { status: 'pending' }),
               created_at: new Date().toISOString(),
             })],
           ),
@@ -13371,6 +13404,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversion: annualPrepayConversionResult,
         prepayOfferRedeemedInTx: prepayOfferRedeemedInTxResult,
         prepayCoveredInTrx: prepayCoveredInTrxResult,
+        prepayDeferredToFirstVisit: prepayDeferredToFirstVisitResult,
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
         standardInvoiceAttached,
@@ -13549,9 +13583,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // sub-gate moved onto the card rail saw the "charged after your
           // first visit" authorization (/data recurringCardPolicy
           // .afterVisitConsent), so that variant (v12) is what is recorded.
+          // GATE_PAF_PREPAY: the deferred prepay accept rendered (and the
+          // resubmit attested) the after-visit prepay authorization.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
             && RecurringCards.isPrepayCardAndChargeEnabled()
-            ? 'prepay_card'
+            ? (prepayChargeAfterFirstVisit ? 'after_visit_prepay' : 'prepay_card')
             // Paused Auto Pay (owner R5) keeps the card but is never charged
             // automatically, so the "charged after your first visit"
             // authorization is NOT what that customer was shown or agreed to.
@@ -14045,7 +14081,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // resolves), and every resolution below writes only while the token
     // still matches.
     let prepayJobClaimToken = null;
-    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId && !txResult.prepayCoveredInTrx) {
+    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId && !txResult.prepayCoveredInTrx
+      && txResult.prepayDeferredToFirstVisit !== true) {
       const candidateToken = require('crypto').randomUUID();
       try {
         const claimedRows = await db('estimates')
@@ -14088,7 +14125,44 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       }
       return fn();
     };
-    if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
+    if (txResult.prepayDeferredToFirstVisit === true) {
+      // GATE_PAF_PREPAY: no charge and no pay link at approval. The durable
+      // job waits for the first performed visit; the sweep then charges the
+      // bound method (paf-prepay-release.js). Record the after-visit
+      // authorization for an already-saved method now (a fresh capture
+      // recorded it at enrollment above); best-effort, the sweep re-records
+      // it before any charge and refuses to charge without it.
+      prepayAutoCharge = { status: 'after_first_visit' };
+      invoicePayUrl = null;
+      const deferredPmRowId = prepayChargePlan.method.paymentMethodRowId
+        || recurringCardEnrollmentResult?.paymentMethodRowId
+        || null;
+      if (deferredPmRowId) {
+        try {
+          const ConsentService = require('../services/payment-method-consents');
+          const consentMethodType = prepayChargePlan.method.methodType || 'card';
+          const already = await ConsentService.hasConsentSnapshotForVariant(
+            customerId,
+            prepayChargePlan.method.stripePaymentMethodId,
+            { methodType: consentMethodType, variant: 'after_visit_prepay', since: acceptAuthorizedAt },
+          );
+          if (!already) {
+            await ConsentService.recordConsent({
+              customerId,
+              paymentMethodId: deferredPmRowId,
+              stripePaymentMethodId: prepayChargePlan.method.stripePaymentMethodId,
+              source: 'estimate_accept',
+              methodType: consentMethodType,
+              ip: req.ip,
+              userAgent: req.get('user-agent') || null,
+              consentVariant: 'after_visit_prepay',
+            });
+          }
+        } catch (consentErr) {
+          logger.warn(`[estimate-accept] deferred prepay consent snapshot failed for estimate ${estimate.id} — the sweep records it before charging: ${consentErr.message}`);
+        }
+      }
+    } else if (prepayChargePlan && annualPrepaySelected && invoiceId && customerId
       && !txResult.prepayCoveredInTrx && !prepayJobClaimToken) {
       // Another executor owns the job (or the claim write failed) — never
       // run a second collection beside it.
@@ -14934,7 +15008,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // auto-charges it. Invoice-mode and prepay accepts keep their delivery;
     // an auto-charged (paid) prepay invoice has nothing to deliver — the
     // charge path already handles the receipt.
-    if (invoiceId && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
+    if (invoiceId && !['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
       || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
@@ -15277,7 +15351,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
         // that nobody is asked to pay.
-        prepayChargeOutcome: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
+        prepayChargeOutcome: ['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status)
           ? prepayAutoCharge.status
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
@@ -15345,14 +15419,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // the success payload must say "confirmed", never "pay your prepay
       // invoice" (same override the already-accepted retry path derives
       // from the live invoice status).
-      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) || invoiceSettledByCredit,
+      invoiceSettled: ['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status) || invoiceSettledByCredit,
       // 'ambiguous' is preserved (Codex r6 P1) — the client renders
       // tender-neutral "we're confirming your payment" copy for it, never
       // a bank-debit assertion.
-      prepayChargeStatus: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
+      prepayChargeStatus: ['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status)
         ? prepayAutoCharge.status
         : null,
-      prepayChargedTotal: ['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
+      prepayChargedTotal: ['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status) && prepayChargePlan?.quote
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
@@ -20456,10 +20530,15 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const prepayJobStamp = rawEstData && typeof rawEstData === 'object' ? rawEstData.prepayAutoChargeJob : null;
   const prepaySweepPending = !!prepayTerm && !!invoice
     && !!prepayJobStamp && ['pending', 'claimed'].includes(String(prepayJobStamp.status || ''));
+  // GATE_PAF_PREPAY: a job still waiting for the first visit is not owed now
+  // — no pay link, and the copy says the card is charged after that visit.
+  const prepayAwaitingFirstVisit = !!prepayTerm && !!invoice
+    && !!prepayJobStamp && String(prepayJobStamp.status || '') === 'awaiting_first_visit';
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending && invoice.token
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending
+    && !prepayAwaitingFirstVisit && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -20523,7 +20602,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -20550,10 +20629,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
       // may have an executor mid-charge → tender-neutral 'ambiguous'
       // "we're confirming your payment" copy (Codex r26 P2).
-      invoiceSettled: invoiceSettled || prepaySweepPending,
+      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit,
       prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
         ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
-        : null),
+        : (prepayAwaitingFirstVisit ? 'after_first_visit' : null)),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     alreadyAccepted: true,
@@ -20899,6 +20978,17 @@ function buildAcceptNotificationPayload({
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — payment outcome pending reconciliation; NO pay link sent.`,
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and we're confirming your annual prepay payment. We'll follow up shortly.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    if (prepayChargeOutcome === 'after_first_visit') {
+      // GATE_PAF_PREPAY: nothing charged at approval by design — the saved
+      // method is charged after the first visit is performed. No pay ask.
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — card on file is charged after the first visit; nothing charged today.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your annual prepay is charged to your card on file after your first visit.`,
         customerLink: '/?tab=billing',
       };
     }

@@ -1,0 +1,318 @@
+// Real migrated PostgreSQL, synthetic records, rolled back after every test.
+// Pay after the first visit, annual prepay (GATE_PAF_PREPAY, PR-D; owner
+// rulings 2026-09-30 / 2026-10-01). The accept defers the year's charge: the
+// durable job waits as 'awaiting_first_visit' and, until the year is paid,
+// the plan's visits are held (covered), never billed per visit. The first
+// PERFORMED visit releases the job; the sweep then charges the bound method
+// for the acknowledged total or less (R1). A decline after visit 1 keeps the
+// later visits held and rings the office (R2); no performed visit in 14 days
+// rings the office (R8); a year voided before any visit charges nothing.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  Object.defineProperty(db, 'client', { get: () => db.connection.client });
+  return db;
+});
+jest.mock('../models/marker-db', () => () => require('../models/db'));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  chargeInvoiceWithSavedCard: jest.fn(),
+  savedCardChargeSuppressesAlternateCollection: jest.fn(() => false),
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
+  retrievePaymentIntent: jest.fn(async () => null),
+  cancelPaymentIntent: jest.fn(async () => null),
+}));
+jest.mock('../services/weather-forecast', () => ({
+  ...jest.requireActual('../services/weather-forecast'), getDailyRainOutlookBounded: jest.fn(async () => null),
+}));
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
+jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
+jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: false, blocked: true, code: 'test' })),
+}));
+jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 0 })) }));
+jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
+jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
+jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({
+  isNewRecurringSignupCandidate: jest.fn(async () => false), sendNewRecurringWelcome: jest.fn(async () => {}),
+}));
+jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => {}), sendMembershipRenewalReminder: jest.fn(async () => {}) }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn(async () => {}) }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(), loadTemplateByKey: jest.fn(async () => null), activeSuppressionFor: jest.fn(async () => null),
+}));
+jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
+jest.mock('../services/autopay-enrollment', () => ({
+  ...jest.requireActual('../services/autopay-enrollment'),
+  enrollConsentedMethod: jest.fn(async () => ({ enrolled: false, reason: 'already_enrolled' })),
+}));
+jest.mock('../services/payer', () => ({
+  ...jest.requireActual('../services/payer'),
+  resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+}));
+jest.mock('../services/inspection-credit', () => ({
+  ...jest.requireActual('../services/inspection-credit'),
+  redeemInspectionCreditForBooking: jest.fn(async () => ({ redeemed: 0, reason: 'no_open_offer' })),
+}));
+jest.mock('../services/invoice', () => ({
+  ...jest.requireActual('../services/invoice'),
+  sendViaSMSAndEmail: jest.fn(async () => ({ ok: true, payUrl: '/pay/synthetic' })),
+}));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: jest.fn(async () => ({ id: 'alert' })),
+}));
+
+const { randomUUID } = require('node:crypto');
+
+jest.setTimeout(120000);
+
+const TOTAL_CENTS = 48000;
+
+postgres('annual prepay charged after the first visit', () => {
+  let database;
+  let trx;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    process.env.RECURRING_CARD_ON_FILE = 'true';
+    process.env.GATE_PREPAY_CARD_AND_CHARGE = 'true';
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 4 } });
+    require('../models/db').connection = database;
+    // Cold transforms of the completion module graph stay outside a test's timer.
+    require('../services/complete-scheduled-service');
+  });
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    require('../services/annual-prepay-renewals')._private.resetCachesForTests();
+  });
+
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => {
+    delete process.env.RECURRING_CARD_ON_FILE;
+    delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
+    await database?.destroy();
+  });
+
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = (offset) => etDateString(addETDays(new Date(), offset));
+
+  // An accepted annual-prepay estimate whose charge is deferred: a draft year
+  // invoice, a payment_pending term, a first visit (series parent) and a
+  // second visit (child), and the awaiting job bound to a saved card.
+  async function deferredAccept({ jobPatch = {}, termStatus = 'payment_pending', invoiceStatus = 'draft', acceptedDaysAgo = 1 } = {}) {
+    const f = {
+      customerId: randomUUID(), estimateId: randomUUID(), invoiceId: randomUUID(), termId: randomUUID(),
+      parentId: randomUUID(), childId: randomUUID(), pmId: randomUUID(), pmStripeId: `pm_${randomUUID().slice(0, 8)}`,
+    };
+    await trx('customers').insert({ id: f.customerId, first_name: 'Synthetic', last_name: 'Deferred', phone: '+12025550188',
+      email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: true });
+    await trx('payment_methods').insert({ id: f.pmId, customer_id: f.customerId, stripe_payment_method_id: f.pmStripeId,
+      method_type: 'card', last_four: '4242', is_default: true });
+    await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`,
+      token: randomUUID().replace(/-/g, ''), status: invoiceStatus, total: TOTAL_CENTS / 100, subtotal: TOTAL_CENTS / 100,
+      due_date: day(-acceptedDaysAgo), line_items: JSON.stringify([{ description: 'Annual prepay', amount: TOTAL_CENTS / 100, quantity: 1 }]) });
+    const authorizedAt = new Date(Date.now() - acceptedDaysAgo * 86400000).toISOString();
+    const job = {
+      invoice_id: f.invoiceId, stripe_payment_method_id: f.pmStripeId, payment_method_row_id: f.pmId,
+      method_key: 'k', authorized_total_cents: TOTAL_CENTS, authorized_base_cents: TOTAL_CENTS,
+      authorized_at: authorizedAt, scheduled_service_id: f.parentId, payer_scope_scheduled_service_id: f.parentId,
+      status: 'awaiting_first_visit', deferred_to_first_visit: true, created_at: authorizedAt, ...jobPatch,
+    };
+    await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'accepted',
+      estimate_data: JSON.stringify({ prepayAutoChargeJob: job }) });
+    await trx('annual_prepay_terms').insert({ id: f.termId, customer_id: f.customerId, status: termStatus, source_estimate_id: f.estimateId,
+      prepay_invoice_id: f.invoiceId, term_start: day(0), term_end: day(364), prepay_amount: TOTAL_CENTS / 100,
+      plan_label: 'Synthetic Annual', coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4 });
+    await trx('scheduled_services').insert({ id: f.parentId, customer_id: f.customerId, service_type: 'Quarterly Pest Control',
+      scheduled_date: day(0), window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 120,
+      source_estimate_id: f.estimateId });
+    await trx('scheduled_services').insert({ id: f.childId, customer_id: f.customerId, service_type: 'Quarterly Pest Control',
+      scheduled_date: day(90), window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 120,
+      recurring_parent_id: f.parentId });
+    return f;
+  }
+
+  async function perform(visitId, customerId, outcome = 'completed') {
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'completed', completed_at: new Date() });
+    await trx('service_records').insert({ id: randomUUID(), customer_id: customerId, scheduled_service_id: visitId,
+      service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
+      structured_notes: JSON.stringify({ visitOutcome: outcome }) });
+  }
+
+  const jobOf = async (f) => {
+    const row = await trx('estimates').where({ id: f.estimateId }).first('estimate_data');
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+    return data.prepayAutoChargeJob;
+  };
+  const covers = (visitId) => trx('scheduled_services').where({ id: visitId }).first()
+    .then((visit) => require('../services/annual-prepay-renewals').annualPrepayCoversVisit(visit, trx, { throwOnError: true }));
+  const release = () => require('../services/paf-prepay-release').releaseDeferredPrepayCharges();
+  const sweep = () => require('../services/recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+
+  describe('holding the plan\'s visits until the year is paid', () => {
+    it('holds the first visit and a later child while the job waits', async () => {
+      const f = await deferredAccept();
+      expect(await covers(f.parentId)).toBe(true);
+      expect(await covers(f.childId)).toBe(true);
+    });
+
+    it('keeps holding later visits after a declined charge (R2)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback' } });
+      expect(await covers(f.childId)).toBe(true);
+    });
+
+    it('bills normally once the job is cancelled, when the accept was not deferred, or when the job names another invoice', async () => {
+      const cancelled = await deferredAccept({ jobPatch: { status: 'cancelled_before_visit' } });
+      expect(await covers(cancelled.parentId)).toBe(false);
+      const chargeNow = await deferredAccept({ jobPatch: { deferred_to_first_visit: false, status: 'pending' } });
+      expect(await covers(chargeNow.parentId)).toBe(false);
+      const otherInvoice = await deferredAccept({ jobPatch: { invoice_id: randomUUID() } });
+      expect(await covers(otherInvoice.parentId)).toBe(false);
+    });
+
+    it('never holds a visit of a service the term does not cover', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.childId }).update({ service_type: 'Lawn Fertilization' });
+      expect(await covers(f.childId)).toBe(false);
+    });
+  });
+
+  it('completing the first visit while the charge waits bills nothing for the visit', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('status')).status).toBe('completed');
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await release()).toMatchObject({ released: 1 });
+  });
+
+  describe('releasing the charge after the first performed visit', () => {
+    it('leaves the job waiting while no visit is performed, and for an inspection-only visit', async () => {
+      const f = await deferredAccept();
+      expect(await release()).toMatchObject({ released: 0 });
+      await perform(f.parentId, f.customerId, 'inspection_only');
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('releases once on a performed visit and brings the invoice due today', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      expect(await release()).toMatchObject({ released: 0 });
+      const job = await jobOf(f);
+      expect(job).toMatchObject({ status: 'pending', released_for_visit_id: f.parentId });
+      const invoice = await trx('invoices').where({ id: f.invoiceId }).first('due_date');
+      expect(etDateString(new Date(invoice.due_date))).toBe(day(0));
+    });
+
+    it('releases on a performed child visit of the series', async () => {
+      const f = await deferredAccept();
+      await perform(f.childId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      expect((await jobOf(f)).released_for_visit_id).toBe(f.childId);
+    });
+
+    it('charges nothing when the year invoice was voided before any visit', async () => {
+      const f = await deferredAccept({ invoiceStatus: 'void' });
+      expect(await release()).toMatchObject({ cancelled: 1 });
+      expect((await jobOf(f))).toMatchObject({ status: 'cancelled_before_visit', reason: 'invoice_void' });
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    it('rings the office once when no visit is performed within 14 days (R8)', async () => {
+      const f = await deferredAccept({ acceptedDaysAgo: 15 });
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(await release()).toMatchObject({ staleAlerted: 1 });
+      expect(await release()).toMatchObject({ staleAlerted: 0 });
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ area: 'Billing', subject: { type: 'estimate', id: f.estimateId } });
+    });
+  });
+
+  describe('the charge after release', () => {
+    it('charges the bound card with the acknowledged total as a ceiling, not an exact match (R1)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId) => {
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+        return { ok: true };
+      });
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      const [invoiceId, pmRowId, opts] = StripeService.chargeInvoiceWithSavedCard.mock.calls[0];
+      expect([invoiceId, pmRowId]).toEqual([f.invoiceId, f.pmId]);
+      expect(opts.maxAuthorizedTotalCents).toBe(TOTAL_CENTS);
+      expect(opts).not.toHaveProperty('expectedTotal');
+      expect((await jobOf(f)).status).toBe('paid');
+      const consent = await trx('payment_method_consents').where({ customer_id: f.customerId }).first('consent_text_version', 'consent_text_snapshot');
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(consent.consent_text_snapshot).toBe(ConsentText.AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT);
+      expect(consent.consent_text_version).toBe(ConsentText.AFTER_VISIT_CONSENT_VERSION);
+    });
+
+    it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {
+      const f = await deferredAccept();
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ first_visit_date: day(0) });
+      await perform(f.parentId, f.customerId);
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId) => {
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', paid_at: new Date() });
+        return { ok: true };
+      });
+      await sweep();
+      const paid = await trx('invoices').where({ id: f.invoiceId }).first();
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(paid);
+      const term = await trx('annual_prepay_terms').where({ id: f.termId }).first('status', 'coverage_visit_count');
+      expect(term.status).toBe('active');
+      const visits = await trx('scheduled_services').where({ customer_id: f.customerId })
+        .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'rescheduled']);
+      expect(visits).toHaveLength(term.coverage_visit_count);
+      expect(await trx('invoices').where({ customer_id: f.customerId }).whereNot({ id: f.invoiceId })).toEqual([]);
+    });
+
+    it('sends the pay link and rings the office on a decline, and keeps later visits held (R2)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
+      await sweep();
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect((await jobOf(f)).status).toBe('delivered_fallback');
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({
+        area: 'Billing', subject: { type: 'invoice', id: f.invoiceId },
+      }), { dedupeKey: `paf-prepay-charge-failed:${f.estimateId}` });
+      expect(await covers(f.childId)).toBe(true);
+    });
+  });
+});
