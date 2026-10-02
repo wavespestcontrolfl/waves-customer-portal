@@ -135,6 +135,14 @@ describe('the visit step', () => {
     expect(screen.queryByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeNull();
   });
 
+  test('a visit the house mix is not for (an initial cleanout) starts with nothing picked', async () => {
+    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' } });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+    expect(screen.queryByText(/Taurus SC 4 fl oz/)).toBeNull();
+    expect(screen.queryByText(/Atticus Talak/)).toBeNull();
+  });
+
   test('the tracker holds the report until a rating is picked', async () => {
     await openSheet(makeRequest());
     expect(screen.getByText('Pick the pest activity, 1 to 5.')).toBeTruthy();
@@ -417,7 +425,15 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(screen.getByText('Nothing was sent: customer opted out of texts.')).toBeTruthy();
+    expect(screen.getByText('No text or app message went out: customer opted out of texts.')).toBeTruthy();
+  });
+
+  test('no phone on file names the message that did not go, never that nothing went (the report email goes on its own)', async () => {
+    await openSheet(makeRequest({ complete: [{ success: true, completionSmsStatus: 'no_phone' }] }));
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByText('No phone on file, so no text or app message went out. The report is in the customer’s portal.')).toBeTruthy();
   });
 
   test('a promise marked Done shows as closed only when the server closed it', async () => {
@@ -506,7 +522,12 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(request.bodies('/complete')[0]).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
+    const [body] = request.bodies('/complete');
+    expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
+    // Echoed for the server to re-check under its lock: an office change to
+    // or from a callback since the sheet opened is refused, never billed on
+    // the stale choice.
+    expect(body.expectedVisit).toMatchObject({ isCallback: true });
   });
 
   test('a perimeter heard in the note waits for the trace, which gives the sprays their length', async () => {

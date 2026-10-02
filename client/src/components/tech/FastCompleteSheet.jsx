@@ -66,7 +66,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
-import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
+import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
@@ -300,6 +300,22 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
   };
 }
 
+// The report flow takes visits the house mix is not for (an initial
+// cleanout), so it seeds only where the recap modal and the full form would;
+// a re-service sheet always starts with it.
+function seedsHouseMix(visit, { serviceType, reportFlow }) {
+  return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
+}
+
+// The identity the server re-checks under its lock. The report flow's pay
+// link and review ask follow whether the visit is a free callback, so that
+// flow echoes it too.
+function sheetVisitIdentity(visit, reportFlow) {
+  return reportFlow && typeof visit.isCallback === 'boolean'
+    ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback }
+    : recapVisitIdentity(visit);
+}
+
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
@@ -338,8 +354,10 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
           // The house totals are in the unit the resolver gives (4 fl oz), so
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
-          rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount })),
-          visitIdentity: recapVisitIdentity(visit),
+          rows: seedsHouseMix(visit, { serviceType, reportFlow })
+            ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
+            : [],
+          visitIdentity: sheetVisitIdentity(visit, reportFlow),
           rating: {
             allowed: ratingContract?.allowed === true,
             scaleLabels: ratingContract?.scaleLabels || null,

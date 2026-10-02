@@ -204,6 +204,28 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
+  test('a negative after a fact is about something else (codex r3 on #5538)', () => {
+    const note = 'Sprayed around the outside of the house with no issues. Baited inside, nothing found.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed around the outside of the house' }, { area: 'inside', quote: 'Baited inside' }],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside', 'Outside']);
+    expect(facts.unclearAreas).toEqual([]);
+    expect(facts.spray).toMatchObject({ method: 'perimeter' });
+  });
+
+  test('a short denial right after a fact denies it, comma or not', () => {
+    const note = 'Checked for spiders none found. Inside not treated. The garage was not needed.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'Inside' }, { area: 'garage', quote: 'The garage' }],
+      pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
+      spray: { method: 'none', quote: '' },
+    }, note);
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Garage'], pests: [], spray: null });
+  });
+
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
     const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'none', quote: '' } }, note);

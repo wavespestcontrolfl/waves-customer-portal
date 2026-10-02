@@ -253,7 +253,8 @@ function recapServiceIdentity(svc, profile) {
     serviceKey: profile?.serviceKey || null,
     // A free callback booked under a regular service key: the Fast Complete
     // report flow treats it as the re-service it is (no pay link, no review
-    // ask). Not part of the echoed visit identity.
+    // ask), so that flow echoes it back and a visit the office changed to or
+    // from a callback meanwhile is refused (recapVisitIdentityChanged).
     isCallback: svc.is_callback === true,
   };
 }
@@ -446,6 +447,9 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
+  // Whether it is a free callback decides the pay link and the review ask
+  // the client sends, so a change to it is a changed visit.
+  if ('isCallback' in expected && (expected.isCallback === true) !== (locked.is_callback === true)) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};

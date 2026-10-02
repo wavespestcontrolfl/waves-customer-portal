@@ -431,25 +431,26 @@ export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
 }
 
 const money = (value) => `$${Number(value).toFixed(2)}`;
-// What became of the report text, from the completion's own status and
-// reason: a held, blocked or failed text says so, never silence.
-// The completion's status says whether the report went, not how: a customer
-// who prefers the app gets it there, so the words never say "text".
+// What became of the report message, from the completion's own status and
+// reason: a held, blocked or failed message says so, never silence.
+// The status is the text or app message only: a customer who prefers the app
+// gets it there, so a sent message never says "text", and the report email
+// goes out on its own, so a message that did not go never says nothing went.
 const SMS_RESULT = {
   sent: () => 'The report went to the customer.',
   sending: () => 'The report is on its way to the customer.',
   deferred: () => 'The report is queued and goes out in the customer’s messaging hours.',
-  no_phone: () => 'No phone on file, so nothing was sent. The report is in the customer’s portal.',
+  no_phone: () => 'No phone on file, so no text or app message went out. The report is in the customer’s portal.',
   skipped_recap_sms_already_sent: () => 'A message already went to the customer for this visit.',
   suppressed_delivery_mode: () => 'Nothing was sent: this visit’s report is not sent to customers.',
-  blocked: (reason) => `Nothing was sent: ${reason || 'the customer’s message settings held it'}.`,
-  failed: (reason) => `The report did not go out${reason ? ` (${reason})` : ''}. The office can resend it.`,
+  blocked: (reason) => `No text or app message went out: ${reason || 'the customer’s message settings held it'}.`,
+  failed: (reason) => `The text or app message did not go out${reason ? ` (${reason})` : ''}. The office can resend it.`,
 };
 function smsLine(result) {
   const status = result?.completionSmsStatus;
   if (!status || status === 'not_requested') return null;
   const reason = String(result.completionSmsError || '').trim();
-  return SMS_RESULT[status]?.(reason) || `Nothing was sent to the customer${reason ? `: ${reason}` : ''}.`;
+  return SMS_RESULT[status]?.(reason) || `No text or app message went to the customer${reason ? `: ${reason}` : ''}.`;
 }
 
 function billLine(result) {
