@@ -3767,6 +3767,18 @@ async function protectedServiceContactCaller(customer, phone, conn = db) {
   }
 }
 
+// service_contacts_consent_at is ROW-level: persistCallSecondaryContact clears it
+// when a phone without explicit consent joins a stamped row, which would silently
+// stop appointment texts to every contact already authorized. A household contact
+// (no explicit consent on the call) therefore never takes a slot on an account
+// whose existing contacts are stamped; the proposed contact rides the review card
+// for the office to add. Pure.
+function householdContactWouldRevokeConsent(customer) {
+  if (!customer || !customer.service_contacts_consent_at) return false;
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  return SERVICE_CONTACT_SLOTS.some((slot) => String(customer[slot.phone] || '').trim());
+}
+
 function householdLinkCompleted(call) {
   let meta = call?.metadata;
   if (typeof meta === 'string') {
@@ -12538,8 +12550,15 @@ const CallRecordingProcessor = {
       let householdPersist = 'error';
       let householdIncomplete = false;
       try {
-        householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
-        householdIncomplete = householdPersist === 'skipped_slot_race';
+        const consentRow = await db('customers').where({ id: customerId })
+          .first('service_contacts_consent_at', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone');
+        if (householdContactWouldRevokeConsent(consentRow)) {
+          // Existing authorized contacts keep their texts; this contact is on the card.
+          householdPersist = 'deferred_existing_contact_consent';
+        } else {
+          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
+          householdIncomplete = householdPersist === 'skipped_slot_race';
+        }
       } catch (persistErr) {
         householdIncomplete = true;
         logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
@@ -22669,6 +22688,7 @@ CallRecordingProcessor._test = {
   householdLinkFromCall,
   householdLinkCompleted,
   serviceContactOnlyPhone,
+  householdContactWouldRevokeConsent,
   protectedServiceContactCaller,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,

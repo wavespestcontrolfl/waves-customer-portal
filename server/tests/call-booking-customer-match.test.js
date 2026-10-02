@@ -32,7 +32,7 @@ const { _test } = require('../services/call-recording-processor');
 
 const {
   validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
-  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller,
+  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller, householdContactWouldRevokeConsent,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
@@ -208,6 +208,21 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
     expect(source).not.toMatch(/!createdCustomerFromCall && !isOutboundCall\(call\)\s*&& require/);
     expect(source).toContain('const householdIdentityProtected = householdLinkedThisPass || slotOnlyCaller;');
     expect(source).toContain('if (customerId && householdIdentityProtected) {');
+  });
+
+  test('a household contact never revokes the row-level consent of contacts already authorized', () => {
+    const stamp = new Date();
+    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact_phone: '+19415550150' })).toBe(true);
+    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact3_phone: '+19415550150' })).toBe(true);
+    // stamp with no contact phone has nobody to protect; no stamp means nothing to clear
+    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact_phone: ' ' })).toBe(false);
+    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: null, service_contact_phone: '+19415550150' })).toBe(false);
+    expect(householdContactWouldRevokeConsent(null)).toBe(false);
+    // wiring: the check precedes the slot write and the outcome is final (marked complete), the contact stays on the card payload
+    expect(source).toContain("householdPersist = 'deferred_existing_contact_consent';");
+    expect(source).toContain('if (householdContactWouldRevokeConsent(consentRow)) {');
+    const cardPayload = source.slice(source.indexOf("matched_customer_id: String(customerId),"));
+    expect(cardPayload.slice(0, 600)).toContain('household_contact: {');
   });
 
   test('RETRY: a persisted link whose contact/card writes never finished is resumed; a completed one is not repeated', () => {
