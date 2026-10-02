@@ -62,6 +62,12 @@ const COMBINATION_NOUN = '(?:combo|combination)(?!\\s+of\\b(?!\\s+(?:the\\s+|my\
 const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
 const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
 const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');
+// …but "combination of" next to ANY access point in the same segment ("blue
+// is the combination of the side gate") is a credential again (Codex r11).
+const BARE_COMBINATION_RE = /\b(?:combo|combination)s?\b/i;
+const COMBINATION_ACCESS_POINT_RE = /\b(?:gates?|garage|doors?|locks?|padlocks?|lock\s*box(?:es)?|lockbox(?:es)?|keypads?|sheds?|safe|entry|entrance)\b/i;
+const accessCodeNounIn = (seg) => ACCESS_CODE_NOUN_RE.test(seg)
+  || (BARE_COMBINATION_RE.test(seg) && COMBINATION_ACCESS_POINT_RE.test(seg));
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
 // Lowercase credentials (Codex r7: "gate code blue", "the gate code is
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
@@ -102,7 +108,7 @@ function redactAccessCodes(text) {
   }
   // Alphanumeric credential pass, per sentence-ish segment.
   out = out.split(/([.;\n])/).map((seg) => {
-    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
+    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !accessCodeNounIn(seg)) return seg;
     let masked = seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
       ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
     ));

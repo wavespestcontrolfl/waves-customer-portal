@@ -6334,9 +6334,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // customer told us. Frozen whether or not the card gate is on yet
           // (a gate flip must not strand visits completed while it was dark);
           // inert data until the card renders. Callbacks with something on
-          // file only; the helper is pure and returns null otherwise.
-          const frozenReserviceRequest = require('../services/service-report/reservice-report-card')
-            .freezeReserviceRequest(lockedSvcRow || svc);
+          // file only; the helper is pure and returns null otherwise. A
+          // backdated backlog closeout (backfill) never freezes: the booking
+          // words may have been edited since the real visit, and a record
+          // completed without the freeze carries no request (Codex r11).
+          const frozenReserviceRequest = isBackfillCompletion ? null
+            : require('../services/service-report/reservice-report-card')
+              .freezeReserviceRequest(lockedSvcRow || svc);
           if (frozenReserviceRequest) serviceData.reserviceRequest = frozenReserviceRequest;
           // Freeze the appointment's add-on line identities with the
           // completion (codex P2 on #3189): schedule add-on rows are

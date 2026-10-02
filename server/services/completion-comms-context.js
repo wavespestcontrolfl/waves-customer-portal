@@ -324,8 +324,14 @@ const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|usi
 // Judged on the whole sentence, never per clause: a fronted or pronoun-linked
 // access point ("For the side gate, use blue…", "The side gate is on the left
 // and blue opens it") must still drop it.
+// "combination of …" passes ACCESS_SENTENCE_RE as pest talk ("a combination
+// of ants and roaches"), but beside any access point in the same sentence
+// ("blue is the combination of the side gate") it is a credential (Codex r11).
+const COMBINATION_WORD_RE = /\b(?:combo|combination)s?\b/i;
+const COMBINATION_LOCK_RE = /\b(?:padlocks?|lock\s*box(?:es)?|sheds?)\b/i;
 const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
-  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence));
+  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence))
+  || (COMBINATION_WORD_RE.test(sentence) && (ACCESS_POINT_RE.test(sentence) || COMBINATION_LOCK_RE.test(sentence)));
 // And a sentence reaches the writer only when it talks about pests or the
 // signs they leave: scheduling, thanks, a bare reply, and any other way of
 // phrasing an access detail ("blue works at the side gate") never do.

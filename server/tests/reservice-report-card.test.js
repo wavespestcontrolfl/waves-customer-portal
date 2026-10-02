@@ -660,3 +660,22 @@ describe('Codex r10 (#5542)', () => {
     expect(out.whatWeDid.where).toBe('the thin turf areas and driveway edges');
   });
 });
+
+describe('Codex r11 (#5542)', () => {
+  const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+  test.each([
+    ['Ants are in the kitchen and blue is the combination of the side gate.', null],
+    ['Roaches inside. Waves is the combo for the back yard padlock.', 'Roaches inside.'],
+    ['A combination of ants and roaches is in the kitchen.', 'A combination of ants and roaches is in the kitchen.'],
+  ])('a combination phrase that resolves to an access point never reaches the card: %p -> %p', (text, expected) => {
+    expect(words(text)).toBe(expected);
+  });
+  test('the card filter alone catches "combination of the side gate"', () => {
+    const own = card(frozenService({ version: 1, source: 'picker', text: 'Ants inside. Blue is the combination of the side gate.', pests: [] }), { scrub: (t) => t });
+    expect(own.youToldUs.text).toBe('Ants inside.');
+  });
+  test('a backdated (backfill) closeout never freezes the booking words', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toMatch(/const frozenReserviceRequest = isBackfillCompletion \? null\s*: require\('\.\.\/services\/service-report\/reservice-report-card'\)\s*\.freezeReserviceRequest\(lockedSvcRow \|\| svc\);/);
+  });
+});

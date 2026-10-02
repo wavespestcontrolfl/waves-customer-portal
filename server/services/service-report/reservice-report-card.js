@@ -157,7 +157,7 @@ const KEY_LOCATION_RE = new RegExp(
   + '|(?:gate|door|garage|alarm|entry|access)\\s+codes?'
   + '|(?:under|beneath|behind)\\s+(?:the\\s+)?(?:door\\s*)?mat|doormat'
   + `|${LOCK_WORD}\\s+(?:combination|combo)s?`
-  + `|(?:combination|combo)s?\\s+(?:lock|(?:to|for|on)\\s+(?:the\\s+|my\\s+|our\\s+)?${LOCK_WORD}))\\b`,
+  + `|(?:combination|combo)s?\\s+(?:lock|(?:to|for|on|of)\\s+(?:[\\w'-]+\\s+){0,3}?${LOCK_WORD}))\\b`,
   'i',
 );
 // Any pesticide-safety claim: "safe", "pet-safe", "kid friendly", "non-toxic",
