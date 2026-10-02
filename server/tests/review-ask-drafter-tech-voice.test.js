@@ -176,7 +176,10 @@ describe('draftTechVoice', () => {
           ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ["I can't wait too long, I need to go to work"] }
           : { sentence, ask_only: true, greeting_only: false, off_limits: false, supported: false, quotes: [] })) },
     }));
-    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email' })).toBe(email.body);
+    // The visit was a week ago, so "a week since the first treatment" is provable.
+    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    mockTables.sms_log = SMS.map((m) => ({ ...m, created_at: weekAgo }));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email', serviceDate: weekAgo })).toBe(email.body);
   });
 });
 
@@ -587,6 +590,31 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(notTechVoice('Ants were active in the kitchen. A Google review would help: {review_url}', 'Adam')).toBe(true);
     expect(notTechVoice("It's Adam. Ants were active in the kitchen. Google review: {review_url}", 'Adam')).toBe(false);
     expect(notTechVoice("It's great. Ants were active. {review_url}", 'Adam')).toBe(true);
+  });
+
+  test('#5524 r14 P1: every other relative time is closed off — durations need a weeks quote, "a week since the visit" only 6-8 days on', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const et = require('../utils/datetime-et').etCalendarDayOf;
+    const today = et(new Date());
+    const weekAgo = et(new Date(Date.now() - 7 * 86400000));
+    const monthAgo = et(new Date(Date.now() - 30 * 86400000));
+    expect(timingUnsupported('I saw ants last week.', ['saw ants'], [], today)).toBe(true);
+    expect(timingUnsupported('You mentioned ants 3 days ago.', ['ants'], [], today)).toBe(true);
+    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity for up to two weeks is normal'], [], today)).toBe(false);
+    expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity'], [], today)).toBe(true);
+    expect(timingUnsupported('It has been a week since the first treatment.', ['first of two treatments'], [], weekAgo)).toBe(false);
+    expect(timingUnsupported('It has been a week since the first treatment.', ['first of two treatments'], [], monthAgo)).toBe(true);
+  });
+
+  test('#5524 r14 P1: a forward "see you" is a promise; "good to see you today" is not', () => {
+    const rec = 'I need to go to work.';
+    const v = (body) => Drafter.verifyTechVoiceDraft(
+      { body, details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam', termite: false, corpus: rec, ownWords: rec },
+    );
+    expect(v('I know you had to get to work. See you Friday. Google review: {review_url}')).toBe('commitment');
+    expect(v('I know you had to get to work. Looking forward to the next one. Google review: {review_url}')).toBe('commitment');
+    expect(v('Good to see you today, I know you had to get to work. Google review: {review_url}')).toBeNull();
   });
 
   test('a bare link after a question stays with its sentence', () => {

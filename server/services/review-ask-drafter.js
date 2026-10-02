@@ -408,7 +408,7 @@ const STEER_RE = /\binstead of\b|\brather than\b|\bprivately\b|\bbefore (?:you )
 // A review sentence conditioned on satisfaction ("if we earned it", "if you
 // were happy", "if you loved the results"). "if you have a minute" is not a
 // satisfaction condition and stays allowed.
-const SATISFACTION_CONDITION_RE = /\b(?:if|unless|provided)\b[^.!?]*\b(?:happy|pleased|satisf\w*|earn(?:ed)?|enjoy\w*|lov(?:e|ed)|lik(?:e|ed)|good job|great job|hit the mark|went well|worked|did right)\b/i;
+const SATISFACTION_CONDITION_RE = /\b(?:if|unless|provided)\b[^.!?]*\b(?:happy|pleased|satisf\w*|earn(?:ed)?|enjoy\w*|lov(?:e|ed)|lik(?:e|ed)|good job|great job|hit the mark|went well|worked|did right|deserv\w*|merit\w*|worth\s+it|earned\s+it)\b/i;
 // Routing an unhappy customer to a reply instead of a review, even split
 // across sentences: "If anything still looks off, just reply. Otherwise a
 // quick review...", "Text me if something's not right", "Otherwise ... review".
@@ -753,7 +753,7 @@ const RESULT_CLAIM_RE = /\b(?:fix(?:e[sd]|ing)?|repair(?:s|ed|ing)?|replac(?:e|e
 const SENSITIVE_TOPIC_RE = /\b(?:surger(?:y|ies)|hospital\w*|sick|illness|cancer|chemo\w*|diagnos\w*|doctors?|medical|medications?|pregnan\w*|injur\w*|recover(?:y|ing)|funeral|passed away|died|death|disabilit\w*|therap\w*|covid|flu|asthma|diabet\w*|stroke|dialysis|heart|blood|pain|allerg\w*|surgeon|clinic|nurse|health\w*|rehab\w*|disease|infection|fever|cough|symptoms?|prescription|pills?|wheelchair|walker|cane|broken|fractur\w*|pesticides?|insecticides?|herbicides?|termiticides?|fungicides?|chemicals?|talstar|talak|bifenthrin|alpine|termidor|fipronil|taurus|advion|maxforce|sedgehammer|dinotefuran|cypermethrin|deltamethrin|imidacloprid|son|daughter|husband|wife|spouse|kids?|child(?:ren)?|tenants?|neighbou?rs?|mom|mother|dad|father|roommates?|cleaners?|housekeepers?|nanny|grand(?:ma|pa|mother|father|kids?|son|daughter)|in-laws?|let me in|answered the door|opened the door|rent|debt|money|afford\w*|bills?|invoices?|payments?|paid|pay|paying|balance|owe[sd]?|owing|loans?|mortgage|bankrupt\w*|laid off|unemploy\w*|budget|prices?|costs?|charge[sd]?|fees?)\b/i;
 // Same for promises and future visits: the writer never sees verified
 // scheduling data, so "I'll be back tomorrow" cannot be checked and is refused.
-const COMMITMENT_RE = /\b(?:i'll|i will|we'll|we will|i'm going to|we're going to|gonna|be back|come back|coming back|stop by|swing by|up next|next (?:visit|time|treatment|service|week|month)|tomorrow|tonight|later this week|scheduled|appointment|second visit|follow[- ]?up visit)\b/i;
+const COMMITMENT_RE = /\b(?:i'll|i will|we'll|we will|i'm going to|we're going to|gonna|be back|come back|coming back|stop by|swing by|up next|next (?:visit|time|treatment|service|week|month)|tomorrow|tonight|later this week|scheduled|appointment|second visit|follow[- ]?up visit)\b|\bsee\s+you\b(?!\s+(?:today|this\s+(?:morning|afternoon)|earlier))|\blooking\s+forward\b|\bcatch\s+you\b|\btalk\s+soon\b|\buntil\s+next\b/i;
 const DETAIL_STOP = new Set(`the and but for from with that this you your yours our its his her him she they them their
   was were are have has had get got just also very really some any all can could would should will about
   into over then than there here what when where which who how not too out off one two
@@ -1023,10 +1023,31 @@ function quoteSharesContent(sentence, quote, names) {
 // word coverage, so this is where they are proved.
 const SAME_DAY_RE = /\b(?:today|this\s+(?:morning|afternoon|evening)|tonight)\b/i;
 const YESTERDAY_RE = /\b(?:yesterday|last\s+night)\b/i;
+// Every other relative time is checked too, by closing the set: a duration
+// ("for up to two weeks") needs a cited quote that talks in weeks; "a week
+// since the visit" holds only 6-8 days after it; any other relative time
+// ("last week", "3 days ago", "recently", "the other day") is refused,
+// because nothing in code can prove it.
+const DURATION_RE = /\b(?:for\s+)?(?:up\s+to\s+)?(?:a\s+couple\s+(?:of\s+)?|two|2|a\s+few|several)\s+weeks?\b/gi;
+const VISIT_WEEK_RE = /\b(?:a|one)\s+week\s+(?:since|after|on\s+from|from)\s+(?:the|your|our)\s+(?:first\s+)?(?:visit|treatment|service)\b/gi;
+const OTHER_RELATIVE_RE = /\b(?:last|next|this|past|coming)\s+(?:week|month|year|weekend)\b|\b\d+\s+(?:days?|weeks?|months?|years?)\b|\b(?:a|one|two|three|few|couple(?:\s+of)?|several)\s+(?:days?|weeks?|months?|years?)\b|\b(?:ago|earlier|recently|lately)\b|\bthe\s+other\s+day\b/i;
 function timingUnsupported(sentence, quotes, recordLines, visitDay) {
   const today = etCalendarDayOf(new Date());
-  const required = SAME_DAY_RE.test(sentence) ? today
-    : YESTERDAY_RE.test(sentence) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
+  let rest = String(sentence);
+  if (DURATION_RE.test(rest)) {
+    if (!quotes.some((q) => /\bweeks?\b/i.test(q))) return true;
+    rest = rest.replace(DURATION_RE, " ");
+  }
+  DURATION_RE.lastIndex = 0;
+  if (VISIT_WEEK_RE.test(rest)) {
+    const daysSince = visitDay ? Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${visitDay}T12:00:00Z`)) / 86400000) : null;
+    if (daysSince == null || daysSince < 6 || daysSince > 8) return true;
+    rest = rest.replace(VISIT_WEEK_RE, " ");
+  }
+  VISIT_WEEK_RE.lastIndex = 0;
+  if (OTHER_RELATIVE_RE.test(rest)) return true;
+  const required = SAME_DAY_RE.test(rest) ? today
+    : YESTERDAY_RE.test(rest) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
   if (!required) return false;
   return !quotes.some((q) => {
     const nq = normalizeForMatch(q);
