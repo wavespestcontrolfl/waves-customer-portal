@@ -263,10 +263,15 @@ function canonicalV2Secondary(extraction) {
   for (const [k, v] of Object.entries(mirror)) {
     if ([null, undefined, '', 'unknown'].includes(filled[k])) filled[k] = v;
   }
+  // A flag rides only with the role of the shape that stated it: a mirror
+  // whose (specific) role conflicts with the canonical one lends no flags —
+  // a same-phone 'lender' mirror never makes a 'spouse_partner' singleton
+  // on-site (fail closed).
+  const mirrorFlagsCarry = mirror.role === filled.role;
   return {
     ...filled,
-    wants_appointment_texts: single.wants_appointment_texts || mirror.wants_appointment_texts,
-    on_site: single.on_site || mirror.on_site,
+    wants_appointment_texts: single.wants_appointment_texts || (mirrorFlagsCarry && mirror.wants_appointment_texts),
+    on_site: single.on_site || (mirrorFlagsCarry && mirror.on_site),
   };
 }
 

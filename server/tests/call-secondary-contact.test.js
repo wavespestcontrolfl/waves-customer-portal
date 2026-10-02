@@ -1008,6 +1008,14 @@ describe('on-site flags through the V1/V2 resolution', () => {
     expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({}, { secondary_contact: entry(), secondary_contacts: [other] }))).toBe(false);
   });
 
+  test('a same-person mirror with a CONFLICTING role lends no flags (fail closed)', () => {
+    const lenderMirror = { secondary_contact: entry({ role: 'spouse_partner' }), secondary_contacts: [entry({ role: 'lender', wants_appointment_texts: true, on_site: true })] };
+    const canon = canonicalV2Secondary(lenderMirror);
+    expect(canon.role).toBe('spouse_partner');
+    expect(!!canon.on_site || !!canon.wants_appointment_texts).toBe(false);
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({}, lenderMirror))).toBe(false);
+  });
+
   test('entries 2+ (V2 array only) keep their own flags', () => {
     const second = { ...entry({ wants_appointment_texts: true }), name_full: 'Sample Tenant', first_name: 'Sample', last_name: 'Tenant', phone_e164: '+15550100888', role: 'tenant' };
     const list = resolveCallSecondaryContacts({}, { secondary_contact: entry(), secondary_contacts: [entry(), second] });
