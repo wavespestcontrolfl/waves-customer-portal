@@ -421,4 +421,26 @@ describe('TechLayout staff-session verification', () => {
     view.unmount();
     expect(globalThis.fetch).toBe(fetchMock);
   });
+
+  it('ignores a verification answer that lands after another tab signed in, and checks the new login', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-login-a');
+    let answerA;
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.headers?.Authorization === 'Bearer fixture-login-a') return new Promise((resolve) => { answerA = resolve; });
+      if (String(url).includes('/admin/auth/me')) return Promise.resolve(response(200, { id: 'tech-b', name: 'Fixture B', role: 'technician' }));
+      return Promise.resolve(response(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderTech();
+    await vi.waitFor(() => expect(answerA).toBeTypeOf('function'));
+    localStorage.setItem('waves_admin_token', 'fixture-login-b');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-b', name: 'Fixture B', role: 'technician' }));
+    await act(async () => { answerA(response(200, { id: 'tech-a', name: 'Fixture A', role: 'technician' })); });
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves_admin_user')).id).toBe('tech-b');
+    expect(screen.queryByText(/Fixture A/)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('/admin/auth/me') && init?.headers?.Authorization === 'Bearer fixture-login-b')).toBe(true);
+  });
 });

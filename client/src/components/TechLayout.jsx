@@ -45,6 +45,10 @@ export default function TechLayout() {
   // Pages read identity from here, so a failed profile cache write cannot
   // leave them without the signed-in tech's id.
   const [staffProfile, setStaffProfile] = useState(null);
+  // Bumped when a verification answer arrives for a token that is no longer
+  // the stored one (another tab signed in): the check reruns for the new
+  // login instead of applying the old login's answer.
+  const [verifyRun, setVerifyRun] = useState(0);
   const [authStatus, setAuthStatus] = useState(() => (
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
@@ -111,6 +115,7 @@ export default function TechLayout() {
           throw error;
         }
         if (cancelled) return;
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
 
         // The freshly verified profile is what renders; a failed cache write
         // (quota, private mode) must not drop to the stored — possibly
@@ -132,6 +137,7 @@ export default function TechLayout() {
       }, (fetchErr) => { throw transport(fetchErr); })
       .catch((error) => {
         if (cancelled) return;
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (error?.status === 401 || error?.invalidProfile) {
           clearStaffAuth();
           setAuthStatus('unauthenticated');
@@ -166,7 +172,7 @@ export default function TechLayout() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [navigate]);
+  }, [navigate, verifyRun]);
 
   // Any staff API call on these screens that the server answers with 401
   // for the current token ends the session here, whichever handler made it:
