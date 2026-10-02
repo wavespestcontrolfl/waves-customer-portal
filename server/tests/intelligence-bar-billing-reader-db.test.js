@@ -125,7 +125,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       { customer_id: G, payment_date: day(-4), amount: 10, status: 'paid', processor: 'stripe', description: 'Stripe card payment', metadata: json({ waves_invoice_id: gAlias.id }) },
     ]);
     // Legacy / card-on-file rows carry no invoice metadata: linked by the invoice's PaymentIntent or charge id. A combined sibling's row (explicit other invoice_id, same PaymentIntent) is not this invoice's.
-    const gLegacy = await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
+    await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
     await db('payments').insert([
       { customer_id: G, payment_date: day(-3), amount: 70, status: 'refunded', refund_amount: 20, refund_status: 'succeeded', processor: 'stripe', stripe_payment_intent_id: `pi_legacy_${run}`, description: 'Card on file', metadata: json({}) },
       { customer_id: G, payment_date: day(-3), amount: 5, status: 'paid', processor: 'stripe', stripe_charge_id: `ch_legacy_${run}`, description: 'Charge-linked', metadata: json({}) },

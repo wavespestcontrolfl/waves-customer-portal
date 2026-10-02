@@ -110,23 +110,25 @@ old list).
   W9) are `record` reads and admin-only (technicians get no billing reads; the
   action registry refuses them for any technician and the route lists them only
   in the admin-only infra set and `ADMIN_ONLY_TOOL_NAMES`). Both are read-only
-  and in no write-gate set. The list takes `customer_id`, `customer_name` or
-  `phone` through the same task-context selector handling and
+  and in no write-gate set. The list takes `customer_id` or `customer_name`
+  (no phone selector: the current-request grammar cannot bind an unscoped phone
+  to a billing read) through the same task-context selector handling and
   `comms-tools.resolveCustomer` as the other customer readers (an ambiguous
-  name returns candidates, a name or phone that disagrees with the id is
+  name returns candidates, a name that disagrees with the id is
   `selector_conflict`); the detail takes `invoice_id`, which `validateRecordTarget`
-  maps to the owning customer so it must belong to a task customer. Balances are
-  not re-derived: amount due is `invoiceAmountDue` (total minus applied credit),
-  collectibility is `INVOICE_UNCOLLECTIBLE_STATUSES`, and the invoice rows, the
-  unpaid and overdue sets and their counts come from `InvoiceService.list`, the
-  Invoices page's own reader. The detail's payments timeline keeps four kinds of
-  evidence apart by `type` (`recorded_payment` and `payment_attempt` from the
-  payments table, `stripe_charge_attempt`, `stripe_unreconciled_charge`,
-  `credit_movement`) and marks `received: true` only for a recorded successful
-  payment or a Stripe state of succeeded; every other state is an attempt with
-  its state, never paid. The live Stripe PaymentIntent state is not stored in the
-  portal and is reported as unknown. Card numbers, full emails and pay-link
-  tokens are never returned.
+  maps to the owning customer so it must belong to a task customer. The readers
+  derive no money state of their own: an invoice's balance is stated only when
+  both payment-path fences pass, `assertInvoiceCollectible` (invoice-helpers.js)
+  and the read-only `assertNoInvoiceChargeReconciliationPending` (stripe.js: no
+  writes, no locks). Otherwise `balance_due` is null with `collectible: false`,
+  the fence's reason and "needs reconciliation — check the Invoices page". Amount
+  due is `invoiceAmountDue`; the invoice rows and the unpaid and overdue counts
+  come from `InvoiceService.list`. `account_summary.total_due` sums only invoices
+  whose fences passed, counts the ones needing reconciliation separately, and is
+  null with a warning when a read is incomplete. The detail's `recorded_payments`
+  are informational payments-table rows (amount, status, date, method, refund,
+  payer) with no received / not-received verdict. Card numbers, full emails and
+  pay-link tokens are never returned.
 
 ## Deferred
 
