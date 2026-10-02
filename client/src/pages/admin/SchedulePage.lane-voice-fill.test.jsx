@@ -141,6 +141,38 @@ describe('lane voice fill on Generate', () => {
     expect(groupSelect('bed_bug_evidence').value).toBe('Live adults');
   });
 
+  it('an edited report, then a Generate that fills another group: a later edit keeps the fill (codex local r1 on #5628)', async () => {
+    let reads = 0;
+    laneAnswer = () => {
+      reads += 1;
+      const findings = reads === 1 ? READ.findings.filter((entry) => entry.group !== 'bed_bug_prep') : READ.findings.filter((entry) => entry.group === 'bed_bug_prep');
+      return { ok: true, json: async () => ({ ...READ, areas: reads === 1 ? READ.areas : [], findings }) };
+    };
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    const notes = document.querySelector('textarea');
+    fireEvent.change(notes, { target: { value: `${notes.value}\n\nCustomer asked about the couch cover.` } });
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'generate')).toHaveLength(2));
+    await waitFor(() => expect(groupSelect('bed_bug_prep').value).toBe('Preparation complete'));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    fireEvent.change(groupSelect('bed_bug_visit_stage'), { target: { value: 'Initial treatment' } });
+    await waitFor(() => expect(groupSelect('bed_bug_visit_stage').value).toBe('Initial treatment'));
+    expect(groupSelect('bed_bug_prep').value).toBe('Preparation complete');
+    expect(groupSelect('bed_bug_evidence').value).toBe('Live adults');
+  });
+
+  it('a second Generate with nothing new to fill keeps the words beside the values still standing (codex local r1 on #5628)', async () => {
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'generate')).toHaveLength(2));
+    expect(screen.getByText('Heard: “live ones on the couch seams”')).toBeTruthy();
+    expect(screen.getByText('Heard: “treated the master bedroom” · “the living room couch”')).toBeTruthy();
+  });
+
   it('a failed read fills nothing and the report is still written', async () => {
     laneAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
     await openForm(BED_BUG);

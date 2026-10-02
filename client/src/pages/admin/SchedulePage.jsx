@@ -16754,59 +16754,63 @@ export function CompletionPanel({
   // actions): a clash is left for a person to pick. Best effort: a failed
   // read fills nothing and Generate carries on.
   async function fillLaneFromNotes() {
-    const words = groundingNotes();
-    if (!words) return;
-    let heard;
-    try {
-      heard = await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
         method: "POST",
-        body: JSON.stringify({ note: words }),
-      });
-    } catch {
-      return;
-    }
-    if (!heard?.available || heard.status !== "read") return;
-    const groups = specialtyCompletion.findingGroups || [];
-    const picked = activeSelectedLabels(selectedObservationLabels);
+        body: JSON.stringify({ note }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read") return;
+    // A value fills only an unpicked group and only beside what is chosen:
+    // the tap's own rules decide a clash (reconcile drops a value the new
+    // one excludes; the selected actions refuse a value), and a clash is
+    // left for a person.
     const actions = activeSelectedLabels(selectedProtocolActionLabels);
-    const exclusions = specialtyCompletion.observationExclusions || [];
-    const clashes = (value, chosen) => exclusions.some(({ value: one, excludes }) => (
-      (one === value && excludes.some((other) => chosen.includes(other)))
-      || (excludes.includes(value) && chosen.includes(one))
-    ));
+    const chosen = activeSelectedLabels(selectedObservationLabels);
+    const unclear = new Set(heard.unclearGroups);
     const findings = [];
-    const unclear = new Set(Array.isArray(heard.unclearGroups) ? heard.unclearGroups : []);
-    for (const finding of Array.isArray(heard.findings) ? heard.findings : []) {
-      const group = groups.find((item) => item.key === finding?.group);
-      if (!group || !group.options.some((option) => option.value === finding.value)) continue;
-      if (group.options.some((option) => picked.includes(option.value))) continue;
-      const chosen = [...picked, ...findings.map((entry) => entry.value)];
-      if (clashes(finding.value, chosen) || specialtyFindingActionConflict(specialtyCompletion, [...chosen, finding.value], actions)) {
+    for (const finding of heard.findings) {
+      const group = specialtyCompletion.findingGroups.find((item) => (
+        item.key === finding.group && item.options.some((option) => option.value === finding.value)
+      ));
+      if (!group || group.options.some((option) => chosen.includes(option.value))) continue;
+      const kept = reconcileDependentFindingSelections(specialtyCompletion, chosen, group, finding.value);
+      if (chosen.some((value) => !kept.includes(value)) || specialtyFindingActionConflict(specialtyCompletion, kept, actions)) {
         unclear.add(group.key);
-        continue;
-      }
-      findings.push({ group: group.key, value: finding.value, quote: finding.quote });
-    }
-    const areas = areasServiced.length
-      ? []
-      : (Array.isArray(heard.areas) ? heard.areas : []).filter((entry) => areaOptions.includes(entry?.area));
-    if (findings.length || areas.length) {
-      // A fill changes the record an installed report was written from, as
-      // a tap does: the report goes and the tech's own notes, with their
-      // marker lines, come back before the fill's markers are written, so a
-      // later edit never restores notes the fill's picks are missing from
-      // (pre-push P1). Mirrors handleSpecialtyFindingChange.
-      const detached = invalidateGeneratedReportOnTypedEdit();
-      if (areas.length) {
-        lawnAreasInitializedRef.current = true;
-        setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
-      }
-      for (const { value } of findings) {
-        if (!detached) setNotes((current) => (current.trim() ? `${current.trimEnd()}\n[Found] ${value}` : `[Found] ${value}`));
-        appendUniqueLabel(setSelectedObservationLabels, value);
+      } else {
+        chosen.push(finding.value);
+        findings.push(finding);
       }
     }
-    setLaneHeard({ areas, findings, unclear: [...unclear] });
+    const areas = areasServiced.length ? [] : heard.areas.filter((entry) => areaOptions.includes(entry.area));
+    if (findings.length || areas.length) applyLaneFill(findings, areas);
+    // Words heard earlier stay beside values still standing; a group or
+    // area filled again takes its new words.
+    setLaneHeard((prev) => ({
+      areas: [...(prev?.areas || []).filter((entry) => !areas.some((next) => next.area === entry.area)), ...areas],
+      findings: [...(prev?.findings || []).filter((entry) => !findings.some((next) => next.group === entry.group)), ...findings],
+      unclear: [...unclear],
+    }));
+  }
+  // A fill changes the record an installed report was written from, as a
+  // tap does: the report goes and the tech's own notes, with their marker
+  // lines, come back before the fill's markers are written (pre-push P1;
+  // mirrors handleSpecialtyFindingChange). While the picks stay detached
+  // from the notes (an edited report), the notes an edit would bring back
+  // get the markers instead, so a later restore keeps the fill (codex local
+  // r1 on #5628).
+  function applyLaneFill(findings, areas) {
+    const detached = invalidateGeneratedReportOnTypedEdit();
+    const withMarkers = (text) => [String(text || "").trimEnd(), ...findings.map(({ value }) => `[Found] ${value}`)]
+      .filter(Boolean).join("\n");
+    if (!detached) setNotes(withMarkers);
+    else if (preGenerationNotesRef.current != null) preGenerationNotesRef.current = withMarkers(preGenerationNotesRef.current);
+    for (const { value } of findings) appendUniqueLabel(setSelectedObservationLabels, value);
+    if (areas.length) {
+      lawnAreasInitializedRef.current = true;
+      setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
+    }
   }
   // The report itself, from the form as it stands.
   async function runGenerate() {
