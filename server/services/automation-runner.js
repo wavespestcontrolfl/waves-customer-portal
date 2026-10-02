@@ -25,7 +25,9 @@ const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_em
 
 function substitute(text, customer) {
   if (!text) return text;
-  const first = customer.first_name || customer.firstName || '';
+  // 'there' for a customer with no first name on file (call-created on a last
+  // name alone): never "Hi  —".
+  const first = customer.first_name || customer.firstName || 'there';
   const last = customer.last_name || customer.lastName || '';
   return text
     .replace(/\{\{\s*first_name\s*\}\}/g, first)
