@@ -504,7 +504,7 @@ describe('RelayConversation — explicit end after capture', () => {
     Object.defineProperty(convo, '_tools', { get: () => [], set: () => {}, configurable: true });
     stat.tools = [];
     await convo._runToolUseRound({ content: [{ type: 'tool_use', id: 't9', name: '4111111111111111', input: {} }] }, convo._buildToolCtx(), stat, new AbortController().signal).catch(() => {});
-    expect(stat.tools.map((t) => t.name)).toEqual(['unknown_tool']);
+    expect(stat.tools).toEqual([{ name: 'unknown_tool', ms: expect.any(Number), ok: false }]); // never a success
     expect(firstStamp).not.toBeNull();
     expect(stat.firstTokenAt).toBe(firstStamp); // round 2's first token did not overwrite it
     expect(stampRound).toBe(1); // stamped by round 1's tool_use block, not deferred to the text round

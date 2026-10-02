@@ -3167,7 +3167,7 @@ class RelayConversation {
       // The name is model-supplied: keep it only when this session offered
       // that tool, so an invented name (digits, a phone, a card) is never stored.
       const offered = Array.isArray(this._tools) && this._tools.some((t) => t && t.name === block.name);
-      if (Array.isArray(stat.tools)) stat.tools.push({ name: offered ? block.name : 'unknown_tool', ms: Math.round(toolMs), ok: toolOk });
+      if (Array.isArray(stat.tools)) stat.tools.push(offered ? { name: block.name, ms: Math.round(toolMs), ok: toolOk } : { name: 'unknown_tool', ms: Math.round(toolMs), ok: false });
       this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
       this._clearedFailures.tool ||= toolOk;
       results.push({ type: 'tool_result', tool_use_id: block.id, content: out });

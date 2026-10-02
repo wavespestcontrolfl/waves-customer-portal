@@ -77,6 +77,10 @@ const span = (from, to) => (from != null && to != null && to >= from ? to - from
  *   queued           — our reply arrived while earlier agent audio was still
  *                      playing, so Twilio logged no new start (the greeting
  *                      case); heard, but not a latency sample
+ *   ambiguous        — the previous prompt was still waiting for its first
+ *                      text when this one arrived. Twilio's events do not say which
+ *                      prompt a reply answers, so this turn's reply and audio
+ *                      are never attributed (not a latency sample)
  *   no_audio_event   — we replied but no agent audio start followed before
  *                      the call ended
  *   silent           — we never replied before the call ended
@@ -85,111 +89,112 @@ const span = (from, to) => (from != null && to != null && to >= from ? to - from
  *   agentOverCaller — agent audio started while the caller was mid-utterance
  *   callerBargeIns  — Twilio `interrupt` events during this turn's playback
  */
-function buildTurnTimeline(events = []) {
-  const evs = relayEvents(events);
-  const turns = [];
-  let customerSpeaking = false;
-  let agentSpeaking = false;
-  let lastEndOfCustomerSpeech = null;
-  let lastSttMs = null;
-  let pendingTtsMs = null;
-  let current = null;
-
-  const close = (turn, { byNextPrompt }) => {
-    if (!turn || turn.outcome != null) return;
-    if (turn.firstTokenAt != null && turn.agentPlayingAtFirstToken) turn.outcome = 'queued';
-    else if (byNextPrompt) turn.outcome = 'superseded';
-    else turn.outcome = turn.firstTokenAt != null ? 'no_audio_event' : 'silent';
+function freshState() {
+  return {
+    current: null,
+    customerSpeaking: false,
+    agentSpeaking: false,
+    lastEndOfCustomerSpeech: null,
+    lastSttMs: null,
+    pendingTtsMs: null,
   };
+}
 
+function closeTurn(turn, byNextPrompt) {
+  if (!turn || turn.outcome != null) return;
+  if (turn.firstTokenAt != null && turn.agentPlayingAtFirstToken) turn.outcome = 'queued';
+  else if (byNextPrompt) turn.outcome = 'superseded';
+  else turn.outcome = turn.firstTokenAt != null ? 'no_audio_event' : 'silent';
+}
+
+// One handler per Twilio event name; unlisted names are ignored.
+const TIMELINE_HANDLERS = {
+  start_of_customer_speech: (st) => { st.customerSpeaking = true; },
+  end_of_customer_speech: (st, e) => {
+    st.customerSpeaking = false;
+    st.lastEndOfCustomerSpeech = e.at;
+  },
+  stt_latency: (st, e) => { st.lastSttMs = e.latencyMs; },
+  tts_latency: (st, e) => { st.pendingTtsMs = e.latencyMs; },
+  prompt_sent: (st, e, turns) => {
+    // The previous prompt saw no reply text yet: the next reply events could
+    // be its late answer, so they are not attributed to this one. (Doubt
+    // reaches one turn only — a prompt whose reply was cut off for good
+    // must not leave every later turn unmeasured.)
+    const earlierPending = Boolean(st.current && !st.current.sawReply);
+    closeTurn(st.current, true);
+    st.current = {
+      index: turns.length + 1,
+      promptSentAt: e.at,
+      // Twilio sends the prompt the instant it marks end of speech (same
+      // millisecond in every observed call), but a back-to-back second
+      // prompt can arrive with no end marker of its own; the prompt time
+      // stands in, flagged.
+      endOfCustomerSpeechAt: st.lastEndOfCustomerSpeech ?? e.at,
+      endOfSpeechInferred: st.lastEndOfCustomerSpeech == null,
+      sttMs: st.lastSttMs,
+      firstTokenAt: null,
+      agentSpeechStartAt: null,
+      ttsMs: null,
+      responses: 0,
+      sawReply: false,
+      agentPlayingAtFirstToken: false,
+      agentOverCaller: false,
+      callerBargeIns: 0,
+      earlierPending,
+      outcome: earlierPending ? 'ambiguous' : null,
+    };
+    st.lastEndOfCustomerSpeech = null;
+    st.lastSttMs = null;
+    turns.push(st.current);
+  },
+  first_token_received: (st, e) => {
+    const t = st.current;
+    if (!t) return;
+    t.responses += 1;
+    t.sawReply = true;
+    if (t.firstTokenAt == null && t.outcome == null) {
+      t.firstTokenAt = e.at;
+      t.agentPlayingAtFirstToken = st.agentSpeaking;
+    }
+  },
+  start_of_agent_speech: (st, e) => {
+    const t = st.current;
+    // Only audio that starts AFTER this prompt's own first token can be its
+    // reply; earlier audio is a previous reply still reaching the line.
+    if (t && t.firstTokenAt != null && t.outcome == null) {
+      t.agentSpeechStartAt = e.at;
+      t.ttsMs = st.pendingTtsMs;
+      t.agentOverCaller = st.customerSpeaking;
+      t.outcome = 'spoke';
+    }
+    st.pendingTtsMs = null;
+    st.agentSpeaking = true;
+  },
+  end_of_agent_speech: (st) => { st.agentSpeaking = false; },
+  preempted: (st) => { st.agentSpeaking = false; },
+  interrupt: (st) => {
+    if (st.current) st.current.callerBargeIns += 1;
+    st.agentSpeaking = false;
+  },
+};
+
+function buildTurnTimeline(events = []) {
+  const turns = [];
+  let st = freshState();
   let sessionId = null;
-  for (const e of evs) {
+  for (const e of relayEvents(events)) {
     // A reconnected call (GATE_VOICE_RELAY_RECOVERY) runs a second relay
     // session on the same CallSid: nothing carries across the boundary.
     if (e.sessionId && sessionId && e.sessionId !== sessionId) {
-      close(current, { byNextPrompt: false });
-      current = null;
-      customerSpeaking = false;
-      agentSpeaking = false;
-      lastEndOfCustomerSpeech = null;
-      lastSttMs = null;
-      pendingTtsMs = null;
+      closeTurn(st.current, false);
+      st = freshState();
     }
     if (e.sessionId) sessionId = e.sessionId;
-    switch (e.name) {
-      case 'start_of_customer_speech':
-        customerSpeaking = true;
-        break;
-      case 'end_of_customer_speech':
-        customerSpeaking = false;
-        lastEndOfCustomerSpeech = e.at;
-        break;
-      case 'stt_latency':
-        lastSttMs = e.latencyMs;
-        break;
-      case 'prompt_sent':
-        close(current, { byNextPrompt: true });
-        current = {
-          index: turns.length + 1,
-          promptSentAt: e.at,
-          // Twilio sends the prompt the instant it marks end of speech (same
-          // millisecond in every observed call), but a back-to-back second
-          // prompt can arrive with no end marker of its own; the prompt time
-          // stands in, flagged.
-          endOfCustomerSpeechAt: lastEndOfCustomerSpeech ?? e.at,
-          endOfSpeechInferred: lastEndOfCustomerSpeech == null,
-          sttMs: lastSttMs,
-          firstTokenAt: null,
-          agentSpeechStartAt: null,
-          ttsMs: null,
-          responses: 0,
-          agentPlayingAtFirstToken: false,
-          agentOverCaller: false,
-          callerBargeIns: 0,
-          outcome: null,
-        };
-        lastEndOfCustomerSpeech = null;
-        lastSttMs = null;
-        turns.push(current);
-        break;
-      case 'first_token_received':
-        if (current) {
-          current.responses += 1;
-          if (current.firstTokenAt == null) {
-            current.firstTokenAt = e.at;
-            current.agentPlayingAtFirstToken = agentSpeaking;
-          }
-        }
-        break;
-      case 'tts_latency':
-        pendingTtsMs = e.latencyMs;
-        break;
-      case 'start_of_agent_speech':
-        // Only audio that starts AFTER this prompt's own first token can be
-        // its reply; earlier audio is a previous reply still reaching the
-        // line and is never credited to the newer prompt.
-        if (current && current.firstTokenAt != null && current.agentSpeechStartAt == null && current.outcome == null) {
-          current.agentSpeechStartAt = e.at;
-          current.ttsMs = pendingTtsMs;
-          current.agentOverCaller = customerSpeaking;
-          current.outcome = 'spoke';
-        }
-        pendingTtsMs = null;
-        agentSpeaking = true;
-        break;
-      case 'end_of_agent_speech':
-      case 'preempted':
-        agentSpeaking = false;
-        break;
-      case 'interrupt':
-        if (current) current.callerBargeIns += 1;
-        agentSpeaking = false;
-        break;
-      default:
-        break;
-    }
+    const handle = TIMELINE_HANDLERS[e.name];
+    if (handle) handle(st, e, turns);
   }
-  close(current, { byNextPrompt: false });
+  closeTurn(st.current, false);
 
   return turns.map((t) => ({
     ...t,

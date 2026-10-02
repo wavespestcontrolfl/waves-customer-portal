@@ -63,10 +63,11 @@ describe('buildTurnTimeline', () => {
       ev(2500, 'end_of_customer_speech'), ev(2500, 'prompt_sent'),
       ev(3500, 'first_token_received'), ev(3700, 'start_of_agent_speech'),
     ]);
-    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'spoke']);
-    expect(turns[0].heardGapMs).toBeNull();
-    expect(turns[1].heardGapMs).toBe(1200);
-    expect(summarizeTimeline(joinTurnStats(turns, [])).all.heard_gap.n).toBe(1);
+    // The reply that follows may be the first prompt's late answer, so the
+    // second prompt is ambiguous too: neither is a latency sample.
+    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous']);
+    expect(turns.map((t) => t.heardGapMs)).toEqual([null, null]);
+    expect(summarizeTimeline(joinTurnStats(turns, [])).all.heard_gap.n).toBe(0);
   });
 
   test('a reply that lands while earlier agent audio is still playing is queued, not superseded', () => {
@@ -84,6 +85,7 @@ describe('buildTurnTimeline', () => {
   test('a back-to-back prompt with no end-of-speech marker uses the prompt time, flagged', () => {
     const turns = buildTurnTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1200, 'first_token_received'), // the first prompt's reply, never voiced
       ev(2500, 'prompt_sent'),
       ev(3000, 'first_token_received'), ev(3200, 'start_of_agent_speech'),
     ]);
@@ -115,6 +117,30 @@ describe('buildTurnTimeline', () => {
     ]);
     expect(turns[1].heardGapMs).toBeNull();
     expect(turns[1].outcome).toBe('queued');
+  });
+
+  test('a prompt that arrives while an earlier one still awaits its first text is ambiguous: the late reply is never credited to it', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'), // A, still generating…
+      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
+      ev(1600, 'first_token_received'), ev(1700, 'start_of_agent_speech'), // A's late reply
+      ev(4000, 'end_of_agent_speech'),
+    ]);
+    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous']);
+    expect(turns[1].heardGapMs).toBeNull();
+    expect(summarizeTimeline(joinTurnStats(turns, [])).all.heard_gap.n).toBe(0);
+  });
+
+  test('doubt reaches one turn only: after a reply is seen, the next prompt is measured again', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'prompt_sent'), // A, cut off for good — never answered
+      ev(1500, 'prompt_sent'), // B: ambiguous
+      ev(2500, 'first_token_received'), ev(2600, 'start_of_agent_speech'), ev(4000, 'end_of_agent_speech'),
+      ev(5000, 'end_of_customer_speech'), ev(5000, 'prompt_sent'), // C
+      ev(5900, 'first_token_received'), ev(6000, 'start_of_agent_speech'),
+    ]);
+    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous', 'spoke']);
+    expect(turns[2].heardGapMs).toBe(1000);
   });
 
   test('a reply with no agent audio before the call ends is no_audio_event; no reply is silent', () => {
