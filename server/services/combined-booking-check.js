@@ -417,8 +417,12 @@ async function markPrepayCovered(conn, rows) {
   for (const row of rows) {
     row.prepay_covered = false;
     const paid = Number(row.prepaid_amount);
-    if (!(paid > 0) || !(Number(row.estimated_price) > 0)) continue;
-    if (hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= Number(row.estimated_price); continue; }
+    if (!(Number(row.estimated_price) > 0)) continue;
+    if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= Number(row.estimated_price); continue; }
+    // The coverage authority also covers an UNSTAMPED termite renewal visit
+    // during the payment-pending grace window, so a termite visit is asked
+    // even with no stamp; any other unstamped visit has nothing to ask about.
+    if (!(paid > 0) && !row.annual_prepay_term_id && !rowFamilies(row).includes('termite_bait')) continue;
     try {
       row.prepay_covered = await annualPrepayCoversVisit(row, conn) === true;
     } catch (err) {

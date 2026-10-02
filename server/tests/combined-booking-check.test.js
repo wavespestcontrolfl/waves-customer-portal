@@ -298,12 +298,16 @@ describe('markPrepayCovered', () => {
       { id: 'live', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1', estimated_price: 120 },
       { id: 'stale', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't2', estimated_price: 120 },
       { id: 'linkonly', annual_prepay_term_id: 't3', estimated_price: 120 },
+      // An unstamped termite renewal visit in its payment-pending grace window: the authority covers it.
+      { id: 'live', catalog_service_key: 'termite_bait', estimated_price: 120 },
+      { id: 'plainlawn', catalog_service_key: 'lawn_care_recurring', estimated_price: 120 },
     ];
     await check.markPrepayCovered({}, rows);
     expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered]))).toEqual({
-      partial: false, full: true, live: true, stale: false, linkonly: false,
+      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false,
     });
-    expect(validator).toHaveBeenCalledTimes(2);
+    // Asked for the annual stamps, the term link and the unstamped termite visit; never the plain lawn visit.
+    expect(validator).toHaveBeenCalledTimes(4);
   });
 });
 
