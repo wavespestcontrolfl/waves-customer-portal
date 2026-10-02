@@ -770,11 +770,12 @@ const TEMP_POSTFIX_CEILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})\\s*,?\\s*(?
 // Temperature wording earlier in the same clause: "highs are 85 or more",
 // "temperatures are expected to be about 85 or higher". "it is estimated
 // that large patch damaged 85 or more properties" has none (codex #5561
-// rounds 1 and 3). The clause starts after the last punctuation or
-// conjunction, so "temperatures soar in July, and 85 or more lawns" is a
-// count.
+// rounds 1, 3 and 4). The clause starts after the last punctuation; a bare
+// conjunction keeps the subject ("temperatures fluctuate and 85 or higher
+// is common"), and a count noun after the bound is already excluded by
+// NOT_A_TEMPERATURE.
 const TEMP_CONTEXT_WORD = /\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|degrees?)\b|°/i;
-const CLAUSE_BREAK_BEFORE = /[,;:.!?()]|\b(?:and|but|while|although|though|whereas|because|since|so)\b/gi;
+const CLAUSE_BREAK_BEFORE = /[,;:.!?()]/g;
 function temperatureContextBefore(whole, offset) {
   const before = whole.slice(0, offset);
   let start = 0;
@@ -813,7 +814,8 @@ function foldTemperatures(sentence) {
     // ("below 90°F") keeps the documented cool reading (codex #5561 round 3).
     if (CEILING_WORD.test(match)) {
       const fig = match.match(TEMP_FIGURE_WITH_UNIT);
-      if (fig && tempValueF(fig[1], fig[2]) > 80 && isHotValue(tempValueF(fig[1], fig[2]))) return token('hottemp', match);
+      // Only a figure with a unit: "up to 90 lawns" is a count, as on the parent.
+      if (fig && fig[2] && tempValueF(fig[1], fig[2]) > 80 && isHotValue(tempValueF(fig[1], fig[2]))) return token('hottemp', match);
     }
     return token('cooltemp', match);
   });

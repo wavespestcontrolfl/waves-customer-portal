@@ -676,6 +676,7 @@ describe('findUnverifiedClaims', () => {
       // temperature context earlier in the clause binds a unitless bound
       'Large patch thrives when temperatures are expected to be about 85 or higher.',
       'Large patch thrives when daytime highs are forecast to stay 90 or more.',
+      'Large patch thrives when temperatures fluctuate and 85 or higher is common.',
       'Large patch thrives at a 90°F maximum air temperature.',
       'Large patch is active at 95°F max.',
       'Large patch thrives when temperatures are 85°F, far from the coast.',
@@ -801,6 +802,9 @@ describe('findUnverifiedClaims', () => {
       'It is estimated that large patch damaged 85 or more properties.',
       'Large patch was found on 85 or more lawns last year.',
       'Temperatures soar in July, and large patch was found on 85 or more lawns.',
+      // a unit-less ceiling is a count
+      'Large patch can affect up to 90 lawns.',
+      'Large patch can hit a maximum of 90 properties in a bad year.',
       // a comparator keeps its documented cool reading
       'Large patch is active when temperatures are below 90°F.',
       // a unitless trailing bound with no temperature wording is a count
