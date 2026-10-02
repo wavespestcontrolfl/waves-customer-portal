@@ -242,17 +242,14 @@ async function createTrackedShortLink(longUrl, opts = {}) {
 // rather than as an absent one (local audit).
 // Legacy 1-7 char codes are never reused for a NEW send (always, ungated): a
 // re-send for an entity whose only code is legacy mints a fresh 10-char one
-// instead. `includeLegacy: true` is for readers of HISTORY — send
-// reconciliation searches past SMS bodies and the provider for the link that
-// actually went out, which may well be a legacy code (pre-push codex P1 on
-// the legacy-expire PR); hiding it there would read a delivered ask as unsent.
-async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false, includeLegacy = false }) {
+// instead. Readers of HISTORY (send reconciliation) use allShortUrlsFor below.
+async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false }) {
   if (!kind || !entityType || !entityId) return null;
   try {
     const lookup = db('short_codes')
       .where({ kind, entity_type: entityType, entity_id: String(entityId) });
     if (purpose) lookup.where({ purpose });
-    if (!includeLegacy) lookup.whereRaw('char_length(code) > ?', [LEGACY_CODE_MAX_LENGTH]);
+    lookup.whereRaw('char_length(code) > ?', [LEGACY_CODE_MAX_LENGTH]);
     const row = await lookup
       .orderBy('created_at', 'asc')
       .first('code');
@@ -264,11 +261,36 @@ async function existingShortUrlFor({ kind, entityType, entityId, purpose = null,
   }
 }
 
+/**
+ * EVERY short URL ever minted for an entity, oldest first, legacy codes
+ * included — for readers of history, never for reuse. Send reconciliation
+ * searches past SMS bodies and the provider for the link that actually went
+ * out: that may be a legacy code (pre-2026-08-07 text) or the 10-char
+ * replacement a later re-send minted, and searching only one of them would
+ * read a delivered ask as unsent (pre-push codex P1s on the legacy-expire PR).
+ * `rethrow` has the same meaning as in existingShortUrlFor.
+ */
+async function allShortUrlsFor({ kind, entityType, entityId, purpose = null, rethrow = false }) {
+  if (!kind || !entityType || !entityId) return [];
+  try {
+    const lookup = db('short_codes')
+      .where({ kind, entity_type: entityType, entity_id: String(entityId) });
+    if (purpose) lookup.where({ purpose });
+    const rows = await lookup.orderBy('created_at', 'asc').select('code');
+    return (rows || []).filter((r) => r?.code).map((r) => `${baseUrl()}/l/${r.code}`);
+  } catch (err) {
+    logger.warn(`[short-url] all-codes lookup failed for ${kind}/${entityId}: ${err.message}`);
+    if (rethrow) throw err;
+    return [];
+  }
+}
+
 module.exports = {
   baseUrl,
   createShortCode,
   createTrackedShortLink,
   existingShortUrlFor,
+  allShortUrlsFor,
   // The origin every minted short URL uses — exported so previews that
   // estimate a not-yet-minted link (rain-out custom compose) build their
   // placeholder from the SAME env chain as the eventual mint.

@@ -140,17 +140,28 @@ describe('short-url legacy code handling', () => {
     expect(url).toMatch(/\/l\/abcdefghjk$/);
   });
 
-  test('existingShortUrlFor({ includeLegacy: true }) keeps legacy codes visible for send reconciliation', async () => {
+  test('allShortUrlsFor returns every code for the entity, legacy and replacement, with no length filter (history reader)', async () => {
     process.env.GATE_SHORTLINK_LEGACY_EXPIRE = 'true';
     const q = {};
     q.where = jest.fn(() => q);
     q.whereRaw = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
-    q.first = jest.fn(() => Promise.resolve({ code: 'abcde' }));
+    q.select = jest.fn(() => Promise.resolve([{ code: 'abcde' }, { code: 'abcdefghjk' }]));
     db.mockImplementation(() => q);
     const real = jest.requireActual('../services/short-url');
-    const url = await real.existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: 'rr-1', rethrow: true, includeLegacy: true });
+    const urls = await real.allShortUrlsFor({ kind: 'review', entityType: 'review_requests', entityId: 'rr-1', rethrow: true });
     expect(q.whereRaw).not.toHaveBeenCalled();
-    expect(url).toMatch(/\/l\/abcde$/);
+    expect(urls.map((u) => u.split('/l/')[1])).toEqual(['abcde', 'abcdefghjk']);
+  });
+
+  test('allShortUrlsFor rethrows a lookup failure when asked (unreadable ≠ no codes)', async () => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.orderBy = jest.fn(() => q);
+    q.select = jest.fn(() => Promise.reject(new Error('db down')));
+    db.mockImplementation(() => q);
+    const real = jest.requireActual('../services/short-url');
+    await expect(real.allShortUrlsFor({ kind: 'review', entityType: 'review_requests', entityId: 'rr-1', rethrow: true })).rejects.toThrow('db down');
+    expect(await real.allShortUrlsFor({ kind: 'review', entityType: 'review_requests', entityId: 'rr-1' })).toEqual([]);
   });
 });

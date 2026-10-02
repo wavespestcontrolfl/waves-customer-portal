@@ -3364,8 +3364,9 @@ expired page as a past `expires_at` (no telemetry bump), and a legacy code
 with no row stays the generic 404 — so the gate never turns an unknown code
 into an existence oracle. Independently of the gate, a re-send never reuses
 a legacy code for its entity: `existingShortUrlFor` mints a fresh 10-char
-code instead; send-reconciliation readers that search historical bodies pass
-`includeLegacy: true` to keep seeing the old codes).
+code instead; send-reconciliation readers that search historical bodies use
+`allShortUrlsFor`, which returns every code ever minted for the entity,
+legacy and replacement alike).
 `/go/:code` (outside-link click redirect for prep-guide links to third-party
 sites — 302 to the registered destination / generic 404 with no enumeration
 leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
