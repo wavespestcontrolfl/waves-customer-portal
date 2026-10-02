@@ -2702,6 +2702,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // property, catalog service, type, date, address) — OPTIONAL. Sent by
       // the tech Fast Complete sheet; re-checked on the locked row below.
       expectedVisit = null,
+      // The saved trace the Fast Complete report flow judged the report
+      // against: its updated_at, or null for none — OPTIONAL. Undefined (every
+      // other caller) skips the check. Re-checked under the visit row lock.
+      traceSeen,
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -3357,8 +3361,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const rulesBlock = reportRulesReviewBlockPayload({
         isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
       });
+      // A same-key retry of a recorded attempt already got past the heads-up
+      // (it answers before any claim): asking again would make the retry
+      // carry reportRulesConfirmed, a request the attempt's hash refuses.
       if (rulesBlock
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCompletionAttemptForKey(
+          svc.id, completionInput.idempotencyKey || bodyIdempotencyKey, k,
+        ), true))) {
         return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
@@ -3378,6 +3388,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // aborts the closeout (Codex #5516; waves-db failSoftRead).
         return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
       })().catch(() => []);
+      // Only a committed completion skips it (its report already went out).
+      // An uncommitted retry is asked again, even under the same key: the
+      // promise may have changed since that attempt failed, and its
+      // confirmation is outside the request hash (completion-attempts.js),
+      // so answering never strands the retry (codex local r15 on #5538).
       if (stalePromiseIds.length
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: 409, body: {
@@ -5682,6 +5697,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
+          // The trace the report flow judged (Codex #5538): a trace saved or
+          // replaced since from another tab or device would publish a map the
+          // record was never judged against (a perimeter over spot
+          // treatments). Read under this row lock, which every trace save
+          // takes too (treatment-zone-maps.js), so a save either committed
+          // first and is seen here, or waits for this completion.
+          // With the map gate dark the sheet cannot see a trace, so nothing is
+          // compared; the record still freezes what it was judged against
+          // (traceJudged below), and its report never shows a trace it
+          // never saw.
+          if (traceSeen !== undefined && lockedSvcRow && isEnabled('treatmentZoneMap')) {
+            const traceNow = await trx.transaction(async (sp) => sp('treatment_zone_maps')
+              .where({ scheduled_service_id: svc.id })
+              .first('updated_at'));
+            const stamp = (value) => (value == null ? null : new Date(value).getTime());
+            if (stamp(traceSeen) !== stamp(traceNow?.updated_at)) {
+              throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6071,6 +6105,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // The trace the report flow judged this record against (its
+            // updated_at, or null for none): the report shows only that one
+            // (treatment-zone-maps.js traceJudgedAllows).
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6912,9 +6950,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
               || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
-                .where({ scheduled_service_id: svc.id })
-                .first()));
+              // A report-flow completion counts only the trace it judged
+              // (traceSeen): one it never saw drives no exterior timer
+              // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
+                const row = await sp('treatment_zone_maps')
+                  .where({ scheduled_service_id: svc.id })
+                  .first();
+                return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);
+              });
             } catch (traceErr) {
               // Only the EXPECTED missing-table case means "no trace". Any
               // other failure (timeout, permissions) fails CLOSED by
@@ -7829,6 +7874,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
             code: 'visit_identity_changed',
+          } });
+        }
+        if (err && err.code === 'trace_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
+            code: 'trace_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
@@ -14449,6 +14501,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // from the service recipient. Keep id/status/total for display only.
       // (mirrors the track-public.js token suppression)
       invoiceToken: invoice && !invoice.payer_id ? (invoice.token || null) : null,
+      // The same Bill-To read, for display: a payer-billed invoice is the
+      // payer's (AP) to pay, so the tech sheet never shows it as the
+      // customer's balance.
+      invoicePayerBilled: !!invoice?.payer_id,
       invoiceStatus: invoice?.status || null,
       reportUrl,
       invoicePaymentActionRequired,

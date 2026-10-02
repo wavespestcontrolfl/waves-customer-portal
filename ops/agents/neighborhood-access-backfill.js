@@ -54,7 +54,6 @@ if (process.env.DATABASE_PUBLIC_URL) {
 }
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { lookupCountyParcelByPoint } = require(path.join(__dirname, '..', '..', 'server', 'services', 'property-lookup', 'county-parcel-gis'));
-const { SERVICE_AREA_COUNTY_ZIPS } = require(path.join(__dirname, '..', '..', 'server', 'config', 'county-zips'));
 // whereLiveCustomer's own stage list; its bare column names are ambiguous in
 // this join (customer_properties also has `active`), so the predicate is
 // spelled out on c.* below.
@@ -63,6 +62,7 @@ const {
   isKeypadCode,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  countyHint,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'neighborhood-access'));
 
 const TAG = '[neighborhood-access-backfill]';
@@ -116,16 +116,6 @@ async function candidateProperties() {
     .select('p.id', 'p.customer_id', 'p.address_line1', 'p.city', 'p.zip', 'p.latitude', 'p.longitude', 'p.neighborhood_source');
   if (limit) q = q.limit(limit);
   return q;
-}
-
-// The one county whose service-area ZIP set holds this ZIP, else none (a ZIP
-// that straddles a county line keeps the Manatee → Sarasota → Charlotte
-// fallback). A hint keeps an earlier county's slow layer from spending the
-// shared deadline before the right one is asked.
-function countyHint(zip) {
-  const z = String(zip || '').slice(0, 5);
-  const hits = Object.entries(SERVICE_AREA_COUNTY_ZIPS).filter(([, zips]) => zips.includes(z)).map(([county]) => county);
-  return hits.length === 1 ? hits[0] : undefined;
 }
 
 async function lookUpParcels(props) {

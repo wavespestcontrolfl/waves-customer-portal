@@ -152,12 +152,15 @@ async function buildLawnPricingSnapshot(sizeBand) {
  */
 function buildTeaser(rowLike) {
   const full = buildPublicLawnReport(rowLike);
+  // The "why we think so" evidence (GATE_LAWN_DIAGNOSTIC_EVIDENCE) belongs to
+  // the claimed report: the teaser's one finding stays exactly what it was.
+  const { evidence: _evidence, ...firstFinding } = (full.findings && full.findings[0]) || {};
   return {
     overall_status: full.overall_status,
     confidence: full.confidence,
     findings_count: Array.isArray(full.findings) ? full.findings.length : 0,
     // One visible finding to prove the analysis is real; the rest stay locked.
-    first_finding: full.findings && full.findings.length ? full.findings[0] : null,
+    first_finding: full.findings && full.findings.length ? firstFinding : null,
     seasonal_context: full.seasonal_context,
   };
 }

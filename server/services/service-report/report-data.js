@@ -1081,7 +1081,7 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
       // transient failure preserves the exterior dry-down guidance rather
       // than silently dropping customer re-entry advice.
       try {
-        return !!(await knex('treatment_zone_maps')
+        return judgedTraceRow(record, await knex('treatment_zone_maps')
           .where({ scheduled_service_id: record.scheduled_service_id })
           .first());
       } catch (traceErr) {
@@ -1115,13 +1115,24 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
     } catch { /* label fallback above already ran; proceed to the lookup */ }
   }
   try {
-    return !!(await knex('treatment_zone_maps')
+    return judgedTraceRow(record, await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
       .first());
   } catch (traceErr) {
     return !(traceErr?.code === '42P01'
       || /no such table|does not exist/i.test(String(traceErr?.message || '')));
   }
+}
+
+// A trace counts as exterior evidence only when it is one the record may
+// show: a Fast Complete report-flow record froze the trace it was judged
+// against (traceJudged), and a trace it never saw (kept while the map gate
+// was dark, or saved after) drives no exterior dry-down guidance in the
+// report, the re-entry context, the lifecycle email or the completion text
+// either (Codex #5538). Any other record counts its trace as before.
+function judgedTraceRow(record, row) {
+  if (!row) return false;
+  return require('../treatment-zone-maps').traceJudgedAllows(parseJsonObject(record.structured_notes), row);
 }
 
 function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
@@ -4738,7 +4749,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
         .catch(() => null);
-      if (tracedRow?.snapshot_s3_key && PhotoService) {
+      // A report-flow record shows only the trace it was judged against.
+      if (tracedRow?.snapshot_s3_key && PhotoService
+        && require('../treatment-zone-maps').traceJudgedAllows(structured, tracedRow)) {
         const tracedSnapshotUrl = await PhotoService.getViewUrl(
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS

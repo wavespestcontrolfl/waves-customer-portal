@@ -15,9 +15,9 @@ const label = (verdict, correct_value = null) => JSON.stringify({ verdict, corre
 const status = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
 
 // One labeled sms_courtesy row (a yes/no question in a registered package).
-function row({ verdict = 'jev_right', p = 0.9, confident = true, sampled = 'random_audit', correct = null, question = 'is_courtesy_only', pkg = 'sms_courtesy.v1', capability = 'sms_courtesy', model = 'jev-1.13.0' } = {}) {
+function row({ verdict = 'jev_right', p = 0.9, confident = true, sampled = 'random_audit', correct = null, question = 'is_courtesy_only', pkg = 'sms_courtesy.v1', capability = 'sms_courtesy', model = 'jev-1.13.0', provider = 'typesafe' } = {}) {
   return {
-    capability, package_id: pkg, question_id: question, served_model: model, sampled_for: sampled,
+    capability, package_id: pkg, provider, question_id: question, served_model: model, sampled_for: sampled,
     label_status: status[verdict], jev_answer: noul(p, confident), label: label(verdict, correct),
   };
 }
@@ -146,6 +146,15 @@ describe('scoreRows — tiers from the representative set only', () => {
     expect(m.actionableRecall).toMatchObject({ numerator: 10, denominator: 20 });
   });
 
+  test('two providers answering the same cases report side by side, each on its own labels (one row per provider, migration 20261002010000)', () => {
+    const caps = scoreRows([...rows(70, { provider: 'typesafe', model: 'jev-1.13.0', p: 0.95 }), ...rows(10, { provider: 'cloudflare', model: 'clef-flash', p: 0.95 })], []);
+    expect(caps.map((c) => [c.provider, c.servedModel, c.tier])).toEqual([['cloudflare', 'clef-flash', 0], ['typesafe', 'jev-1.13.0', 2]]);
+    expect(caps.every((c) => c.questions[0].provider === c.provider)).toBe(true);
+    // provider is NOT NULL and every reader selects it: a row without one is refused, never scored as Jev's
+    expect(() => scoreRows([{ ...row(), provider: undefined }], [])).toThrow(/without a provider/);
+    expect(() => scoreRows([{ ...row(), provider: '' }], [])).toThrow(/without a provider/);
+  });
+
   test('a newly pinned model version earns its tier on its own labels (§9: per capability, per version)', () => {
     const caps = scoreRows([...rows(10, { model: 'jev-1.13.0' }), ...rows(10, { model: 'jev-1.14.0' })], []);
     expect(caps.map((c) => c.servedModel).sort()).toEqual(['jev-1.13.0', 'jev-1.14.0']);
@@ -193,7 +202,7 @@ describe('scoreRows — tiers from the representative set only', () => {
   });
 
   test('coverage counts every recorded answer, labeled or not, and the confident share', () => {
-    const coverage = [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: '400', confident: '300' }];
+    const coverage = [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', provider: 'typesafe', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: '400', confident: '300' }];
     const [cap] = scoreRows(rows(3), coverage);
     expect(cap.questions[0].coverage).toEqual({ answered: 400, confident: 300, confidentShare: 0.75 });
     const [bare] = scoreRows([], coverage);
@@ -203,7 +212,7 @@ describe('scoreRows — tiers from the representative set only', () => {
 
   test('a choice question (no yes class) reports accuracy as precision and recall, and says so; the type is read from the answer when the package is unregistered', () => {
     const choice = (verdict, correct = null) => ({
-      capability: 'routing', package_id: 'routing.v0', question_id: 'team', served_model: 'jev-1.13.0', sampled_for: 'random_audit',
+      capability: 'routing', package_id: 'routing.v0', provider: 'typesafe', question_id: 'team', served_model: 'jev-1.13.0', sampled_for: 'random_audit',
       label_status: status[verdict], jev_answer: JSON.stringify({ choice: 'billing', confidence: 0.9, probabilities: {}, confident: true }), label: label(verdict, correct),
     });
     const labeled = [choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_right'), choice('jev_wrong', 'technical')];
@@ -240,7 +249,7 @@ describe('scoreRows — tiers from the representative set only', () => {
   });
 
   test('a group opened by a coverage row for an unregistered package still learns its type from the labeled answers', () => {
-    const coverage = [{ capability: 'gone', package_id: 'gone.v1', question_id: 'q', served_model: 'jev-1.13.0', answered: 40, confident: 30 }];
+    const coverage = [{ capability: 'gone', package_id: 'gone.v1', provider: 'typesafe', question_id: 'q', served_model: 'jev-1.13.0', answered: 40, confident: 30 }];
     const [cap] = scoreRows(rows(10, { capability: 'gone', pkg: 'gone.v1', question: 'q' }), coverage);
     expect(cap.questions[0].type).toBe('noul');
     expect(cap.questions[0].representative.counts).toMatchObject({ labeled: 10, unclear: 0 });
@@ -276,7 +285,7 @@ describe('evaluateCapabilities — the read-only status query', () => {
     const now = new Date('2026-10-02T00:00:00Z');
     const conn = fakeConn([
       rows(60, { p: 0.9 }),
-      [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: 500, confident: 450 }],
+      [{ capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', provider: 'typesafe', question_id: 'is_courtesy_only', served_model: 'jev-1.13.0', answered: 500, confident: 450 }],
     ]);
     const out = await evaluateCapabilities({ days: 30, now, conn });
     expect(out).toMatchObject({ windowDays: 30, confidence: 0.95, generatedAt: now.toISOString() });
@@ -287,7 +296,8 @@ describe('evaluateCapabilities — the read-only status query', () => {
     const since = new Date('2026-09-02T00:00:00Z');
     expect(conn.calls.filter(([m]) => m === 'where')).toEqual([['where', ['created_at', '>=', since]], ['where', ['created_at', '>=', since]]]);
     expect(conn.calls).toContainEqual(['whereIn', ['label_status', ['confirmed_correct', 'confirmed_error', 'disagreement']]]);
-    expect(conn.calls).toContainEqual(['groupBy', ['capability', 'package_id', 'question_id', 'served_model']]);
+    expect(conn.calls).toContainEqual(['groupBy', ['capability', 'package_id', 'provider', 'question_id', 'served_model']]);
+    expect(conn.calls).toContainEqual(['select', ['capability', 'package_id', 'provider', 'question_id', 'served_model', 'sampled_for', 'label_status', 'jev_answer', 'label']]);
     expect(conn.calls.some(([m, a]) => m === 'select' && a[0] && /FILTER \(WHERE \(jev_answer->>'confident'\)::boolean\)/.test(a[0].sql))).toBe(true);
     // reads only
     expect(conn.calls.some(([m]) => ['insert', 'update', 'delete'].includes(m))).toBe(false);

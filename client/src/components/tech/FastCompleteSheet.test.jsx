@@ -341,6 +341,27 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
+  test('a confirmable 409 on the re-service form shows the server\'s message: only the report flow asks to confirm (codex local r19 on #5538)', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Refused words: "safe".'), { status: 409, code: 'report_rules_review', confirmable: true });
+      }
+      return base(path, options);
+    });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByText('Refused words: "safe".')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Send as is' })).toBeNull();
+  });
+
   test('a 409 idempotency_key_mismatch is a recoverable conflict, never shown as saved', async () => {
     // The server also answers it for pending/failed attempts with no record.
     const request = makeRequest();

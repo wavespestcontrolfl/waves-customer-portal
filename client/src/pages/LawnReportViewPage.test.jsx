@@ -45,6 +45,54 @@ describe('LawnReportViewPage', () => {
     expect(screen.getByRole('button', { name: /get my free lawn plan/i })).toBeInTheDocument();
   });
 
+  it('prints no evidence block or basis line when the payload carries none (evidence gate off)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report: REPORT }) })));
+    renderAt();
+    await screen.findByText('Chinch bug pressure');
+    expect(screen.queryByTestId('finding-evidence')).toBeNull();
+    expect(screen.queryByText(/Why we think so/i)).toBeNull();
+    expect(screen.queryByText(/Based on/i)).toBeNull();
+  });
+
+  it('prints the server evidence under its finding, and the basis line under the section title', async () => {
+    const evidence = {
+      why: 'Chinch bug damage shows as irregular yellow-to-brown patches in full sun.',
+      certainty: 'How sure we are: moderate. The photos fit this pattern.',
+      confirm: 'What would settle it: a quick float test at the edge of the patch.',
+    };
+    const report = {
+      ...REPORT,
+      basis: 'Based on 4 photos.',
+      findings: [
+        { ...REPORT.findings[0], evidence },
+        { name: 'weed pressure', confidence: 'high', severity: 'mild', customer_note: 'We saw weed pressure.', evidence: { why: 'Weeds are visible in the photos.', certainty: 'How sure we are: high. This is clear in the photos.', confirm: null } },
+        { name: 'thinning turf', confidence: 'low', severity: 'mild', customer_note: 'We saw signs consistent with thinning turf.' },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText('Based on 4 photos.')).toBeInTheDocument();
+    const blocks = screen.getAllByTestId('finding-evidence');
+    // The third finding carries no evidence, so it gets no block.
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toHaveTextContent('Why we think so');
+    expect(blocks[0]).toHaveTextContent(evidence.why);
+    expect(blocks[0]).toHaveTextContent(evidence.certainty);
+    expect(blocks[0]).toHaveTextContent(evidence.confirm);
+    expect(blocks[1]).toHaveTextContent('Weeds are visible in the photos.');
+    expect(blocks[1]).not.toHaveTextContent(/What would settle it/);
+  });
+
+  it('still prints the basis line on a report sent with no findings (codex P2 #5598 r2)', async () => {
+    const report = { ...REPORT, basis: 'Based on 3 photos.', findings: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText('Based on 3 photos.')).toBeInTheDocument();
+    expect(screen.queryByText('What we found')).toBeNull();
+    // Exactly once: the findings section is absent, so only the summary card prints it.
+    expect(screen.getAllByText('Based on 3 photos.')).toHaveLength(1);
+  });
+
   it('shows a friendly not-available state on 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({ error: 'Report not found' }) })));
     renderAt();

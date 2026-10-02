@@ -83,6 +83,9 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 // these route tests only need the hooks to succeed quietly.
 jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  // GATE_SMS_SCHEDULING_SUGGEST rollback filter: a pass-through here; its SQL
+  // is covered in sms-scheduling-suggest.test.js.
+  excludeGatedSchedulingSuggestions: jest.fn((query) => query),
   HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),

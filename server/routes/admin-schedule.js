@@ -5137,6 +5137,17 @@ async function loadProjectCompletionContextByServiceId(services) {
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
       fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
+      // GATE_FAST_COMPLETE_REPORT — the same schedule-payload ride: with it on,
+      // pest re-services and regular untyped pest visits open the Fast
+      // Complete report flow (talk, generate the report, trace, send). Not a
+      // combined service (pest + rodent bait, pest + termite bait): its
+      // typed companion sections are required at completion and the report
+      // flow has none, so it keeps the full form (Codex #5538). Nor a
+      // service with its own typed findings (cockroach, German roach
+      // knockdowns): /complete requires them and the report flow has none.
+      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && !(completionProfile?.companions || []).length
+        && !completionProfile?.findingsType,
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -6261,6 +6272,8 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+        // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
+        fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
@@ -6854,6 +6867,7 @@ router.get('/week', async (req, res, next) => {
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+          fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
@@ -24694,6 +24708,9 @@ router.post('/generate-report', async (req, res) => {
       treeShrubReview,
       // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
       promiseMarks,
+      // "Write again" (Fast Complete): a fresh draft for the same inputs, so
+      // the cached one is not read back. The new draft still replaces it.
+      fresh,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -25635,7 +25652,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         ])}`
         : '')
       .digest('hex');
-    const cached = reportCopyCacheGet(cacheKey);
+    const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —

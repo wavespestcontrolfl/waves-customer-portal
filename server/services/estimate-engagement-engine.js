@@ -31,6 +31,7 @@
  */
 
 const db = require('../models/db');
+const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
@@ -796,7 +797,7 @@ async function processDueBatch(now = new Date()) {
           continue;
         }
       }
-      const firstName = (est.customer_name || '').split(' ')[0] || 'there';
+      const firstName = await estimateGreetingFirstName(db, est);
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
       // Accept-intent variant (owner 2026-07-15: as few clicks as possible)
       // — the engaged-moment templates' CTA rides this: same tokened page
