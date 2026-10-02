@@ -3536,7 +3536,11 @@ function openMissedVisit(context) {
 }
 // Re-booking a missed visit is a new visit of the missed service (/book under
 // GATE_SMS_OFFERS_SCHEDULER: the missed row is no longer a live visit to move).
+// The availability lookup is located by the customer, not the missed property: with
+// another address on the account the times could be for the wrong house, so the
+// identity is uncertain and OPEN TIMES are withheld (the line then routes to the SLA).
 function missedVisitIdentity(missed) {
+  if (missed.singleLocation !== true) return { serviceType: null, certain: false, reason: 'missed_visit_other_location' };
   return { serviceType: String(missed.type), certain: true, reason: 'missed_visit' };
 }
 
@@ -5498,7 +5502,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
   // the OPEN TIMES were sized for the missed visit (missedVisitIdentity), not another job
-  const missedOpenTimes = identity.reason === 'missed_visit';
+  const missedOpenTimes = identity.reason === 'missed_visit' && identity.certain === true;
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, missedOpenTimes, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.

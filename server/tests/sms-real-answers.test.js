@@ -1010,7 +1010,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       client: {},
       context: {
         summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [],
-        visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+        visitLoops: { missedVisit: { logId: 'rl-1', singleLocation: true, type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
       },
       inboundMessage: 'Thanks so much!',
       intent: { intent: 'gratitude_reply' },
@@ -1033,7 +1033,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     const missedContext = {
       summary: 'Test customer', customer: { id: 'cust-1' },
       upcomingServices: [{ type: 'Lawn Care', date: '2026-10-20', scheduledServiceId: 'visit-lawn' }],
-      visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+      visitLoops: { missedVisit: { logId: 'rl-1', singleLocation: true, type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
     };
     for (const answer of [{ about: 'missed', visit: null, service: null }, { about: 'none', visit: null, service: null }]) {
       const getAvailableSlots = jest.fn(async () => ({
@@ -1090,7 +1090,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       context: {
         summary: 'Test customer', customer: { id: 'cust-1' },
         upcomingServices: [{ type: 'Lawn Care', date: '2026-10-20', scheduledServiceId: 'visit-lawn' }],
-        visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+        visitLoops: { missedVisit: { logId: 'rl-1', singleLocation: true, type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
       },
       inboundMessage: 'Can I move my lawn visit on the 20th?',
       intent: { intent: 'service_scheduling_window_reply' }, schedulingIntent: true, city: 'Venice', voiceProfile: null,
@@ -1100,6 +1100,29 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).toContain('- MISSED VISIT: the Mosquito Control visit');
     expect(result.factsBlock).toContain('then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised (no OPEN TIMES here are for this service: never offer times for it)');
     expect(result.factsBlock).not.toContain('the OPEN TIMES are for this service');
+  });
+
+  test('gate on: a miss on an account with another address gets no rebooking times — the line routes it to the SLA (pre-push audit P1, #5610 r2)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-10-05', fullDate: 'Monday, October 5', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: {
+        summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [],
+        visitLoops: { missedVisit: { logId: 'rl-1', singleLocation: false, type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+      },
+      inboundMessage: 'Thanks so much!',
+      intent: { intent: 'gratitude_reply' }, schedulingIntent: false, city: 'Venice', voiceProfile: null,
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).not.toContain('OPEN TIMES (real');
+    expect(result.factsBlock).toContain('then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised (no OPEN TIMES here are for this service: never offer times for it)');
   });
 
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
