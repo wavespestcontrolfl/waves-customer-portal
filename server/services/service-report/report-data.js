@@ -3821,34 +3821,60 @@ function buildWateringBanner(instruction, weekPlan = null) {
 // The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
 
-// The days from this visit to the next one, for the v6 copy's "by your next
-// visit" sentence (GATE_LAWN_REPORT_COPY_V6). A cadence estimate comes from
-// this visit's own service, so it is this property's. A SCHEDULED next visit
-// is matched by customer only, so for a customer with lawn service at two
-// homes it may be the other one: its date counts only when it provably
-// resolves to this visit's property (visit-property-scope.js, the one shared
-// resolver), else the gap is unknown and no by-next-visit sentence is chosen.
+// The plan cadence in weeks a lawn service type names ("every 6 weeks",
+// "monthly"...), or null: the report's estimated next visit and the v6 copy's
+// gap read the same rule.
+function lawnCadenceWeeks(serviceType) {
+  const t = String(serviceType || '').toLowerCase();
+  const m = t.match(/every\s+(\d+)\s+week/);
+  if (m) return Number(m[1]);
+  if (/bi-?weekly/.test(t)) return 2;
+  if (/bi-?monthly/.test(t)) return 8;
+  if (/monthly/.test(t)) return 4;
+  if (/quarterly/.test(t)) return 13;
+  if (/weekly/.test(t)) return 1;
+  return null;
+}
+
+// The days from this visit to the next one AT THIS PROPERTY, for the v6
+// copy's "by your next visit" sentence (GATE_LAWN_REPORT_COPY_V6). The next
+// lawn booking is found by the shared same-line / same-property scan
+// (same-line-visit.js), so on a multi-property account a booking at another
+// home is skipped, not taken; no booking at this property falls back to this
+// visit's own plan cadence. Any read or property lookup that FAILS is recorded
+// as a degraded read (the copy must not freeze on it); an unresolvable
+// property gives an unknown gap, and no by-next-visit sentence is chosen.
+const LAWN_COPY_NEXT_SCAN = 25;
 async function lawnCopyNextVisitGap(service, timing, knex, readFailures) {
-  if (!timing.visitDate || !timing.nextVisitIso) return null;
-  if (timing.nextRow) {
-    if (!service.scheduled_service_id) return null;
-    const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
-    const thisRow = await knex('scheduled_services')
-      .where({ id: service.scheduled_service_id })
-      .first('property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
-      .catch(failSoft(readFailures, 'next_visit', null));
-    if (!thisRow) return null;
-    // A failed property / estimate lookup is a degraded read, not "another
-    // home": the copy must not freeze without its by-next-visit sentence.
-    const scope = { onLookupFailure: () => readFailures.add('next_visit') };
-    const [mine, next] = await Promise.all([
-      resolveVisitPropertyScope(thisRow, knex, scope),
-      resolveVisitPropertyScope(timing.nextRow, knex, scope),
-    ]);
-    if (!sameResolvedProperty(mine && mine.key, next && next.key)) return null;
+  if (!timing.visitDate || !timing.afterIso || !service.scheduled_service_id) return null;
+  const rows = await knex('scheduled_services')
+    .where('customer_id', service.customer_id)
+    .andWhere('scheduled_date', '>', timing.afterIso)
+    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+    .orderBy('scheduled_date', 'asc')
+    .limit(LAWN_COPY_NEXT_SCAN)
+    .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS)
+    .catch(failSoft(readFailures, 'next_visit', null));
+  const reportVisit = await knex('scheduled_services')
+    .where({ id: service.scheduled_service_id })
+    .first(...PROPERTY_SCOPE_COLUMNS)
+    .catch(failSoft(readFailures, 'next_visit', null));
+  if (!rows || !reportVisit) return null;
+  const found = await nextSameLineVisitAtProperty({
+    knex, rows, reportVisit, serviceLine: 'lawn', onLookupFailure: () => readFailures.add('next_visit'),
+  });
+  if (found.state === 'scheduled') {
+    const raw = found.row.scheduled_date;
+    const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+    const gap = Math.round((Date.parse(`${iso}T12:00:00Z`) - Date.parse(`${timing.visitDate}T12:00:00Z`)) / 86400000);
+    return Number.isFinite(gap) && gap >= 0 ? gap : null;
   }
-  const gap = Math.round((Date.parse(`${timing.nextVisitIso}T12:00:00Z`) - Date.parse(`${timing.visitDate}T12:00:00Z`)) / 86400000);
-  return Number.isFinite(gap) && gap >= 0 ? gap : null;
+  // 'none' over a full page could hide this property's booking further out.
+  if (found.state === 'none' && rows.length < LAWN_COPY_NEXT_SCAN) {
+    const weeks = lawnCadenceWeeks(service.service_type);
+    return weeks ? weeks * 7 : null;
+  }
+  return null;
 }
 
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
@@ -5596,7 +5622,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // omitted entirely. Never invent a precise date the data can't back.
       // The visit / next-visit calendar days the v6 copy writer reads (it needs
       // the gap in days, which the label cannot give it).
-      const lawnCopyTiming = { visitDate: null, nextVisitIso: null, nextRow: null };
+      const lawnCopyTiming = { visitDate: null, afterIso: null };
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5624,27 +5650,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
               .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
             .orderBy('scheduled_date', 'asc')
-            .first('scheduled_date', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
-            // Recorded: the v6 copy picks its "by your next visit" sentence from
-            // this gap and must not freeze one a failed read invented.
-            .catch(failSoft(readFailures, 'next_visit', null));
+            .first('scheduled_date')
+            .catch(() => null);
           let nextVisit = null;
           lawnCopyTiming.visitDate = svcIso || null;
+          lawnCopyTiming.afterIso = afterIso;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
-            lawnCopyTiming.nextRow = nextRow;
-            lawnCopyTiming.nextVisitIso = nextRow.scheduled_date instanceof Date ? nextRow.scheduled_date.toISOString().slice(0, 10) : String(nextRow.scheduled_date).slice(0, 10);
           } else if (svcIso) {
-            const t = String(service.service_type || '').toLowerCase();
-            const m = t.match(/every\s+(\d+)\s+week/);
-            let weeks = m ? Number(m[1]) : null;
-            if (weeks == null) {
-              if (/bi-?weekly/.test(t)) weeks = 2;
-              else if (/bi-?monthly/.test(t)) weeks = 8;
-              else if (/monthly/.test(t)) weeks = 4;
-              else if (/quarterly/.test(t)) weeks = 13;
-              else if (/weekly/.test(t)) weeks = 1;
-            }
+            const weeks = lawnCadenceWeeks(service.service_type);
             if (weeks) {
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
@@ -5653,12 +5667,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               // date as the "next visit".
               if (est.getTime() > Date.now()) {
                 nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
-                lawnCopyTiming.nextVisitIso = est.toISOString().slice(0, 10);
               }
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
-        } catch { readFailures.add('next_visit'); /* next-visit lookup is best-effort */ }
+        } catch { /* next-visit lookup is best-effort */ }
       }
 
       if (reportV2 && featureGates.lawnReportCopyV6Live()) {

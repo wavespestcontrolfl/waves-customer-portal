@@ -455,6 +455,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(render(<ServiceReportDocument data={without} token="tok124" />).container.textContent).not.toContain('What to expect');
   });
 
+  it('prints the lead headline (the frozen v6 one) as Overall, so a later assessment correction cannot make the PDF disagree', () => {
+    const snapshot = { overallScore: 86, statusHeadline: 'Needs attention — weed pressure' };
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Stable — watching weed pressure' } } };
+    const text = render(<ServiceReportDocument data={data} token="tok125" />).container.textContent;
+    expect(text).toContain('Overall: Stable — watching weed pressure');
+    expect(text).not.toContain('Needs attention — weed pressure');
+  });
+
   it('keeps approved visual moments and the turf-height gauge photo', () => {
     const data = {
       ...BASE_DATA,

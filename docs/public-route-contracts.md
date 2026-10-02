@@ -2171,13 +2171,16 @@ creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`
 such a render's lead keeps the snapshot headline and has no applied line (never
 the AI treatment narrative). A failed property or estimate lookup behind the
 next-visit check counts as a degraded read.
-A scheduled next visit sets that sentence's gap only when it resolves to this
-visit's property (`visit-property-scope.js`); otherwise no by-next-visit
-sentence is chosen. The fields reach the lead through a non-enumerable
+That sentence's gap is the next lawn booking AT THIS PROPERTY (the shared
+same-line / same-property scan in `same-line-visit.js`, so an earlier booking at
+another of the customer's homes is skipped), else this visit's own plan cadence;
+an unresolvable property gives no by-next-visit sentence. The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
-key. The lawn PDF prints `whatToExpect` as a "What to expect" line (its headline
-is the same `statusHeadline`, and the insights it already lists cover `watching`),
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
+under this gate, so a later assessment correction cannot make the PDF and the
+live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
+as a "What to expect" line (the insights it already lists cover `watching`),
 and its cache signature carries a `:copyv6=1` stamp while the gate is live.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render

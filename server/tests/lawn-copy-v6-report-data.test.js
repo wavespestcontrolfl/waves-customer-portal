@@ -294,7 +294,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     afterEach(() => { jest.useRealTimers(); });
     const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
     const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
-    const gapFor = async (nextStamp) => {
+    const gapFor = async (nextStamp, extraRows = []) => {
       live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
@@ -303,6 +303,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
           scheduled_services: [
             { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
             { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...nextStamp },
+            ...extraRows,
           ],
         });
         return spy.mock.calls[0][0].ctx.nextVisitGapDays;
@@ -317,6 +318,29 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 
     test('another home of the same customer: no gap (no by-next-visit sentence), never the other home\'s date', async () => {
       expect(await gapFor(HOME_B)).toBeNull();
+    });
+
+    test('an EARLIER booking at another home is skipped and the later booking at this home sets the gap', async () => {
+      const later = { id: 'ss-later', customer_id: CUSTOMER, scheduled_date: '2027-02-12', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
+      expect(await gapFor(HOME_B, [later])).toBe(135);
+    });
+
+    test('no booking at this home: the gap is this visit\'s own plan cadence', async () => {
+      live();
+      const v6 = require('../services/service-report/lawn-copy-v6');
+      const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+      try {
+        const svc = { ...service(records()['svc-cur'].structured_notes), service_type: 'Lawn Care every 6 weeks' };
+        await render(records(), {
+          scheduled_services: [
+            { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care every 6 weeks', ...HOME_A },
+            { id: 'ss-other', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care every 6 weeks', ...HOME_B },
+          ],
+        }, svc);
+        expect(spy.mock.calls[0][0].ctx.nextVisitGapDays).toBe(42);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('a next visit with no property evidence: no gap', async () => {
@@ -346,13 +370,15 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   test('a failed next-visit read (the gap that picks the by-next-visit sentence) is a degraded read: no freeze', async () => {
     live();
     const recs = records();
-    // Only the next-visit lookup fails; every other scheduled_services read answers.
+    // Only the v6 copy's next-visit scan fails; every other scheduled_services read answers.
     const { knex: base } = withRecords(fixtures(), recs);
     const knex = (table) => {
       const q = base(table);
       if (table !== 'scheduled_services') return q;
-      const first = q.first;
-      q.first = (...args) => (args[0] === 'scheduled_date' ? Promise.reject(new Error('read failed')) : first(...args));
+      const select = q.select;
+      q.select = (...cols) => (cols.includes('service_type') && cols.includes('scheduled_date')
+        ? { catch: (fn) => Promise.resolve(fn(new Error('read failed'))) }
+        : select(...cols));
       return q;
     };
     knex.raw = base.raw;

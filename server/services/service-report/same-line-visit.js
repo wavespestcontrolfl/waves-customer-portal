@@ -71,20 +71,25 @@ function isSameLineVisit(row, {
 // the report's upcoming-visits card (visit-property-scope.js). Fails
 // closed: when the report's own visit, or an earlier same-line booking,
 // cannot be tied to a property, the answer is 'unknown', never 'none'.
-async function nextSameLineVisitAtProperty({ knex, rows, reportVisit, serviceLine }) {
+// `onLookupFailure` (optional) is told when a property read FAILED, as
+// opposed to a property that is simply unresolvable; the answer is the same.
+async function nextSameLineVisitAtProperty({
+  knex, rows, reportVisit, serviceLine, onLookupFailure,
+}) {
+  const failed = () => { if (typeof onLookupFailure === 'function') onLookupFailure(); return null; };
   const reportScope = reportVisit
-    ? await resolveVisitPropertyScope(reportVisit, knex).catch(() => null)
+    ? await resolveVisitPropertyScope(reportVisit, knex, { onLookupFailure }).catch(failed)
     : null;
   if (!reportScope?.key) return { state: 'unknown' };
   const rodentReportRefresh = rodentReportRefreshFor(serviceLine);
   const catalog = rodentReportRefresh
     ? await loadRodentCatalogIndex(knex)
     : { serviceCategoryById: null, rodentCatalogNames: null };
-  const caches = { propertyById: new Map(), estimateById: new Map() };
+  const caches = { propertyById: new Map(), estimateById: new Map(), onLookupFailure };
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!isSameLineVisit(row, { serviceLine, rodentReportRefresh, ...catalog })) continue;
      
-    const scope = await resolveVisitPropertyScope(row, knex, caches).catch(() => null);
+    const scope = await resolveVisitPropertyScope(row, knex, caches).catch(failed);
     if (!scope?.key) return { state: 'unknown' };
     if (sameResolvedProperty(scope.key, reportScope.key)) return { state: 'scheduled', row };
   }
