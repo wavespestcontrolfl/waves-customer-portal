@@ -514,8 +514,12 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('#5524 r4 P1: from calls, only the caller\'s labeled turns count as the customer\'s words', () => {
     const { callerTurns } = Drafter.__private;
-    expect(callerTurns('Agent: we just had a new baby at the office\nCaller: the ants are back by the lanai')).toBe('the ants are back by the lanai');
-    expect(callerTurns('no labels at all here')).toBe('');
+    expect(callerTurns('Agent: we just had a new baby at the office\nCaller: the ants are back by the lanai', 'inbound')).toBe('the ants are back by the lanai');
+    expect(callerTurns('no labels at all here', 'inbound')).toBe('');
+    expect(callerTurns('Caller: the ants are back', null)).toBe('');
+    // #5524 r6: outbound recordings can swap the labels, so they never count.
+    expect(callerTurns('Agent: hi\nCaller: we just had a new baby', 'outbound')).toBe('');
+    expect(callerTurns('Agent: hi\nCaller: the ants are back', 'outbound-api')).toBe('');
   });
 
   test('#5524 r5 P1: the fact-check record holds only the caller\'s call turns, never the summary or staff turns', async () => {

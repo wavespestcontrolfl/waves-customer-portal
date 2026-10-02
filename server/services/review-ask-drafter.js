@@ -605,7 +605,11 @@ function buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo,
 
 // Text written by the customer, or about this visit by the tech: the only
 // places a proper noun in the draft may come from.
-function callerTurns(transcript) {
+// Outbound recordings can swap the Agent / Caller labels (call-self-audit,
+// contact-correction), so only an explicitly INBOUND call's labeled Caller
+// turns count; outbound or unknown direction never does.
+function callerTurns(transcript, direction) {
+  if (!/^inbound/i.test(String(direction || ""))) return "";
   return String(transcript || "").split(/\n+/)
     .filter((line) => /^\s*(?:caller|customer)\s*:/i.test(line))
     .map((line) => line.replace(/^\s*(?:caller|customer)\s*:\s*/i, ""))
@@ -619,7 +623,7 @@ function customerOwnWords(ctx) {
     // From calls, only what the CALLER said in a labeled transcript: the
     // summary is AI-written and mixes both voices, and unlabeled transcripts
     // can't be attributed, so neither counts as the customer's own words.
-    ...ctx.calls.map((c) => callerTurns(c.transcript)),
+    ...ctx.calls.map((c) => callerTurns(c.transcript, c.direction)),
     ...ctx.emails.map((e) => `${e.subject} ${e.text}`),
   ].join("\n");
 }
@@ -1107,7 +1111,7 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
         ...ctx,
         priorTouches: [],
         sms: ctx.sms.filter((m) => m.direction === "customer"),
-        calls: ctx.calls.map((c) => ({ ...c, call_summary: callerTurns(c.transcript) || null, transcript: null })),
+        calls: ctx.calls.map((c) => ({ ...c, call_summary: callerTurns(c.transcript, c.direction) || null, transcript: null })),
       },
     });
     const prompt = { system: buildTechVoiceSystemPrompt(stepKind, serviceDaysAgo), facts, channel, check, record };
