@@ -143,11 +143,44 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(await accessRows(n)).toEqual([]);
   });
 
+  test('a standing conflict with no open bell (an earlier raise failed) is raised on the next pass', async () => {
+    const n = await neighborhood('Fernleaf Hollow');
+    const customerId = await customerWithCode('7777', { neighborhoodId: n });
+    await trx('neighborhood_access').insert([
+      { neighborhood_id: n, access_type: 'keypad', code: '7777', status: 'needs_confirm', source: 'profile', source_customer_id: customerId },
+      { neighborhood_id: n, access_type: 'keypad', code: '8888', status: 'needs_confirm', source: 'backfill' },
+    ]);
+    await sweepSavedGateCodes(); // nothing changed since the watermark
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers?customerId=${customerId}` });
+    // An open (or person-dismissed) bell for it is left alone.
+    mockRaise.mockClear();
+    mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
+    await sweepSavedGateCodes();
+    mockOpenKeys.mockResolvedValue([]);
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a county lookup that failed is retried on the next pass, whatever the watermark', async () => {
+    const customerId = await customerWithCode('9999');
+    await openWindow();
+    const lookup = jest.fn(async () => null);
+    expect((await sweepSavedGateCodes({ lookup })).tally).toEqual({ no_neighborhood: 1 });
+    lookup.mockResolvedValue({ county: 'Manatee', subdivision: 'MEADOW AT CEDAR RANCH PH II PB60/1', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' });
+    // Watermark has moved past the preferences; the unchecked property keeps it in.
+    const r = await sweepSavedGateCodes({ lookup });
+    expect(r.tally).toEqual({ filed: 1 });
+    expect(lookup).toHaveBeenCalledTimes(2);
+    const linked = await trx('customer_properties').where({ customer_id: customerId }).first('neighborhood_id');
+    expect(linked.neighborhood_id).not.toBeNull();
+  });
+
   test('a conflict the office resolved has its bell closed by the sweep', async () => {
     const n = await neighborhood('Ashby');
     await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '6666', status: 'active', source: 'office' });
-    mockOpenKeys.mockResolvedValueOnce([`neighborhood-gate-conflict:${n}`]);
+    mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
     await sweepSavedGateCodes();
+    mockOpenKeys.mockResolvedValue([]);
     expect(mockClose).toHaveBeenCalledWith(expect.anything(), [`neighborhood-gate-conflict:${n}`], 'gate_code_confirmed', expect.any(Object));
   });
 });

@@ -320,17 +320,29 @@ async function sweepWatermark(conn) {
   return row?.value || null;
 }
 
-// The customers to look at: a non-empty neighborhood code, changed since the
-// watermark (every coded customer on the first run), not deleted.
+// The customers to look at, all with a non-empty neighborhood code and not
+// deleted: those whose preferences changed since the watermark (every coded
+// customer on the first run), PLUS — whatever the watermark says — those whose
+// property was never successfully checked against the county roll (a lookup
+// that timed out, a pin still missing), so a county outage or a late geocode is
+// retried every pass until the property is checked.
 async function changedGateCodeCustomers(conn, since) {
-  let q = conn('property_preferences as pp')
+  const coded = () => conn('property_preferences as pp')
     .join('customers as c', 'c.id', 'pp.customer_id')
     .whereNull('c.deleted_at')
-    .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''")
-    .orderBy('pp.customer_id')
+    .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''");
+  const changed = since
+    ? await coded().where('pp.updated_at', '>=', conn.raw('?::timestamptz', [since])).pluck('pp.customer_id')
+    : await coded().pluck('pp.customer_id');
+  const unchecked = await coded()
+    .whereExists(conn('customer_properties as p').select(1)
+      .whereRaw('p.customer_id = pp.customer_id')
+      .where('p.active', true)
+      .whereNull('p.neighborhood_id')
+      .whereNull('p.neighborhood_checked_at')
+      .where((w) => w.whereNull('p.neighborhood_source').orWhereNot('p.neighborhood_source', 'office')))
     .pluck('pp.customer_id');
-  if (since) q = q.where('pp.updated_at', '>=', conn.raw('?::timestamptz', [since]));
-  return q;
+  return [...new Set([...changed, ...unchecked])].sort();
 }
 
 // File one customer's current code. Lock order matches every preference
@@ -412,6 +424,36 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   });
 }
 
+// Every neighborhood that has a code conflict right now, with the customer
+// behind its newest unconfirmed code (the bell opens that record).
+async function conflictedNeighborhoods(conn) {
+  const rows = await conn('neighborhood_access as a')
+    .whereNotNull('a.code').whereNot('a.status', 'retired')
+    .groupBy('a.neighborhood_id')
+    .havingRaw('count(*) > 1')
+    .havingRaw("bool_or(a.status = 'needs_confirm')")
+    .select('a.neighborhood_id',
+      conn.raw("(array_agg(a.source_customer_id ORDER BY a.created_at DESC) FILTER (WHERE a.status = 'needs_confirm' AND a.source_customer_id IS NOT NULL))[1] AS customer_id"));
+  return rows;
+}
+
+// Raise the bell for a standing conflict that has none open (the raise after
+// filing failed, or the process stopped between the two). A bell a person
+// dismissed is still open by key and is left alone.
+async function reconcileConflictBells(alreadyRaised) {
+  const { openAdminAlertKeys } = require('./admin-alert-episodes');
+  const open = new Set(await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX));
+  let raised = 0;
+  for (const row of await conflictedNeighborhoods(db)) {
+    if (alreadyRaised.has(row.neighborhood_id) || open.has(`${CONFLICT_KEY_PREFIX}${row.neighborhood_id}`)) continue;
+    if (!row.customer_id) continue; // no customer record to open; the office tab (PR 3) lists it
+    const c = await db('customers').where({ id: row.customer_id }).first('first_name');
+    await raiseConflictBell(row.neighborhood_id, row.customer_id, c?.first_name || null);
+    raised += 1;
+  }
+  return raised;
+}
+
 // The emitter clears its own bells: a neighborhood whose codes no longer
 // conflict (the office confirmed or retired one) has its bell closed done.
 async function closeResolvedConflictBells() {
@@ -424,6 +466,31 @@ async function closeResolvedConflictBells() {
   return closeAdminAlertKeys(db, resolved, 'gate_code_confirmed', {
     resolution: 'Cleared: the neighborhood has one gate code on file again',
   });
+}
+
+// The bell side of a pass: ring for this pass's new conflicts, raise any
+// standing conflict whose bell never landed, and close the resolved ones.
+async function settleConflictBells(conflicts, logger) {
+  const raisedNow = new Set();
+  for (const [neighborhoodId, { customerId, firstName }] of conflicts) {
+    try {
+      await raiseConflictBell(neighborhoodId, customerId, firstName);
+      raisedNow.add(neighborhoodId);
+    } catch (err) {
+      logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
+    }
+  }
+  // A conflict filed earlier whose bell never landed is raised now.
+  try {
+    await reconcileConflictBells(raisedNow);
+  } catch (err) {
+    logger.warn(`[neighborhood-access] conflict bell reconcile failed (${err.code || err.name || 'error'})`);
+  }
+  try {
+    await closeResolvedConflictBells();
+  } catch (err) {
+    logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
+  }
 }
 
 async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) {
@@ -448,18 +515,7 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
       logger.warn(`[neighborhood-access] filing failed for customer ${customerId} (${err.code || err.name || 'error'})`);
     }
   }
-  for (const [neighborhoodId, { customerId, firstName }] of conflicts) {
-    try {
-      await raiseConflictBell(neighborhoodId, customerId, firstName);
-    } catch (err) {
-      logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
-    }
-  }
-  try {
-    await closeResolvedConflictBells();
-  } catch (err) {
-    logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
-  }
+  await settleConflictBells(conflicts, logger);
   // Advance only after a clean pass, so a failed customer is retried next tick.
   if (!failed) {
     await db('system_settings').insert({
