@@ -390,3 +390,21 @@ describe('county result pickers on a route', () => {
     expect(pickCharlotteAddressResult(charlotte(['9155 SR 31 STE 1', '9155 SR 31 STE 2']), '9155 FL-31 N, Port Charlotte, FL 33948')).toBeNull();
   });
 });
+
+describe('round-4 cases', () => {
+  test('spelled diagonals canonicalize ("Northeast US Highway 41" → "US 41 NE")', () => {
+    expect(normalizeCountyStreetLine('123 Northeast US Highway 41')).toBe('123 US 41 NE');
+    expect(normalizeCountyStreetLine('123 US 41 Southwest')).toBe('123 US 41 SW');
+    // A non-route street keeps its spelled direction untouched here.
+    expect(normalizeCountyStreetLine('123 Northeast Park Dr')).toBe('123 NORTHEAST PARK DR');
+  });
+
+  test('city scope applies before the exact-row preference (Hillsborough)', () => {
+    const { pickHillsboroughAddressResult } = _private;
+    const rows = [
+      { pin: 'A0001', folio: '0001', address: '9155 SR 70 E, RUSKIN' },
+      { pin: 'A0002', folio: '0002', address: '9155 SR 70, TAMPA' },
+    ];
+    expect(pickHillsboroughAddressResult(rows, '9155 FL-70 E, Tampa, FL 33610')).toMatchObject({ parcelId: 'A0002' });
+  });
+});

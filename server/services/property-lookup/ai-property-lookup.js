@@ -2719,7 +2719,7 @@ function routeSearchCandidates(street) {
   // after the number ("5100 US 301 N"), but a roll may write it first
   // ("5100 N US HWY 301", Hillsborough). The direction-free spellings follow
   // for rolls that omit it.
-  const direction = route.preDirection || route.postDirection;
+  const { direction } = route;
   const bareForms = routeSpellingVariants(`${m[1]} ${route.type} ${route.number}`);
   const routes = [
     ...(direction ? routeSpellingVariants(`${m[1]} ${direction} ${route.type} ${route.number}`) : []),
@@ -2888,7 +2888,10 @@ const COUNTY_ROUTE_STREET_RE = new RegExp(
   + '\\s*(\\d{1,4}[A-Z]?)(?=\\s|$)(.*)$',
 );
 function canonicalizeCountyRouteStreet(street) {
-  const m = COUNTY_ROUTE_STREET_RE.exec(street);
+  // Spelled diagonals ("123 Northeast US Highway 41") abbreviate first —
+  // the route parser reads NE/NW/SE/SW. Only a route street is rewritten;
+  // any other street comes back exactly as given.
+  const m = COUNTY_ROUTE_STREET_RE.exec(street.replace(/\b(NORTH|SOUTH)(EAST|WEST)\b/g, (_, ns, ew) => `${ns[0]}${ew[0]}`));
   if (!m) return street;
   const [, houseNumber, preDirection, token, routeNumber, rest] = m;
   let type;
@@ -3058,7 +3061,9 @@ const COUNTY_ROUTE_LABEL_RE = /^(?:(N|S|E|W|NE|NW|SE|SW)\s+)?(SR|US|CR)\s+(\d{1,
 function parseCountyRouteLabel(streetLabel) {
   const m = COUNTY_ROUTE_LABEL_RE.exec(String(streetLabel || '').trim());
   if (!m) return null;
-  return { preDirection: m[1] || null, type: m[2], number: m[3], postDirection: m[4] || null };
+  // `direction` is whichever position carries it (canonical keys put it
+  // after the number); every caller compares directions through it.
+  return { preDirection: m[1] || null, type: m[2], number: m[3], postDirection: m[4] || null, direction: m[4] || m[1] || null };
 }
 
 // ZIP from the city/state tail of a comma-formed address — never from the
@@ -3126,7 +3131,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // phantom "MAIN ST 4" street), so peel them from the raw string first.
     const cleanedAddress = String(address || '').replace(/#\s*[A-Za-z0-9-]+/g, ' ');
     const street = normalizeCountyStreetLine(cleanedAddress); // "4867 TOBERMORY WAY"
-    const m = /^(\d+)\s+(.{3,})$/.exec(street || '');
+    const m = /^(\d+)\s+(.{3,})$/.exec(street);
     if (!m) return null;
     let houseNumber = parseInt(m[1], 10);
     // The audit usually receives the geocoder's CANONICAL address (typo-fixed
@@ -3136,7 +3141,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // always taken from the ORIGINALLY TYPED address when one is supplied.
     if (options.typedAddress) {
       const typedStreet = normalizeCountyStreetLine(String(options.typedAddress).replace(/#\s*[A-Za-z0-9-]+/g, ' '));
-      const typedM = /^(\d+)\s+/.exec(typedStreet || '');
+      const typedM = /^(\d+)\s+/.exec(typedStreet);
       if (typedM) houseNumber = parseInt(typedM[1], 10);
     }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
@@ -3150,8 +3155,9 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const route = parseCountyRouteLabel(streetLabel);
     const likeText = route ? `${route.type} ${route.number}` : (removeStreetSuffix(streetLabel) || streetLabel);
     const typedSuffix = extractStreetSuffix(streetLabel);
+    // No serviced county → the loop below never answers and the audit
+    // returns null (no signal) through the !anyAnswered exit.
     const counties = auditCountyCandidates(address, geoContext);
-    if (!counties.length) return null;
     // ZIP scope: the customer-typed ZIP wins over the canonical/geocoded one
     // (Google can rewrite the ZIP while snapping). When a typed address was
     // supplied but carries NO ZIP, do NOT fall back to the canonical ZIP —
@@ -3185,8 +3191,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // different road — "SR 64 E" vs "SR 64 W". The typed direction pins BOTH
     // positions: a roll row may write it before or after the number, so
     // "123 US 41 N" must not accept "123 S US 41" through the prefix slot.
-    const routeDirection = route && (route.preDirection || route.postDirection);
-    const routeDirectionAlt = routeDirection ? escapeAuditRegex(routeDirection) : '[NSEW]{1,2}';
+    const routeDirectionAlt = route?.direction ? escapeAuditRegex(route.direction) : '[NSEW]{1,2}';
     const relaxedPattern = route
       ? new RegExp(
         `\\b(\\d+)\\s+(?:${routeDirectionAlt}\\s+)?`
@@ -3234,15 +3239,12 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // A row only falls out of scope when it HAS a ZIP and it isn't the typed
     // one — unknown row ZIPs stay in scope (fail-open, never manufactures a
     // mismatch out of missing data).
-    // The targeted "<number> <street>" query (truncated-page fallback). A
-    // route row can carry a direction BETWEEN the number and the route
+    // The targeted "<number> %<street>" query (truncated-page fallback). A
+    // row can carry a direction BETWEEN the number and the street
     // ("123 N US 41", "123 NE US HWY 41"), which a LIKE on "123 US 41" never
-    // reaches — so a route queries "<number> %<route>" under each spelling
-    // (one request each); the direction-pinned patterns still decide what
-    // counts. Ordinary streets keep the plain targeted query.
-    const queryTargeted = (county) => (route
-      ? queryStreetSitusAddresses(county, likeText, { ...options, houseNumber })
-      : queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options));
+    // reaches; the mid-pattern wildcard does, and the direction-pinned
+    // patterns still decide what counts.
+    const queryTargeted = (county) => queryStreetSitusAddresses(county, likeText, { ...options, houseNumber });
     const zipCompatible = (zipSet) => !typedZip || !zipSet || [...zipSet].some((z) => !z || z === typedZip);
     const scopedNumbers = (map) => {
       const out = new Set();
@@ -3267,13 +3269,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       anyAnswered = true;
       if (!result.situs.length) continue;
 
-      let numbers = collect(result.situs, result.zips, strictPattern);
-      // A route's rows mix spellings on one road ("7100 SR 70" beside
-      // "7000 SR 70 E"), so the direction-compatible relaxed matches are
-      // merged in, not used only as an empty-result fallback — otherwise the
-      // strict hits hide the relaxed rows and a real number reads as missing.
-      if (route) numbers = mergeNumbers(numbers, collect(result.situs, result.zips, relaxedPattern));
-      else if (!numbers.size) numbers = collect(result.situs, result.zips, relaxedPattern);
+      // Strict and relaxed matches are merged, never relaxed-as-fallback: one
+      // road's rows mix spellings ("7100 SR 70" beside "7000 SR 70 E"), and a
+      // strict hit must not hide a same-street row that only the relaxed
+      // (suffix/direction-pinned) pattern reads — the targeted queries below
+      // already merge both the same way.
+      const numbers = mergeNumbers(
+        collect(result.situs, result.zips, strictPattern),
+        collect(result.situs, result.zips, relaxedPattern),
+      );
       if (!numbers.size) {
         // A truncated page with no matched rows proves nothing — the street
         // could live entirely in the unreturned rows. Try the targeted
@@ -3500,14 +3504,14 @@ function routeAddressMatch(normalizedAddress, target) {
     const route = parseCountyRouteLabel(label);
     if (!route) return null;
     const tail = m[2].startsWith(label) ? m[2].slice(label.length).trim() : '';
-    return { house: m[1], route, tail, direction: route.postDirection || route.preDirection || null };
+    return { house: m[1], route, tail };
   };
   const a = parse(normalizedAddress);
   const b = parse(target);
   if (!a || !b) return null;
   if (a.house !== b.house || a.route.type !== b.route.type || a.route.number !== b.route.number) return false;
   if (a.tail !== b.tail) return false;
-  return !a.direction || !b.direction || a.direction === b.direction;
+  return !a.route.direction || !b.route.direction || a.route.direction === b.route.direction;
 }
 
 function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
@@ -3648,19 +3652,19 @@ function isUniqueCountyAddressMatch(rows, address, requiresCityMatch) {
   const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
   if (!target || (requiresCityMatch && !targetCity)) return null;
 
-  const normalizedRows = rows
+  // City scope FIRST, then exact-before-loose: an exact-direction row in
+  // another city must not shadow a direction-less row in the typed city
+  // (Hillsborough always requires the city).
+  const inCity = rows
     .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
-    .filter((row) => row.parcelId && row.situsAddress);
+    .filter((row) => row.parcelId && row.situsAddress)
+    .filter((row) => !targetCity
+      || (normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress)) === targetCity);
   // Exact equality first; only when nothing is exact may a route row that
   // omits the typed direction stand in (routeAddressMatch) — and the
   // uniqueness rule below still refuses an ambiguous pair.
-  const exact = normalizedRows.filter((row) => row.normalizedAddress === target);
-  const matches = (exact.length ? exact : normalizedRows.filter((row) => routeAddressMatch(row.normalizedAddress, target) === true))
-    .filter((row) => {
-      if (!targetCity) return true;
-      const rowCity = normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress);
-      return rowCity === targetCity;
-    });
+  const exact = inCity.filter((row) => row.normalizedAddress === target);
+  const matches = exact.length ? exact : inCity.filter((row) => routeAddressMatch(row.normalizedAddress, target) === true);
 
   const unique = dedupeCountyMatches(matches);
   if (unique.length !== 1) return null;
