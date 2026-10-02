@@ -610,7 +610,12 @@ function summarizePayments(entries, invoice) {
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
   const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received);
   const disputed = entries.filter((entry) => entry.status === 'disputed');
-  const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous' || entry.unconfirmed === true);
+  // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
+  // with no recorded result, an ambiguous one, or an accepted-but-unrecorded one) may already have charged
+  // the customer: its receipt is unconfirmed, which is not the same as not received.
+  const pending = notReceived.filter((entry) => entry.status === 'processing' || (entry.unconfirmed === true && entry.source === 'combined_pay_processing'));
+  const unknownOutcome = notReceived.filter((entry) => entry.state === 'claimed' || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing'));
+  const inFlight = [...pending, ...unknownOutcome];
   const failed = notReceived.filter((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed');
   const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
   const creditSettled = entries.filter((entry) => entry.settled_by === 'account_credit');
@@ -621,7 +626,8 @@ function summarizePayments(entries, invoice) {
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
   if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, net $${netRecorded.toFixed(2)}${refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded but are not in the payments table (needs reconciling)`);
-  if (inFlight.length) parts.push(`${inFlight.length} attempt(s) still in flight or with an unknown outcome (NOT received)`);
+  if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);
+  if (unknownOutcome.length) parts.push(`${unknownOutcome.length} charge attempt(s) with an unknown outcome (Stripe may have charged the customer: receipt NOT confirmed)`);
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (creditSettled.length) parts.push('settled by account credit with no card charge (a credit settlement is not a payment received)');
@@ -629,6 +635,7 @@ function summarizePayments(entries, invoice) {
   if (receivedAny) statement = `Payment was received: ${parts.join('; ')}.`;
   else if (invoiceStatusKey(invoice.status) === 'prepaid') statement = 'Settled as prepaid (account credit or an annual prepay): no payment row; nothing is owed.';
   else if (creditSettled.length) statement = `Settled by account credit, not by a payment: ${parts.join('; ')}.`;
+  else if (unknownOutcome.length) statement = `Payment receipt is not confirmed: ${parts.join('; ')}. Stripe may have charged the customer, so do not say it was not paid, and do not retry the charge.`;
   else if (invoiceStatusKey(invoice.status) === 'paid') statement = `The invoice is marked paid but no received payment is linked to it in the portal's records${parts.length ? `; ${parts.join('; ')}` : ''}. Say the payment evidence is unknown.`;
   else statement = `No payment has been received${parts.length ? `: ${parts.join('; ')}` : ' and none has been attempted that the portal recorded'}.`;
 
@@ -638,6 +645,8 @@ function summarizePayments(entries, invoice) {
     stripe_succeeded_not_in_ledger: stripeConfirmed.length,
     unreconciled_stripe_charges: unreconciled.length,
     attempts_in_flight_or_unknown: inFlight.length,
+    payments_pending: pending.length,
+    attempts_unknown_outcome: unknownOutcome.length,
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
     settled_by_account_credit: creditSettled.length,

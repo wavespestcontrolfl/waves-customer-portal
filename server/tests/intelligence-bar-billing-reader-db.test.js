@@ -231,8 +231,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(failedRow).toMatchObject({ received: false });
     expect(timeline.some((e) => e.type === 'recorded_payment')).toBe(false);
     expect(detail.payment_summary).toMatchObject({ received: false, recorded_payments_net: 0, attempts_in_flight_or_unknown: 2, attempts_failed_or_canceled: 2 });
-    expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
-    expect(detail.payment_summary.statement).toMatch(/NOT received/);
+    // The submitted-but-unresolved charge may already have succeeded: unconfirmed, not "not received".
+    expect(detail.payment_summary).toMatchObject({ payments_pending: 1, attempts_unknown_outcome: 1 });
+    expect(detail.payment_summary.statement).toMatch(/^Payment receipt is not confirmed/);
+    expect(detail.payment_summary.statement).not.toMatch(/^No payment has been received/);
+    expect(detail.payment_summary.statement).toMatch(/do not retry the charge/);
     expect(detail.invoice).toMatchObject({ status: 'overdue', balance_due: 200, overdue: true });
     expect(detail.payment_plan.active).toMatchObject({ payment_amount: 50, payment_frequency: 'monthly' });
     expect(detail.payment_plan.installments).toMatch(/unknown here/);
@@ -288,8 +291,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(provisional).toMatchObject({ received: false, unconfirmed: true, source: 'combined_pay_processing' });
     expect(provisional.state).toMatch(/processing/);
     expect(provisional.stripe_payment_intent_id).toBe(`pi_ach_${run}`);
-    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, stripe_succeeded_not_in_ledger: 0, attempts_in_flight_or_unknown: 1 });
+    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, stripe_succeeded_not_in_ledger: 0, attempts_in_flight_or_unknown: 1, payments_pending: 1, attempts_unknown_outcome: 0 });
     expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
+    expect(detail.payment_summary.statement).toMatch(/still processing \(not received yet\)/);
     expect(detail.invoice).toMatchObject({ status: 'processing', balance_due: 0 });
     const { account_summary: summary } = await read('get_customer_invoices', { customer_id: C });
     expect(summary).toMatchObject({ total_due: 0, outstanding_count: 0, processing: { count: 1, amount: 45 } });
@@ -315,8 +319,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const orphan = detail.payments_timeline.find((e) => e.type === 'stripe_unreconciled_charge');
     expect(orphan).toMatchObject({ received: false, unconfirmed: true, source: 'invoice_card_on_file', stripe_payment_intent_id: `pi_bank_${run}` });
     expect(orphan.state_note).toMatch(/not confirmed received/i);
-    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, attempts_in_flight_or_unknown: 1 });
-    expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
+    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, attempts_in_flight_or_unknown: 1, attempts_unknown_outcome: 1 });
+    expect(detail.payment_summary.statement).toMatch(/^Payment receipt is not confirmed/);
+    expect(detail.payment_summary.statement).toMatch(/do not retry the charge/);
   });
 
   test('overlapping subsets: the presented personal balance excludes the union, so nothing is subtracted twice', async () => {
