@@ -47,5 +47,6 @@ describe('retired /tech portal redirect', () => {
     expect(screen.getByText('Install hint')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', `/admin/login?next=${encodeURIComponent('/admin/today/tools?visit=row%3Atwo')}`);
     expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Waves Field Tools' }).parentElement.style.paddingTop).toContain('safe-area-inset-top');
   });
 });

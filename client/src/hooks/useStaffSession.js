@@ -73,10 +73,10 @@ export default function useStaffSession() {
     // Only a failure to REACH the server (or to read a 2xx body) may open from
     // the offline pass: adminFetch throws those with no HTTP status. A server
     // answer of any kind carries a status (or is a profile we reject below).
-    // On the field path the 401 is handled below, after the token check, so
-    // an old login's late 401 never sends a newer login (another tab) to the
-    // sign-in page (pre-push P1).
-    adminFetch("/admin/auth/me", abort ? { signal: abort.signal, redirectOn401: false } : {})
+    // Every path handles the 401 below, after the token check, so an old
+    // login's late 401 never sends a newer login (another tab) to the sign-in
+    // page (pre-push P1; Codex #5573 r14 for non-field pages).
+    adminFetch("/admin/auth/me", { redirectOn401: false, ...(abort ? { signal: abort.signal } : {}) })
       .then((profile) => {
         if (superseded()) return;
         if (!profile) {

@@ -21,7 +21,9 @@ export default function TechPortalRedirect() {
   // #5573 r10). The installed app starts at /admin/today.
   if (!getAdminAuthToken()) {
     return (
-      <div style={{ minHeight: '100vh', padding: 24, background: '#0f1923', color: '#e2e8f0', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+      // Standalone PWA under viewport-fit=cover: clear the notch / status bar
+      // like the retired shell did (Codex #5573 r14).
+      <div style={{ minHeight: '100vh', padding: 24, paddingTop: 'calc(24px + env(safe-area-inset-top, 0px))', background: '#0f1923', color: '#e2e8f0', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
         <h1 style={{ fontSize: 24, margin: '8px 0 16px' }}>Waves Field Tools</h1>
         <AddToHomeScreenHint />
         <Link to={`/admin/login?next=${encodeURIComponent(target)}`} style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, padding: '10px 16px', borderRadius: 8, background: '#e2e8f0', color: '#0f1923', fontSize: 16, fontWeight: 700, textDecoration: 'none' }}>

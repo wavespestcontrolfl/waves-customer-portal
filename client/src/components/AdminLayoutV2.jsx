@@ -47,7 +47,6 @@ import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 import { useTechNavigationLock } from "./tech/TechNavigationLock";
 import useStaffSession from "../hooks/useStaffSession";
 
-export { AUTH_CHECK_TIMEOUT_MS } from "../hooks/useStaffSession";
 
 function initialsFor(name) {
   if (!name) return "•";

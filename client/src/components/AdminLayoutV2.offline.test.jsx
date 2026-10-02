@@ -26,7 +26,8 @@ vi.mock("./admin/GlobalCommandPalette", async () => {
   };
 });
 
-import AdminLayoutV2, { AUTH_CHECK_TIMEOUT_MS } from "./AdminLayoutV2";
+import AdminLayoutV2 from "./AdminLayoutV2";
+import { AUTH_CHECK_TIMEOUT_MS } from "../hooks/useStaffSession";
 import TechNavigationLock from "./tech/TechNavigationLock";
 
 function LoginProbe() {
@@ -287,6 +288,24 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(AUTH_CHECK_TIMEOUT_MS + 100); });
     await act(async () => { unbounded.resolve(response(200, TECH)); });
     expect(await screen.findByText("Schedule content")).toBeInTheDocument();
+  });
+
+  it("on a non-Today page too, an old login's late 401 neither redirects nor signs out the newer login (Codex #5573 r14)", async () => {
+    const NEW_TOKEN = staffJwt(undefined, "newer-signature");
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    let answerOld;
+    vi.stubGlobal("fetch", vi.fn((_url, options = {}) => {
+      const auth = options.headers?.Authorization || "";
+      if (auth.endsWith(LIVE_TOKEN)) return new Promise((resolve) => { answerOld = () => resolve(response(401, { error: "revoked" })); });
+      return Promise.resolve(response(200, { ...TECH, id: "tech-2", name: "Newer Tech" }));
+    }));
+    const hrefBefore = window.location.href;
+    renderAt("/admin/dashboard");
+    await act(async () => {});
+    localStorage.setItem("waves_admin_token", NEW_TOKEN);
+    await act(async () => { answerOld(); });
+    expect(window.location.href).toBe(hrefBefore);
+    expect(localStorage.getItem("waves_admin_token")).toBe(NEW_TOKEN);
   });
 
   it("treats a 2xx whose body cannot be read as weak signal", async () => {

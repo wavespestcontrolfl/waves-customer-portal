@@ -20,7 +20,8 @@ vi.mock("./admin/GlobalCommandPalette", async () => {
   };
 });
 
-import AdminLayoutV2, { AUTH_CHECK_TIMEOUT_MS } from "./AdminLayoutV2";
+import AdminLayoutV2 from "./AdminLayoutV2";
+import { AUTH_CHECK_TIMEOUT_MS } from "../hooks/useStaffSession";
 import TechNavigationLock from "./tech/TechNavigationLock";
 import { FLAGS_FETCH_TIMEOUT_MS } from "../hooks/useFeatureFlag";
 
