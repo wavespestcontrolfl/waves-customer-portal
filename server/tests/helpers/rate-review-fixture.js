@@ -114,6 +114,7 @@ function scriptedDb(scenario) {
     if (/WaveGuard Monthly/.test(sql)) return { rows: Object.entries(scenario.settledDues || {}).map(([customer_id, settled]) => ({ customer_id, settled })) };
     if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
     if (/^\?$/.test(sql.trim())) return bindings[0];
+    if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] }; // the per-batch rebuild/schedule lock (lockBatch)
     throw new Error(`rate-review fixture: unexpected raw SQL ${sql.slice(0, 60)}`);
   });
   db.transaction = jest.fn(async (fn) => fn(db));

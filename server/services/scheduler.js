@@ -2274,6 +2274,33 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Rate review monthly batch failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 3:10 AM ET — Annual rate review APPLY (plan annual-rate-review-
+  // 2026-09-30 step 3, services/rate-review-apply.js). Writes the noticed
+  // rate on its effective date for every rate-review notice the comms lane
+  // has SENT: per-application visits + fee + ledger slice, monthly dues +
+  // slice, or the prepaid term's successor amount — one transaction per
+  // notice, holds recorded and belled, never a customer message. Dark behind
+  // GATE_RATE_REVIEW — rateReviewLive() is read BEFORE the cron lock, so off
+  // = no query, no write (customers keep the lower rate: the safe direction
+  // of the kill switch). Before the 6:05 MRR snapshot and the 8 AM dues run,
+  // so a dues day on the effective date bills the new rate. runExclusive: a
+  // deploy-overlap tick must not apply the same night twice (applied_at
+  // under the notice row lock is the second guard).
+  // =========================================================================
+  cron.schedule('10 3 * * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review nightly apply');
+    try {
+      await runExclusive('rate-review-apply', async () => {
+        const { applyDueRateChanges } = require('./rate-review-apply');
+        const result = await applyDueRateChanges();
+        logger.info(`[rate-review-apply] nightly tick: ${result.reason ? `skipped (${result.reason})` : `${result.due} due, ${result.applied} applied, ${result.held} held`}`);
+      });
+    } catch (err) { logger.error(`Rate review nightly apply failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
   // competitors' ranked keywords from DataForSEO Labs, diffs against our
   // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners

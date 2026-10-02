@@ -23261,6 +23261,24 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             });
         }
 
+        // Coverage money only — the setup line is not per-visit coverage.
+        const switchTermAmount = Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100;
+        // Annual rate review (GATE_RATE_REVIEW): a switch whose term succeeds
+        // one carrying a noticed renewal amount charges that amount unless
+        // staff confirm a different one (acknowledgeNoticedAmount) — the
+        // same guard as the Customer 360 renewal routes, under this
+        // customer's annual-prepay lock, before the term is written.
+        if (require('../config/feature-gates').rateReviewLive()) {
+          const RateReviewApply = require('../services/rate-review-apply');
+          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, today: etDateString(), lock: true,
+          });
+          if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+          if (noticed) {
+            await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: liveVisit.customer_id, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'schedule_prepay_switch', invoiceId: invoice.id });
+          }
+        }
+
         const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: liveVisit.customer_id,
           // Estimate-origin switches carry their provenance so a later
@@ -23270,8 +23288,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           prepayInvoiceId: invoice.id,
           planLabel: mintPayload.planLabel,
           monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
-          // Coverage money only — the setup line is not per-visit coverage.
-          prepayAmount: Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100,
+          prepayAmount: switchTermAmount,
           termStart: mintPayload.termStart,
           coverageServiceType: mintPayload.serviceType,
           coverageVisitCount: mintPayload.visitCount,
@@ -23311,6 +23328,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
       if (err && err.switchConflict) return res.status(409).json({ error: err.message });
       throw err;
     }
@@ -27029,6 +27047,10 @@ router._test = {
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
+  // The lock-and-refuse phase on its own — the annual rate review apply lane
+  // (services/rate-review-apply.js) validates the locked targets before it
+  // lets the propagation write.
+  lockAndGuardFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
   retiredGateInputsForVisitEdit,
   retiredSaleKeysVouchedByAcceptedEstimate,

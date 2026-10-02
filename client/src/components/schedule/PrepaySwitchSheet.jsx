@@ -32,6 +32,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import MobilePaymentSheet from './MobilePaymentSheet';
+import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -46,8 +47,11 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
-      try { const j = await r.json(); msg = j.error || msg; } catch { /* keep status */ }
+      let body = null;
+      try { body = await r.json(); msg = body?.error || msg; } catch { /* keep status */ }
       const err = new Error(msg);
+      // Structured refusals (the noticed renewal amount 409) ride along.
+      if (body && typeof body === 'object') err.body = body;
       // A status means the SERVER answered — the request definitively did not
       // commit. No status (network drop, timeout) means the outcome is
       // UNKNOWN, and money paths must not compensate as if it failed.
@@ -127,6 +131,13 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
   // the outcome and the other becomes a no-op, so the abort path can never
   // race the success path past the activation gate.
   const tenderOutcomeClaimed = useRef(false);
+  // A noticed-amount 409 that lands after the sheet closed must neither ask
+  // nor resend the switch.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // Set when the switch stopped mid-way and the operator has to finish by
   // hand: a restore that failed, an ambiguous network outcome, or a prepay
   // void that refused. { title, message, detail, voided } — `voided` powers
@@ -181,12 +192,17 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       // ONE atomic server operation: CAS-void the superseded draft + mint
       // the prepay invoice and term, all recomputed server-side under the
       // locks. Collect-only — the response goes straight to the tender.
-      result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
+      // A noticed renewal amount (annual rate review) asks staff once;
+      // confirm resends with acknowledgeNoticedAmount, cancel sends nothing.
+      result = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
         method: 'POST',
-        body: JSON.stringify({}),
-      });
+        body: JSON.stringify({ ...ack }),
+      }), (message) => mountedRef.current && window.confirm(message));
     } catch (e) {
-      if (e.status) {
+      if (e.code === NOTICED_AMOUNT_DECLINED) {
+        // Declined before any write: nothing was voided or minted.
+        setActionError(e.message);
+      } else if (e.status) {
         // The server answered: the transaction did not commit, so nothing
         // was voided and nothing minted. The visit still bills as it did.
         setActionError(e.message || 'Could not switch this visit to annual prepay');
