@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Select, cn } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import AdminFollowThroughCards from "../../components/admin/AdminFollowThroughCards";
+import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 
 const KIND_LABEL = {
   send_estimate: "Send estimate",
@@ -248,6 +249,8 @@ function useAutoClosedCommitments() {
 }
 
 export default function OwedTabV2() {
+  // Promises are staff-wide; the call behind one is admin-only.
+  const canOpenCall = useCanAccessCalls();
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
   // The shared callback cards above the list: shown only while the selected
@@ -463,7 +466,7 @@ export default function OwedTabV2() {
                     <Button size="sm" variant="ghost" disabled={busyId === row.id} onClick={() => act(row, "dismiss")}>Dismiss</Button>
                   </>
                 )}
-                <Button size="sm" variant="ghost" onClick={() => openCall(row)} className={cn("ml-auto")}>Open call</Button>
+                {canOpenCall && <Button size="sm" variant="ghost" onClick={() => openCall(row)} className={cn("ml-auto")}>Open call</Button>}
               </div>
             </li>
           );

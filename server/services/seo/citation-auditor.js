@@ -68,7 +68,7 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const { _internals: contactFinder } = require('./contact-finder');
 const { classifyPageBody } = require('./page-body-classifier');
 const { decodeHTML } = require('entities');
-const { visibleText } = require('../content/content-registry-live-status');
+const { visibleText, notFoundHeading } = require('../content/content-registry-live-status');
 
 const STATES = ['unverified', 'verified', 'mismatched', 'fetch-blocked', 'missing'];
 const BRAND_NAME = 'Waves Pest Control'; // locations.js carries office names only, not the brand name
@@ -97,8 +97,8 @@ const STREET_WORDS = {
 // directionals, "florida" -> "fl", collapse spaces.
 function normalizeStreet(str) {
   return String(str || '').toLowerCase()
+    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*(?:#\s*)?[a-z0-9-]+/g, ' ') // "Suite #110" is ONE designator; one whitespace run, so no backtracking blowup
     .replace(/#\s*[a-z0-9-]+/g, ' ')
-    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*[a-z0-9-]+/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .split(' ').filter(Boolean).map((w) => STREET_WORDS[w] || w).join(' ');
 }
@@ -170,20 +170,92 @@ const BRAND_RE = /waves\s+pest\s+control/i;
 const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})/g;
 const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
 
+// Expanded JSON-LD wraps values as {"@value": ...} (possibly inside arrays, addresses and their
+// fields). Unwrap them all BEFORE any field is read, so a name, telephone or street given that
+// way is judged as its value, not as "[object Object]". Expanded keys are schema.org IRIs
+// ("https://schema.org/telephone"); they are read as the compact property name. A one-entry
+// array (expanded form wraps every value) is read as its entry. Iterative, one pass per block:
+// a fetched page's nesting depth must never exhaust the stack (a dropped block would hide a
+// stated mismatch) or make the walk quadratic.
+const SCHEMA_IRI_RE = /^(?:https?:\/\/schema\.org\/|schema:)/i;
+function unwrapLd(input) {
+  const holder = {};
+  const stack = [[input, holder, 'v']];
+  while (stack.length) {
+    const [src, parent, key] = stack.pop();
+    let v = src;
+    for (;;) {
+      if (Array.isArray(v) && v.length === 1) v = v[0];
+      else if (v && typeof v === 'object' && !Array.isArray(v) && '@value' in v) v = v['@value'];
+      else break;
+    }
+    if (Array.isArray(v)) {
+      const out = new Array(v.length);
+      parent[key] = out;
+      v.forEach((x, i) => stack.push([x, out, i]));
+    } else if (v && typeof v === 'object') {
+      const out = {};
+      parent[key] = out;
+      const entries = Object.entries(v).map(([k, val]) => [k.replace(SCHEMA_IRI_RE, ''), val]);
+      for (const [k] of entries) out[k] = undefined; // keep key order
+      for (let i = entries.length - 1; i >= 0; i -= 1) stack.push([entries[i][1], out, entries[i][0]]); // a later duplicate key wins
+    } else {
+      parent[key] = v;
+    }
+  }
+  return holder.v;
+}
+
+// A node that only points at another ({"@id": "_:address"}), as flattened JSON-LD writes links.
+// Stops at the first other key, so a large node is never enumerated whole.
+const isLdRef = (v) => {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || typeof v['@id'] !== 'string') return false;
+  for (const k in v) if (k !== '@id' && k !== '@type') return false;
+  return true;
+};
+
 // Every named/phoned/addressed schema.org node in the page's JSON-LD (arrays, @graph, mainEntity).
+// Flattened JSON-LD puts the postal address in a sibling node and links it by @id: an address
+// reference is replaced by the node it names, from any block on the page. One that names no node
+// stays a bare reference, which addressStrings reports as stated but unreadable.
 function jsonLdNodes(html) {
   const out = [];
-  const visit = (node) => {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) return node.forEach(visit);
-    if (node.name || node.telephone || node.address) out.push(node);
-    if (node['@graph']) visit(node['@graph']);
-    if (node.mainEntity) visit(node.mainEntity);
+  const byId = new Map();
+  // Blank-node ids ("_:address") are local to their own JSON-LD block; IRIs name one node
+  // page-wide. Blank ids (the node's own and its address links) are renamed per block on the way
+  // in, before any merge, so a property merged from another block keeps its block's meaning.
+  const scoped = (id, block) => (id.startsWith('_:') ? `_:${block}/${id.slice(2)}` : id);
+  const scopeRef = (v, block) => (isLdRef(v) ? { ...v, '@id': scoped(v['@id'], block) } : v);
+  // Depth-first, in document order (a node, then its @graph, then its mainEntity), on the
+  // block normalized once. A bare {"@value": ...} unwraps to a primitive: not an entity.
+  const visit = (root, block) => {
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== 'object') continue;
+      if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i -= 1) stack.push(node[i]); continue; }
+      // A node split across blocks under one IRI @id is one node: its properties merge into the first
+      // (in place, each copied once; the first value of a property stands), so no block's stated
+      // field is dropped.
+      if (node.address) node.address = Array.isArray(node.address) ? node.address.map((a) => scopeRef(a, block)) : scopeRef(node.address, block);
+      const id = typeof node['@id'] === 'string' && !isLdRef(node) ? scoped(node['@id'], block) : null;
+      const first = id === null ? node : byId.get(id) || node;
+      if (id !== null) byId.set(id, first);
+      Object.keys(node).forEach((k) => { if (!(k in first)) first[k] = node[k]; });
+      if (node.name || node.telephone || node.address) out.push(node);
+      if (node.mainEntity) stack.push(node.mainEntity);
+      if (node['@graph']) stack.push(node['@graph']);
+    }
   };
+  let block = 0;
   for (const m of String(html).matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
-    try { visit(JSON.parse(m[1])); } catch { /* malformed block: ignore */ }
+    let parsed;
+    try { parsed = JSON.parse(m[1]); } catch { continue; } // malformed block: ignore
+    visit(unwrapLd(parsed), block);
+    block += 1;
   }
-  return out;
+  const resolve = (v) => (Array.isArray(v) ? v.map(resolve) : (isLdRef(v) && byId.get(v['@id'])) || v);
+  return out.map((node) => (node.address ? { ...node, address: resolve(node.address) } : node));
 }
 
 const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
@@ -197,14 +269,23 @@ const isWavesNode = (n) => alnum(n.name).includes(alnum(BRAND_NAME))
 // address-bearing one is judged (a stated mismatch). Name, phone and address come from that one node.
 function wavesEntity(html, candidates = []) {
   const mine = jsonLdNodes(html).filter(isWavesNode);
+  // Many nodes can share one address (an @id reference): parse each address value once.
+  const parsedAddress = new Map();
+  const parseOnce = (address) => {
+    if (!parsedAddress.has(address)) parsedAddress.set(address, (addressStrings(address, candidates) || {}).parsed || null);
+    return parsedAddress.get(address);
+  };
   const score = (node) => {
     const phones = [].concat(node.telephone ?? []).map(phoneKey);
-    const addr = node.address ? (addressStrings(node.address, candidates) || {}).parsed || null : null;
+    const addr = node.address ? parseOnce(node.address) : null;
     const best = candidates.reduce((max, c) => Math.max(max,
       (phones.includes(c.phoneKey) ? 100 : 0) + (addr && addr.street === c.street ? 10 : 0) + (addr && addr.city && c.cities.includes(addr.city) ? 1 : 0)), 0);
     return best + (node.address ? 0.5 : 0);
   };
-  return mine.reduce((top, n) => (top === null || score(n) > score(top) ? n : top), null);
+  let top = null;
+  let topScore = -Infinity;
+  for (const n of mine) { const sc = score(n); if (sc > topScore) { top = n; topScore = sc; } } // each node scored once
+  return top;
 }
 
 // An `address` given as an array lists several: judge the entry matching the expected office(s)
@@ -222,12 +303,23 @@ function pickAddress(entries, candidates) {
 
 // A JSON-LD address (object or string) as { parsed, raw, display }: `parsed` is normalized for
 // comparison (postal = first 5 digits); `raw` and `display` are the values AS GIVEN.
+// Address objects are parsed once each (a shared @id node can sit in thousands of entities'
+// address arrays); once an entry is chosen the result does not depend on the candidates.
+const parsedAddressObjects = new WeakMap();
 function addressStrings(address, candidates = []) {
   if (Array.isArray(address)) address = pickAddress(address.filter(Boolean), candidates);
   if (!address) return null;
   if (typeof address === 'string') {
     const parsed = parseAddress(address);
     return { parsed, raw: { street: address.split(/[,\n]/)[0].trim(), city: parsed.city, region: parsed.region, postal: parsed.postal }, display: address };
+  }
+  if (!parsedAddressObjects.has(address)) parsedAddressObjects.set(address, objectAddressStrings(address));
+  return parsedAddressObjects.get(address);
+}
+function objectAddressStrings(address) {
+  if (isLdRef(address)) {
+    const none = { street: null, city: null, region: null, postal: null };
+    return { parsed: none, raw: none, display: `JSON-LD address ${address['@id']} (not on the page)`, unresolved: true };
   }
   const raw = { street: address.streetAddress || null, city: address.addressLocality || null, region: address.addressRegion || null, postal: address.postalCode || null };
   const parsed = {
@@ -240,10 +332,11 @@ function addressStrings(address, candidates = []) {
   return { parsed, raw, display };
 }
 
-// A JSON-LD text value as stated: string, first-class array or {"@value"}; anything else is
-// kept as its JSON so it is still judged (and fails) rather than read as unstated.
+// A JSON-LD text value as stated (value objects are already unwrapped): a string, or an array of
+// them; any other object is kept as its JSON so it is still judged (and fails) rather than read
+// as unstated.
 function statedText(v) {
-  const one = Array.isArray(v) ? v.map((x) => (x && x['@value']) ?? x).filter((x) => x != null && String(x).trim() !== '').join(' ') : (v && typeof v === 'object' && '@value' in v ? v['@value'] : v);
+  const one = Array.isArray(v) ? v.filter((x) => x != null && String(x).trim() !== '').join(' ') : v;
   if (one == null || (typeof one !== 'object' && String(one).trim() === '')) return null;
   return typeof one === 'object' ? JSON.stringify(one) : String(one).trim();
 }
@@ -280,8 +373,45 @@ function extractNap(html, candidates = []) {
 
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
-// Any Florida state + ZIP on the page means an address is shown, whatever its street looks like.
-const FL_ZIP_RE = /\b(?:FL|Florida)\.?,?\s+\d{5}(?:-\d{4})?\b/gi;
+// Any US state + ZIP on the page means an address is shown, whatever its street looks like
+// ("99 Palm Terrace, Atlanta, GA 30303"): a USPS state code (or Florida) followed by a ZIP. Only
+// real codes count, so "PO 12345" or "NO 12345" is not an address. Any case right after a comma
+// ("Atlanta, ga 30303"). Without a comma, upper or title case ("GA 30303", "Ga 30303"), except
+// codes that are also words or ID labels ("Order ID 12345", "Hi 12345"): those need a comma or
+// a house number shortly before, as does any lowercase code or name.
+const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY';
+const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
+const AMBIGUOUS_STATE_CODES = new Set(['ID', 'IN', 'OR', 'OK', 'ME', 'HI', 'OH', 'AL', 'LA', 'MS', 'CO', 'DE', 'PA']);
+const BARE_STATE_CODES = US_STATE_CODES.split('|').filter((c) => !AMBIGUOUS_STATE_CODES.has(c));
+const BARE_STATE_ALTS = [...BARE_STATE_CODES, ...BARE_STATE_CODES.map((c) => c[0] + c[1].toLowerCase())].join('|');
+// Full state names count too ("Atlanta, Georgia 30303"), title or upper case without a comma.
+const US_STATE_NAMES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
+  'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
+  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana',
+  'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio',
+  'Oklahoma', 'Oregon', 'Pennsylvania', 'Puerto Rico', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee',
+  'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'];
+const STATE_NAME_ALTS = US_STATE_NAMES.flatMap((n) => [n, n.toUpperCase()]).map((n) => n.replace(/ /g, '\\s+')).join('|');
+const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${STATE_NAME_ALTS})${ZIP_TAIL}`); // our own state in any case
+// A house number shortly before (within 120 characters, not a word count, so long street and
+// city names still count) is address context for any state code or name in any case
+// ("99 palm terrace atlanta ga 30303", "99 Palm Terrace Boise ID 83702"). The number must stand
+// alone: not one group of a phone ("941 318 7612") and not a count ("5 reviews"). A code right
+// after an ID label ("Listing ID 98765", "order id 12345") is that label, not a state.
+const COUNT_NOUNS = 'reviews?|ratings?|photos?|pictures?|videos?|years?|yrs?|stars?|followers?|likes?|jobs?|hires?|views?|answers?|questions?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|miles?|mi|employees?|projects?|results?|listings?|customers?|clients?';
+const ID_LABELS = 'listing|order|account|acct|member|customer|client|ref|reference|user|business|profile|case|ticket|invoice|tax|employer|record|vendor|license|licence|transaction|tracking|item|product|ad|company|provider|location|store|claim|policy|confirmation|booking|job|lead|quote';
+const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?(?<!\\b(?:${ID_LABELS}))\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
+// Some directories show no ZIP ("99 Palm Terrace, Atlanta, GA", or fields in separate elements:
+// "99 Palm Terrace Atlanta GA"): a house number, then a state ending the address, still means an
+// address is shown. After a comma any code or name counts (codes that are also words, "…, or",
+// only in upper case); without one, an upper-case code (one that is also an ID label's word,
+// "Listing ID", not after that label) or a state name. Count words match in any case.
+const caseFree = (w) => w.replace(/[a-z]/gi, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`);
+const NAME_ALTS_ANY_CASE = US_STATE_NAMES.map((n) => caseFree(n).replace(/ /g, '\\s+')).join('|');
+const ID_LABELS_ANY_CASE = ID_LABELS.split('|').map(caseFree).join('|');
+const NO_ZIP_STATE = `(?:,\\s*(?:${BARE_STATE_CODES.map(caseFree).join('|')}|${[...AMBIGUOUS_STATE_CODES].join('|')})|\\s(?:${BARE_STATE_CODES.join('|')})|(?<!\\b(?:${ID_LABELS_ANY_CASE}))\\s(?:${[...AMBIGUOUS_STATE_CODES].join('|')})|[,\\s]\\s*(?:${NAME_ALTS_ANY_CASE}))`;
+const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS.split('|').map(caseFree).join('|')})\\b)[^;!?]{1,120}?${NO_ZIP_STATE}(?![\\w-])(?!\\.?,?\\s*\\d)`);
+const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
 // Address, conservative: a false "unverified" is fine, a false "verified" is not.
@@ -293,30 +423,89 @@ const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s
 // contiguously on word boundaries. Other address-like strings leave it unconfirmed (a sidebar
 // may list other businesses, so never a mismatch); none at all means the page shows no address.
 // `observed` is always what the page said, never the office's canonical address.
-function judgeAddress(nap, office) {
-  const a = nap.entity && nap.entity.address;
-  if (a) {
-    const { parsed, raw } = a;
-    const mismatches = [];
-    const stated = (v) => v != null && String(v).trim() !== ''; // stated, even if it did not parse
-    if (stated(raw.street) && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
-    if (stated(raw.city) && !office.cities.includes(parsed.city)) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
-    if (stated(raw.postal) && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
-    if (stated(raw.region) && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
-    if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: a.display };
-    if (stated(raw.street)) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
-  }
+const isStated = (v) => v != null && String(v).trim() !== ''; // stated, even if it did not parse
+
+// The Waves entity's stated address: each stated part must match the office. null when it states
+// no street and no mismatching part, so the visible text is consulted instead.
+function judgeEntityAddress({ parsed, raw, display }, office) {
+  const parts = [
+    { field: 'address', raw: raw.street, ok: parsed.street === office.street, expected: office.address, seen: display },
+    { field: 'city', raw: raw.city, ok: office.cities.includes(parsed.city), expected: office.cityLabel, seen: raw.city },
+    { field: 'postal_code', raw: raw.postal, ok: parsed.postal === office.postal, expected: office.postal, seen: raw.postal },
+    { field: 'region', raw: raw.region, ok: parsed.region === office.region, expected: 'FL', seen: raw.region },
+  ];
+  const mismatches = parts.filter((p) => isStated(p.raw) && !p.ok).map(({ field, expected, seen }) => ({ field, expected, seen }));
+  if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: display };
+  if (isStated(raw.street)) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: display };
+  return null;
+}
+
+// Visible text confirms only when it holds the office's whole normalized address. Otherwise an
+// address shown anywhere (street-like string, or any state + ZIP) leaves it unconfirmed.
+function judgeTextAddress(nap, office, entityAddress) {
   const seen = nap.text.match(ADDRESS_LIKE_RE) || [];
   const normalizedText = normalizeStreet(nap.text);
   if (office.fulls.some((full) => hasSequence(normalizedText, full))) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }
-  // An address is shown when a street-like string OR any Florida "state ZIP" is on the page; the
-  // latter catches streets we cannot recognise (long names, "Terrace", ...). Not ours -> unconfirmed.
-  const fl = new RegExp(FL_ZIP_RE.source, 'i').exec(nap.text);
-  const first = seen[0] ? seen[0].trim() : (fl ? nap.text.slice(Math.max(0, fl.index - 60), fl.index + fl[0].length).trim() : null);
-  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (a && a.display) || first };
+  // Phones are blanked to a ';' (which the house-number span cannot cross) padded to the same
+  // length, so a phone is never a house number and match indexes still point into nap.text.
+  const noPhones = nap.text.replace(PHONE_RE, (m) => ';'.padEnd(m.length, ' '));
+  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || (NUMBERED_STATE_ZIP_RE.exec(noPhones) || NUMBERED_STATE_NO_ZIP_RE.exec(noPhones));
+  const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
+  // An entity address we could not read (a link to a node not on the page) is stated but
+  // unknown: never let it pass as "no address shown".
+  const unread = entityAddress && entityAddress.unresolved ? entityAddress.display : null;
+  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first || unread, observed: (entityAddress && entityAddress.display) || first };
+}
+
+function judgeAddress(nap, office) {
+  const a = nap.entity && nap.entity.address;
+  return (a && judgeEntityAddress(a, office)) || judgeTextAddress(nap, office, a);
+}
+
+// Name and phone. ONE precedence rule: a field the Waves JSON-LD entity states IS the listing's
+// value for it and page text never overrides it; only a field the entity leaves unstated is read
+// from the visible text. Only the ENTITY's stated phone can prove a phone mismatch: a phone in
+// the visible text (support line, ad, sidebar) is not listing evidence, so ours confirms and its
+// absence leaves the phone unconfirmed. With several candidate offices, judge against the one
+// whose phone matched (else the first, the default office).
+function judgeIdentity(nap, candidates) {
+  const { entity } = nap;
+  const phoneStated = Boolean(entity && entity.rawPhones.length);
+  const phonePool = phoneStated ? entity.phones : nap.textPhones;
+  const expected = candidates.find((c) => phonePool.includes(c.phoneKey)) || candidates[0];
+  const nameText = entity && entity.name ? entity.name : `${nap.text} ${nap.title}`;
+  const namePresent = alnum(nameText).includes(alnum(expected.name));
+  const ourPhoneInText = nap.textPhones.some((k) => candidates.some((c) => c.phoneKey === k));
+  const phoneOk = phonePool.includes(expected.phoneKey);
+  const expectedPhones = candidates.map((c) => c.phone).join(' or ');
+  const mismatches = [];
+  if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: (entity && entity.name) || nap.title || null });
+  if (phoneStated && !phoneOk) mismatches.push({ field: 'phone', expected: expectedPhones, seen: entity.phones.length ? entity.phones.slice(0, 3).map(fmtPhone) : entity.rawPhones.slice(0, 3) });
+  return { expected, phoneStated, phoneOk, mismatches, noNap: !namePresent && !phoneStated && !ourPhoneInText };
+}
+
+// Stored values are what the page showed, never the office's canonical values.
+function observedNap(nap, who, address) {
+  const { entity } = nap;
+  let phone = null;
+  if (who.phoneStated) phone = entity.phones.length ? fmtPhone(who.phoneOk ? who.expected.phoneKey : entity.phones[0]) : entity.rawPhones[0];
+  else if (who.phoneOk) phone = fmtPhone(who.expected.phoneKey);
+  return { nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0], nap_phone: phone, nap_address: address.observed };
+}
+
+// Why a fetched page cannot be judged at all (null = readable): a non-2xx, a bot challenge, a
+// non-HTML body, or a branded soft-404. None of these is ever "missing".
+function unreadableReason(page) {
+  if (page.blocked) return 'blocked_host';
+  if (page.error) return page.error;
+  if (page.status < 200 || page.status >= 300) return `http_${page.status}`;
+  const kind = classifyPageBody(page.html || '', page.contentType, { strictChallenge: true });
+  if (kind === 'challenge') return 'challenge';
+  if (kind === 'non_html') return 'non_html';
+  return notFoundHeading(page.html || '') ? 'soft_404' : null;
 }
 
 /**
@@ -326,57 +515,27 @@ function judgeAddress(nap, office) {
  */
 function classifyListing(page, candidates) {
   const blocked = (reason, extra = {}) => ({ status: 'fetch-blocked', nap: null, detail: { reason, http_status: page.status || null, ...extra } });
-  if (page.blocked) return blocked('blocked_host');
-  if (page.error) return blocked(page.error);
-  if (page.status < 200 || page.status >= 300) return blocked(`http_${page.status}`);
-  const html = page.html || '';
-  const kind = classifyPageBody(html, page.contentType, { strictChallenge: true });
-  if (kind === 'challenge') return blocked('challenge');
-  if (kind === 'non_html') return blocked('non_html');
-  const nap = extractNap(html, candidates);
-  const { entity } = nap;
-  const phoneStated = Boolean(entity && entity.rawPhones.length);
+  const unreadable = unreadableReason(page);
+  if (unreadable) return blocked(unreadable);
+
+  const nap = extractNap(page.html || '', candidates);
   // A short page is a JS shell / empty page unless it carries a usable Waves entity (one that
   // states a telephone), which is then judged on its own.
-  if (nap.text.length < MIN_VISIBLE_CHARS && !phoneStated) return blocked('empty_or_js_only');
+  const usableEntity = Boolean(nap.entity && nap.entity.rawPhones.length);
+  if (nap.text.length < MIN_VISIBLE_CHARS && !usableEntity) return blocked('empty_or_js_only');
+  const who = judgeIdentity(nap, candidates);
+  if (who.noNap) return blocked('no_nap_found');
 
-  // ONE precedence rule: a field the Waves JSON-LD entity states IS the listing's value for it
-  // and page text never overrides it; only a field the entity leaves unstated is read from the
-  // visible text. Only the ENTITY's stated phone can prove a phone mismatch: a phone in the
-  // visible text (support line, ad, sidebar) is not listing evidence, so ours confirms and its
-  // absence leaves the phone unconfirmed. With several candidate offices, judge against the one
-  // whose phone matched (else the first, the default office).
-  const phonePool = phoneStated ? entity.phones : nap.textPhones;
-  const expected = candidates.find((c) => phonePool.includes(c.phoneKey)) || candidates[0];
-  const nameText = entity && entity.name ? entity.name : `${nap.text} ${nap.title}`;
-  const namePresent = alnum(nameText).includes(alnum(expected.name));
-  if (!namePresent && !phoneStated && !nap.textPhones.some((k) => candidates.some((c) => c.phoneKey === k))) return blocked('no_nap_found');
-
-  const mismatches = [];
-  if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: (entity && entity.name) || nap.title || null });
-  const phoneOk = phonePool.includes(expected.phoneKey);
-  const expectedPhones = candidates.map((c) => c.phone).join(' or ');
-  if (phoneStated && !entity.phones.length) mismatches.push({ field: 'phone', expected: expectedPhones, seen: entity.rawPhones.slice(0, 3) });
-  else if (phoneStated && !phoneOk) mismatches.push({ field: 'phone', expected: expectedPhones, seen: entity.phones.slice(0, 3).map(fmtPhone) });
-
-  const address = judgeAddress(nap, expected);
-  mismatches.push(...address.mismatches);
-
-  // Stored values are what the page showed, never the office's canonical values.
-  const observed = {
-    nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0],
-    nap_phone: phoneStated ? (entity.phones.length ? fmtPhone(phoneOk ? expected.phoneKey : entity.phones[0]) : entity.rawPhones[0]) : (phoneOk ? fmtPhone(expected.phoneKey) : null),
-    nap_address: address.observed,
-  };
-  const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
+  const address = judgeAddress(nap, who.expected);
+  const mismatches = [...who.mismatches, ...address.mismatches];
+  const observed = observedNap(nap, who, address);
+  const base = { http_status: page.status, final_url: page.finalUrl, office: who.expected.locationId, address_checked: address.checked };
 
   // A cut-off body proves nothing either way: what was cut may hold a conflicting address or
   // JSON-LD entity (so never verified) or may not repeat a mismatch (so never mismatched).
   if (page.truncated) return blocked('truncated');
-  if (mismatches.length) {
-    return { status: 'mismatched', nap: observed, detail: { ...base, mismatches } };
-  }
-  if (!phoneOk) {
+  if (mismatches.length) return { status: 'mismatched', nap: observed, detail: { ...base, mismatches } };
+  if (!who.phoneOk) {
     // No phone anywhere on the page: nothing readable to judge (fetch-blocked). Phones shown but
     // none ours: the listing's phone is unconfirmed, never a mismatch.
     if (!nap.textPhones.length) return blocked('phone_not_found', { final_url: page.finalUrl });
@@ -456,7 +615,11 @@ class CitationAuditor {
     }
     const counts = statusCounts(audited);
     logger.info(`Citation audit: ${JSON.stringify(counts)} (${audited.length} of ${rows.length} written${failed ? `, ${failed} failed to save` : ''})`);
-    return { total: audited.length, skipped: rows.length - audited.length - failed, failed, ...counts };
+    const result = { total: audited.length, skipped: rows.length - audited.length - failed, failed, ...counts };
+    // The rest of the sweep already ran; a partial or total write failure still has to reach the
+    // cron health wrapper (runExclusive records a thrown run as failed), so reject AFTER the loop.
+    if (failed) throw Object.assign(new Error(`Citation audit: ${failed} of ${rows.length} row(s) could not be saved`), { result });
+    return result;
   }
 
   async getDashboard() {

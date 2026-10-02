@@ -78,7 +78,9 @@ router.get(
   '/audio/:id',
   rejectQueryString,
   adminAuthenticate,
-  requireTechOrAdmin,
+  // Admin-only: a recording is the whole customer conversation. A technician
+  // login never streams call audio (security audit 2026-10-01).
+  requireAdmin,
   async (req, res) => {
     try {
       const config = require('../config');
@@ -111,10 +113,18 @@ router.get(
   },
 );
 
+// Role map for this router (owner 2026-10-02: a technician login gets no
+// customer calls, and only an admin blocks or unblocks numbers):
+//   - ADMIN-ONLY: the recordings list, the per-call row (transcript), the
+//     audio proxy above, per-call intelligence, processing/synopsis (paid),
+//     the disposition tag (spam deletes the call and blocks the caller) and
+//     unblocking a number.
+//   - Staff-wide: commitments and reschedule proposals (the Promises tab and
+//     the technician follow-through cards), and READING the block list.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /stats — processing dashboard stats
-router.get('/stats', async (req, res, next) => {
+router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const stats = await CallRecordingProcessor.getStats();
     res.json(stats);
@@ -122,7 +132,7 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /recordings — list recordings with processing status
-router.get('/recordings', async (req, res, next) => {
+router.get('/recordings', requireAdmin, async (req, res, next) => {
   try {
     const { status, limit = 50, page = 1 } = req.query;
     let query = db('call_log')
@@ -153,7 +163,7 @@ router.get('/recordings', async (req, res, next) => {
 // POST /process/:callSid — process a single recording.
 // force=true (via query or body) bypasses the "already processed" dedup
 // guard so the admin Reprocess button can re-extract on an existing row.
-router.post('/process/:callSid', async (req, res, next) => {
+router.post('/process/:callSid', requireAdmin, async (req, res, next) => {
   try {
     const force = req.query.force === 'true' || req.body?.force === true;
     // `operator` = a human pressed Process, which selects the short quiet
@@ -188,7 +198,7 @@ router.post('/process/:callSid', async (req, res, next) => {
 });
 
 // POST /process-all — process all pending recordings
-router.post('/process-all', async (req, res, next) => {
+router.post('/process-all', requireAdmin, async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.processAllPending();
     res.json(result);
@@ -196,7 +206,7 @@ router.post('/process-all', async (req, res, next) => {
 });
 
 // POST /synopsis/:callSid — generate or regenerate lead synopsis
-router.post('/synopsis/:callSid', async (req, res, next) => {
+router.post('/synopsis/:callSid', requireAdmin, async (req, res, next) => {
   try {
     const result = await CallRecordingProcessor.generateSynopsis(req.params.callSid);
     res.json(result);
@@ -212,19 +222,14 @@ router.post('/synopsis/:callSid', async (req, res, next) => {
 // fulfillment, later outcomes, honest processing state, and which values a
 // person overrode. Read-only apart from the fulfillment refresh (open AI
 // rows are marked fulfilled when a later record proves it).
-router.get('/calls/:id/intelligence', async (req, res, next) => {
+router.get('/calls/:id/intelligence', requireAdmin, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
     const { loadCallIntelligence } = require('../services/call-intelligence');
     const intelligence = await loadCallIntelligence(db, req.params.id);
     if (!intelligence) return res.status(404).json({ error: 'Call not found' });
-    // Billing is admin-only everywhere else (the technician-safe customer
-    // payload strips invoices, payments and revenue): the outcomes block
-    // carries invoice totals and paid revenue, so a technician gets it
-    // without them (Codex r11 P1).
-    if (req.techRole !== 'admin' && intelligence.outcomes) {
-      intelligence.outcomes = { ...intelligence.outcomes, invoices: [], revenue_cents: null, billing_hidden: true };
-    }
+    // Admin-only route (requireAdmin above): the payload carries the call's
+    // evidence and its billing outcomes, neither of which a technician sees.
     const { isEnabled } = require('../config/feature-gates');
     // The panel hides its write controls when the gate is off, instead of
     // offering buttons that can only 409.
@@ -422,7 +427,7 @@ router.get('/commitments/auto-closed', async (req, res, next) => {
 });
 
 // POST /calls/:id/commitments — the office records a promise the AI missed.
-// Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
+// Staff-wide (router-level requireTechOrAdmin), like settling a promise.
 router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
@@ -967,7 +972,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
 });
 
 // GET /recording/:id — get single recording detail
-router.get('/recording/:id', async (req, res, next) => {
+router.get('/recording/:id', requireAdmin, async (req, res, next) => {
   try {
     const recording = await db('call_log')
       .where('call_log.id', req.params.id)
@@ -1008,7 +1013,7 @@ async function findLiveCustomerForCall(call) {
 }
 
 // PUT /calls/:id/disposition — tag a call
-router.put('/calls/:id/disposition', async (req, res, next) => {
+router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
   try {
     const { disposition } = req.body;
 
@@ -1115,7 +1120,7 @@ router.get('/blocked', async (req, res, next) => {
 });
 
 // DELETE /blocked/:phone — unblock a number
-router.delete('/blocked/:phone', async (req, res, next) => {
+router.delete('/blocked/:phone', requireAdmin, async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.phone }).del();
     res.json({ success: true });

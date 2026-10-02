@@ -138,7 +138,7 @@ const FAILURE_RULES = [
   // not get to call it a success (Codex r7 on #3846). `openai_failed` /
   // `openai_cancelled`: a Responses body that ended in a provider-side
   // terminal state (not the model's output cut off).
-  ['provider', /^(no_key|all_providers_failed|session_error_event|session_stream_eof|openai_(failed|cancelled))$|_(5\d\d|429|529|503|401|403|404)$/],
+  ['provider', /^(no_key|all_providers_failed|session_error_event|session_stream_eof|openai_(failed|cancelled)|cloudflare_unsuccessful)$|_(5\d\d|429|529|503|401|403|404)$/],
   // status-qualified 408s (Codex r13) and the adapters' own deadlines —
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   ['timeout', /^(timeout_budget_exhausted|timeout)$|_(408|timeout)$/],
@@ -150,7 +150,7 @@ const FAILURE_RULES = [
   // `max_events`: a Managed Agents runner's own SSE event cap ended the
   // stream before the session did — our budget, not the provider's fault.
   ['budget', /^(budget_exhausted|max_cost|max_tool_calls|max_events)$/],
-  ['bad_input', /^bad_request$|^typesafe_unpinned_model$|_(400|413|422)$/],
+  ['bad_input', /^bad_request$|^typesafe_unpinned_model$|^cloudflare_unknown_model$|_(400|413|422)$/],
   ['incomplete', /^(empty_json|empty_text|unparseable|truncated)$/],
   // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the
   // same family as a safety gate, an eval candidate rather than plumbing.

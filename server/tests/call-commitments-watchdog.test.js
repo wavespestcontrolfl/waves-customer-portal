@@ -98,12 +98,26 @@ test('a burst past the threshold collapses into one aggregate bell keyed on the 
   expect(opts.refreshOnDedupe).toBe(true);
   expect(opts.metadata.overdue_count).toBe(AGGREGATE_THRESHOLD + 2);
   expect(opts.metadata.overdue_commitment_ids).toHaveLength(AGGREGATE_THRESHOLD + 2);
+  // A standing backlog is a count on the Owed tab, not a bell (owner 2026-10-01):
+  // the row is Activity-only, which the bell list, unread count and mark-all-read skip.
+  expect(opts.metadata.feed).toBe('activity');
   // A second run the same day with one item settled keys the SAME row.
   NotificationService.notifyAdmin.mockClear();
   listOpenCommitments.mockResolvedValue(Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row(`r${i}`)));
   await runCallCommitmentsWatchdog({ now: NOW });
   expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('call-commitments-overdue:2026-09-05');
   expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.overdue_count).toBe(AGGREGATE_THRESHOLD + 1);
+});
+
+test('an individual overdue promise (at or under the threshold) still rings the bell', async () => {
+  listOpenCommitments.mockResolvedValue(Array.from({ length: AGGREGATE_THRESHOLD }, (_, i) => row(`r${i}`)));
+  await runCallCommitmentsWatchdog({ now: NOW });
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(AGGREGATE_THRESHOLD);
+  for (const [, title, , opts] of NotificationService.notifyAdmin.mock.calls) {
+    expect(title).toBe('A promise to a caller is overdue');
+    expect(opts.bell).toBe(true);
+    expect(opts.metadata.feed).toBeUndefined();
+  }
 });
 
 test('a silenced or failed write is reported as unannounced, never as alerted', async () => {

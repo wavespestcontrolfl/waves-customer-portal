@@ -312,6 +312,51 @@ describe('triggerNotification bell outcome', () => {
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  // One bell row per conversation (owner 2026-10-01): a known sender's next text
+  // rewrites the standing thread row. That is a NEW message, so its push goes.
+  test('a thread row refreshed by a new text still pushes, and asks notifyAdmin to refresh and bump it', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true, rung: true });
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('sms_reply', { threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 2 },
+      { dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(stats.bellWritten).toBe(true);
+    expect(stats.deduped).toBeUndefined();
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls.at(-1);
+    expect(title).toBe('2 texts from unknown');
+    expect(body).toBe('Second text');
+    expect(opts).toMatchObject({ dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true, link: '/admin/communications?thread=cust-1&message=SM-2' });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+  });
+
+  test('refreshPayload becomes a lock-time standingRefresh: an older message keeps the row content, a newer one rebuilds it with the new count', async () => {
+    const payload = { threadId: 'cust-1', fromName: 'Dana Example', twilioSid: 'SM-new', message: 'Newer text', textCount: 1 };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true });
+    await triggerNotification('sms_reply', payload, {
+      dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true,
+      refreshPayload: (_row, base) => ({ payload: { textCount: base.textCount + 1 }, keepContent: base.twilioSid === 'SM-held' }),
+    });
+    const { standingRefresh } = NotificationService.notifyAdmin.mock.calls.at(-1)[3];
+    const row = { body: 'Held text', link: '/admin/communications?thread=cust-1&message=SM-held', detail: null };
+    const kept = await standingRefresh(row, { payload: { threadId: 'cust-1', fromName: 'Dana Example', twilioSid: 'SM-held', textCount: 2 } });
+    expect(kept).toMatchObject({ title: '3 texts from Dana Example', body: 'Held text', link: row.link, quiet: true });
+    expect(kept.metadata.payload).toMatchObject({ twilioSid: 'SM-held', textCount: 3 });
+    const took = await standingRefresh(row, { payload: { twilioSid: 'SM-older', textCount: 2 } });
+    expect(took).toMatchObject({ title: '3 texts from Dana Example', body: 'Newer text', link: '/admin/communications?thread=cust-1&message=SM-new' });
+    expect(took.quiet).toBeUndefined();
+    expect(took.metadata.payload).toMatchObject({ twilioSid: 'SM-new', textCount: 3 });
+  });
+
+  test('a thread row hit with identical content (a replayed text) is not a refresh and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true });
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('sms_reply', { threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 2 },
+      { dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(stats).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
   // A second same-day callback on the SAME open promise dedupes to the
   // committed bell — the promise-chaser bell's own dedupeKey — and must not
   // re-buzz the phone either, even though it is a genuinely new call.
@@ -646,6 +691,19 @@ describe('payment failure settlement recheck', () => {
     expect(result.bellWritten).toBe(true);
     expect(result.push.skipped).toBe('superseded_before_push');
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+});
+
+describe('sms_reply thread row title', () => {
+  test('one text reads "SMS from Name"; a running count leads the title from the second text', () => {
+    const { build } = TRIGGER_REGISTRY.sms_reply;
+    expect(build({ fromName: 'Dana Example', message: 'Hi', threadId: 'c1', twilioSid: 'SM1' }).title).toBe('SMS from Dana Example');
+    expect(build({ fromName: 'Dana Example', message: 'Hi', threadId: 'c1', twilioSid: 'SM1', textCount: 1 }).title).toBe('SMS from Dana Example');
+    const third = build({ fromName: 'Dana Example', message: 'Third', threadId: 'c1', twilioSid: 'SM3', textCount: 3 });
+    expect(third.title).toBe('3 texts from Dana Example');
+    expect(third.body).toBe('Third');
+    // The link keeps the thread prefix the read-state matchers split on.
+    expect(third.link).toBe('/admin/communications?thread=c1&message=SM3');
   });
 });
 
