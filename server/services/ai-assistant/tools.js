@@ -303,6 +303,9 @@ const methodLabel = (p) => {
 async function showRecentPayments(customerId, actions, cards) {
   const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
   if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
+  // The Billing page is the fallback on every exit below, so the button goes
+  // on first: the model is not allowed to write a link itself.
+  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   let page;
   try {
     page = await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
@@ -329,7 +332,6 @@ async function showRecentPayments(customerId, actions, cards) {
       receiptUrl: p.receiptUrl || null,
     };
   });
-  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   if (!rows.length) {
     return {
       shown: false,

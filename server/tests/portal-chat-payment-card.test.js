@@ -76,10 +76,11 @@ test('a refund that has not settled withholds the card', async () => {
 
 test('an unreadable payer ownership lookup shows no card', async () => {
   listPortalPayments.mockResolvedValue({ payments: PAYMENTS, payerLookupFailed: true });
-  const cards = [];
-  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  const cards = []; const actions = [];
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', actions, cards);
   expect(cards).toEqual([]);
   expect(result.shown).toBe(false);
+  expect(actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
 test('an empty page with history behind it is not "no payments"', async () => {
@@ -97,12 +98,13 @@ test('no payments on record says so', async () => {
   expect(result.instruction).toMatch(/No payments are on record/);
 });
 
-test('a read failure shows nothing and never throws', async () => {
+test('a read failure shows nothing, never throws, and still offers Open Billing', async () => {
   listPortalPayments.mockRejectedValue(new Error('db down'));
-  const cards = [];
-  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  const cards = []; const actions = [];
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', actions, cards);
   expect(result.shown).toBe(false);
   expect(cards).toEqual([]);
+  expect(actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
 test('refuses a model-supplied customer id and a channel without cards', async () => {

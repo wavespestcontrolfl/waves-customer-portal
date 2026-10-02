@@ -298,7 +298,15 @@ class WavesAssistant {
 
     // 4. If escalation trigger detected, escalate immediately
     if (trigger) {
-      return this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic: topicOfTrigger(trigger) });
+      const topic = topicOfTrigger(trigger);
+      // A billing keyword ("refund", "dispute") hands off, but under the facts
+      // lane the customer still gets the payment card and Open Billing
+      // button under the hand-off reply, as a model-led hand-off would give.
+      if (topic === 'billing' && lane.cards) {
+        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
+      }
+      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
+      return { ...escResult, ...laneExtras(lane) };
     }
 
     // 5. Build conversation history for Claude

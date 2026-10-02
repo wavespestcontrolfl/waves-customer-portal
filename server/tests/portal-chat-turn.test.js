@@ -139,6 +139,21 @@ test('a card and a hand-off asked for in one response: the card runs first and r
   escalate.mockRestore();
 });
 
+test('a billing keyword hand-off ("refund") still shows the card under the facts gate, with no model call', async () => {
+  process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+  mockListPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Pest', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
+  wire('portal_chat', 'cust-1');
+  const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent', escalated: true, teamNotified: true });
+
+  const result = await assistant.processMessage({ message: 'Please refund my last payment', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  expect(mockCreate).not.toHaveBeenCalled();
+  expect(escalate.mock.calls[0][3]).toEqual({ topic: 'billing' });
+  expect(result.cards).toHaveLength(1);
+  expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+  escalate.mockRestore();
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
