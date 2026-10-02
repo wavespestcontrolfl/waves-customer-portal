@@ -535,7 +535,9 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     const invStatus = String(invoice.status || '').toLowerCase();
     if (['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
     const credit = require('./customer-credit');
-    let creditLowers = false;
+    // Credit already applied to the year bill lowers the charge too, even
+    // with no balance left to apply (GitHub Codex #5567 r12).
+    let creditLowers = Number(invoice.credit_applied) > 0;
     if (await credit.autoApplyWouldApply(invoice, conn)) {
       const balance = await credit.getBalance(invoice.customer_id, conn);
       if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;

@@ -1700,7 +1700,12 @@ visit for that total or less (account credit may lower it, never raise it). (2) 
 must carry, besides the existing `prepayChargeAcknowledgedTotalCents` /
 `prepayChargeAcknowledgedMethodKey` / `prepayChargeConsentAccepted`, the new request field
 `prepayChargeConsentVariant: 'after_visit_prepay'` attesting the tab rendered the
-after-visit authorization; without it the accept re-quotes (402) and commits nothing. A
+after-visit authorization; without it the accept re-quotes (402) and commits nothing. It
+must also carry `prepayChargeConsentVersion`, the after-visit text's own version label
+(`consentVersionForVariant('after_visit_prepay')`, currently `v13_2026-10-01`, the
+`AFTER_VISIT_CONSENT_VERSION` the bundle rendered), beside the bundle `consentTextVersion`:
+a missing or different value answers the reloadable `409 { code: 'CONSENT_VERSION_STALE' }`
+before any mutation. A
 charge-now accept (gate off) that sends `prepayChargeConsentVariant: 'after_visit_prepay'` is
 also re-quoted, so the after-visit text is never recorded for a charge at approval; a
 gate-off tab that sends no variant is unchanged. (3) A deferred accept charges nothing and
@@ -1708,8 +1713,11 @@ sends no pay link: the success payload carries `prepayChargeStatus: 'after_first
 `invoiceSettled: true`, `nextStep: 'confirmed'`, `invoiceMode: false`, no `invoicePayUrl`,
 and `prepayChargedTotal` = the acknowledged total (the amount to be charged after the visit,
 not an amount already charged). The accept records the `after_visit_prepay` consent
-(`v12_2026-09-30`) and persists `estimates.estimate_data.prepayAutoChargeJob` with
-`status: 'awaiting_first_visit'` and `deferred_to_first_visit: true`. (4) A retry of that
+(`v13_2026-10-01`, the attested `prepayChargeConsentVersion`) and persists
+`estimates.estimate_data.prepayAutoChargeJob` with `status: 'awaiting_first_visit'`,
+`deferred_to_first_visit: true` and `consent_variant_version` (that attested version). A year
+minted to, or resolving to, a third-party payer is never deferred: its job stays `pending`
+with `after_visit_attested: true` and follows the existing payer-routing posture. (4) A retry of that
 already-accepted estimate (`alreadyAccepted: true`) while the job still waits rebuilds the
 same posture (`prepayChargeStatus: 'after_first_visit'`, no `/pay/` link, `invoiceMode:
 false`); once released it reads as the existing `pending`/`claimed` sweep posture. A year

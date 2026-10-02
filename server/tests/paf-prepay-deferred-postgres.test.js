@@ -379,6 +379,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await facts(unstamped.parentId)).toBeNull();
     });
 
+    it('credit already applied to the year bill makes the amount a ceiling, even with no balance left (Codex r12)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('invoices').where({ id: f.invoiceId }).update({ credit_applied: 50 });
+      expect(await facts(f.parentId)).toMatchObject({ amount: 'up to $480.00' });
+    });
+
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
       const removed = await deferredAccept();
       await trx('payment_methods').where({ id: removed.pmId }).del();
