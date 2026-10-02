@@ -396,7 +396,7 @@ async function getRecentVisits(customerId, actions, cards) {
   addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   let page;
   try {
-    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ });
+    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
   } catch (err) {
     logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
     return UNAVAILABLE;

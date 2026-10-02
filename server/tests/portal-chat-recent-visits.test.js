@@ -49,7 +49,8 @@ test('the model gets structured facts; the summary and report link go on a card 
 
   const result = await executeToolCall('get_recent_visits', {}, 'cust-1', actions, cards);
 
-  expect(listPortalServiceHistory).toHaveBeenCalledWith('cust-1', { limit: 3 });
+  // Completed records only, filtered before the limit.
+  expect(listPortalServiceHistory).toHaveBeenCalledWith('cust-1', { limit: 3, completedOnly: true });
   expect(result.visits).toEqual([
     { date: 'Sep 28, 2026', service: 'Quarterly Pest Control', technician: 'Jordan', product_kinds: ['insecticide', 'bait'], summary_on_card: true, report_link_on_card: true },
     { date: 'Aug 20, 2026', service: 'Lawn Care', technician: null, product_kinds: [], summary_on_card: false, report_link_on_card: false },

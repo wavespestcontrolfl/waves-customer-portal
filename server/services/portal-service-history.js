@@ -41,7 +41,11 @@ function suppressesCustomerArtifacts(structuredNotes = {}) {
   return Boolean(structuredNotes.typedReportDelivery) && structuredNotes.typedReportDelivery !== 'auto_send';
 }
 
-async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, type = null, scope = null } = {}) {
+// completedOnly (the assistant's recent-visits tool): only records whose
+// status is 'completed', filtered before the limit and in the total, so an
+// incomplete visit is never described as a completed one. The route leaves
+// it off and lists every record, as before.
+async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, type = null, scope = null, completedOnly = false } = {}) {
   let query = db('service_records')
     .where({ 'service_records.customer_id': customerId })
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
@@ -61,6 +65,7 @@ async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, ty
     query = query.where('service_records.service_type', 'ilike', `%${type}%`);
   }
   if (scope) query = scopeRecordsToProperty(query, scope);
+  if (completedOnly) query = query.where('service_records.status', 'completed');
 
   const services = await query;
 
@@ -146,6 +151,7 @@ async function listPortalServiceHistory(customerId, { limit = 20, offset = 0, ty
       scope,
     );
   }
+  if (completedOnly) totalQuery = totalQuery.where('service_records.status', 'completed');
   const total = await totalQuery.count('service_records.id as count').first();
   return { services: enriched, total: parseInt(total.count) };
 }
