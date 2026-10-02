@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002150000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002160000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -34,7 +34,7 @@ jest.setTimeout(60000);
       revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(), shadowDraft5: randomUUID(), shadowDraft6: randomUUID(),
       humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(), humanBetterSwept: randomUUID(),
       sweptIgnored: randomUUID(), autoIgnored: randomUUID(), recoveredIgnored: randomUUID(), recoveredSend: randomUUID(), autoSend: randomUUID(),
-      autoRecovered: randomUUID(), autoRecoveredSend: randomUUID(), uncountedDecision: randomUUID(), judgedForTraining: randomUUID(), trainingMatchesEmittedJudgment: randomUUID(), trainingDiffersFromJudgment: randomUUID(), trainingNoReplyAgreed: randomUUID(),
+      autoRecovered: randomUUID(), autoRecoveredSend: randomUUID(), gratitudeRecovered: randomUUID(), gratitudeSend: randomUUID(), uncountedDecision: randomUUID(), judgedForTraining: randomUUID(), trainingMatchesEmittedJudgment: randomUUID(), trainingDiffersFromJudgment: randomUUID(), trainingNoReplyAgreed: randomUUID(),
       profileRejected: randomUUID(), profilePending: randomUUID(),
     };
     const reviewer = randomUUID();
@@ -108,12 +108,12 @@ jest.setTimeout(60000);
     // A reply sent INSTEAD of a pending suggestion links it through metadata.parked_decision_ids (the decision reads ignored).
     await trx('sms_log').insert({
       id: ids.parkedSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
-      message_body: 'We will be there Thursday morning.', metadata: JSON.stringify({ parked_decision_ids: [ids.ignored] }), created_at: at(9.8),
+      message_body: 'We will be there Thursday morning.', metadata: JSON.stringify({ parked_decision_ids: [ids.ignored], human_authored: true }), created_at: at(9.8),
     });
     // What the person actually sent: the outbound text stamped with the decision id (the send that settled it).
     await trx('sms_log').insert({
       id: ids.settlingSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
-      message_body: 'Tuesday at 2 is fine. See you then.', metadata: JSON.stringify({ agent_decision_id: ids.linkedCorrected }), created_at: at(4.6),
+      message_body: 'Tuesday at 2 is fine. See you then.', metadata: JSON.stringify({ agent_decision_id: ids.linkedCorrected, human_authored: true }), created_at: at(4.6),
     });
     await trx('agent_decisions').insert([
       // the after-send sweep's ignored: committed while the send was in flight, never on screen, no linked send
@@ -124,6 +124,8 @@ jest.setTimeout(60000);
       decision(ids.recoveredIgnored, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'Admin', reviewed_at: at(1) }),
       // auto-send's parked sibling, re-stamped 'Admin' by scheduled-send recovery: its linked send is the AI's own
       decision(ids.autoRecovered, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'Admin', reviewed_at: at(1.1) }),
+      // the gratitude lane's own send, recovered the same way: no operator provenance on the row
+      decision(ids.gratitudeRecovered, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'Admin', reviewed_at: at(1.2) }),
       // a judged draft whose decision no person acted on: the judgment row shows the reply
       decision(ids.uncountedDecision, null, { human_verdict: null, status: 'pending_review', entity_type: 'message_draft', entity_id: ids.shadowDraft6, reviewed_by: null, reviewed_at: null }),
     ]);
@@ -134,6 +136,8 @@ jest.setTimeout(60000);
         message_body: 'Friday morning works, see you then.', metadata: JSON.stringify({ parked_decision_ids: [ids.recoveredIgnored] }), admin_user_id: reviewer, created_at: at(9.7) },
       { id: ids.autoRecoveredSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'ai_autosent', status: 'delivered',
         message_body: 'Thanks, Thursday is on the calendar.', metadata: JSON.stringify({ parked_decision_ids: [ids.autoRecovered] }), created_at: at(9.65) },
+      { id: ids.gratitudeSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'ai_gratitude', status: 'delivered',
+        message_body: 'You are welcome, see you Thursday.', metadata: JSON.stringify({ parked_decision_ids: [ids.gratitudeRecovered] }), created_at: at(9.62) },
     ]);
 
     const profile = (id, status, version) => ({
@@ -195,7 +199,7 @@ jest.setTimeout(60000);
     expect(byId[ids.linkedCorrected].human_text).toBe('Tuesday at 2 is fine. See you then.');
     expect(byId[ids.trainingMatchesJudgment]).toMatchObject({ source: 'reply_training', human_text: 'Yes, Tuesday works. See you then.' });
     expect(byId[ids.trainingEdited].detail).toMatchObject({ source_agent_decision_id: ids.trainingDecision, review_note: 'Named the day', capture_reason: 'agent_review_reply_verdict' });
-    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.sweptIgnored, ids.autoIgnored, ids.autoRecovered, ids.uncountedDecision, ids.trainingMatchesEmittedJudgment, ids.trainingNoReplyAgreed, ids.trainingSameReply, ids.trainingDecision]) {
+    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.sweptIgnored, ids.autoIgnored, ids.autoRecovered, ids.gratitudeRecovered, ids.uncountedDecision, ids.trainingMatchesEmittedJudgment, ids.trainingNoReplyAgreed, ids.trainingSameReply, ids.trainingDecision]) {
       expect(byId[absent]).toBeUndefined();
     }
     expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
