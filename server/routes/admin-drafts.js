@@ -1,6 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+
+// The corrections view (migration 20261002110000) counts a revised or
+// rejected draft only when a person's review wrote it: the campaign send guard
+// and the Agent Ops duplicate sweep also write status rejected with
+// approved_by. The two review endpoints stamp the status they set into
+// flags.review_verdict; the view requires the stamp to match the row's status.
+// flags is an object on some drafts and an ARRAY of tags on others (the
+// house-voice drafter writes an array), and array || object is an array, so
+// the stamp follows the row's shape: a 'review_verdict:<status>' tag on an
+// array, a review_verdict key on an object, a fresh object when null.
+const reviewVerdictStamp = (dbh, status) => dbh.raw(
+  "CASE jsonb_typeof(flags) WHEN 'array' THEN flags || ?::jsonb WHEN 'object' THEN flags || ?::jsonb ELSE ?::jsonb END",
+  [JSON.stringify([`review_verdict:${status}`]), JSON.stringify({ review_verdict: status }), JSON.stringify({ review_verdict: status })],
+);
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -1134,6 +1148,9 @@ router.put('/:id/revise', async (req, res, next) => {
         final_response: revisedResponse,
         approved_by: req.technicianId,
         approved_at: claimTime,
+        // Review provenance: the corrections view counts a revised draft
+        // only when this endpoint wrote it (the system also sets approved_by).
+        flags: reviewVerdictStamp(db, 'revised'),
       })
       .returning('*');
     if (!draft) {
@@ -1306,6 +1323,8 @@ router.put('/:id/reject', async (req, res, next) => {
         .where({ id: req.params.id, status: 'pending' })
         .update({
           status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+          // Review provenance, see /:id/revise.
+          flags: reviewVerdictStamp(trx, 'rejected'),
         });
       if (!updated) return;
       await trx('click_followup_actions')
