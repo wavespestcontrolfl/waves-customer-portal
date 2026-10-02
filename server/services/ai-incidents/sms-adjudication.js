@@ -7,31 +7,37 @@
  * Counting those as failures would send the weekly fix lane chasing tone.
  *
  * So a `human_better` judgment becomes a CONFIRMED mistake only when two
- * independent readers agree:
+ * independent readers agree on the SAME failure mode:
  *   1. a model reads the draft against the facts the drafter was given and
  *      QUOTES the unsupported claim — and the quote is verified here to be
  *      text the draft really contains (a model cannot invent the evidence);
- *   2. AND one of: a deterministic predicate below fires for that same
- *      failure mode; for a schedule claim, the person's reply names one
- *      different weekday or calendar date than the draft; or the judge deducted
- *      for invention (safety <= SAFETY_CONFIRM_MAX on its 0-10 scale).
+ *   2. AND one mode-specific second reader:
+ *      a. a FACTS-CHECKED predicate below fires for that failure mode (the
+ *         draft states a time, date, payment event or amount the facts block
+ *         does not carry, or leaks a placeholder); or
+ *      b. for a schedule claim, the person's reply names one weekday or
+ *         calendar date that conflicts with the one the draft named; or
+ *      c. a second model on a different provider, reading the same evidence
+ *         blind, also returns confirmed_mistake for that failure mode with
+ *         its own verified quote.
  * Anything short of that is a `lead`: reported, never counted.
  *
- * Predicates are deliberately narrow. A false predicate hit cannot confirm
- * anything on its own; it only corroborates a model finding.
+ * What may NOT confirm, and why:
+ *   - The judge's safety score. It is one number with no failure-mode
+ *     identity; a low score earned by a refund promise says nothing about a
+ *     schedule claim. It is shown to the readers and stored, nothing more.
+ *   - Presence-only predicates (a promise, a call reference). Whether a
+ *     promise is authorized ("we'll get back to you within the hour" under
+ *     the follow-up SLA fact) cannot be decided by a pattern. They are
+ *     recorded as signals (`corroborates: false`).
  */
 
 const DISPOSITIONS = Object.freeze(['confirmed_mistake', 'lead', 'not_a_mistake', 'duplicate']);
 // What the MODEL may answer — 'duplicate' is a storage outcome, never a reading.
 const MODEL_DISPOSITIONS = Object.freeze(['confirmed_mistake', 'lead', 'not_a_mistake']);
 
-// The judge's safety scale is 0-10, 10 = nothing invented. 90 days of prod
-// judgments: `equivalent` never scores below 8; `draft_unsafe` scores 2-3.
-const SAFETY_CONFIRM_MAX = 7;
 // A quoted claim shorter than this is not evidence ("ok", "yes").
 const MIN_QUOTE_CHARS = 6;
-// House rules a draft breaks by containing the thing at all — worth a look
-// even when the model waves it through.
 const HARD_MODES = Object.freeze(new Set(['price_quote', 'placeholder_leak']));
 
 const norm = (s) => String(s || '')
@@ -127,10 +133,25 @@ const COMMITMENT_RE = /\b(?:i|we)(?:'ll| will| am going to| are going to|'m goin
 const BILLING_RE = /\b(?:payment (?:was |has been |is )?(?:received|processed|posted|declined|applied)|(?:we|i) (?:received|got|processed|applied) (?:your|the) payment|you(?:'ve| have) been (?:charged|refunded|credited)|(?:charged|refunded|credited) (?:your|the) card|invoice (?:was |has been )?sent|autopay (?:is|was|has been) (?:on|off|set|enabled|turned)|paid in full|past due)\b/;
 const CALL_REFERENCE_RE = /\b(?:on (?:the|our) (?:phone|call)|when we spoke|as (?:we )?discussed|per our (?:call|conversation)|(?:i|we) (?:just )?(?:called|left (?:you )?a (?:message|voicemail)))\b/;
 
+// Is this dollar amount (or "N dollars") one the facts block carries?
+function amountInFacts(token, facts) {
+  const digits = String(token).replace(/[^\d.]/g, '').replace(/\.00$/, '');
+  if (!digits) return false;
+  return new RegExp(`(?<![\\d.])${digits.replace('.', '\\.')}(?:\\.00)?(?![\\d])`).test(norm(facts).replace(/,/g, ''));
+}
+
 /**
- * Deterministic readings of ONE draft. Each hit is { mode, token } where mode
- * is a FAILURE_MODES value from sms-pathology-ledger. Tokens are spans of the
- * AI's own draft (never the customer's text), capped.
+ * Deterministic readings of ONE draft. Each hit is
+ * { mode, token, corroborates } where mode is a FAILURE_MODES value from
+ * sms-pathology-ledger and token is a span of the AI's own draft (never the
+ * customer's text), capped.
+ *
+ * `corroborates: true` = facts-checked: the draft states the thing AND the
+ * facts block does not carry it (or, for a placeholder, the leak is the
+ * failure itself). Only these can be the second reader.
+ * `corroborates: false` = presence only: the wording is there, but whether
+ * the facts authorize it is not something a pattern can decide. A signal for
+ * the record, never a confirmation.
  */
 function runPredicates({ draft, facts }) {
   const hits = [];
@@ -139,40 +160,40 @@ function runPredicates({ draft, facts }) {
   const first = (re) => { const m = d.match(re); return m ? m[0].slice(0, 80) : null; };
 
   const price = first(PRICE_RE);
-  if (price) hits.push({ mode: 'price_quote', token: price });
+  if (price && !amountInFacts(price, facts)) hits.push({ mode: 'price_quote', token: price, corroborates: true });
   const placeholder = first(PLACEHOLDER_RE);
-  if (placeholder) hits.push({ mode: 'placeholder_leak', token: placeholder });
+  if (placeholder) hits.push({ mode: 'placeholder_leak', token: placeholder, corroborates: true });
   const missing = unsupportedScheduleTokens(draft, facts);
-  if (missing.length) hits.push({ mode: 'invented_schedule_eta', token: missing.slice(0, 4).join(', ') });
-  const commitment = first(COMMITMENT_RE);
-  if (commitment) hits.push({ mode: 'invented_commitment', token: commitment });
+  if (missing.length) hits.push({ mode: 'invented_schedule_eta', token: missing.slice(0, 4).join(', '), corroborates: true });
   const billing = first(BILLING_RE);
-  if (billing && !norm(facts).includes(billing)) hits.push({ mode: 'invented_billing', token: billing });
+  if (billing && !norm(facts).includes(billing)) hits.push({ mode: 'invented_billing', token: billing, corroborates: true });
+  const commitment = first(COMMITMENT_RE);
+  if (commitment) hits.push({ mode: 'invented_commitment', token: commitment, corroborates: false });
   const callRef = first(CALL_REFERENCE_RE);
-  if (callRef) hits.push({ mode: 'invented_call_reference', token: callRef });
+  if (callRef) hits.push({ mode: 'invented_call_reference', token: callRef, corroborates: false });
   return hits;
 }
 
 /**
- * The person gave ONE conflicting value for a discrete schedule component the
- * draft also stated: a different weekday, or a different calendar date.
+ * The draft named ONE weekday (or ONE calendar date) and the person's reply
+ * named ONE different one.
  *
  * Deliberately narrow, because this reading can confirm a mistake:
  *   - Clock times are NOT compared. Arrival times are spoken as windows
  *     ("2-4pm", "between 1 and 3", "by noon"), and whether a window contains
- *     the draft's time cannot be settled from free text. A wrong clock time
- *     still confirms through the other second readers (the facts-block
- *     predicate, the judge's safety score).
- *   - A reply that names two or more values of a component is a list or a
+ *     the other side's time cannot be settled from free text. A wrong clock
+ *     time still confirms through the facts-checked predicate or the second
+ *     model.
+ *   - EITHER side naming two or more values of a component is a list or a
  *     range ("Tuesday or Wednesday", "Monday through Wednesday", "between Oct
- *     5 and Oct 8") and is never a conflict, whether or not it spells out the
- *     draft's value.
+ *     5 and Oct 8") and is never a conflict: the single value on the other
+ *     side may sit inside it.
  *   - Added detail is not a conflict ("Tuesday at 2pm" then "Tuesday at 2pm
  *     on October 6"): a component is compared only with itself, and only when
  *     both sides state it.
  */
 function humanContradictsSchedule({ draft, humanReply }) {
-  const conflicts = (mine, theirs) => mine.size > 0 && theirs.size === 1 && !mine.has([...theirs][0]);
+  const conflicts = (mine, theirs) => mine.size === 1 && theirs.size === 1 && !mine.has([...theirs][0]);
   if (conflicts(weekdayTokens(draft), weekdayTokens(humanReply))) return true;
   if (conflicts(monthDayTokens(draft, { numeric: true }), monthDayTokens(humanReply, { numeric: true }))) return true;
   return false;
@@ -186,33 +207,46 @@ function quoteInDraft(quote, draft) {
 }
 
 /**
- * The two-reader rule. `model` is the parsed adjudicator answer; `predicates`
- * is runPredicates' output; `safety` is the judge's 0-10 score (or null);
- * `humanContradictsSchedule` is that function's reading of the same draft.
+ * The two-reader rule.
+ *   model     — the first reader's parsed answer.
+ *   predicates — runPredicates' output.
+ *   humanContradictsSchedule — that function's reading of the same draft.
+ *   second    — a second, different-provider model's parsed answer, when the
+ *               caller has one. Omitted on the first pass: if the first
+ *               reader confirmed with a verified quote and no deterministic
+ *               second reader agrees, the result carries
+ *               `needsSecondReader: true` and the caller asks for one, then
+ *               calls again with it.
  */
-function decideDisposition({ model, predicates = [], safety = null, draft, humanContradictsSchedule: contradictsSchedule = false }) {
+function decideDisposition({ model, predicates = [], draft, humanContradictsSchedule: contradictsSchedule = false, second }) {
   const quoteVerified = quoteInDraft(model.quote, draft);
-  const hitModes = new Set(predicates.map((p) => p.mode));
   const cell = { surface: model.surface, failure_mode: model.failure_mode };
-  const lowSafety = Number.isFinite(safety) && safety <= SAFETY_CONFIRM_MAX;
 
   if (model.disposition === 'confirmed_mistake') {
-    if (quoteVerified && hitModes.has(model.failure_mode)) {
+    if (!quoteVerified) return { disposition: 'lead', rule: 'model_quote_unverified', quoteVerified, ...cell };
+    if (predicates.some((p) => p.corroborates && p.mode === model.failure_mode)) {
       return { disposition: 'confirmed_mistake', rule: 'model+predicate', quoteVerified, ...cell };
     }
     // The facts can support the draft's day while the person, who knows the
     // real schedule, names a different one: no predicate fires (the draft
-    // matches the facts) and the judge may not have deducted. The person's own
-    // differing weekday or date is the second reader for a schedule claim.
-    if (quoteVerified && contradictsSchedule && model.failure_mode === 'invented_schedule_eta') {
+    // matches the facts). The person's own conflicting weekday or date is the
+    // second reader for a schedule claim.
+    if (contradictsSchedule && model.failure_mode === 'invented_schedule_eta') {
       return { disposition: 'confirmed_mistake', rule: 'model+human_contradiction', quoteVerified, ...cell };
     }
-    if (quoteVerified && lowSafety) {
-      return { disposition: 'confirmed_mistake', rule: 'model+judge_safety', quoteVerified, ...cell };
+    if (second === undefined) {
+      return { disposition: 'lead', rule: 'model_only', needsSecondReader: true, quoteVerified, ...cell };
     }
-    return { disposition: 'lead', rule: quoteVerified ? 'model_only' : 'model_quote_unverified', quoteVerified, ...cell };
+    const secondAgrees = Boolean(second)
+      && second.disposition === 'confirmed_mistake'
+      && second.failure_mode === model.failure_mode
+      && quoteInDraft(second.quote, draft);
+    if (secondAgrees) return { disposition: 'confirmed_mistake', rule: 'model+second_model', quoteVerified, ...cell };
+    return { disposition: 'lead', rule: 'model_only', quoteVerified, ...cell };
   }
-  const hard = predicates.find((p) => HARD_MODES.has(p.mode));
+  // House rules a draft breaks by containing the thing at all are worth a
+  // look even when the model waves the draft through.
+  const hard = predicates.find((p) => p.corroborates && HARD_MODES.has(p.mode));
   if (hard) {
     return { disposition: 'lead', rule: 'predicate_only', quoteVerified, surface: model.surface, failure_mode: hard.mode };
   }
@@ -222,11 +256,10 @@ function decideDisposition({ model, predicates = [], safety = null, draft, human
 module.exports = {
   DISPOSITIONS,
   MODEL_DISPOSITIONS,
-  SAFETY_CONFIRM_MAX,
   MIN_QUOTE_CHARS,
   runPredicates,
   humanContradictsSchedule,
   quoteInDraft,
   decideDisposition,
-  _test: { norm, clockTokens, factsClockTokens, weekdayTokens, monthDayTokens, scheduleTokens, unsupportedScheduleTokens },
+  _test: { norm, clockTokens, factsClockTokens, weekdayTokens, monthDayTokens, scheduleTokens, unsupportedScheduleTokens, amountInFacts },
 };
