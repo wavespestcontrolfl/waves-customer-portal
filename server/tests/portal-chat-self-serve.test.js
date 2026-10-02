@@ -137,7 +137,7 @@ describe('a portal hand-off rings the office and says only what happened', () =>
 
   test('rings one rule-compliant bell and promises a reply', async () => {
     mockEscalationDb();
-    NotificationService.notifyAdmin.mockResolvedValue({ notification: { id: 'n-1' }, deduped: false });
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', category: 'alert', deduped: false });
 
     const result = await assistant.escalate(conversation, 'Why was I charged twice on 2026-09-30?!', 'billing question');
 
@@ -176,10 +176,21 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     expect(result.reply).not.toMatch(/sent this to our team|notified/i);
   });
 
-  test('a suppressed bell (null) is not a notification either', async () => {
+  test.each([
+    ['a failed write', null],
+    ['a withheld bell (demo account)', { id: null, suppressed: true }],
+  ])('%s is not a notification', async (_name, returned) => {
     mockEscalationDb();
-    NotificationService.notifyAdmin.mockResolvedValue(null);
-    expect((await assistant.escalate(conversation, 'hello', 'reason')).teamNotified).toBe(false);
+    NotificationService.notifyAdmin.mockResolvedValue(returned);
+    const result = await assistant.escalate(conversation, 'hello', 'reason');
+    expect(result.teamNotified).toBe(false);
+    expect(result.reply).toMatch(/saved your request/);
+  });
+
+  test('a bell already standing for this hand-off counts as notified', async () => {
+    mockEscalationDb();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', deduped: true });
+    expect((await assistant.escalate(conversation, 'hello', 'reason')).teamNotified).toBe(true);
   });
 
   test('kill switch off: legacy wording, no bell, no teamNotified field', async () => {

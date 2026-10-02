@@ -602,7 +602,10 @@ class WavesAssistant {
         detail: String(customerMessage || '').slice(0, 1000),
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
       });
-      return Boolean(result?.notification);
+      // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
+      // { id: null, suppressed: true } when the bell was withheld (a demo
+      // account), and null when the write failed.
+      return Boolean(result?.id) && !result.suppressed;
     } catch (err) {
       logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
       return false;
