@@ -124,6 +124,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       { customer_id: G, payment_date: day(-5), amount: 150, status: 'disputed', processor: 'stripe', card_brand: 'visa', description: 'Stripe card payment', metadata: json({ dispute_invoice_id: gAlias.id }) },
       { customer_id: G, payment_date: day(-4), amount: 10, status: 'paid', processor: 'stripe', description: 'Stripe card payment', metadata: json({ waves_invoice_id: gAlias.id }) },
     ]);
+    // Legacy / card-on-file rows carry no invoice metadata: linked by the invoice's PaymentIntent or charge id. A combined sibling's row (explicit other invoice_id, same PaymentIntent) is not this invoice's.
+    const gLegacy = await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
+    await db('payments').insert([
+      { customer_id: G, payment_date: day(-3), amount: 70, status: 'refunded', refund_amount: 20, refund_status: 'succeeded', processor: 'stripe', stripe_payment_intent_id: `pi_legacy_${run}`, description: 'Card on file', metadata: json({}) },
+      { customer_id: G, payment_date: day(-3), amount: 5, status: 'paid', processor: 'stripe', stripe_charge_id: `ch_legacy_${run}`, description: 'Charge-linked', metadata: json({}) },
+      { customer_id: G, payment_date: day(-3), amount: 999, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_legacy_${run}`, description: 'Sibling share', metadata: json({ invoice_id: uid() }) },
+    ]);
     const gBulk = await invoice('g_bulk', G, { total: 90 });
     await db.batchInsert('payments', Array.from({ length: 51 }, (_, n) => ({ customer_id: G, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
       description: `Synthetic failed ${n}`, metadata: json({ invoice_id: gBulk.id }) })), 51);
@@ -276,6 +283,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(alias.recorded_payments.map((p) => p.status).sort()).toEqual(['disputed', 'paid']);
     expect(alias.recorded_payments.find((p) => p.status === 'disputed')).toMatchObject({ amount: 150, method: 'stripe visa' });
     expect(alias.invoice).toMatchObject({ collectible: true, balance_due: 150 });
+    const legacy = await read('get_invoice_detail', { invoice_id: inv.g_legacy.id });
+    expect(legacy.recorded_payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([5, 70]);
+    expect(legacy.recorded_payments.find((p) => p.amount === 70)).toMatchObject({ status: 'refunded', refunded_amount: 20, refund_status: 'succeeded' });
     const bulk = await read('get_invoice_detail', { invoice_id: inv.g_bulk.id });
     expect(bulk.recorded_payments).toHaveLength(50);
     expect(bulk.unknowns.join(' ')).toMatch(/More payment rows are tied to this invoice than were read/);

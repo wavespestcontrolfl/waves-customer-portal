@@ -456,20 +456,29 @@ function paymentPlanDetail(rows) {
 // states the PaymentIntent SUCCEEDED counts as received; every other source
 // (combined_pay_processing is an ACH residual written before the cash arrives;
 
-// The payments-table rows tied to this invoice by the portal's own linkage keys (metadata.invoice_id,
-// dispute_invoice_id, waves_invoice_id) and the manual-payment description (receipt-payment.js
-// loadPaymentForInvoice). Informational: no row is classified as received or not received here.
+// The payments-table rows tied to this invoice by the portal's own linkage (receipt-payment.js
+// loadPaymentForInvoice and the applied-money fence): metadata.invoice_id / dispute_invoice_id /
+// waves_invoice_id, the invoice's Stripe PaymentIntent or charge id, and the manual-payment description. A row
+// that names a different invoice explicitly is that invoice's (a combined payment writes one row per invoice
+// on one PaymentIntent). Informational: no row is classified as received or not received here.
 async function loadRecordedPayments(customerId, invoice) {
   const rows = await db('payments')
     .where({ customer_id: customerId })
     .where(function linkedToInvoice() {
       for (const key of INVOICE_LINK_KEYS) this.orWhereRaw(`payments.metadata::jsonb ->> '${key}' = ?`, [String(invoice.id)]);
+      if (invoice.stripe_payment_intent_id) this.orWhereRaw('payments.stripe_payment_intent_id = ?', [String(invoice.stripe_payment_intent_id)]);
+      if (invoice.stripe_charge_id) this.orWhereRaw('payments.stripe_charge_id = ?', [String(invoice.stripe_charge_id)]);
       if (/^[A-Za-z0-9-]+$/.test(String(invoice.invoice_number || ''))) this.orWhereRaw('payments.description LIKE ?', [`Invoice ${invoice.invoice_number} — %`]);
     })
     .orderBy('created_at', 'desc')
     .limit(PAYMENT_ROW_CAP + 1)
     .select('id', 'payment_date', 'amount', 'status', 'metadata', 'created_at', 'processor', 'card_brand', 'payment_method_type', 'refund_amount', 'refund_status', 'payer_id');
-  const kept = rows.slice(0, PAYMENT_ROW_CAP);
+  const namesOtherInvoice = (row) => {
+    const metadata = parseJson(row.metadata) || {};
+    const named = INVOICE_LINK_KEYS.map((key) => metadata[key]).filter(Boolean).map(String);
+    return named.length > 0 && !named.includes(String(invoice.id));
+  };
+  const kept = rows.filter((row) => !namesOtherInvoice(row)).slice(0, PAYMENT_ROW_CAP);
   const payerRef = (row) => (row.payer_id != null ? row.payer_id : (parseJson(row.metadata) || {}).payer_id);
   const payerIds = [...new Set(kept.map(payerRef).filter((id) => Number.isInteger(Number(id)) && Number(id) > 0).map(Number))];
   let names = new Map();
