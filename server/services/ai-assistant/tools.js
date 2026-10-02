@@ -111,7 +111,10 @@ const PORTAL_TOOLS = [
 const RECENT_PAYMENTS_SHOWN = 3;
 // Payment statuses the card knows how to label. Anything else is left off
 // the card and reported to the model as "other" so it hands off.
-const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 'Failed', refunded: 'Refunded' };
+// 'upcoming' is a scheduled Auto Pay row (getPaymentHistory orders it first by
+// its future date); it is labeled so it never hides the card, and
+// "Scheduled" is not a completed payment.
+const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 'Failed', refunded: 'Refunded', upcoming: 'Scheduled' };
 // A refund the card may call refunded: the webhook's settled stamps, or a
 // Stripe refund object that succeeded. A pending or failed refund has no
 // label, so the card is withheld.
@@ -295,7 +298,8 @@ const longDateLabel = (value) => {
 };
 const methodLabel = (p) => {
   if (!p.lastFour) return '';
-  const isBank = ['us_bank_account', 'bank', 'ach'].includes(String(p.methodType || '').toLowerCase());
+  // The same four aliases autopay-eligibility.js and the Billing tab read.
+  const isBank = ['us_bank_account', 'bank', 'ach', 'bank_account'].includes(String(p.methodType || '').toLowerCase());
   const brand = isBank ? (p.bankName || 'Bank account') : (p.cardBrand ? p.cardBrand.charAt(0).toUpperCase() + p.cardBrand.slice(1) : 'Card');
   return `${brand} ending in ${p.lastFour}`;
 };

@@ -13,7 +13,7 @@ const { PORTAL_TOOLS, PORTAL_FACTS_TOOLS, executeToolCall } = require('../servic
 
 const PAYMENTS = [
   { id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Invoice WV-1042 — Quarterly Pest Control — per application', cardBrand: 'visa', lastFour: '4242', methodType: 'card', refundAmount: null, receiptUrl: '/receipt/tok_abc', receiptPdfUrl: '/api/receipt/tok_abc/pdf' },
-  { id: 'p2', date: new Date('2026-08-28T00:00:00Z'), amount: 1250.5, status: 'failed', description: 'Silver WaveGuard Monthly', cardBrand: null, lastFour: '9876', methodType: 'us_bank_account', bankName: 'Example Bank', refundAmount: null, receiptUrl: null },
+  { id: 'p2', date: new Date('2026-08-28T00:00:00Z'), amount: 1250.5, status: 'failed', description: 'Silver WaveGuard Monthly', cardBrand: null, lastFour: '9876', methodType: 'bank_account', bankName: 'Example Bank', refundAmount: null, receiptUrl: null },
   { id: 'p3', date: '2026-07-28', amount: 129, status: 'paid', description: 'Invoice WV-0990', cardBrand: 'visa', lastFour: '4242', methodType: 'card', refundAmount: 29, refundStatus: 'partial', receiptUrl: null, stripeReceiptUrl: 'https://pay.stripe.com/receipts/x' },
 ];
 
@@ -53,6 +53,15 @@ test('renders the Billing tab rows as a card, adds Open Billing, and tells the m
   }
   // No Stripe-hosted receipt on the card either: only the Waves receipt page.
   expect(JSON.stringify(cards)).not.toContain('stripe.com');
+});
+
+test('a scheduled Auto Pay row is labeled Scheduled and never hides the card', async () => {
+  listPortalPayments.mockResolvedValue({ payments: [{ id: 'up', date: '2026-10-28', amount: 129, status: 'upcoming', description: 'Silver WaveGuard Monthly', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }, PAYMENTS[0]] });
+  const cards = [];
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  expect(result.shown).toBe(true);
+  expect(result.statuses).toEqual(['Scheduled', 'Paid']);
+  expect(cards[0].rows.map((r) => r.statusLabel)).toEqual(['Scheduled', 'Paid']);
 });
 
 test('any payment the card cannot label means no card: a disputed newest payment never lets an older paid one read as the latest', async () => {
