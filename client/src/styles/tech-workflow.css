@@ -122,6 +122,14 @@
 /* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
 .tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
 .tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the words and the photos
+   share one box. */
+.tech-visit-note-box { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--tech-border); border-radius: 10px; background: var(--tech-card); }
+.tech-visit-note-box .ui-control.tech-visit-control { border: none; border-radius: 10px 10px 0 0; background: transparent; }
+.tech-note-photo-after { display: grid; gap: 8px; padding: 0 12px 12px; }
+.tech-note-photo-confirm { display: grid; gap: 8px; }
+.tech-note-photo-confirm p { margin: 0; }
+.tech-note-photo-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 /* Fast Complete tip options: label over one line of the customer copy. */
 .tech-visit-tip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .ui-action.tech-visit-tip { justify-content: flex-start; height: auto; min-height: 56px; padding: 8px 12px; text-align: left; white-space: normal; }

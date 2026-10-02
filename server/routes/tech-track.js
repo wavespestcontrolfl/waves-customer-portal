@@ -311,6 +311,8 @@ const {
 const {
   promoteStagedPhotosForCompletedVisit,
   sanitizeCustomerFacingPhotoCaption,
+  updateStagedServicePhotoCaption,
+  deleteStagedServicePhoto,
   uploadServicePhotoBuffer,
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
@@ -1134,6 +1136,55 @@ router.get('/:id/photos', async (req, res, next) => {
   } catch (err) {
     logger.error(`[tech-track] photos list failed: ${err.message}`);
     next(err);
+  }
+});
+
+// PATCH / DELETE /api/tech/services/:id/photos/:photoId — the tech sheet's
+// notes box changes a staged photo's description or removes the photo before
+// the visit is completed (GATE_NOTE_BOX_PHOTOS, dark: off answers 404). Same
+// ownership rule as the photo routes above; a completed visit's photos are
+// on its record and are never changed here (409 visit_completed).
+const STAGED_PHOTO_REFUSALS = {
+  photo_not_found: 'Photo not found',
+  service_not_found: 'Service not found',
+  not_assigned: 'Not assigned to this service',
+  visit_completed: 'This visit is completed; its photos are on the report.',
+};
+function refuseStagedPhotoChange(res, { status, code }) {
+  return res.status(status).json({ error: STAGED_PHOTO_REFUSALS[code], code });
+}
+
+router.patch('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await updateStagedServicePhotoCaption({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      caption: req.body?.caption,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    return res.json({ photo: { ...result.photo, staged: true } });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo description failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+router.delete('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await deleteStagedServicePhoto({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    logger.info(`[tech-track] staged photo removed service=${req.params.id} tech=${req.technicianId}`);
+    return res.json({ ok: true, id: result.photo.id });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo removal failed: ${err.message}`);
+    return next(err);
   }
 });
 

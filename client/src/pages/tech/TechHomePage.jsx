@@ -1325,6 +1325,10 @@ export default function TechHomePage({ section = 'today' }) {
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
             reportFlow: isFastCompleteReportEligible(fastCompleteService),
+            // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
+            // the visit's photos in the note's box (the report flow only;
+            // never lawn or tree, shrub & palm, which the payload leaves off).
+            noteBoxPhotosEnabled: fastCompleteService.noteBoxPhotosEnabled === true,
             technicianName: fastCompleteService.technicianName || fastCompleteService.technician_name || null,
             traceEligible: fastCompleteService.traceEligible !== false,
             lat: fastCompleteService.lat ?? null,

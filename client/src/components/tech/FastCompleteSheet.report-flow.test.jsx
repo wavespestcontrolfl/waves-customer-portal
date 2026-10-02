@@ -61,7 +61,7 @@ const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], p
 function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
-  promises = { available: false, promises: [] }, blog = { available: false, posts: [] },
+  promises = { available: false, promises: [] }, blog = { available: false, posts: [] }, photoChange = () => ({}),
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -72,6 +72,7 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.split('?')[0].endsWith('/blog-posts')) return typeof blog === 'function' ? blog(path) : blog;
+    if (/\/photos\/[^/]+$/.test(path)) return photoChange(path, options);
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
     if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace(path, options) : trace;
     if (path === '/admin/schedule/generate-report') {
@@ -462,6 +463,19 @@ describe('generate and read', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add or view photos' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Done with photos' }));
     expect(await screen.findByRole('button', { name: 'Write it again' })).toBeTruthy();
+  });
+
+  test('gate off: a failed later read counts as no photos, never a hold, as before', async () => {
+    let reads = 0;
+    const request = makeRequest({
+      photos: () => { reads += 1; if (reads > 1) throw Object.assign(new Error('Failed to fetch'), { status: 0 }); return { photos: [{ id: 'p1', url: 'https://example.test/p1.jpg', caption: 'Counter edge' }] }; },
+    });
+    await openSheet(request);
+    expect(await screen.findByText('1 added')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Add or view photos' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Done with photos' }));
+    expect(await screen.findByText('Optional')).toBeTruthy();
+    expect(screen.queryByText('Read the photos again first.')).toBeNull();
   });
 
   test('a photo read still landing after the manager closes holds the send', async () => {
@@ -1008,5 +1022,272 @@ describe('perimeterFeetOf', () => {
     expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'lawn_highlight' })).toBeNull();
     expect(perimeterFeetOf({ linear_ft: 0, capture_mode: 'perimeter' })).toBeNull();
     expect(perimeterFeetOf(null)).toBeNull();
+  });
+});
+
+describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
+  const NOTE_BOX = { ...SERVICE, noteBoxPhotosEnabled: true };
+  const PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+  // The visit's staged photos, as the server holds them: a description or a
+  // removal changes them, and the next read shows it.
+  function stagedPhotos() {
+    const stored = [{ id: 'ph-1', url: PIXEL, caption: 'Counter edge' }, { id: 'ph-2', url: PIXEL, caption: '' }];
+    return {
+      stored,
+      photos: () => ({ photos: stored.map((photo) => ({ ...photo })) }),
+      photoChange: (path, options) => {
+        const id = path.split('/').pop();
+        const index = stored.findIndex((photo) => photo.id === id);
+        if (options?.method === 'DELETE') { stored.splice(index, 1); return { ok: true, id }; }
+        stored[index].caption = JSON.parse(options.body).caption;
+        return { photo: { ...stored[index], staged: true } };
+      },
+    };
+  }
+  const photoReads = (request) => request.calls.filter((call) => call.path === '/tech/services/svc-1/photos').length;
+
+  test('the photos sit in the note\'s box; a description is saved on the visit and the photos read again', async () => {
+    const staged = stagedPhotos();
+    const request = makeRequest({ photos: staged.photos, photoChange: staged.photoChange });
+    await openSheet(request, NOTE_BOX);
+    expect(await screen.findByText('Counter edge')).toBeTruthy();
+    // No separate photo section beside the box.
+    expect(screen.queryByRole('heading', { name: 'Photos' })).toBeNull();
+    const readsBefore = photoReads(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    const patch = request.calls.find((call) => call.path === '/tech/services/svc-1/photos/ph-2');
+    expect(patch.options.method).toBe('PATCH');
+    expect(patch.body).toEqual({ caption: 'Ants along the slider track' });
+    expect(photoReads(request)).toBeGreaterThan(readsBefore);
+    expect(screen.queryByLabelText('Description for photo 2')).toBeNull();
+  });
+
+  test('the report waits while a description is open', async () => {
+    const staged = stagedPhotos();
+    await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(await screen.findByText('Save or cancel the photo description first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+  });
+
+  test('removing a photo asks first: Keep changes nothing, Remove photo deletes it from the visit', async () => {
+    const staged = stagedPhotos();
+    const request = makeRequest({ photos: staged.photos, photoChange: staged.photoChange });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    expect(screen.getByText('Remove this photo? It’s deleted from the visit for good.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    expect(request.calls.some((call) => call.options?.method === 'DELETE')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo' }));
+    await waitFor(() => expect(screen.queryByText('Counter edge')).toBeNull());
+    const removal = request.calls.find((call) => call.options?.method === 'DELETE');
+    expect(removal.path).toBe('/tech/services/svc-1/photos/ph-1');
+    expect(staged.stored.map((photo) => photo.id)).toEqual(['ph-2']);
+  });
+
+  test('a dropped connection keeps the description and its photos, and Save works again (codex local r1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let saves = 0;
+    const offline = () => Object.assign(new Error('Failed to fetch'), { status: 0 });
+    const request = makeRequest({
+      // The first read lands; the one after the failed save does not.
+      photos: () => { reads += 1; if (reads === 2) throw offline(); return staged.photos(); },
+      photoChange: (path, options) => { saves += 1; if (saves === 1) throw offline(); return staged.photoChange(path, options); },
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Couldn’t save the photo change. Try again.')).toBeTruthy();
+    await waitFor(() => expect(reads).toBe(2));
+    // The photos stay, and so do the words: Save again goes through.
+    expect(screen.getByText('Counter edge')).toBeTruthy();
+    expect(screen.getByLabelText('Description for photo 2').value).toBe('Ants along the slider track');
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    expect(staged.stored[1].caption).toBe('Ants along the slider track');
+  });
+
+  test('a change the server took holds even when the read after it fails: the report writes from it (pre-push P1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let online = false;
+    const offline = () => Object.assign(new Error('Failed to fetch'), { status: 0 });
+    // Only the first read lands until the connection is back.
+    const request = makeRequest({
+      photos: () => { reads += 1; if (reads > 1 && !online) throw offline(); return staged.photos(); },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo' }));
+    await waitFor(() => expect(screen.queryByText('Counter edge')).toBeNull());
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3));
+    // The box shows the changes the server took, but an unread visit holds
+    // the report until a read lands (codex local r2 on #5624).
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(await screen.findByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    online = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Read the photos again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+    await generate({ rating: null });
+    const [payload] = request.bodies('/generate-report');
+    expect(payload.photoCount).toBe(1);
+    expect(payload.photoCaptions).toEqual(['Ants along the slider track']);
+  });
+
+  test('a photo change in hand holds the way back to a written report (codex local r2 on #5624)', async () => {
+    const staged = stagedPhotos();
+    await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);
+    await screen.findByText('Counter edge');
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(screen.getByText('Save or cancel the photo description first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 2' }));
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(false));
+  });
+
+  test('a photo the manager added holds the send until the visit\'s photos are read (codex local r2 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let online = true;
+    const offline = () => Object.assign(new Error('Failed to fetch'), { status: 0 });
+    const request = makeRequest({
+      photos: () => { reads += 1; if (!online) throw offline(); return staged.photos(); },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    // The manager adds a photo; the read after it fails.
+    staged.stored.push({ id: 'ph-3', url: PIXEL, caption: 'Kitchen counter' });
+    online = false;
+    fireEvent.click(screen.getByRole('button', { name: /^Add photo/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Done with photos' }));
+    expect(await screen.findByText('Couldn’t read the visit’s photos. Check the connection.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the report' }));
+    expect(screen.getByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    online = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Read the photos again' }));
+    // The added photo landed: the report is stale and is written again.
+    expect(await screen.findByText('Kitchen counter')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Write it again' })).toBeTruthy();
+  });
+
+  test('a first read that fails holds the report too, with a way to read again (pre-push P1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let online = false;
+    const request = makeRequest({
+      photos: () => { if (!online) throw Object.assign(new Error('Failed to fetch'), { status: 0 }); return staged.photos(); },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    expect(await screen.findByText('Couldn’t read the visit’s photos. Check the connection.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    online = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Read the photos again' }));
+    expect(await screen.findByText('Counter edge')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+  });
+
+  test('a reply with no photo list is no answer: the photos stay and the report holds (codex local r4 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let readable = true;
+    const request = makeRequest({
+      // An unreadable body answers {}, as the tech app's request helper does.
+      photos: () => { reads += 1; return readable ? staged.photos() : {}; },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    readable = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Couldn’t read the visit’s photos. Check the connection.')).toBeTruthy();
+    expect(reads).toBe(2);
+    expect(screen.getByText('Counter edge')).toBeTruthy();
+    expect(screen.getByText('Ants along the slider track')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+  });
+
+  test('Add photo waits while a description is open: the manager never covers its mic (codex local r2 on #5624)', async () => {
+    const staged = stagedPhotos();
+    await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);
+    await screen.findByText('Counter edge');
+    const addPhoto = () => screen.getByRole('button', { name: /^Add photo/ });
+    expect(addPhoto().disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(addPhoto().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(addPhoto().disabled).toBe(false));
+  });
+
+  test('Full form and the product picker wait while a description is open (codex local r3 on #5624)', async () => {
+    const staged = stagedPhotos();
+    render(<FastCompleteSheet service={NOTE_BOX} request={makeRequest({ photos: staged.photos, photoChange: staged.photoChange })} onClose={() => {}} onCompleted={() => {}} onFullForm={() => {}} />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const fullForm = () => screen.getByRole('button', { name: 'Full form' });
+    const otherProduct = () => screen.getByRole('button', { name: '+ Other product' });
+    expect(fullForm().disabled).toBe(false);
+    expect(otherProduct().disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(fullForm().disabled).toBe(true);
+    expect(otherProduct().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(fullForm().disabled).toBe(false));
+    expect(otherProduct().disabled).toBe(false);
+  });
+
+  test('a description the server refuses stays open with its words, and says why', async () => {
+    const staged = stagedPhotos();
+    const refused = Object.assign(new Error('Photo caption contains wording we can\'t put on a customer report (eliminated).'), {
+      status: 422, code: 'photo_caption_banned_copy',
+    });
+    const request = makeRequest({ photos: staged.photos, photoChange: () => { throw refused; } });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 1'), { target: { value: 'Ants eliminated from the counter' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText(/That description has wording we can’t put on a customer’s report/)).toBeTruthy();
+    expect(screen.getByLabelText('Description for photo 1').value).toBe('Ants eliminated from the counter');
+    expect(staged.stored[0].caption).toBe('Counter edge');
   });
 });
