@@ -662,6 +662,8 @@ describe('findUnverifiedClaims', () => {
       'Large patch seldom fails to spread in summer.',
       'Large patch rarely stops short of spreading in summer.',
       // centigrade is Celsius
+      'Large patch thrives at 80 degrees centigrade.',
+      'Large patch thrives at an 85°F maximum temperature or higher.',
       'Large patch thrives at 30 degrees centigrade.',
       'Large patch thrives when temperatures are 30 centigrade or higher.',
       'Large patch thrives in summer despite being far from common in winter.',

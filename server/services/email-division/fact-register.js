@@ -769,7 +769,7 @@ const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:abou
 // value-sensitive ceiling and the unit-less context gate were reverted
 // after five non-converging review rounds).
 // It must end the clause: "90°F maximum damage" is not a ceiling.
-const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
+const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\s+(?!(?:higher|hotter|warmer|more|greater|above|over|up)\\b)|but\\b))`, 'gi');
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -794,7 +794,7 @@ function foldTemperatures(sentence) {
   text = text.replace(TEMP_POSTFIX_CEILING, (match) => token('cooltemp', match));
   // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
   // judged on its Fahrenheit value, so the raw-number triggers never see it.
-  text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
+  text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(toFahrenheit(tempValue(figure)) >= 80 ? 'hottemp' : 'cooltemp', match)); // 80°C is 176°F: hot, not implausible
   const restore = (clause) => String(clause).replace(/\b(?:hot|cool)temp(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
   return { text, restore };
 }
