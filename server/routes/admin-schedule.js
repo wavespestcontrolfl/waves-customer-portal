@@ -2997,6 +2997,15 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
+// Whether an add-on line can be due on any occurrence after the series
+// anchor, by lineDueOnRecurringDate's own rule: a one-time service key or a
+// 'one_time' pattern is due on the anchor only; every other line recurs.
+function addonRecursAfterAnchor(line) {
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
+}
+
 function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
@@ -27087,6 +27096,7 @@ router._test = {
   addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
+  addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,

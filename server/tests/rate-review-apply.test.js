@@ -25,6 +25,7 @@ const fixture = require('./helpers/rate-review-apply-fixture');
 
 const mockDb = fixture.createFakeDb();
 const mockSchedule = { guardThrows: null, seriesLockBusy: false, propagateOverride: null, calls: [] };
+const mockResumeHolds = jest.fn(async () => ({ reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] }));
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-1' }));
 
 jest.mock('../models/db', () => mockDb);
@@ -50,6 +51,10 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     .where('t.term_end', '>=', today),
 }));
 jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
+jest.mock('../services/cancellation-resolution/holds', () => ({
+  ...jest.requireActual('../services/cancellation-resolution/holds'),
+  resumeHoldsDueFor: (...args) => mockResumeHolds(...args),
+}));
 jest.mock('../routes/admin-schedule', () => {
   const { parseTemplateOverrides } = require('../services/recurring-template-overrides');
   const sum = (rows) => (rows || []).reduce((s, a) => s + (Number(a.estimated_price) > 0 ? Number(a.estimated_price) : 0), 0);
@@ -104,6 +109,9 @@ jest.mock('../routes/admin-schedule', () => {
         return true;
       }),
       calculateStoredVisitFinancials: calc,
+      // admin-schedule.js addonRecursAfterAnchor, reduced: a 'one_time' line
+      // is due on the anchor only, every other line recurs.
+      addonRecursAfterAnchor: (line) => (line?.recurring_pattern || line?.recurringPattern || null) !== 'one_time',
       loadStoredDiscountScope: async () => null,
       parseTemplateOverrides,
       readProvenanceOverrides: (raw) => {
@@ -153,6 +161,7 @@ beforeEach(() => {
   mockSchedule.guardThrows = null;
   mockSchedule.seriesLockBusy = false;
   mockSchedule.propagateOverride = null;
+  delete process.env.GATE_CANCEL_FLOW_V2;
   mockDb.reset();
 });
 
@@ -328,16 +337,43 @@ describe('scheduleNoticeRows — per_application effective date', () => {
   });
 });
 
+describe('scheduleNoticeRows — live inputs under the fence', () => {
+  test('a visit the notice would reprice no longer carries the ranked rate → held, no notice (never told, then refused at apply)', async () => {
+    const book = pestBook();
+    book.scheduled_services[2].estimated_price = '125.00';
+    const out = await scheduleBook(book);
+    expect(out.created).toBe(0);
+    expect(out.held.map((h) => h.reason)).toEqual(['rate_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+  test('the account now bills on another lane than the ranking saw → held, no notice', async () => {
+    const out = await scheduleBook(pestBook(1, { customer: { billing_mode: 'monthly_membership' } }));
+    expect(out.held.map((h) => h.reason)).toEqual(['lane_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+  test('monthly dues the ledger no longer carries at the ranked rate → held, no notice', async () => {
+    const out = await scheduleBook(pestBook(1, {
+      snapshot: { billing_lane: 'monthly_membership', rate_unit: 'month', current_rate_source: 'ledger_slice', current_rate_cents: 3333, proposed_rate_cents: 3633, delta_cents: 300 },
+      customer: { billing_mode: 'monthly_membership', billing_day: 15, monthly_rate: '39.00' },
+    }), { plannedSendDate: '2026-11-02' });
+    expect(out.held.map((h) => h.reason)).toEqual(['rate_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+});
+
 describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
   test('monthly_membership: the first dues day on or after both floors, labelled per month', async () => {
     const book = pestBook(1, {
       snapshot: { billing_lane: 'monthly_membership', rate_unit: 'month', current_rate_source: 'ledger_slice', current_rate_cents: 3333, proposed_rate_cents: 3633, delta_cents: 300, visits_per_year: 4 },
       customer: { billing_mode: 'monthly_membership', billing_day: 15, monthly_rate: '33.33' },
     });
+    book.customer_plan_rates[0].monthly_rate = '33.33';
     const out = await scheduleBook(book, { plannedSendDate: '2026-11-02' });
     expect(out.created).toBe(1);
     // floor = anniversary 2026-12-05 (> 2026-12-02) → first 15th on/after → 2026-12-15
     expect(notices()[0]).toMatchObject({ billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', noticed_current_cents: 3333, noticed_new_cents: 3633 });
+    // the plan the letter names: its series and the ledger slices' accept provenance
+    expect(JSON.parse(notices()[0].metadata)).toMatchObject({ series_root_id: VISIT(100), slice_estimates: ['pest_control:'] });
   });
   test('monthly_membership: a floor past the dues day rolls to next month', async () => {
     const book = pestBook(1, {
@@ -363,10 +399,12 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     const out = await scheduleBook(prepayBook());
     expect(out.created).toBe(1);
     const notice = notices()[0];
-    // the public page shows current → new "per year": the ANNUAL totals, cent-exact with the renewal amount
+    // the public page shows the per-application rates (never a combined
+    // yearly total); the enforced amounts are the ANNUAL totals, cent-exact
+    // with the renewal amount
     expect(notice).toMatchObject({
-      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
-      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      billing_lane: 'annual_prepay', cadence_label: 'application', effective_date: '2027-05-15',
+      current_amount_cents: 11700, new_amount_cents: 12100, noticed_current_cents: 46800, noticed_new_cents: 48400,
     });
     expect(JSON.parse(notice.metadata)).toMatchObject({
       term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400,
@@ -653,6 +691,26 @@ describe('applyDueRateChanges — per_application', () => {
     expect(closeCall[1]).toContain(`rate-review-apply-hold:${notices()[0].id}:plan_on_hold`);
     expect(closeCall[2]).toBe('rate_review_notice_applied');
   });
+  test('a hold ending today is resumed before the apply, so the rate lands on its own effective date', async () => {
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-10' }];
+    mockResumeHolds.mockImplementationOnce(async (ids, { today }) => {
+      for (const h of mockDb.store.plan_holds) if (ids.includes(String(h.customer_id)) && h.resume_on <= today) h.status = 'resumed';
+      return { reminded: 0, resumed: 1, skipsRecovered: 0, errors: [] };
+    });
+    const out = await runApply(book);
+    expect(mockResumeHolds).toHaveBeenCalledWith([String(CUSTOMER(1))], { today: '2026-12-10' });
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+    expect(visits()[1].estimated_price).toBe('121.00');
+  });
+  test('with the cancel flow off, no hold is resumed early (the lifecycle cron owns it)', async () => {
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-10' }];
+    const out = await runApply(book);
+    expect(mockResumeHolds).not.toHaveBeenCalled();
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_on_hold']);
+  });
   test('a hold that changes reason closes the earlier reason\'s bell and keeps the current one', async () => {
     const book = sentBook();
     book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-20' }];
@@ -796,6 +854,29 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.holds).toEqual([]);
     expect(out.applied).toBe(1);
   });
+  test('the first visit the letter named is already under way or done at the old rate → hold, later visits not repriced', async () => {
+    const book = sentBook({ notice: { metadata: { ...fixture.noticeRow(1).metadata, first_visit_id: VISIT(101) } } });
+    book.scheduled_services[1].status = 'en_route';
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['effective_visit_started']);
+    expect(visits()[2].estimated_price).toBe('117.00');
+    expect(notices()[0].applied_at == null).toBe(true);
+  });
+  test('an add-on sold for the anchor visit only never reaches a later spawn: the template still spawns flat → applied', async () => {
+    const book = sentBook();
+    book.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'one_time' }];
+    const out = await runApply(book);
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+  });
+  test('a recurring add-on on the series parent lands on some spawns and not others → hold, whatever a discount offsets', async () => {
+    const book = sentBook();
+    book.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'quarterly' }];
+    book.scheduled_services[0].discount_type = 'fixed';
+    book.scheduled_services[0].discount_amount = 20;
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['series_template_complex']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
   test('a series template that would not spawn later visits at the noticed amount (parent discount) → hold', async () => {
     const book = sentBook();
     book.scheduled_services[0].discount_type = 'percent';
@@ -885,13 +966,34 @@ describe('applyDueRateChanges — monthly_membership', () => {
       notice: {
         billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2027-01-01', noticed_current_cents: 3333, noticed_new_cents: 3633,
         current_amount_cents: 3333, new_amount_cents: 3633,
-        metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'month', visits_per_year: 4, current_rate_source: source }, ...notice,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'month', visits_per_year: 4, current_rate_source: source, series_root_id: VISIT(100) }, ...notice,
       },
     });
     book.customer_plan_rates = ledger || [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept' }];
     return book;
   }
   const JAN = new Date('2027-01-01T08:10:00Z');
+  test('a same-family plan re-accepted since the notice (new ledger provenance, same price) → plan_replaced, dues untouched', async () => {
+    const book = monthlyBook({
+      ledger: [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept', source_estimate_id: 'est-new' }],
+      notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(100), slice_estimates: ['pest_control:est-old'] } },
+    });
+    const out = await runApply(book, JAN);
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    expect(customer1().monthly_rate).toBe('33.33');
+    // the same provenance applies
+    const same = monthlyBook({
+      ledger: [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept', source_estimate_id: 'est-old' }],
+      notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(100), slice_estimates: ['pest_control:est-old'] } },
+    });
+    expect(await runApply(same, JAN)).toMatchObject({ applied: 1, held: 0 });
+  });
+  test('the noticed series was replaced by another of the same line → plan_replaced; a notice recording no plan fails closed', async () => {
+    const book = monthlyBook({ notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(999) } } });
+    expect((await runApply(book, JAN)).holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    const bare = monthlyBook({ notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice' } } });
+    expect((await runApply(bare, JAN)).holds.map((h) => h.reason)).toEqual(['notice_series_unrecorded']);
+  });
   test('moves the family slice and the dues scalar by the delta under source annual_review; nothing else is touched', async () => {
     const out = await runApply(monthlyBook(), JAN);
     expect(out).toMatchObject({ due: 1, applied: 1, held: 0 });
@@ -989,8 +1091,8 @@ describe('applyDueRateChanges — annual_prepay', () => {
     const book = sentBook({
       book: { snapshot: { billing_lane: 'annual_prepay', current_rate_source: 'prepay_term' }, customer: { billing_mode: 'annual_prepay' } },
       notice: {
-        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
-        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        billing_lane: 'annual_prepay', cadence_label: 'application', effective_date: '2027-05-15',
+        current_amount_cents: 11700, new_amount_cents: 12100, noticed_current_cents: 46800, noticed_new_cents: 48400,
         metadata: {
           source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'prepay_term',
           term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400, per_application_current_cents: 11700, per_application_new_cents: 12100,
