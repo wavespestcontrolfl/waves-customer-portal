@@ -449,33 +449,63 @@ function missedWindowStart(originalWindow) {
   if (!start) return null;
   return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
 }
-// Was this logged miss followed up? Only the logged row itself can say so (owner
-// 10-02, #5610: the office rebooks a miss; the drafter never infers a follow-up
-// from some other booking — a series top-up or an unreviewed call booking looks
-// just like one). The row counts while it still holds the frozen scope (same
-// property, same catalog service — a row staff repurposed is no evidence) and was
-// rebooked in place (new_date), moved off the missed slot, completed, or performed
-// (tracker complete or a service record). A move the office has not reviewed yet (a
-// call-booked or voice-agent row, call-booking-source-actions) is not a rebooking.
-async function noshowFollowedUp(conn, noshow) {
-  if (!noshow.scheduled_service_id || !noshow.ss_status_present) return false;
+// Was this logged miss followed up? (owner 10-02, #5610: the office rebooks a miss.)
+// 1. The logged row itself, while it still holds the frozen scope (same property,
+//    same catalog service — a row staff repurposed is no evidence): rebooked in
+//    place (new_date), moved off the missed slot, under way, completed, or performed
+//    (tracker complete or a service record). A move the office has not reviewed yet
+//    (a call-booked or voice-agent row, call-booking-source-actions) is not one.
+// 2. Only when the logged row is TERMINAL (dispatch "no show", skipped, cancelled,
+//    or gone — it can never be moved again): a REPLACEMENT the office booked (owner
+//    10-02 r4) — same customer, same frozen property and catalog service, created
+//    after the miss was logged, on or after the missed day, live or done, NOT a
+//    generated series child (recurring_parent_id) and NOT an unreviewed call/voice
+//    booking. Any other booking never counts (series top-ups look just like one).
+const TERMINAL_STATUSES = ['no_show', 'skipped', 'cancelled'];
+async function noshowFollowedUp(conn, customerId, noshow) {
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
-  if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
-    && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
   const date = calendarDay(noshow.original_date);
-  const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
-  // a windowless missed slot that has since been given a time is a move too (Codex #5610 r3)
-  const currentStart = hhmmToMinutes(noshow.window_start);
-  const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
-    || (missedStart != null ? currentStart !== missedStart : currentStart != null);
-  // the visit itself is under way (the tech started it late, unmoved): nothing for the office to rebook
-  const underWay = ['en_route', 'on_site'].includes(noshow.status) || LIVE_TRACK_STATES.includes(noshow.track_state);
-  const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true || underWay
-    || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
-  if (!rowEvidence || (noshow.ss_property_id || null) !== (noshow.occurrence_property_id || null)) return false;
-  const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, noshow.ss_service_type]);
-  const missedKey = serviceIdentityKey(noshow.occurrence_service_id, noshow.occurrence_service_type, byName);
-  return Boolean(missedKey) && serviceIdentityKey(noshow.ss_service_id, noshow.ss_service_type, byName) === missedKey;
+  const scopeKey = async (rows) => {
+    const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, ...rows.map((r) => r.service_type)]);
+    return {
+      missed: serviceIdentityKey(noshow.occurrence_service_id, noshow.occurrence_service_type, byName),
+      of: (r) => serviceIdentityKey(r.service_id, r.service_type, byName),
+    };
+  };
+  const rowPresent = Boolean(noshow.scheduled_service_id && noshow.ss_status_present);
+  if (rowPresent && !TERMINAL_STATUSES.includes(noshow.status)) {
+    if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
+      && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
+    const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
+    // a windowless missed slot that has since been given a time is a move too (Codex #5610 r3)
+    const currentStart = hhmmToMinutes(noshow.window_start);
+    const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
+      || (missedStart != null ? currentStart !== missedStart : currentStart != null);
+    // the visit itself is under way (the tech started it late, unmoved): nothing for the office to rebook
+    const underWay = ['en_route', 'on_site'].includes(noshow.status) || LIVE_TRACK_STATES.includes(noshow.track_state);
+    const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true || underWay
+      || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
+    if (!rowEvidence || (noshow.ss_property_id || null) !== (noshow.occurrence_property_id || null)) return false;
+    const key = await scopeKey([{ service_type: noshow.ss_service_type }]);
+    return Boolean(key.missed) && key.of({ service_id: noshow.ss_service_id, service_type: noshow.ss_service_type }) === key.missed;
+  }
+  // terminal (or gone): an office-booked replacement
+  if (!date) return false;
+  let query = conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', date)
+    .whereIn('status', LIVE_OR_DONE)
+    .where('created_at', '>', noshow.logged_at)
+    .whereNull('recurring_parent_id');
+  query = noshow.occurrence_property_id
+    ? query.where({ property_id: noshow.occurrence_property_id })
+    : query.whereNull('property_id');
+  if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
+  const replacements = ((await query.select('service_id', 'service_type', 'status', 'source_action', 'customer_confirmed')) || [])
+    .filter((r) => !isUnreviewedDispatchOwned(r));
+  if (!replacements.length) return false;
+  const key = await scopeKey(replacements);
+  return Boolean(key.missed) && replacements.some((r) => key.of(r) === key.missed);
 }
 // The newest UNFOLLOWED no-show in the lookback, paged in a stable order so a page
 // of followed-up rows never hides an older open one (the page cap is a backstop).
@@ -499,10 +529,12 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
         conn.raw('(ss.id IS NOT NULL) AS ss_status_present'),
         conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'))) || [];
     for (const noshow of noshows) {
-      if (await noshowFollowedUp(conn, noshow)) continue;
+      if (await noshowFollowedUp(conn, customerId, noshow)) continue;
       const startHms = missedWindowStart(noshow.original_window);
       return {
         logId: String(noshow.id),
+        // the logged occurrence's row: a WINDOW PASSED / DELAY line for the same row yields to this one
+        visitId: noshow.scheduled_service_id ? String(noshow.scheduled_service_id) : null,
         type: noshow.occurrence_service_type,
         date: calendarDay(noshow.original_date),
         windowStart: startHms,
@@ -659,8 +691,12 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
-  out.lateAlert = lateAlert;
-  out.pastWindow = pastWindow;
+  // The nightly sweep logs a miss but leaves the row unstarted, so the same occurrence
+  // can also read as a passed window or a delay that evening: the logged miss is the
+  // stronger fact and supersedes them (one instruction per visit — Codex #5610 r4).
+  const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId);
+  out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
+  out.pastWindow = sameVisit(pastWindow) ? null : pastWindow;
   out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;

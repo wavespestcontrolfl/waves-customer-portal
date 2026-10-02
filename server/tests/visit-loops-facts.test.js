@@ -660,7 +660,7 @@ describe('missedVisit (logged customer no-shows)', () => {
 
   test('an open no-show renders its FROZEN scope and the window as promised', async () => {
     const { out, conn } = await run([noshow({ ss_scheduled_date: '2026-09-29' })]);
-    expect(out.missedVisit).toEqual({ logId: 'rl-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
+    expect(out.missedVisit).toEqual({ logId: 'rl-1', visitId: 'visit-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
     const q = conn.calls.find((c) => c.table === 'reschedule_log');
     // only logged customer no-shows with a frozen scope (pre-migration rows are unknown, never the live row's values)
     expect(hasOp(q.ops, 'where', (a) => a[0] === 'rl.reason_code' && a[1] === 'customer_noshow')).toBe(true);
@@ -678,11 +678,33 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ status: 'cancelled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
-  test('another booking is never follow-up evidence — only the logged row (owner 10-02, #5610: series top-ups, unreviewed call bookings)', async () => {
-    const later = { service_id: null, service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00' };
+  test('a live logged row: another booking is never follow-up evidence (series top-ups, call bookings)', async () => {
+    const later = { service_id: null, service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00', status: 'confirmed' };
     const { out, conn } = await run([noshow()], [later]);
     expect(out.missedVisit).toMatchObject({ logId: 'rl-1' });
     expect(conn.calls.some((c) => c.table === 'scheduled_services' && isFollowUpQuery(c.ops))).toBe(false);
+  });
+
+  test('a TERMINAL logged row (dispatch no-show, skipped, cancelled, gone): an office-booked replacement clears it (owner 10-02, Codex #5610 r4)', async () => {
+    const repl = (over = {}) => ({ service_id: null, service_type: 'Pest Control', status: 'confirmed', source_action: null, customer_confirmed: null, ...over });
+    for (const terminal of [{ status: 'no_show' }, { status: 'skipped' }, { status: 'cancelled' }, { ss_status_present: false, status: null }]) {
+      expect((await run([noshow(terminal)], [repl()])).out.missedVisit).toBeNull();
+      // no replacement: still open
+      expect((await run([noshow(terminal)], [])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    }
+    const { conn } = await run([noshow({ status: 'no_show' })], [repl()]);
+    const q = conn.calls.find((c) => c.table === 'scheduled_services' && isFollowUpQuery(c.ops));
+    // same customer + frozen property, booked after the log, on/after the missed day, never a series child or the row itself
+    expect(hasOp(q.ops, 'where', (a) => a[0].property_id === 'prop-1')).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0].customer_id === 'c1')).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'created_at' && a[1] === '>' && a[2] instanceof Date)).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-09-29')).toBe(true);
+    expect(hasOp(q.ops, 'whereNull', (a) => a[0] === 'recurring_parent_id')).toBe(true);
+    expect(hasOp(q.ops, 'whereNot', (a) => a[0] === 'id' && a[1] === 'visit-1')).toBe(true);
+    // another catalog service, or an unreviewed call / voice booking, is no replacement
+    expect((await run([noshow({ status: 'no_show' })], [repl({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([noshow({ status: 'no_show' })], [repl({ status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: false })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([noshow({ status: 'no_show' })], [repl({ source_action: 'voice_agent', customer_confirmed: false })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
   test('a move the office has not reviewed (call-booked / voice-agent) is not a rebooking', async () => {
@@ -733,6 +755,25 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect(await open({ occurrence_service_type: 'Wasp Nest Removal', ss_service_type: 'wasp nest removal' })).toBeNull();
     expect(await open({ occurrence_service_type: 'Inspection', ss_service_type: 'INSPECTION' })).toBeNull();
     expect(await open({ occurrence_service_type: 'Inspection', ss_service_id: 'svc-dup-a', ss_service_type: 'Inspection' })).toMatchObject({ logId: 'rl-1' });
+  });
+
+  test('the logged miss supersedes WINDOW PASSED for the SAME visit (nightly sweep evening), not for another (Codex #5610 r4)', async () => {
+    const todayMiss = noshow({ original_date: '2026-10-01', ss_scheduled_date: '2026-10-01', status: 'pending' });
+    const load = (rows, pastRow) => loadVisitLoops({
+      customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow,
+      conn: fakeConn({
+        reschedule_log: () => rows,
+        services: () => CATALOG.filter((c) => c.name === 'Pest Control'),
+        scheduled_services: (ops, kind) => (isCandidateQuery(ops) ? [todayRow(pastRow)] : (kind === 'first' ? null : [])),
+      }),
+    });
+    const same = await load([todayMiss], { status: 'pending' });
+    expect(same.missedVisit).toMatchObject({ logId: 'rl-1', visitId: 'visit-1' });
+    expect(same.pastWindow).toBeNull();
+    // a passed window on ANOTHER visit stays
+    const other = await load([todayMiss], { id: 'visit-2', status: 'pending' });
+    expect(other.missedVisit).toMatchObject({ visitId: 'visit-1' });
+    expect(other.pastWindow).toMatchObject({ visitId: 'visit-2' });
   });
 
   test('the signature names the logged occurrence', async () => {
