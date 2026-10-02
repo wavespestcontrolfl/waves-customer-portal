@@ -622,18 +622,25 @@ export function mergeLaneRecord(record, facts, preset) {
 
 // The tech's own pick: a place toggled, or a group's value set (or cleared,
 // ''), the tap's rule dropping a value it excludes.
+// The tech's own pick drops the words a fill stood on: a toggled place's,
+// the edited group's, and those of a value the pick reconciled away, so
+// picking the filled value again shows no quote as if the note had just said
+// it (Codex P2 r3 on #5632, the typed record's rule).
 export function changeLaneRecord(record, key, value, preset) {
   const picked = [...new Set([...record.picked, key])];
   if (key === 'areas') {
     const areas = record.areas.includes(value) ? record.areas.filter((area) => area !== value) : [...record.areas, value];
-    return { ...record, areas, picked };
+    const heardAreas = Object.fromEntries(Object.entries(record.heard.areas).filter(([area]) => area !== value));
+    return { ...record, areas, picked, heard: { ...record.heard, areas: heardAreas } };
   }
   const group = preset.findingGroups.find((item) => item.key === key);
   const kept = reconcileDependentFindingSelections(preset, Object.values(record.values), group, value);
   const values = Object.fromEntries(preset.findingGroups
     .map((item) => [item.key, item.options.find((option) => kept.includes(option.value))?.value || ''])
     .filter(([, chosen]) => chosen));
-  return { ...record, values, picked };
+  const heardValues = Object.fromEntries(Object.entries(record.heard.values)
+    .filter(([groupKey, entry]) => groupKey !== key && values[groupKey] === entry.value));
+  return { ...record, values, picked, heard: { ...record.heard, values: heardValues } };
 }
 
 // Whether the completion would refuse this record without an action beside
