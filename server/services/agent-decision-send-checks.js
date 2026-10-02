@@ -441,11 +441,19 @@ function commitmentDayChanged(snapshot, now) {
 async function commitmentsChanged(conn, refs, customerId) {
   if (!customerId) return true;
   const { commitmentRevision, allOpenCallCommitments, allSmsLane } = require('./visit-loops-facts');
-  // each rendered SMS/email lane on its own page, as the facts loader reads them
+  // each rendered SMS/email lane on its own page, as the facts loader reads them, and
+  // only the channels whose gate is still on: a row from a lane rolled back since the
+  // draft is no longer live, so the reply is refused
+  const { smsCommitmentsEnabled } = require('./sms-operational-actions');
+  const { gateEnvValue } = require('../config/feature-gates');
+  const channels = [smsCommitmentsEnabled() && 'sms', gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS') && 'email'].filter(Boolean);
+  const lane = async (name) => (channels.length
+    ? ((await allSmsLane(conn, { customerId, channels, lane: name })) || []).filter((r) => channels.includes(r.channel === 'email' ? 'email' : 'sms'))
+    : []);
   const [calls, promises, requests] = await Promise.all([
     allOpenCallCommitments(conn, { customerId }),
-    allSmsLane(conn, { customerId, lane: 'promise' }),
-    allSmsLane(conn, { customerId, lane: 'request' }),
+    lane('promise'),
+    lane('request'),
   ]);
   const live = new Map([...(calls || []), ...(promises || []), ...(requests || [])].map((r) => [String(r.id), r]));
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));

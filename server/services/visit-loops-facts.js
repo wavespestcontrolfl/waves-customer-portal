@@ -164,13 +164,19 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
     .join('scheduled_services as ss', 'ss.id', 'a.job_id')
     .where('ss.customer_id', customerId)
     .whereIn('a.type', LATE_ALERT_TYPES).whereNull('a.resolved_at')
+    // an uncleared street-level address hold was never dispatched (the tech-late
+    // detector resolves its alert on its next sweep): no delay in the meantime
+    .whereNotExists(function unclearedAddressHold() { require('./street-level-hold').heldVisitSubquery(this, 'ss'); })
     .orderBy('a.created_at', 'desc')
     .select('a.type', 'a.severity', 'a.payload', 'ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.status', 'ss.track_state', 'ss.scheduled_date',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type');
   const today = etDateString(now);
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
-  const liveNow = (occ) => occ.date === today || (occ.date === yesterday && crossesIntoNow({ window_start: occ.startHms }, nowMin));
+  // yesterday's overnight window stays live while its alert is unresolved: a stage-2
+  // alert is raised AFTER the window ends, so "window still open" would drop it
+  const overnight = (occ) => (customerWindowEndMinutes({ window_start: occ.startHms }) || 0) > 1440;
+  const liveNow = (occ) => occ.date === today || (occ.date === yesterday && overnight(occ));
   // Every applicable alert, newest first; a confirmed delay outranks a tracking
   // gap (a gap is not a must-answer loop, so it must never hide a real delay).
   // a lagging member of a stop whose sibling has already ARRIVED or finished carries
@@ -354,6 +360,8 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
     type: row.service_type || null,
     windowDisplay: windowLabel({ ...row, window_start: occ.startHms }, deriveWindow),
     minutesPast,
+    // unassigned: there is no tech to check with — the reply says the office is checking
+    assigned: !!row.technician_id,
     passedKeys: passed.map((p) => `${p.row.id}@${p.occ.date}T${p.occ.startHms}`),
   };
 }

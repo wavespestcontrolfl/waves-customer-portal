@@ -45,6 +45,9 @@ describe('renderVisitLoopsSection', () => {
     // no minutes: the alert's figure is frozen and measured from the internal job block
     expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
     expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
+    // an unassigned visit has no tech to check with
+    const loops = fullLoops();
+    expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).toContain("say you're checking with the office, quote FOLLOW-UP SLA");
     expect(out).not.toContain('no tech location');
     expect(out).not.toContain('MISSED VISIT'); // split out of #5499 into its own PR
     expect(out).not.toContain('live note');

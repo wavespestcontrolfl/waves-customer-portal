@@ -198,6 +198,19 @@ describe('lateAlert', () => {
     expect((await run(alertRow({ payload: { promised_window: { start_at: '2026-10-03T13:00:00.000Z' } } }))).lateAlert).toBeNull();
   });
 
+  test('an overnight (23:00) visit\'s stage-2 alert stays live after its window ends; an ordinary yesterday alert does not', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T03:00:00.000Z' } }; // 09-30 23:00 ET
+    const at = new Date('2026-10-01T05:30:00Z'); // 01:30 ET, past the 01:00 end
+    expect((await run(alertRow({ payload }, { scheduled_date: '2026-09-30', window_start: '23:00:00', status: 'en_route' }), at)).lateAlert).toMatchObject({ visitId: 'visit-1', scheduledDate: '2026-09-30' });
+    const day = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-09-30T13:00:00.000Z' } }; // 09-30 09:00 ET
+    expect((await run(alertRow({ payload: day }, { scheduled_date: '2026-09-30' }), at)).lateAlert).toBeNull();
+  });
+
+  test('an alert on an uncleared street-level hold is excluded in the query', async () => {
+    const conn = fakeConn({ dispatch_alerts: (ops) => (hasOp(ops, 'whereNotExists') ? [] : [{ type: 'tech_late' }]), scheduled_services: () => [] });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).lateAlert).toBeNull();
+  });
+
   test('a delivered reschedule obsoletes the alert\'s frozen promise before the detector reconciles it', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
     // the customer was since told 3 PM: the 9 AM delay is obsolete
@@ -235,10 +248,10 @@ describe('lateAlert', () => {
     expect((await run([])).lateAlert).toBeNull();
   });
 
-  test('yesterday\'s 23:00 occurrence stays live until its window ends at 01:00 ET', async () => {
+  test('yesterday\'s 23:00 occurrence stays live past midnight, and after its 01:00 end while the alert is unresolved', async () => {
     const row = alertRow({ payload: { scheduled_date: '2026-09-30', window_start: '23:00:00' } }, { scheduled_date: '2026-09-30', window_start: '23:00:00' });
     expect((await run(row, new Date('2026-10-01T04:30:00Z'))).lateAlert).toMatchObject({ visitId: 'visit-1' }); // 00:30 ET
-    expect((await run(row, new Date('2026-10-01T05:30:00Z'))).lateAlert).toBeNull(); // 01:30 ET
+    expect((await run(row, new Date('2026-10-01T05:30:00Z'))).lateAlert).toMatchObject({ visitId: 'visit-1' }); // 01:30 ET
   });
 
   test('reads the customer\'s unresolved alerts of the two overdue types, joined to their visits', async () => {
@@ -261,7 +274,7 @@ describe('pastWindow', () => {
   test('a pending visit past its customer-facing window (start + 2h, not the internal block) reads passed', async () => {
     // window_start 09:00, internal window_end 10:00, customer window 9-11; it is 12:00.
     const out = await run({ status: 'pending' });
-    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60, passedKeys: ['visit-1@2026-10-01T09:00:00'] });
+    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60, passedKeys: ['visit-1@2026-10-01T09:00:00'], assigned: true });
   });
 
   test('inside the customer-facing window (even past the internal window_end) is not passed', async () => {

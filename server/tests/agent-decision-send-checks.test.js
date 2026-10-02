@@ -27,7 +27,7 @@ jest.mock('../services/sms-eta-freshness', () => ({
 jest.mock('../models/db', () => jest.fn());
 // the open-loop recheck asks the canonical commitment readers (PR #5499)
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn(async () => []) }));
-jest.mock('../services/sms-operational-actions', () => ({ listSmsCommitments: jest.fn(async () => []) }));
+jest.mock('../services/sms-operational-actions', () => ({ listSmsCommitments: jest.fn(async () => []), smsCommitmentsEnabled: jest.fn(() => true) }));
 const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
@@ -583,6 +583,17 @@ describe('open-loop commitments recheck', () => {
     // closed, dismissed, superseded by a reprocess, or relinked to another customer: absent from the lists
     openFor({ calls: [{ id: 'cc-1' }] });
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBe('commitment_closed');
+  });
+
+  test('a ref from a lane whose gate was rolled back since the draft is refused', async () => {
+    const { smsCommitmentsEnabled } = require('../services/sms-operational-actions');
+    openFor({ texts: [{ id: 'cc-2', channel: 'sms' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-2']) })).resolves.toBeNull();
+    smsCommitmentsEnabled.mockReturnValueOnce(false);
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-2']) })).resolves.toBe('commitment_closed');
+    // email rows need GATE_EMAIL_OPERATIONAL_ACTIONS (off here): never live
+    openFor({ texts: [{ id: 'em-1', channel: 'email' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['em-1']) })).resolves.toBe('commitment_closed');
   });
 
   test('no customer on the decision: refused (ownership cannot be shown)', async () => {
