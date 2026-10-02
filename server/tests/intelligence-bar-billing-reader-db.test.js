@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z;
+  let A; let B; let H; let E; let G; let Z; let Y;
   const inv = {};
   const tokens = [];
 
@@ -79,7 +79,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('voided', A, { total: 77, status: 'void' });
     await invoice('processing', A, { total: 55, status: 'processing' });
     // Ordinary collectible invoices.
-    await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15) });
+    const credited = await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15) });
+    await db('payment_plans').insert({ customer_id: A, invoice_id: credited.id, total_balance: 100, payment_amount: 25, payment_frequency: 'weekly', plan_start_date: day(0), next_payment_date: day(7) });
     await invoice('draft', A, { total: 40, status: 'draft', due_date: null });
     await invoice('archived', A, { total: 33, archived_at: new Date() });
     for (let n = 0; n < 4; n += 1) await invoice(`fill${n}`, A, { total: 10 + n, due_date: day(20 + n) });
@@ -101,6 +102,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const [replacement] = await db('payments').insert({ customer_id: A, payment_date: day(0), amount: 66, status: 'paid', description: 'Replacement', metadata: json({}) }).returning('id');
     await db('payments').insert({ customer_id: A, payment_date: day(-1), amount: 66, status: 'failed', processor: 'stripe', description: 'Connection failure, reconciled',
       superseded_by_payment_id: replacement.id || replacement, metadata: json({ invoice_id: failSup.id, ambiguous_outcome: true }) });
+    // A saved-card ambiguity parks the invoice as `processing` and leaves the attempt; an ordinary processing invoice is an ACH in flight.
+    Y = await customer(`Parked${run}`, `Processing${run}`);
+    await invoice('y_ach', Y, { total: 90, status: 'processing' });
+    const parked = await invoice('y_parked', Y, { total: 35, status: 'processing' });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: parked.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-parked-${run}`, status: 'claimed', amount: 35, submitted_at: new Date() });
     // Same-surname neighbour with loud sentinels, and a dispute-hold customer.
     await invoice('b_open', B, { total: 999.99, title: `SENTINEL-B-${run}`, status: 'overdue', due_date: day(-40) });
     await invoice('b_paid', B, { total: 55.55, status: 'paid', title: `SENTINEL-B-PAID-${run}` });
@@ -174,7 +180,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       expect(by(list, key).reason).not.toMatch(/pi_/);
     }
     expect(by(list, 'open')).toMatchObject({ has_active_payment_plan: true });
-    expect(by(list, 'open').payment_plan).toMatchObject({ payment_amount: 50, payment_frequency: 'monthly', total_balance: 200 });
+    // Nothing that reads as owed leaves a held invoice: not the amount due, not the plan's installment or balance.
+    expect(by(list, 'open').payment_plan).toMatchObject({ payment_amount: null, total_balance: null, payment_frequency: 'monthly', amounts_withheld: expect.any(String) });
+    expect(by(list, 'credited').payment_plan).toMatchObject({ payment_amount: 25, total_balance: 100, payment_frequency: 'weekly' });
+    for (const key of ['paid', 'voided', 'processing', 'open', 'amb', 'orphan', 'failamb']) {
+      expect(by(list, key)).toMatchObject({ amount_due_after_credit: null, balance_due: null });
+      expect(by(list, key).total).toBeGreaterThan(0);
+    }
     expect(list.invoices.every((i) => 'dispute_hold' in i && 'annual_prepay' in i && 'archived' in i)).toBe(true);
     // No derived receipt fields remain on an item.
     for (const field of ['amount_paid', 'payment_recorded', 'unreconciled_stripe_charges']) expect(by(list, 'paid')).not.toHaveProperty(field);
@@ -214,13 +226,29 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     // credited 100 + draft 40 + fillers 10+11+12+13 + failsup 66 (archived excluded; open, amb, orphan, failamb held by the fence; paid, void, processing terminal).
     expect(summary).toMatchObject({ total_due: 252, needs_reconciliation_count: 4, not_yet_sent_due: 40, overdue_count: 1, outstanding_count: 11 });
     expect(summary.dispute_hold).toMatchObject({ active: false });
-    expect(summary.unknown).toMatch(/4 invoice\(s\) need reconciliation and are NOT in total_due/);
+    expect(summary.unknown).toMatch(/4 invoice\(s\) \(unpaid or processing\) need reconciliation and are NOT in total_due/);
     expect(summary).toMatchObject({ credit_balance: 25 });
     for (const field of ['complete', 'unreconciled_stripe_charges', 'unresolved_charge_attempts']) expect(summary).not.toHaveProperty(field);
     // A customer with nothing held states its total with no warning.
     const b = await read('get_customer_invoices', { customer_id: B });
     expect(b.account_summary.total_due).toBe(999.99);
     expect(b.account_summary.unknown).toBeUndefined();
+  });
+
+  test('a processing invoice is a bank payment in flight only when the charge fence is clear; a parked saved-card ambiguity needs reconciliation, in the list, the detail and the summary', async () => {
+    const list = await read('get_customer_invoices', { customer_id: Y, limit: 50 });
+    expect(by(list, 'y_ach')).toMatchObject({ collectible: false, needs_reconciliation: false, balance_due: null, amount_due_after_credit: null, reason: expect.stringMatching(/already processing/) });
+    expect(by(list, 'y_parked')).toMatchObject({ collectible: false, needs_reconciliation: true, balance_due: null, amount_due_after_credit: null });
+    expect(by(list, 'y_parked').reason).toMatch(/saved-card charge in progress or awaiting reconciliation — needs reconciliation — check the Invoices page/);
+    expect(list.account_summary.processing).toMatchObject({ count: 2, bank_payment_in_flight: 1, needs_reconciliation: 1 });
+    expect(list.account_summary.needs_reconciliation_count).toBe(1);
+    expect(list.account_summary.unknown).toMatch(/1 invoice\(s\) \(unpaid or processing\) need reconciliation/);
+    const detail = await read('get_invoice_detail', { invoice_id: inv.y_parked.id });
+    expect(detail.invoice).toMatchObject({ needs_reconciliation: true, balance_due: null, amount_due_after_credit: null });
+    expect((await read('get_invoice_detail', { invoice_id: inv.y_ach.id })).invoice.needs_reconciliation).toBe(false);
+    // An ordinary processing invoice is all in flight.
+    const a = await read('get_customer_invoices', { customer_id: A });
+    expect(a.account_summary.processing).toMatchObject({ count: 1, bank_payment_in_flight: 1, needs_reconciliation: 0 });
   });
 
   test('overlapping subsets: the presented personal balance excludes the union; a withdrawn Bill-To is payer-billed, held back and not in total_due', async () => {
@@ -282,7 +310,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const held = await read('get_invoice_detail', { invoice_id: inv.open.id });
     expect(held.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
     expect(held.invoice.reason).toMatch(/needs reconciliation — check the Invoices page/);
-    expect(held.payment_plan.active).toMatchObject({ payment_amount: 50, payment_frequency: 'monthly' });
+    expect(held.payment_plan.active).toMatchObject({ payment_amount: null, total_balance: null, payment_frequency: 'monthly' });
+    expect(held.invoice).toMatchObject({ amount_due_after_credit: null, total: 200 });
+    expect(paid.invoice).toMatchObject({ amount_due_after_credit: null, total: 120 });
     const ok = await read('get_invoice_detail', { invoice_id: inv.credited.id });
     expect(ok.invoice).toMatchObject({ collectible: true, balance_due: 100, amount_due_after_credit: 100, credit_applied: 50 });
     expect(ok.recorded_payments).toEqual([]);

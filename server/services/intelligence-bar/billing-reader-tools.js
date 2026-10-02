@@ -60,7 +60,7 @@ const NOT_YET_SENT_STATUSES = ['draft', 'scheduled', 'sending'];
 
 const LIST_STATUS_FILTERS = ['all', 'unpaid', 'overdue', 'paid', 'prepaid', 'processing', 'draft', 'sent', 'viewed', 'void', 'refunded'];
 
-const BALANCE_RULE = 'Read only. A balance is stated ONLY when the invoice passes the payment paths\' own collectibility checks (collectible: true). Otherwise balance_due is null with the reason: say so and send staff to the Invoices page; never guess, never say it was or was not paid, and never suggest collecting or retrying a charge. recorded_payments are informational rows, not a verdict on receipt.';
+const BALANCE_RULE = 'Read only. A balance is stated ONLY when the invoice passes the payment paths\' own collectibility checks (collectible: true). Otherwise balance_due is null with the reason (and amount_due_after_credit and a payment plan\'s amounts are null too): say so and send staff to the Invoices page; never guess, never say it was or was not paid, and never suggest collecting or retrying a charge. recorded_payments are informational rows, not a verdict on receipt.';
 
 const BILLING_READER_TOOLS = [
   {
@@ -85,7 +85,8 @@ Select the customer with customer_id or customer_name.`,
     name: 'get_invoice_detail',
     description: `Read ONE invoice by invoice_id: line items, discounts, amounts, and whether it is collectible (collectible true: balance_due is stated; false: balance_due is null with the reason, and "needs reconciliation — check the Invoices page" when a charge state is unresolved). Also recorded_payments (the payments-table rows tied to the invoice: amount, status, date, method, refund amounts, and the payer when a third party funded it), dispute hold, payment plan and annual-prepay linkage.
 ${BALANCE_RULE} Admin-only; never changes anything and never charges, refunds, credits or sends.
-Use for: "what is on invoice INV-…?", "why does this invoice still show a balance?", "what payments are recorded on it?"`,
+Takes the invoice_id from get_customer_invoices; there is no invoice-number lookup.
+Use for: "what is on this invoice?" (after listing the customer's invoices), "why does this invoice still show a balance?", "what payments are recorded on it?"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -206,14 +207,10 @@ const fenceReason = (message) => scrub(String(message || '').replace(/\bpi_[A-Za
 
 // Is this invoice collectible? BOTH fences must pass: the pay paths' own collectibility gate and the saved-card
 // reconciliation fence (read-only form: no writes, no locks). Anything else is not collectible, with a reason.
-async function invoiceFence(invoice) {
-  try {
-    assertInvoiceCollectible(invoice);
-  } catch (err) {
-    return { collectible: false, needs_reconciliation: false, reason: fenceReason(err.message) || 'This invoice is not collectible', balance_due: null };
-  }
+async function chargeFenceOutcome(invoice) {
   try {
     await require('../stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, db, { readOnly: true });
+    return null;
   } catch (err) {
     const known = FENCE_CODES.includes(err.code);
     if (!known) logger.warn(`[intelligence-bar:billing-reader] charge fence could not run (${err.code || err.name || 'error'})`);
@@ -224,6 +221,23 @@ async function invoiceFence(invoice) {
       balance_due: null,
     };
   }
+}
+
+async function invoiceFence(invoice) {
+  try {
+    assertInvoiceCollectible(invoice);
+  } catch (err) {
+    // A saved-card ambiguity parks the invoice as `processing` and leaves the attempt in place
+    // (parkInvoiceForSavedCardReconciliation): a processing row is an ACH in flight only when the charge fence
+    // finds nothing unresolved, so it runs BEFORE the terminal "bank payment processing" explanation is accepted.
+    if (invoiceStatusKey(invoice.status) === 'processing') {
+      const held = await chargeFenceOutcome(invoice);
+      if (held) return held;
+    }
+    return { collectible: false, needs_reconciliation: false, reason: fenceReason(err.message) || 'This invoice is not collectible', balance_due: null };
+  }
+  const held = await chargeFenceOutcome(invoice);
+  if (held) return held;
   // A PaymentIntent attached to the invoice means a payment was started on it. The pay paths retrieve that
   // intent from Stripe and refuse to collect again unless it is unconfirmed or canceled (stripe.js
   // chargeInvoiceWithSavedCard and createInvoicePaymentIntent). The reader never calls Stripe, so it holds the
@@ -233,6 +247,24 @@ async function invoiceFence(invoice) {
     return { collectible: false, needs_reconciliation: true, reason: ATTACHED_INTENT_REASON, balance_due: null };
   }
   return { collectible: true, needs_reconciliation: false, reason: null, balance_due: invoiceAmountDue(invoice) };
+}
+
+// THE one place a due-style amount leaves the reader. Whatever reads as "owed" (the balance, the amount due after
+// credit, a payment plan's installment and remaining balance) is stated only for a collectible invoice and is
+// null otherwise; total and credit applied are document facts and stay.
+function projectDue(row, fence, today) {
+  return {
+    amount_due_after_credit: fence.collectible ? invoiceAmountDue(row) : null,
+    collectible: fence.collectible,
+    balance_due: fence.collectible ? fence.balance_due : null,
+    ...(fence.reason ? { reason: fence.reason } : {}),
+    needs_reconciliation: fence.needs_reconciliation,
+    overdue: fence.collectible ? isOverdue(row, today) : null,
+  };
+}
+function projectPlan(plan, fence) {
+  if (!plan || fence.collectible) return plan;
+  return { ...plan, payment_amount: null, total_balance: null, amounts_withheld: 'not stated for an invoice that is not collectible' };
 }
 
 async function fenceAll(invoices) {
@@ -320,7 +352,7 @@ async function accountSummary(InvoiceService, customer, today) {
   const [unpaid, overdue, processing, credit, hold] = await Promise.all([
     listAllInvoices(InvoiceService, { customerId, status: 'unpaid', archived: 'hide' }),
     InvoiceService.list({ customerId, status: 'overdue', archived: 'hide', limit: 1, offset: 0 }),
-    InvoiceService.list({ customerId, status: 'processing', archived: 'hide', limit: 1, offset: 0 }),
+    listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }),
     readCredit(customerId),
     readDisputeHold(customerId),
   ]);
@@ -331,11 +363,19 @@ async function accountSummary(InvoiceService, customer, today) {
   if (!unpaid.complete) unknowns.push('More unpaid invoices than the summary reads in one call: total_due and its splits are null (unknown), not zero.');
   else if (unpaid.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} unpaid invoices to check for reconciliation: total_due and its splits are null (unknown), not zero. Page through get_customer_invoices.`);
   else fenced = await fenceAll(unpaid.rows);
+  // Each processing invoice is classified by the same per-invoice fence result as the list: a bank payment in
+  // flight only when the charge fence finds nothing unresolved, otherwise it needs reconciliation.
+  let fencedProcessing = null;
+  if (!processing.complete) unknowns.push('More processing invoices than the summary reads in one call: the processing split and needs_reconciliation_count are null (unknown).');
+  else if (processing.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} processing invoices to check: the processing split and needs_reconciliation_count are null (unknown).`);
+  else fencedProcessing = await fenceAll(processing.rows);
+  const processingReconcile = fencedProcessing ? processing.rows.filter((invoice) => fencedProcessing.get(String(invoice.id)).needs_reconciliation).length : null;
   const rowsWhere = (test) => (fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).collectible && test(invoice)) : null);
   const sum = (rows) => (rows ? fromCents(rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)) : null);
-  const needsReconciliation = fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).needs_reconciliation).length : null;
+  const unpaidReconcile = fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).needs_reconciliation).length : null;
+  const needsReconciliation = unpaidReconcile !== null && processingReconcile !== null ? unpaidReconcile + processingReconcile : null;
   const otherNotCollectible = fenced ? unpaid.rows.filter((invoice) => !fenced.get(String(invoice.id)).collectible && !fenced.get(String(invoice.id)).needs_reconciliation).length : null;
-  if (needsReconciliation > 0) unknowns.push(`${needsReconciliation} invoice(s) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
+  if (needsReconciliation > 0) unknowns.push(`${needsReconciliation} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
   if (otherNotCollectible > 0) unknowns.push(`${otherNotCollectible} unpaid invoice(s) are not collectible from this customer (for example billed to a third party) and are not in total_due.`);
   const notYetSent = (invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status));
   const summary = {
@@ -346,7 +386,12 @@ async function accountSummary(InvoiceService, customer, today) {
     not_yet_sent_due: sum(rowsWhere(notYetSent)),
     payer_billed_due: sum(rowsWhere(isPayerBilled)),
     presented_self_pay_due: sum(rowsWhere((invoice) => !notYetSent(invoice) && !isPayerBilled(invoice))),
-    processing: { count: processing.total, note: 'Bank payments in flight: not counted in total_due; their amounts are not stated here.' },
+    processing: {
+      count: processing.total,
+      bank_payment_in_flight: processingReconcile === null ? null : processing.rows.length - processingReconcile,
+      needs_reconciliation: processingReconcile,
+      note: 'Processing invoices are not counted in total_due and their amounts are not stated here. bank_payment_in_flight are waiting on a bank transfer; needs_reconciliation are not: a charge state is unresolved, so check the Invoices page.',
+    },
     ...credit,
     dispute_hold: hold,
     as_of: today,
@@ -370,14 +415,9 @@ function invoiceItem(row, today, fence, heldIds) {
     paid_at: iso(row.paid_at),
     total: money(row.total),
     credit_applied: money(row.credit_applied) || 0,
-    amount_due_after_credit: invoiceAmountDue(row),
-    collectible: fence.collectible,
-    balance_due: fence.balance_due,
-    ...(fence.reason ? { reason: fence.reason } : {}),
-    needs_reconciliation: fence.needs_reconciliation,
-    overdue: fence.collectible ? isOverdue(row, today) : null,
+    ...projectDue(row, fence, today),
     has_active_payment_plan: Boolean(paymentPlanFromList(row)),
-    payment_plan: paymentPlanFromList(row),
+    payment_plan: projectPlan(paymentPlanFromList(row), fence),
     dispute_hold: heldIds ? heldIds.has(String(row.id)) : null,
     annual_prepay: annualPrepayLinkage(row),
     payer_billed: isPayerBilled(row),
@@ -446,9 +486,9 @@ function lineItems(raw) {
   }));
 }
 
-function paymentPlanDetail(rows) {
+function paymentPlanDetail(rows, fence) {
   if (!rows.length) return null;
-  const mapped = rows.map((plan) => ({
+  const mapped = rows.map((plan) => projectPlan({
     id: plan.id,
     status: plan.status,
     payment_amount: money(plan.payment_amount),
@@ -459,7 +499,7 @@ function paymentPlanDetail(rows) {
     created_at: iso(plan.created_at),
     completed_at: iso(plan.completed_at),
     cancelled_at: iso(plan.cancelled_at),
-  }));
+  }, fence));
   return {
     active: mapped.find((plan) => plan.status === 'active') || null,
     history: mapped.filter((plan) => plan.status !== 'active'),
@@ -589,12 +629,7 @@ async function getInvoiceDetail(input, actionContext) {
       tax_amount: money(invoice.tax_amount) || 0,
       total: money(invoice.total),
       credit_applied: money(invoice.credit_applied) || 0,
-      amount_due_after_credit: invoiceAmountDue(invoice),
-      collectible: fence.collectible,
-      balance_due: fence.balance_due,
-      ...(fence.reason ? { reason: fence.reason } : {}),
-      needs_reconciliation: fence.needs_reconciliation,
-      overdue: fence.collectible ? isOverdue(invoice, today) : null,
+      ...projectDue(invoice, fence, today),
       payer_billed: isPayerBilled(invoice),
       payment_method: invoice.payment_method || null,
       payment_reference: scrub(invoice.payment_reference, 120),
@@ -611,7 +646,7 @@ async function getInvoiceDetail(input, actionContext) {
     },
     recorded_payments: recorded.payments,
     recorded_payments_note: 'Informational: the payments-table rows tied to this invoice, with no verdict on whether it was paid or what is owed. collectible and balance_due decide that.',
-    payment_plan: paymentPlanDetail(plans),
+    payment_plan: paymentPlanDetail(plans, fence),
     dispute_hold: hold,
     annual_prepay: termId ? {
       role: invoice.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term',
