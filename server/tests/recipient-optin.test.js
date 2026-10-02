@@ -368,7 +368,7 @@ describe('visitAskState: whether an on-site ask can go out for its visit (#5467)
 });
 
 describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
-  function load({ leaseCount = 1, visitState = 'live', sendResult = { sent: true, sid: 'SM1' } } = {}) {
+  function load({ leaseCount = 1, visitState = 'live', sendResult = { sent: true, sid: 'SM1' }, slotPhone = '+19415550123' } = {}) {
     jest.resetModules();
     const writes = [];
     const dbMock = jest.fn((table) => {
@@ -378,7 +378,11 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
         whereNull: jest.fn((c) => { ctx.nulls.push(c); return q; }),
         whereNotNull: jest.fn(() => q),
         orWhere: jest.fn(() => q),
-        first: jest.fn(async () => (table === 'scheduled_services' && visitState !== 'dead' ? { id: 'v1' } : null)),
+        first: jest.fn(async () => {
+          if (table === 'scheduled_services') return visitState !== 'dead' ? { id: 'v1' } : null;
+          if (table === 'customers') return { service_contact_phone: slotPhone };
+          return null;
+        }),
         update: jest.fn(async (patch) => {
           writes.push({ table, filter: { ...ctx.filter }, nulls: [...ctx.nulls], patch });
           // The lease CAS (dispatch_lease_at taken while undispatched) answers leaseCount.
@@ -447,6 +451,17 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     const released = writes.find((w) => w.patch && w.patch.status === 'ask_failed');
     expect(released.filter).toMatchObject({ visit_id: 'v1' });
     expect(released.patch.dispatch_lease_at).toBeNull();
+  });
+
+  test('the provider-boundary check refuses a phone no longer in a contact slot: released to ask_failed', async () => {
+    const { optin, writes, send } = load({ slotPhone: '+19415550999' });
+    send.mockImplementation(async (input) => {
+      const verdict = await input.preProviderCheck({ channel: 'sms' });
+      expect(verdict.ok).toBe(false);
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
+    expect(writes.some((w) => w.patch && w.patch.status === 'ask_failed')).toBe(true);
   });
 
   test('a sender error AFTER the provider accepted marks the ask dispatched (never ask_failed)', async () => {

@@ -509,7 +509,16 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       const result = await sendCustomerMessage({
         ...(claim.visitId ? {
           preProviderCheck: async () => {
-            const s = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
+            // The phone must still occupy a service-contact slot: a contact
+            // removed or replaced since the claim is never asked (dead).
+            const inSlot = await db('customers').where({ id: claim.customerId })
+              .first('service_contact_phone', 'service_contact2_phone', 'service_contact3_phone')
+              .then((c) => (c ? [c.service_contact_phone, c.service_contact2_phone, c.service_contact3_phone]
+                .some((ph) => recipientPhoneKey(ph) === claim.key) : false))
+              .catch(() => null);
+            const s = inSlot === false ? { state: 'dead' }
+              : inSlot === null ? { state: 'unknown' }
+                : await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
             boundaryState = s.state;
             return s.state === 'live'
               ? { ok: true }
