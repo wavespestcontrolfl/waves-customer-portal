@@ -12,6 +12,7 @@
  */
 
 const db = require('../models/db');
+const { greetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
@@ -430,8 +431,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
-    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
-    || 'there';
+    || greetingFirstName({ customerName: estimate.customer_name, customer });
   const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
   const body = await renderSmsTemplate('deposit_receipt', {
     first_name: firstName,
@@ -599,8 +599,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   }
 
   const firstName = String(customer?.first_name || '').trim()
-    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
-    || 'there';
+    || greetingFirstName({ customerName: estimate.customer_name, customer });
   // Amount comes straight from the verified deposit ledger amount — never
   // recomputed here (waves-billing rule 1).
   const amount = `$${Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '')}`;

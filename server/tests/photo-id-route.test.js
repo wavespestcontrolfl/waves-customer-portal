@@ -105,6 +105,7 @@ mockDb.transaction = jest.fn(async (callback) => {
 const mockGateState = { customerPhotoId: true, customerPhotoIdIssues: false, photoIdV2: false };
 const mockIdentifyPest = jest.fn();
 const mockIdentifyPestV2 = jest.fn();
+const mockIdentifyPlantV2 = jest.fn();
 const mockLawnAnalyzePhoto = jest.fn();
 const mockTreeAnalyzePhoto = jest.fn();
 const mockReserviceAccess = jest.fn(async () => null);
@@ -194,6 +195,12 @@ jest.mock('../services/pest-identification', () => {
 // never a call when the gate is off.
 jest.mock('../services/photo-id-v2/pest-engine', () => ({
   identifyPestV2: (...args) => mockIdentifyPestV2(...args),
+}));
+// Plant engine (owner 2026-10-02): its orchestration is covered by
+// plant-engine-v2's own tests; the route only needs its contract with
+// identifyPlantV2 (call shape, ok:false -> 503, v2 stored and served).
+jest.mock('../services/photo-id-v2/plant-engine', () => ({
+  identifyPlantV2: (...args) => mockIdentifyPlantV2(...args),
 }));
 jest.mock('../services/lawn-assessment', () => ({
   analyzePhoto: (...args) => mockLawnAnalyzePhoto(...args),
@@ -1318,7 +1325,7 @@ describe('next_step branches', () => {
 });
 
 // ── GATE_PHOTO_ID_V2 ─────────────────────────────────────────────────────
-describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
+describe('GATE_PHOTO_ID_V2 (photoIdV2)', () => {
   test('gate off: pest path is byte-identical to v1 and identifyPestV2 is never called', async () => {
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/pest', photoBody());
@@ -1343,7 +1350,7 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
       expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
       expect(mockIdentifyPestV2).toHaveBeenCalledWith(expect.arrayContaining([
         expect.objectContaining({ mimeType: 'image/jpeg' }),
-      ]));
+      ]), { ladder: 'gemini_only' }); // owner 2026-10-01: the app reads Gemini alone
       // v1 fields — same shape as today, unchanged by the client for a
       // v2-unaware caller.
       expect(body.id).toBeDefined();
@@ -1906,14 +1913,128 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
-  test('gate on: lawn/tree_shrub paths are unaffected — identifyPestV2 is never called for either type', async () => {
+  // Owner 2026-10-02 ("same as pest"): gate on also reads lawn and
+  // tree/shrub/palm with the plant engine's Gemini-only workup.
+  const plantV2 = (headline = 'Brown patches in the lawn') => ({
+    kind: 'workup', answer: { level: 'symptom', headline }, tier: 'needs_more_evidence', possibilities: [],
+  });
+  const plantOk = (headline) => ({ ok: true, v2: plantV2(headline), internal: { ladder: 'gemini_only' } });
+
+  test('gate on: lawn reads the plant engine Gemini-only, stores and serves its v2', async () => {
     mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2.mockResolvedValue(plantOk('Brown patches in the lawn'));
     await withServer(async (base) => {
-      const lawnRes = await post(base, '/api/photo-id/lawn', photoBody());
-      expect(lawnRes.status).toBe(200);
-      const treeRes = await post(base, '/api/photo-id/tree_shrub', photoBody());
-      expect(treeRes.status).toBe(200);
+      const res = await post(base, '/api/photo-id/lawn', photoBody({ subject: 'lawn', chips: { grass_type: 'st_augustine' } }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.v2).toMatchObject({ kind: 'workup', answer: { headline: 'Brown patches in the lawn' } });
+      expect(body.result).toBeDefined(); // v1 scores still computed (decision 3)
       expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+      expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({
+        subject: 'lawn', mode: 'workup', ladder: 'gemini_only', chips: { grass_type: 'st_augustine' },
+      }));
+      const row = TABLES.lawn_diagnostics[0];
+      expect(JSON.parse(row.report_contract).v2).toMatchObject({ kind: 'workup' });
+      expect(JSON.parse(row.ai_analysis)).toMatchObject({ engine: 'v2', internal: { ladder: 'gemini_only' } });
+      const detail = await fetch(`${base}/api/photo-id/lawn/${body.id}`).then((r) => r.json());
+      expect(detail.v2).toMatchObject({ kind: 'workup' });
+      const list = await fetch(`${base}/api/photo-id`).then((r) => r.json());
+      expect(list.items.find((i) => i.id === body.id).headline).toBe('Brown patches in the lawn');
+    });
+  });
+
+  test('gate on: a palm posts to tree_shrub with subject palm; v2 lands in result_v2 and is served back', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2.mockResolvedValue(plantOk('Yellowing fronds'));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ subject: 'palm', chips: { fronds: 'oldest' } }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.v2.answer.headline).toBe('Yellowing fronds');
+      expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({
+        subject: 'palm', mode: 'workup', ladder: 'gemini_only', chips: { fronds: 'oldest' },
+      }));
+      const row = TABLES.tree_shrub_assessments[0];
+      expect(JSON.parse(row.result_v2)).toMatchObject({ kind: 'workup' });
+      expect(JSON.parse(row.v2_internal)).toMatchObject({ ladder: 'gemini_only' });
+      const detail = await fetch(`${base}/api/photo-id/tree_shrub/${body.id}`).then((r) => r.json());
+      expect(detail.v2.answer.headline).toBe('Yellowing fronds');
+      const list = await fetch(`${base}/api/photo-id`).then((r) => r.json());
+      expect(list.items.find((i) => i.id === body.id).headline).toBe('Yellowing fronds');
+    });
+  });
+
+  test('gate on: a tree_shrub post without a subject reads as tree_shrub; junk chips become {}', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2.mockResolvedValue(plantOk('Spots on the leaves'));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ chips: ['not', 'an', 'object'] }));
+      expect(res.status).toBe(200);
+      expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({ subject: 'tree_shrub', chips: {} }));
+    });
+  });
+
+  test('gate on: a plant v2 failure answers 503 for lawn and tree_shrub, never a v1-only card', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
+    await withServer(async (base) => {
+      expect((await post(base, '/api/photo-id/lawn', photoBody())).status).toBe(503);
+      expect((await post(base, '/api/photo-id/tree_shrub', photoBody())).status).toBe(503);
+    });
+  });
+
+  test('gate on: v1 scores failing does not block a v2 answer', async () => {
+    mockGateState.photoIdV2 = true;
+    mockLawnAnalyzePhoto.mockRejectedValue(new Error('scores down'));
+    mockTreeAnalyzePhoto.mockRejectedValue(new Error('scores down'));
+    mockIdentifyPlantV2.mockResolvedValue(plantOk('Thinning turf'));
+    await withServer(async (base) => {
+      const lawn = await post(base, '/api/photo-id/lawn', photoBody());
+      expect(lawn.status).toBe(200);
+      expect((await lawn.json()).v2.answer.headline).toBe('Thinning turf');
+      const tree = await post(base, '/api/photo-id/tree_shrub', photoBody());
+      expect(tree.status).toBe(200);
+      expect((await tree.json()).v2.answer.headline).toBe('Thinning turf');
+    });
+  });
+
+  test('gate on: the workup next_step_hint drives next_step in POST, detail and history', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPlantV2
+      .mockResolvedValueOnce({ ok: true, v2: { ...plantV2('Brown patches in the lawn'), next_step_hint: { kind: 'specialist' } }, internal: {} })
+      .mockResolvedValueOnce({ ok: true, v2: { ...plantV2('Spots on the leaves'), next_step_hint: { kind: 'inspection' } }, internal: {} });
+    await withServer(async (base) => {
+      const lawn = await (await post(base, '/api/photo-id/lawn', photoBody())).json();
+      expect(lawn.next_step.kind).toBe('referral');
+      const tree = await (await post(base, '/api/photo-id/tree_shrub', photoBody())).json();
+      expect(tree.next_step.kind).toBe('inspection');
+      expect((await fetch(`${base}/api/photo-id/lawn/${lawn.id}`).then((r) => r.json())).next_step.kind).toBe('referral');
+      expect((await fetch(`${base}/api/photo-id/tree_shrub/${tree.id}`).then((r) => r.json())).next_step.kind).toBe('inspection');
+      const list = await fetch(`${base}/api/photo-id`).then((r) => r.json());
+      expect(list.items.find((i) => i.id === lawn.id).next_step_kind).toBe('referral');
+      expect(list.items.find((i) => i.id === tree.id).next_step_kind).toBe('inspection');
+    });
+  });
+
+  test('gate on: lawn passes the saved grass type and irrigation to the plant engine', async () => {
+    mockGateState.photoIdV2 = true;
+    mockLoadCustomerGrassContext.mockResolvedValue({ grassType: 'st_augustine', grassTypeLabel: 'St. Augustine', irrigationSystem: 'system' });
+    mockIdentifyPlantV2.mockResolvedValue(plantOk());
+    await withServer(async (base) => {
+      expect((await post(base, '/api/photo-id/lawn', photoBody())).status).toBe(200);
+      expect(mockIdentifyPlantV2).toHaveBeenCalledWith(expect.objectContaining({
+        context: { grass_type_on_file: 'st_augustine', irrigation_type: 'system' },
+      }));
+    });
+  });
+
+  test('gate off: lawn/tree_shrub never call the plant engine and send no v2', async () => {
+    await withServer(async (base) => {
+      const lawn = await (await post(base, '/api/photo-id/lawn', photoBody({ subject: 'lawn' }))).json();
+      const tree = await (await post(base, '/api/photo-id/tree_shrub', photoBody({ subject: 'palm' }))).json();
+      expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+      expect(lawn.v2).toBeUndefined();
+      expect(tree.v2).toBeUndefined();
     });
   });
 });

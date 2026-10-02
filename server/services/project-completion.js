@@ -854,7 +854,11 @@ async function completeProjectBackedService({
         lockedVisit = await trx('scheduled_services')
           .where({ id: scheduledService.id })
           .forUpdate()
-          .first('id', 'is_callback', 'service_id', 'service_type')
+          .first('id', 'status', 'is_callback', 'service_id', 'service_type',
+            // The customer's booking words freeze onto the record with the
+            // completion, like the /complete and recap paths
+            // (service-report/reservice-report-card.js).
+            'customer_request', 'customer_request_source', 'customer_request_pests')
           .catch(() => null);
         Object.assign(insert, completionTierSnapshotFields({
           serviceRecordCols,
@@ -880,6 +884,16 @@ async function completeProjectBackedService({
           closeoutRequirements: closeoutSnap,
         });
       }
+      // Only when THIS invocation completes the visit (the locked scheduled
+      // row is not already completed): re-closing a completed visit never
+      // freezes today's booking words.
+      const frozenRequest = lockedVisit && serviceRecordCols.service_data
+        && String(lockedVisit.status || '') !== 'completed'
+        ? require('./service-report/reservice-report-card').freezeReserviceRequest(lockedVisit)
+        : null;
+      if (frozenRequest) {
+        insert.service_data = serializeJsonb({ ...parseJsonObject(insert.service_data), reserviceRequest: frozenRequest });
+      }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {
       // Visit lock FIRST (repo lock order: scheduled_services →
@@ -892,7 +906,8 @@ async function completeProjectBackedService({
       const lockedVisit = await trx('scheduled_services')
         .where({ id: scheduledService.id })
         .forUpdate()
-        .first('id', 'service_id', 'service_type')
+        .first('id', 'status', 'service_id', 'service_type', 'is_callback',
+          'customer_request', 'customer_request_source', 'customer_request_pests')
         .catch(() => null);
       const freshRecord = await trx('service_records')
         .where({ id: serviceRecord.id })
@@ -909,6 +924,20 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      // The customer's booking words freeze with the completion
+      // (reservice-report-card.js): only when THIS update performs it (the
+      // visit is not already completed, read from the LOCKED scheduled row),
+      // fill-if-absent, from the LOCKED row.
+      if (serviceRecordCols.service_data && lockedVisit
+        && String(lockedVisit.status || '') !== 'completed') {
+        const currentData = update.service_data !== undefined
+          ? parseJsonObject(update.service_data)
+          : parseJsonObject(serviceRecord.service_data);
+        const frozenRequest = Object.prototype.hasOwnProperty.call(currentData, 'reserviceRequest')
+          ? null
+          : require('./service-report/reservice-report-card').freezeReserviceRequest(lockedVisit);
+        if (frozenRequest) update.service_data = serializeJsonb({ ...currentData, reserviceRequest: frozenRequest });
+      }
       let closeoutSnap = null;
       if (serviceRecordCols.structured_notes
         && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {

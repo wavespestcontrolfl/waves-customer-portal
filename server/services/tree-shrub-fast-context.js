@@ -25,11 +25,15 @@ const {
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const PhotoService = require('./photos');
+const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 
 const ROTATION_WINDOW_DAYS = 60;
 // Palm spacing = the shared three-calendar-month rule (owner program, #5089).
 const { palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS: PALM_FERTILIZER_SPACING_DAYS } = require('./tree-shrub-completion-defaults');
 const HISTORY_RECORD_LIMIT = 12;
+// Same lifetime the tech portal's own photo list signs for (tech-track GET /:id/photos).
+const LAST_PHOTO_URL_TTL_SECONDS = 3600;
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
 // (both schedule feeds hide it); /complete does not refuse it, so this does.
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled']);
@@ -153,6 +157,60 @@ function buildLastVisit(history) {
       amountUnit: quantityUnit(p.amount_unit),
     })),
   };
+}
+
+function slotOfAiTags(aiTags) {
+  let tags = aiTags;
+  if (typeof tags === 'string') {
+    try { tags = JSON.parse(tags); } catch { return null; }
+  }
+  return tags && typeof tags === 'object' && !Array.isArray(tags) ? normalizeTreeShrubPhotoSlot(tags.slot) : null;
+}
+
+/**
+ * Last visit's photo per slot: { [slotKey]: { url, takenAt } }. Reads only the
+ * last COMPLETED record from loadTreeShrubHistory (so it inherits that read's
+ * property scoping and visit-date bound), and only photos whose ai_tags carry
+ * a known slot key. A full-form visit's photos carry none, so they never show
+ * as "last time" for a slot. The URL is a short-lived presigned view URL, never
+ * a raw key. Any failure answers {} (the sheet then shows no thumbnails).
+ */
+async function loadLastVisitPhotos(history, knex, serviceId) {
+  try {
+    const last = history.find((record) => record.status === 'completed');
+    if (!last) return {};
+    const rows = await knex('service_photos')
+      .where('service_record_id', last.id)
+      .whereNotNull('ai_tags')
+      .orderBy('captured_at', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .select('id', 's3_key', 'ai_tags', 'captured_at', 'created_at');
+    // Newest first, so the first photo seen for a slot is the one to show.
+    const bySlot = new Map();
+    for (const row of rows) {
+      const slot = slotOfAiTags(row.ai_tags);
+      if (slot && row.s3_key && !bySlot.has(slot)) bySlot.set(slot, row);
+    }
+    const out = {};
+    for (const [slot, row] of bySlot) {
+      const takenAt = row.captured_at || row.created_at;
+      // One photo that will not sign loses only its own thumbnail.
+      try {
+        out[slot] = {
+          url: await PhotoService.getViewUrl(row.s3_key, LAST_PHOTO_URL_TTL_SECONDS),
+          takenAt: takenAt ? new Date(takenAt).toISOString() : null,
+        };
+      } catch (err) {
+        logger.warn(`[ts-fast-context] last visit photo not signed for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+      }
+    }
+    return out;
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[ts-fast-context] last visit photos unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return {};
+  }
 }
 
 // Most recent ACTUAL amount (positive, with a unit) per catalog product.
@@ -359,6 +417,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     products,
     monthProducts,
     lastVisit: buildLastVisit(history),
+    lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
   };

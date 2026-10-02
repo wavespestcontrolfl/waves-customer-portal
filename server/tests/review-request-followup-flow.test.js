@@ -21,6 +21,7 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
   existingShortUrlFor: jest.fn().mockResolvedValue(null),
+  allShortUrlsFor: jest.fn().mockResolvedValue([]),
 }));
 // Provider-side reconcile for stale inline claims (claimInlineForSend).
 jest.mock('../services/twilio', () => ({

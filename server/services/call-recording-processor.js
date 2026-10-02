@@ -3092,11 +3092,13 @@ async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = 
 // when their identities conflict (different phone, email, or first name), the
 // V1 extraction wins unmerged — never chimera two different people.
 function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { canonicalV2Secondary } = require('../utils/extraction-compat');
   const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
     ? extracted.secondary_contact
     : null;
-  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  // The singleton and the mirrored secondary_contacts[0] are canonicalized first, so
+  // flags the model put on only one of the two shapes still count.
+  const v2 = canonicalV2Secondary(v2Extraction);
   if (!v1 || !v2) return v1 || v2;
 
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -3109,6 +3111,27 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
   if (conflicts) return v1;
 
+  // POSITIVE same-person evidence (shared email, phone, or full name). The
+  // conflict check above only proves the two extractions do not DISAGREE —
+  // an email-only V1 and a phone-only V2 never conflict, yet may be two
+  // different people. Anything that authorizes action on the OTHER
+  // extractor's identifier (billing V1's inbox for V2's payer; texting V2's
+  // phone on V1's consent) needs this, not just the absence of conflict.
+  const samePerson = (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+    || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+    || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+      && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name));
+  // The on-site flags (wants_appointment_texts, on_site) come ONLY from the V2
+  // extraction (V1 does not extract them). They only decide whether the
+  // recipient gets the opt-in ASK (owner redesign 2026-10-01: consent is the
+  // recipient's own YES). A V2 flag is that extractor's statement about ITS OWN
+  // person, so it may only attach to the merged phone when that phone is V2's
+  // own (V1 has none) or the two are positively the same person — never to
+  // V1's different number — and it is bound to the role V2 itself assigned.
+  const v2FlagsCarry = !v1.phone || samePerson;
+  const onSiteRole = (r) => ON_SITE_NOTIFY_ROLES.has(String(r || '').trim().toLowerCase());
+  const v2Flag = (field) => v2[field] === true && v2FlagsCarry && onSiteRole(v2.role);
+
   return {
     first_name: v1.first_name || v2.first_name,
     last_name: v1.last_name || v2.last_name,
@@ -3118,6 +3141,15 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // Appointment-text intent and on-site presence (schema 1.22.0): V2's flags
+    // under the carry rules above. The identity-conflict check already returned
+    // V1 unmerged for a different person, so a conflicting V2 partner's flags
+    // never arrive here.
+    wants_appointment_texts: v2Flag('wants_appointment_texts'),
+    on_site: v2Flag('on_site'),
+    // The role those V2 flags were judged under: the ask decision reads it, so
+    // a different non-unknown V1 role never vetoes a V2 on-site contact.
+    ...((v2Flag('wants_appointment_texts') || v2Flag('on_site')) ? { on_site_role: v2.role } : {}),
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -3126,13 +3158,7 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // bill V1's inbox for V2's payer. Requiring a positive shared identifier
     // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
     // to carry an "owner pays" flag onto an unrelated contact's email.
-    is_billing_party: v1.is_billing_party === true
-      || (v2.is_billing_party === true && (
-        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
-        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
-        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
-          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
-      )),
+    is_billing_party: v1.is_billing_party === true || (v2.is_billing_party === true && samePerson),
     notes: v1.notes || v2.notes,
   };
 }
@@ -3152,7 +3178,7 @@ function identityConflicts(a, b) {
 }
 
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { mapSecondaryContactsToLegacy, canonicalV2Secondary } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
   let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
   // When the single-contact resolver rejected V2's person on an identity
@@ -3161,7 +3187,10 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   // rejected identity as an "additional" contact and fan notifications out
   // to it (codex P1). Drop the conflicting mirror; genuinely-different
   // extra parties (entries 2+) stay.
-  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  // The CANONICAL V2 person (the same identity resolveCallSecondaryContact
+  // compared): a name-only singleton filled from its mirror carries the
+  // mirror's phone, so a phone conflict with V1 drops that mirror here too.
+  const v2Single = canonicalV2Secondary(v2Extraction);
   if (primary && v2Single && identityConflicts(primary, v2Single)) {
     const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
     const norm = (v) => String(v || '').trim().toLowerCase();
@@ -3284,8 +3313,16 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
-  if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp } = {}) {
+  // An on-site contact the opt-in ask will actually go to (the caller's
+  // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
+  // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
+  // Nobody asked for this person to get notifications: their opt-in covers
+  // appointment TEXTS only, so their email is not filed (service-report
+  // emails fan out to every slot email).
+  if (onSiteOnly && contact.email) contact = { ...contact, email: null };
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const customer = await db('customers').where({ id: customerId }).first();
@@ -3443,10 +3480,35 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
-    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+    // keepConsentStamp: the stamp (other people's consent) stays, and the new
+    // phone goes on the account's unconsented list — held out of every text
+    // resolver (customer-contact) whatever the opt-in gate does, until that
+    // person's own YES (recipient-optin) takes it off.
+    // Whether or not the row was stamped before (this same write may stamp
+    // it for the caller's explicit consent), the inferred phone is held —
+    // unless it already confirmed its own opt-in on this account (holdPhone).
+    // A kept stamp also records the phones it covers right now (grandfathered
+    // contacts often have no opt-in row): if a later edit clears the stamp,
+    // the held person's YES can still restore it.
+    ...((contact.phone && holdPhone) ? {
+      service_preferences: db.raw(
+        "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
+        [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
+          ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
+          : [])],
+      ),
+    } : {}),
+    ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
+      // The phones the cleared stamp DID cover (pre-double-opt-in slots have
+      // no recipient_optin row): kept so the new recipient's YES can restore
+      // the account stamp instead of being blocked by them forever.
+      service_preferences: db.raw(
+        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
+        [JSON.stringify(SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean))],
+      ),
     } : {}),
   };
   const updated = await write.update(slotWrite);
@@ -3660,6 +3722,44 @@ const AV_COUNTY_ENUM = { manatee: 'Manatee', sarasota: 'Sarasota', charlotte: 'C
 // customer, so a slot-phone hit alone must go to review, not auto-link.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
 const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
+// Roles for a person who will be AT the property on the visit day. Narrower
+// than HOUSEHOLD_SLOT_ROLES on purpose: home_seller and landlord are not
+// on-site for the appointment, and agent-type roles serve many accounts.
+// home_seller: the seller who meets the technician (WDO / access visits) —
+// only when the on-site or text flag says so, like every role here.
+const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']);
+// Owner ruling 2026-09-30 "on-site person is the contact point", redesigned
+// 2026-10-01: when the caller books for someone who will be at the property
+// and the V2 extraction says that person should get the appointment texts
+// (wants_appointment_texts) or will be on site (on_site), the ONLY thing the
+// pipeline does is SEND THEM THE OPT-IN ASK. Consent is the recipient's own
+// YES to that text (recipient-optin.js stamps the artifact then) — never what
+// the extractor inferred. The flags are model-judged, so they may trigger the
+// ask and nothing else. Pure; every other gate (do-not-contact, a live rail,
+// the cross-customer phone guard, STOP / past-decline holds) is applied by the
+// caller and the opt-in service.
+function onSiteOptinAskTrigger(contact) {
+  if (!contact || !String(contact.phone || '').trim()) return false;
+  if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
+  return contact.wants_appointment_texts === true || contact.on_site === true;
+}
+// The pre-claim gates on the on-site opt-in ask, in one pure place: not an
+// on-site contact, the caller's do-not-contact request, a dark rail, then
+// whether the slot was saved (or the phone already filed). The opt-in service
+// still applies its own holds (STOP, past-decline, suppression, the claim
+// dedupe). Returns { ask, reason } with reason the card's not_sent:<reason>.
+function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = false, persistResult = null, phoneFromV2 = true } = {}) {
+  if (!onSiteOptinAskTrigger(contact)) return { ask: false, reason: 'not_on_site_contact' };
+  // The ask goes only to a phone the V2 extraction itself captured — never a
+  // number only the legacy extractor read (a misparse would text a stranger).
+  if (!phoneFromV2) return { ask: false, reason: 'phone_not_from_v2' };
+  if (doNotContact) return { ask: false, reason: 'do_not_contact' };
+  if (!optinRailLive) return { ask: false, reason: 'optin_rail_dark' };
+  const slotSaved = persistResult === 'written'
+    || (typeof persistResult === 'string' && persistResult.startsWith('skipped_phone_on_record'));
+  if (!slotSaved) return { ask: false, reason: 'slot_not_saved' };
+  return { ask: true, reason: null };
+}
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
 // account; agent-type people (realtor, property manager) serve MANY accounts
@@ -12003,6 +12103,12 @@ const CallRecordingProcessor = {
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    // The caller asked not to be contacted: no on-site opt-in ask for any
+    // contact on this call (the slot may still be written).
+    // Either extractor hearing a do-not-contact request blocks the on-site
+    // opt-in ask (same both-signals rule as the other outbound gates).
+    const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true
+      || extracted.do_not_contact_request === true;
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
     // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
@@ -13776,21 +13882,140 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
+    // On-site contacts whose opt-in ask is due: the ask is NOT sent here. It
+    // goes out at the booking site, only once a confirmed visit has actually
+    // landed (not a street-level office-review hold, not an address dispute),
+    // quoting that visit's address. Filled for a fresh slot write AND for a
+    // contact already on record, so a retry of the call still asks.
+    const pendingOnSiteAsks = [];
+    // Phones the V2 extraction itself captured for a party it ALSO flagged as
+    // on-site (role + on_site / wants_appointment_texts on that same V2 entry):
+    // the only numbers an on-site opt-in ask may go to. Binding phone and
+    // flags to one V2 party keeps a merge with V1 from moving one person's
+    // flags onto another person's number.
+    const onSiteV2PhoneKeys = (() => {
+      const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+      const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
+        .filter((c) => c && onSiteOptinAskTrigger(c))
+        .map((c) => ten(c.phone)).filter(Boolean));
+    })();
+    let onSiteAsksHandled = false;
+    // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
+    // the card's own contact: awaiting_booking | dispatching | sent |
+    // not_sent:<reason>.
+    const markOptinAsk = async (entry, value) => {
+      const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      if (!callSecondaryContact || !tenOf(entry?.phone) || tenOf(entry.phone) !== tenOf(callSecondaryContact.phone)) return;
+      try {
+        await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({
+            payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ optin_ask: value })]),
+            updated_at: new Date(),
+          });
+      } catch (triageErr) {
+        logger.warn(`[call-proc] optin-ask triage update failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    };
+    // The opt-in ask needs a LIVE rail (gate on + request template active);
+    // dark = nobody can be asked. Read once per call, only when it can matter.
+    // Read only when the secondary-contact pass can run at all (same gate,
+    // customer and contacts as the persistence block): with the kill switch
+    // off, a template-read failure must not fail the call.
+    const optinRailLive = (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId
+      && callSecondaryContacts.some(onSiteOptinAskTrigger))
+      ? await require('./recipient-optin').isOptinRailLive()
+      : false;
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
-      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      // dedup, cross-customer, empty slot). A full set of slots does not end
+      // the scan: a later party already on record still gets its on-site ask.
+      const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const secondaryEntry of callSecondaryContacts) {
+      let onSitePath = false;
       try {
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
+        // Pre-persist: only entries that could be asked need the slot-phone read.
+        const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));
+        const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive && onSitePhoneFromV2;
+        onSitePath = onSitePreAsk;
+        let onSiteBlockedBeforeWrite = false;
+        let onSiteAlreadyConfirmed = false;
+        if (onSitePreAsk) {
+          const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+          const before = await db('customers').where({ id: customerId }).first();
+          // A phone NEW to this account is blocked BEFORE the slot write (a
+          // reclaimable ask_failed row; an existing row is left as it is), so
+          // the account's existing consent stamp can stay: the row, not the
+          // stamp, holds the new phone until its own YES (the rail is live, so
+          // the opt-in gate is on). A phone already on record keeps its standing.
+          const newKey = lastTen(secondaryEntry.phone);
+          const knownKeys = [before?.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => before?.[slot.phone])].map(lastTen).filter(Boolean);
+          if (newKey && !knownKeys.includes(newKey)) {
+            await db('recipient_optin').insert({
+              phone_key: newKey,
+              phone_e164: String(secondaryEntry.phone || '').trim(),
+              status: 'ask_failed',
+              customer_id: customerId,
+              requested_by: 'call_pipeline',
+              requested_at: new Date(),
+            }).onConflict(['customer_id', 'phone_key']).ignore();
+            onSiteBlockedBeforeWrite = true;
+          }
+          // A phone that already said YES on this account (on record now, or
+          // removed and re-added) keeps its consent: no hold, no new ask, and
+          // it stays in the same-call fan-out.
+          const existing = newKey ? await db('recipient_optin').where({ customer_id: customerId, phone_key: newKey }).first('status') : null;
+          onSiteAlreadyConfirmed = existing?.status === 'confirmed';
+        }
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
+          smsConsentExplicit: v2SmsConsentExplicit,
+          onSiteAskEligible: onSitePreAsk,
+          // Model-inferred on-site contact behind a blocking opt-in row: the
+          // account's existing consent (other people's) is not cleared.
+          keepConsentStamp: onSiteBlockedBeforeWrite,
+          holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,
+        });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        // Re-added phone that already confirmed its own opt-in here: restore
+        // the account stamp a contact edit may have cleared (same coverage
+        // rule as its YES). And a YES that landed between the status read
+        // above and the hold write (its own follow-up found no hold to
+        // remove) is applied now: re-read after the write, release the hold.
+        const heldOnWrite = onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed && result === 'written';
+        const confirmedSinceRead = heldOnWrite
+          && (await db('recipient_optin').where({ customer_id: customerId, phone_key: lastTen(secondaryEntry.phone) }).first('status'))?.status === 'confirmed';
+        if ((onSiteAlreadyConfirmed && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))) || confirmedSinceRead) {
+          await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));
+        }
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
         // ask (dark template = nothing pends; gate off = no-op). The CLAIM
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
-        // stays async.
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
+        // stays async. Asked here when the caller gave explicit SMS consent
+        // (as always). An on-site contact's ask waits for the booking site
+        // (pendingOnSiteAsks) — no booking, no ask.
+        const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 });
+        if (onSiteDecision.ask && secondaryEntry?.phone) {
+          pendingOnSiteAsks.push({ entry: secondaryEntry });
+          // Queued for the booking site: excluded from the same-call fan-out
+          // (no opt-in row yet must not read as grandfathered) and from the
+          // explicit-consent claim below, so nobody is asked before a visit lands.
+          // (A phone that already confirmed on this account is a consented
+          // recipient: not excluded.)
+          if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
+          // (Durably blocked before the slot write — see onSiteBlockedBeforeWrite.)
+        }
+        const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
+        // Either extractor's do-not-contact request suppresses every opt-in
+        // dispatch, this legacy explicit-consent path included.
+        // ...and never for an on-site candidate refused because its phone is
+        // not V2-captured (that number must not be texted by any path).
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact
+          && onSiteDecision.reason !== 'phone_not_from_v2') {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -13833,6 +14058,7 @@ const CallRecordingProcessor = {
             logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
           }
         }
+        await markOptinAsk(secondaryEntry, optinAskState);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -13848,10 +14074,16 @@ const CallRecordingProcessor = {
             .ignore()
             .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
         }
-        if (result === 'skipped_slots_full') break;
+        // Slots full is NOT the end of the scan: a later party may already sit
+        // in a slot (on record) and still owe its on-site opt-in ask.
+        if (result === 'skipped_slots_full') continue;
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        // An on-site contact's setup (blocking row, status reads, slot write)
+        // must not be dropped on a transient error — the call would finalize
+        // with the person never saved or asked. Fail the pass so it retries.
+        if (onSitePath) throw e;
       }
       }
     }
@@ -18722,6 +18954,109 @@ const CallRecordingProcessor = {
                 await require('./outbound-review-confirm')
                   .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
               }
+              // On-site opt-in asks (owner ruling 2026-09-30, redesigned 10-01:
+              // consent is the recipient's own YES). Claimed only HERE, once a
+              // visit has landed and after any reuse activation above — never for
+              // an unbooked / held call or a visit whose house number is disputed.
+              // The shared visit check (recipient-optin visitAskState) decides:
+              //   'live'    — confirmed, canonical arrival ahead: ask now;
+              //   'wait'    — a street-level address hold under office review
+              //               (#5381): claimed (pending, visit-bound) but not
+              //               sent; the undispatched-ask sweep sends it once the
+              //               office confirms the visit, or releases it if the
+              //               visit dies;
+              //   'unknown' — the visit read failed: claimed the same way, so the
+              //               sweep re-checks this visit (never read as gone);
+              //   'dead'    — nothing.
+              // The visit id rides the claim and the row, so every later send
+              // (deferred replay, recovery sweep) re-checks this same visit.
+              const onSiteAskVisitState = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true)
+                ? await require('./recipient-optin').visitAskState(svc.id, customerId)
+                  .then((r) => r.state).catch(() => 'unknown')
+                : 'dead';
+              if (onSiteAskVisitState !== 'dead') {
+                onSiteAsksHandled = true;
+                const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
+                const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');
+                for (const { entry } of pendingOnSiteAsks) {
+                  const phoneKey = tenOf(entry.phone);
+                  try {
+                    const custRow = await db('customers').where({ id: customerId }).first();
+                    // The phone must still occupy a service-contact slot on the
+                    // fresh row: a contact removed or replaced since the save is
+                    // no longer an appointment recipient and is never asked.
+                    const slotPhones = custRow
+                      ? [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                      : [];
+                    if (custRow && !slotPhones.some((ph) => tenOf(ph) === phoneKey)) {
+                      await markOptinAsk(entry, 'not_sent:not_in_slot');
+                      continue;
+                    }
+                    const claims = custRow ? await claimRecipientOptins({
+                      customer: custRow,
+                      contacts: [{
+                        name: [entry.first_name, entry.last_name].filter(Boolean).join(' '),
+                        firstName: entry.first_name || '',
+                        phone: entry.phone,
+                      }],
+                      priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                        .filter((ph) => tenOf(ph) !== phoneKey),
+                      propertyAddress: visitAddress || [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+                      visitId: svc.id,
+                    }) : [];
+                    if (claims.length && onSiteAskVisitState !== 'live') {
+                      await markOptinAsk(entry, onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry');
+                    } else if (claims.length) {
+                      await markOptinAsk(entry, 'dispatching');
+                      void dispatchRecipientOptins(claims, custRow)
+                        .catch((err) => {
+                          logger.warn(`[call-proc] on-site opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`);
+                          return 0;
+                        })
+                        .then((outcome) => {
+                          // dispatchRecipientOptins resolves { requested }; the catch yields 0.
+                          const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);
+                          return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
+                        });
+                    } else {
+                      await markOptinAsk(entry, 'not_sent:no_new_ask');
+                    }
+                  } catch (askErr) {
+                    // The claim failed (a read / render error): keep the
+                    // obligation on the visit-bound retry rail — a PENDING,
+                    // undispatched row carrying this visit, which the recovery
+                    // sweep re-checks and sends (or releases) later. Still
+                    // blocking: a pending row holds the phone like ask_failed.
+                    // A confirmed / declined row is left as it is.
+                    await db('recipient_optin').insert({
+                      phone_key: phoneKey,
+                      phone_e164: String(entry.phone || '').trim(),
+                      status: 'pending',
+                      customer_id: customerId,
+                      requested_by: 'call_pipeline',
+                      requested_at: new Date(),
+                      visit_id: svc.id,
+                    }).onConflict(['customer_id', 'phone_key']).merge({
+                      status: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END"),
+                      // A pending ask mid-dispatch (live lease) keeps its visit.
+                      visit_id: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' OR (recipient_optin.status = 'pending' AND (recipient_optin.dispatch_lease_at IS NULL OR recipient_optin.dispatch_lease_at < now() - interval '10 minutes')) THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
+                      // Only a FAILED ask restarts as undispatched; a pending ask
+                      // that already went out keeps its marker (never re-sent).
+                      dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),
+                      // A reclaimed failed ask drops its old SID: a late failure
+                      // callback for the old send must not flip the new row.
+                      provider_sid: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.provider_sid END"),
+                      updated_at: new Date(),
+                    });
+                    // (A failure of THIS write propagates: the call-processing
+                    // pass fails and retries rather than finalizing with no
+                    // retry row for the confirmed visit.)
+                    await markOptinAsk(entry, 'not_sent:claim_failed_retrying');
+                    logger.warn(`[call-proc] on-site opt-in ask failed for ${maskSid(callSid)}: ${safeErrorToken(askErr)}`);
+                  }
+                }
+              }
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it
@@ -21116,6 +21451,11 @@ const CallRecordingProcessor = {
       }).catch((e) => logger.warn(`[call-proc] late-scheduling-hold lead-activity refresh failed for ${maskSid(callSid)}: ${e.message}`));
     }
 
+    // On-site asks that never reached a landed, active visit: nothing was sent.
+    if (pendingOnSiteAsks.length && !onSiteAsksHandled) {
+      for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');
+    }
+
     const liveLeadConversation = isLiveLeadConversation({
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });
@@ -22541,6 +22881,8 @@ CallRecordingProcessor._test = {
   isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
+  onSiteOptinAskTrigger,
+  decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,

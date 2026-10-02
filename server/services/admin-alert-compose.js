@@ -140,5 +140,5 @@ async function raiseAdminAlert(category, spec = {}, rawOpts = {}) {
 
 module.exports = {
   AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
-  composeAdminAlert, raiseAdminAlert, cutAtWord: truncateAtWord, firstSentence,
+  composeAdminAlert, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence,
 };

@@ -23,33 +23,95 @@
  * The client has NO copy of this text: the estimate page renders what the
  * public /data endpoint serves and attests the served version on accept.
  * Pinned by server/tests/estimate-acceptance-terms.test.js.
+ *
+ * v2026-10 (owner ruling 2026-09-30, annual rate review disclosed up front):
+ * the Services drawer line gains one sentence — rates are reviewed once a
+ * year after the first 12 months, with at least 30 days' written notice
+ * before any change — in the 'plan' SCOPE only. The one-liner above Accept
+ * is byte-identical to v2026-09 (owner ruling 2026-08-28: same steps, least
+ * words).
+ *
+ * SCOPE (codex #5434 r1 P0): the rate review is a recurring residential
+ * PLAN term, so one version carries two drawer variants and the record
+ * stores the one the customer read:
+ *   'plan'  the accept is a recurring residential plan — every service
+ *           carries the plan terms (pest, lawn, mosquito, tree & shrub:
+ *           the page's own plan-terms scope, never rodent, commercial,
+ *           termite or unclassifiable work) and at least one service
+ *           recurs. The Services line carries the rate review sentence.
+ *   'base'  every other cancel-anytime accept — rodent, a one-time-only
+ *           estimate, the customer's one-time toggle on a plan estimate —
+ *           has no rate to review: the Services line is the v2026-09 text.
+ * The /data route serves the estimate's scope (plus the 'base' lines a
+ * one-time toggle swaps in) and the accept route re-derives it from the
+ * same rule, refusing an attestation that names the other scope — a tab
+ * can never be recorded under a line it did not render.
  */
 
-const ACCEPTANCE_TERMS_VERSION = 'v2026-09';
+const ACCEPTANCE_TERMS_VERSION = 'v2026-10';
+
+const ACCEPTANCE_TERMS_SCOPES = Object.freeze(['plan', 'base']);
 
 // Rendered as one line above the Accept CTA. 17 words.
 const ACCEPTANCE_LINE = 'Accepting authorizes these services at the price shown. Cancel anytime — completed visits are still due.';
 
-// Rendered inside the inline "View terms" drawer. Five short lines.
+// The annual rate review sentence (verbatim owner copy, 2026-09-30): the
+// 'plan' scope's Services line ends with it; the 'base' scope never
+// carries it.
+const RATE_REVIEW_SENTENCE = 'Rates are reviewed once a year after your first 12 months, with at least 30 days’ written notice before any change.';
+
+// Rendered inside the inline "View terms" drawer. Five short lines; the
+// Services line has its 'plan' variant beside the base text.
 const ACCEPTANCE_TERMS = [
-  { label: 'Services', text: 'at the price and frequency shown, until you cancel. No contract.' },
+  {
+    label: 'Services',
+    text: 'at the price and frequency shown, until you cancel. No contract.',
+    planText: `at the price and frequency shown, until you cancel. No contract. ${RATE_REVIEW_SENTENCE}`,
+  },
   { label: 'Payment', text: 'due when each service is completed. Auto Pay is a separate authorization you can change in your portal.' },
   { label: 'Unpaid balances', text: 'stay due; we’ll remind you, and service may pause until you’re current.' },
   { label: 'Canceling', text: 'anytime. Completed visits are still due. Termite/WDO has its own agreement.' },
   { label: 'Accepting', text: 'counts as your signature. We keep the version, time and device, and email you a copy. You’ll get service and billing messages by text, email and phone (reply STOP to end texts).' },
 ];
 
-/** Verbatim snapshot stored on the acceptance row. */
-function acceptanceTermsSnapshot() {
-  return [ACCEPTANCE_LINE, ...ACCEPTANCE_TERMS.map((t) => `${t.label} — ${t.text}`)].join('\n');
+/** 'plan' | 'base', or null for anything else (an absent or unknown attestation). */
+function normalizeAcceptanceTermsScope(value) {
+  return ACCEPTANCE_TERMS_SCOPES.includes(value) ? value : null;
 }
 
-/** Payload shape the public /data endpoint serves the estimate page. */
-function acceptanceTermsPayload() {
+function assertScope(scope) {
+  if (!ACCEPTANCE_TERMS_SCOPES.includes(scope)) throw new Error(`acceptance terms: unknown scope "${scope}"`);
+}
+
+/** The drawer lines for one scope, in order. */
+function acceptanceTermsLines(scope) {
+  assertScope(scope);
+  return ACCEPTANCE_TERMS.map((t) => ({
+    label: t.label,
+    text: scope === 'plan' && t.planText ? t.planText : t.text,
+  }));
+}
+
+/** Verbatim snapshot stored on the acceptance row: the line + every drawer line the customer could read, for one scope. */
+function acceptanceTermsSnapshot(scope) {
+  return [ACCEPTANCE_LINE, ...acceptanceTermsLines(scope).map((t) => `${t.label} — ${t.text}`)].join('\n');
+}
+
+/**
+ * Payload shape the public /data endpoint serves the estimate page, for the
+ * estimate's own scope. A 'plan' payload also carries `oneTimeTerms` — the
+ * 'base' drawer lines — so the page can swap them in when the customer
+ * toggles a plan estimate to a one-time visit (no rate to review) and
+ * attest 'base' for that accept.
+ */
+function acceptanceTermsPayload(scope) {
+  assertScope(scope);
   return {
     version: ACCEPTANCE_TERMS_VERSION,
+    scope,
     line: ACCEPTANCE_LINE,
-    terms: ACCEPTANCE_TERMS.map((t) => ({ label: t.label, text: t.text })),
+    terms: acceptanceTermsLines(scope),
+    ...(scope === 'plan' ? { oneTimeTerms: acceptanceTermsLines('base') } : {}),
   };
 }
 
@@ -92,8 +154,12 @@ function deviceLabelFromUserAgent(ua) {
 
 module.exports = {
   ACCEPTANCE_TERMS_VERSION,
+  ACCEPTANCE_TERMS_SCOPES,
   ACCEPTANCE_LINE,
   ACCEPTANCE_TERMS,
+  RATE_REVIEW_SENTENCE,
+  normalizeAcceptanceTermsScope,
+  acceptanceTermsLines,
   acceptanceTermsSnapshot,
   acceptanceTermsPayload,
   maskIpForCustomer,

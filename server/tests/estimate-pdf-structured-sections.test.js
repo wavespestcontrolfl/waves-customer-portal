@@ -127,6 +127,10 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     // authored terms it prints no canned callback guarantee.
     const untouched = await buildEstimateProposalPDFBuffer(legacyNoTerms, { billsPerApplication: false });
     expect(extractPdfText(untouched)).not.toContain('callback guarantee between scheduled visits');
+    // The rate-review disclosure follows the same rule: never beside
+    // authored terms, never on an authored (commercial) proposal.
+    expect(extractPdfText(structured)).not.toContain('Rate reviewed yearly');
+    expect(extractPdfText(untouched)).not.toContain('Rate reviewed yearly');
   });
 
   test.each([
@@ -205,6 +209,26 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('$1,200.00');
     expect(text).toContain('Retained inspection scope');
     expect(text).not.toContain('callback guarantee between scheduled visits');
+    expect(text).not.toContain('Rate reviewed yearly');
+  });
+
+  test('billing.withholdRateReviewTerms forces the rate review line off (the /pdf route could not prove its evidence durable)', async () => {
+    const pest = {
+      id: 'ordinary-current-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+      },
+    };
+    const withheld = extractPdfText(await buildEstimateProposalPDFBuffer(pest, { billsPerApplication: false, withholdRateReviewTerms: true }));
+    expect(withheld).toContain('Pest Control');
+    expect(withheld).toContain('callback guarantee between scheduled visits');
+    expect(withheld).not.toContain('Rate reviewed yearly');
   });
 
   test('an ordinary synthesized pest proposal keeps its callback guarantee and price', async () => {
@@ -225,6 +249,86 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Pest Control');
     expect(text).toContain('$55.00');
     expect(text).toContain('callback guarantee between scheduled visits');
+    // Annual rate review disclosure (owner ruling 2026-09-30) prints beside
+    // the recurring residential plan terms. (The typographic apostrophe in
+    // "days’" is WinAnsi 0x92 in the extracted stream, so match up to it.)
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+  });
+
+  // codex #5434 r2 P1: a frozen (accepted / declined) document keeps the
+  // terms the customer saw — the disclosure rides only when the recorded
+  // acceptance carried the sentence.
+  test('an ACCEPTED pest proposal prints the disclosure only when its acceptance record carried it; a declined one never does', async () => {
+    const { RATE_REVIEW_SENTENCE } = require('../services/acceptance-terms-text');
+    const base = {
+      id: 'frozen-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurringServices: [{ service: 'pest_control', name: 'Pest Control' }] },
+      },
+    };
+    // Accepted before the disclosure existed (an older acceptance snapshot, or none): frozen on the old terms.
+    const oldAcceptance = { termsText: 'Accepting authorizes these services at the price shown.\nServices — at the price and frequency shown, until you cancel. No contract.', termsVersion: 'v2026-09', acceptedAt: '2026-09-01T15:00:00Z' };
+    let text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: oldAcceptance }));
+    expect(text).toContain('Pest Control');
+    expect(text).not.toContain('Rate reviewed yearly');
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: null }));
+    expect(text).not.toContain('Rate reviewed yearly');
+    // Accepted under the 'plan' drawer: the record proves the customer read it.
+    const planAcceptance = { ...oldAcceptance, termsText: `${oldAcceptance.termsText} ${RATE_REVIEW_SENTENCE}`, termsVersion: 'v2026-10' };
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted' }, { billsPerApplication: false, acceptance: planAcceptance }));
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+    // Declined: historical, never restated.
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'declined' }, { billsPerApplication: false }));
+    expect(text).not.toContain('Rate reviewed yearly');
+    // Accepted with NO drawer snapshot (gate off / annual prepay) but the
+    // accept's own document stamp (codex r3 P1): the line stays.
+    text = extractPdfText(await buildEstimateProposalPDFBuffer({ ...base, status: 'accepted', estimate_data: { ...base.estimate_data, rateReviewDisclosedAtAccept: true } }, { billsPerApplication: false, acceptance: null }));
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+  });
+
+  test('a synthesized lawn proposal carries the rate-review disclosure without the pest-only callback line', async () => {
+    const lawn = {
+      id: 'ordinary-current-lawn',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Lawn Care Program', monthlyPrice: 85 }],
+        result: { recurringServices: [{ service: 'lawn_care', name: 'Lawn Care Program' }] },
+      },
+    };
+
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(lawn, { billsPerApplication: false }));
+    expect(text).toContain('Lawn Care Program');
+    expect(text).not.toContain('callback guarantee between scheduled visits');
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+  });
+
+  test('a tree & shrub row the browser document cannot classify by name still prints the disclosure here — the one server decision both renderers read (codex #5434 r1 P1)', async () => {
+    const ornamental = {
+      id: 'ordinary-current-ornamental',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Ornamental Care Program', monthlyPrice: 85 }],
+        result: { recurringServices: [{ service: 'tree_shrub', name: 'Ornamental Care Program' }] },
+      },
+    };
+
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(ornamental, { billsPerApplication: false }));
+    expect(text).toContain('Ornamental Care Program');
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
   });
 
   test('a one-time-only pest proposal has no scheduled visits: no canned callback guarantee', async () => {
@@ -247,6 +351,8 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     const text = extractPdfText(await buildEstimateProposalPDFBuffer(oneTime, { billsPerApplication: false }));
     expect(text).toContain('One-Time Pest Control');
     expect(text).not.toContain('callback guarantee between scheduled visits');
+    // No recurring line ⇒ no rate to review ⇒ no disclosure.
+    expect(text).not.toContain('Rate reviewed yearly');
   });
 
   test('the email attachment entry point applies the same no-guarantee policy', async () => {
@@ -266,8 +372,9 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
       },
     };
     const attachment = await buildEstimateProposalEmailAttachment(mixed, { billsPerApplication: false });
-    expect(extractPdfText(Buffer.from(attachment.content, 'base64')))
-      .not.toContain('callback guarantee between scheduled visits');
+    const attachmentText = extractPdfText(Buffer.from(attachment.content, 'base64'));
+    expect(attachmentText).not.toContain('callback guarantee between scheduled visits');
+    expect(attachmentText).not.toContain('Rate reviewed yearly');
   });
 
   test('an oversized corrective row (12 long bullets) paginates instead of overflowing (codex #3297 r2)', async () => {

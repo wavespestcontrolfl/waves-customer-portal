@@ -6,6 +6,7 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteTreeShrubSheet from './FastCompleteTreeShrubSheet';
+import serverSlots from '../../../../server/config/tree-shrub-photo-slots.js';
 
 // The canvas downscale needs a browser; the slot only needs what it returns.
 vi.mock('../../lib/completion-photo', () => ({
@@ -392,11 +393,68 @@ describe('photos and the photo read', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     const body = await completeBody(request);
     expect(body.completionPhotos).toEqual([
-      { data: 'data:image/jpeg;base64,front.jpg', name: 'front.jpg', photoType: 'after', sortOrder: 0, capturedAt: '2026-10-04T14:00:00.000Z' },
-      { data: 'data:image/jpeg;base64,back.jpg', name: 'back.jpg', photoType: 'after', sortOrder: 1, capturedAt: '2026-10-04T14:00:00.000Z' },
-      { data: 'data:image/jpeg;base64,leaf.jpg', name: 'leaf.jpg', photoType: 'after', sortOrder: 2, capturedAt: '2026-10-04T14:00:00.000Z' },
+      { data: 'data:image/jpeg;base64,front.jpg', name: 'front.jpg', photoType: 'after', sortOrder: 0, capturedAt: '2026-10-04T14:00:00.000Z', slot: 'front_beds' },
+      { data: 'data:image/jpeg;base64,back.jpg', name: 'back.jpg', photoType: 'after', sortOrder: 1, capturedAt: '2026-10-04T14:00:00.000Z', slot: 'back_landscape' },
+      { data: 'data:image/jpeg;base64,leaf.jpg', name: 'leaf.jpg', photoType: 'after', sortOrder: 2, capturedAt: '2026-10-04T14:00:00.000Z', slot: 'leaf_close_up' },
     ]);
     expect(request.calls.some((c) => c.path.includes('/tech/services/'))).toBe(false);
+  });
+
+  test('each photo carries the slot it was taken for, only the five known keys', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await addPhoto('Whole palm', 'palm.jpg');
+    await addPhoto('Oldest fronds', 'fronds.jpg');
+    await addPhoto('Back or side landscape', 'back.jpg');
+    await addPhoto('Front beds', 'front.jpg');
+    await addPhoto('Leaf close-up', 'leaf.jpg');
+    fireEvent.click(screen.getByRole('button', { name: 'Good' }));
+    const body = await completeBody(request);
+    expect(body.completionPhotos.map((photo) => photo.slot)).toEqual(['front_beds', 'back_landscape', 'whole_palm', 'oldest_fronds', 'leaf_close_up']);
+  });
+
+  test('the sheet slot list matches the server slot list', () => {
+    expect(serverSlots.TREE_SHRUB_PHOTO_SLOT_KEYS).toEqual(['front_beds', 'back_landscape', 'whole_palm', 'oldest_fronds', 'leaf_close_up']);
+  });
+
+  test("last visit's photo shows beside its slot with alt text, and only that slot", async () => {
+    const context = {
+      ...CONTEXT,
+      lastVisitPhotos: {
+        front_beds: { url: 'https://photos.example.test/front.jpg?sig=1', takenAt: '2026-09-04T14:00:00.000Z' },
+        whole_palm: { url: 'https://photos.example.test/palm.jpg?sig=2', takenAt: null },
+        // Unknown keys and non-http URLs are ignored.
+        not_a_slot: { url: 'https://photos.example.test/x.jpg', takenAt: null },
+        leaf_close_up: { url: 'javascript:alert(1)', takenAt: null },
+      },
+    };
+    await openSheet(makeRequest({ context }));
+    const front = screen.getByAltText('Front beds, last visit');
+    expect(front.getAttribute('src')).toBe('https://photos.example.test/front.jpg?sig=1');
+    expect(screen.getByText('Last time · Sep 4')).toBeTruthy();
+    expect(screen.getByAltText('Whole palm, last visit').getAttribute('src')).toBe('https://photos.example.test/palm.jpg?sig=2');
+    expect(screen.getAllByText('Last time')).toHaveLength(1);
+    expect(screen.queryByAltText('Leaf close-up, last visit')).toBeNull();
+    expect(screen.queryByAltText('Back or side landscape, last visit')).toBeNull();
+    // Today's own photo is separate: it still gets its normal alt text.
+    await addPhoto('Front beds', 'front.jpg');
+    expect(screen.getByAltText('Front beds, last visit')).toBeTruthy();
+  });
+
+  test('no last-visit photos (first Fast Complete visit, or the read failed) shows no thumbnails', async () => {
+    await openSheet(makeRequest({ context: { ...CONTEXT, lastVisitPhotos: {} } }));
+    expect(screen.queryByText(/Last time/)).toBeNull();
+    expect(screen.queryByAltText(/last visit/)).toBeNull();
+    cleanup();
+    await openSheet(makeRequest({ context: CONTEXT }));
+    expect(screen.queryByAltText(/last visit/)).toBeNull();
+  });
+
+  test('a last-visit photo that fails to load is hidden, not a broken image', async () => {
+    const context = { ...CONTEXT, lastVisitPhotos: { front_beds: { url: 'https://photos.example.test/expired.jpg', takenAt: null } } };
+    await openSheet(makeRequest({ context }));
+    fireEvent.error(screen.getByAltText('Front beds, last visit'));
+    expect(screen.queryByAltText('Front beds, last visit')).toBeNull();
   });
 
   test('Analyze reads the current photos in slot order and a rejected finding goes in the body as hidden', async () => {

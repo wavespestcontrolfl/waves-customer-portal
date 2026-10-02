@@ -342,13 +342,14 @@ describe('appointment link idempotent minting', () => {
       calls.push(table);
       const api = {
         where: () => api,
+        whereRaw: () => api,
         orderBy: () => api,
-        first: async () => (table === 'short_codes' ? { code: 'abc12' } : null),
+        first: async () => (table === 'short_codes' ? { code: 'abcdefghjk' } : null),
       };
       return api;
     });
     const url = await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: 'svc-1' });
-    expect(url).toMatch(/\/l\/abc12$/);
+    expect(url).toMatch(/\/l\/abcdefghjk$/);
     expect(calls).toContain('short_codes');
   });
 
@@ -356,7 +357,7 @@ describe('appointment link idempotent minting', () => {
     const { existingShortUrlFor } = require('../services/short-url');
     expect(await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: null })).toBe(null);
     mockDb.mockImplementation(() => {
-      const api = { where: () => api, orderBy: () => api, first: async () => null };
+      const api = { where: () => api, whereRaw: () => api, orderBy: () => api, first: async () => null };
       return api;
     });
     expect(await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: 'svc-2' })).toBe(null);

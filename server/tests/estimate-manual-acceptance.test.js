@@ -149,7 +149,12 @@ function makeDb(estimate, claimedOverrides = null) {
         if (applied.estimate_data && applied.estimate_data.__raw) {
           let prior = {};
           try { prior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data || '{}') : (estimate.estimate_data || {}); } catch { prior = {}; }
-          applied.estimate_data = JSON.stringify({ ...prior, pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase() });
+          applied.estimate_data = JSON.stringify({
+            ...prior,
+            pricingAuthorityAtLock: String(estimate.pricing_authority || 'NULL').toUpperCase(),
+            // The served-evidence promotion rides the same raw (one more jsonb_set).
+            ...(String(patch.estimate_data.__raw).includes("'{rateReviewDisclosedAtAccept}', 'true'::jsonb") ? { rateReviewDisclosedAtAccept: true } : {}),
+          });
         }
         const updated = { ...estimate, ...applied, ...(claimedOverrides || {}) };
         return {
@@ -277,6 +282,35 @@ describe('estimate manual acceptance', () => {
       estimateConverter: { convertEstimate: jest.fn() },
     });
     expect(updates.some((u) => u.table === 'customers')).toBe(false);
+  });
+
+  test('a verbal accept promotes current served-disclosure evidence to the frozen-document stamp; without it, no stamp (codex local review on #5434)', async () => {
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const run = async (estimateData) => {
+      const estimate = {
+        id: 'estimate-rr',
+        status: 'viewed',
+        customer_id: 'customer-1',
+        sent_at: '2026-05-10T12:00:00.000Z',
+        monthly_total: '125.00',
+        onetime_total: '0.00',
+        waveguard_tier: 'Gold',
+        estimate_data: JSON.stringify(estimateData),
+      };
+      const { database, updates } = makeDb(estimate);
+      const estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-1' }) };
+      await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 'admin-1', database, estimateConverter, leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() } });
+      const freeze = updates.find((u) => u.table === 'estimates' && u.patch?.status === 'accepted');
+      expect(freeze).toBeTruthy();
+      return String(freeze.patch.estimate_data.__raw);
+    };
+    const withMarker = await run({ result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 125 }] } }, rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+    expect(withMarker).toContain("'{rateReviewDisclosedAtAccept}', 'true'::jsonb");
+    expect(withMarker).toContain('pricingAuthorityAtLock');
+    const withoutMarker = await run({ result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 125 }] } } });
+    expect(withoutMarker).not.toContain('rateReviewDisclosedAtAccept');
+    const staleMarker = await run({ result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 125 }] } }, rateReviewTermsServed: 'v2025-01' });
+    expect(staleMarker).not.toContain('rateReviewDisclosedAtAccept');
   });
 
   test('stamps accepted_at, clears lost metadata, and runs won hooks', async () => {

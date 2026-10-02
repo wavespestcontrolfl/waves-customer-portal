@@ -16,6 +16,7 @@
  *   GET  /                      unified list (type/status filters, newest first)
  *   GET  /funnel                per-type funnel counts (analyzed → claimed → viewed → booked)
  *   GET  /:type/:id             detail: photos (signed URLs), tech view, customer preview
+ *   GET  /customer/:type/:id    a customer app Photo ID row's v2 + admin-only internal
  *   POST /:type                 admin-created assessment (phone prospect / existing customer)
  *   POST /:type/:id/link        link/unlink a lead or customer
  *   POST /:type/:id/generate-link  mint/refresh the report link, no email —
@@ -236,6 +237,39 @@ async function loadPhotos(config, rowId) {
 }
 
 // GET /api/admin/photo-assessments/:type/:id
+// GET /api/admin/photo-assessments/customer/:type/:id — a customer app Photo
+// ID submission's stored v2 answer with its admin-only `internal` record
+// (which models answered, why a stand-in ran). Pest and lawn keep `internal`
+// in ai_analysis; tree & shrub / palm in v2_internal (Codex #5596 r1: staff
+// need to see why a live customer answer was produced). Read-only.
+const CUSTOMER_PHOTO_ID_SOURCES = Object.freeze({
+  pest: { table: 'pest_identifications', v2: (row) => parseJson(row.report_contract, {}).v2, internal: (row) => parseJson(row.ai_analysis, {}).internal },
+  lawn: { table: 'lawn_diagnostics', v2: (row) => parseJson(row.report_contract, {}).v2, internal: (row) => parseJson(row.ai_analysis, {}).internal },
+  tree_shrub: { table: 'tree_shrub_assessments', v2: (row) => parseJson(row.result_v2, null), internal: (row) => parseJson(row.v2_internal, null) },
+});
+
+router.get('/customer/:type/:id', async (req, res, next) => {
+  try {
+    const source = CUSTOMER_PHOTO_ID_SOURCES[req.params.type];
+    if (!source || !UUID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Assessment not found' });
+    const row = await db(source.table).where({ id: req.params.id, mode: 'customer' }).first();
+    if (!row) return res.status(404).json({ error: 'Assessment not found' });
+    return res.json({
+      id: row.id,
+      type: req.params.type,
+      created_at: row.created_at,
+      customer_id: row.customer_id || null,
+      property_id: row.property_id || null,
+      note: row.note || null,
+      location: row.location || null,
+      v2: source.v2(row) || null,
+      internal: source.internal(row) || null,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.get('/:type/:id', async (req, res, next) => {
   try {
     const config = typeConfig(req, res);

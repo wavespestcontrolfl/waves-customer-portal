@@ -125,6 +125,9 @@ describe('PII-tool taint persists across follow-up turns', () => {
       expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({
         prompt: REDACT_NOTE,
         response: REDACT_NOTE,
+        // The query log records WHO asked (staff id), so a request tally can
+        // be grouped by operator. It was never set before 2026-10-02.
+        operator_id: 'admin-1',
       }));
 
       const assistant = body.conversationHistory[body.conversationHistory.length - 1];

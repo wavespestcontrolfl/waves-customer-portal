@@ -73,10 +73,15 @@ const {
 // structure must end with the SLA line + the re-service line.
 const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
 const RS_BINDINGS = [D_, D_, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source];
+// VISIT STATUS & OPEN LOOPS ('_cflv', SMS facts-gap PR 1) is matched at its rendered position: the
+// header line between UPCOMING SERVICES and the first BILLING: line. Contract order is SLA, COMPANY
+// FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, FREE RE-SERVICE.
+const VL_BINDINGS = ['\nVISIT STATUS & OPEN LOOPS:\n', D_, '\nUPCOMING SERVICES:\n'];
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
   D_, D_, exactStructureRegexSource('optional'),
   D_, D_, exactStructureRegexSource('required'),
+  ...VL_BINDINGS,
   ...RS_BINDINGS,
 ];
 
@@ -246,18 +251,32 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cfl+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cflv+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
-    // the current identity (3_cfl) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS, LABEL FACTS
-    const CURRENT_BINDINGS = ['%FOLLOW-UP SLA RIGHT NOW:%', ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required')];
+    // the current identity (3_cflv) requires, in token order: SLA, FREE RE-SERVICE (its rendered-position twin), COMPANY FACTS,
+    // LABEL FACTS, VISIT STATUS & OPEN LOOPS (header at its rendered position)
+    const CURRENT_BINDINGS = ['%FOLLOW-UP SLA RIGHT NOW:%', ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS];
     for (const [, args] of likeRaws) {
       expect(args[1]).toEqual(CURRENT_BINDINGS);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 3_cfl+c: every fact the version carries is required, none forbidden
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // 3_cflv+c: every fact the version carries is required, none forbidden
+      expect(String(args[0])).not.toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
+  });
+
+  test('the shipped 3_cfl identity forbids VISIT STATUS & OPEN LOOPS at its rendered position', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers3_cfl+c');
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
+    await sealEvalItems({ target: 100, dbi });
+    const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
+    expect(likeRaws.length).toBeGreaterThanOrEqual(2);
+    for (const [, args] of likeRaws) {
+      expect(String(args[0])).toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
+      expect(args[1].slice(-VL_BINDINGS.length)).toEqual(VL_BINDINGS);
+    }
   });
 
   // Codex #5194 r7 P1: v11 has a contract too — a rollback must not keep

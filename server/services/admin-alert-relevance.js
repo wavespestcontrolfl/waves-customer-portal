@@ -120,6 +120,13 @@ function refsFromRow(row) {
   };
 }
 
+// A non-empty id as text (customer ids are stored as text here; bad values
+// drop, never throw).
+function idTextOrNull(value) {
+  const text = value == null ? '' : String(value).trim();
+  return text && text.length <= 64 ? text : null;
+}
+
 // Which live records this row is about, resolved against loaded maps (an id
 // the maps do not hold resolves to undefined = the record is gone).
 function resolveRefs(row, data) {
@@ -131,7 +138,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map(), consents: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -156,6 +163,25 @@ async function loadSubjects(rows, conn = db) {
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
       .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status'));
+  }
+  // The stale-consent bells' customers: when did each last record a consent
+  // at a CURRENT recurring-card text version — the base text or the
+  // after-visit variant's (local max-effort review on #5434: an after-visit
+  // reauthorization lands as AFTER_VISIT_CONSENT_VERSION, and it settles
+  // the bell exactly like the base text does). A card-hold consent is not a
+  // recurring authorization and never settles it.
+  // (A customer id is deliberately NOT a subject ref — only this class reads
+  // it, straight from its own metadata.)
+  const consentCustomerIds = [...new Set(rows
+    .map((row) => parseMeta(row.metadata))
+    .filter((meta) => String(meta.dedupeKey || '').startsWith(CONSENT_STALE_PREFIX))
+    .map((meta) => idTextOrNull(meta.customerId)).filter(Boolean))];
+  if (consentCustomerIds.length) {
+    const { CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION } = require('./payment-method-consent-text');
+    const recorded = await conn('payment_method_consents').whereIn('customer_id', consentCustomerIds)
+      .whereIn('consent_text_version', [CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION])
+      .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
+    data.consents = new Map(recorded.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -202,6 +228,9 @@ function subjectFor(row, data, todayET) {
     promiseOf: (id) => data.promises.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
     leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
+    // The latest consent the bell's customer recorded at the current text
+    // version (loaded for stale-consent bells only).
+    consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
   };
 }
 
@@ -271,6 +300,22 @@ function newLeadMovedOn(s) {
   return null;
 }
 
+// The stale-consent bell (payment-method-consents.js
+// refuseDeferredConsentRecording, dedupeKey consent_version_stale:<intent>):
+// a deferred capture carried a consent text version that was no longer
+// current, so the authorization was withheld and the office asked to
+// re-collect it. Settled only by the customer re-authorizing — a consent row
+// at a CURRENT recurring-card text version (base or after-visit) recorded
+// after the bell; never by the intent
+// (its stamp stays stale for good) and never by an older-version row
+// (codex local max-effort review on #5434).
+const CONSENT_STALE_PREFIX = 'consent_version_stale:';
+function consentReauthorized(s) {
+  if (!s.bellAt || !idTextOrNull(s.meta.customerId)) return null;
+  const at = s.consentRecordedAt ? new Date(s.consentRecordedAt) : null;
+  return at && !Number.isNaN(at.getTime()) && at.getTime() > s.bellAt.getTime() ? 'Authorization was re-collected' : null;
+}
+
 // A promise-mark bell (visit-promises.js alertUnsavedVisitPromiseMarks) is
 // about technician marks that never reached the office's promise list. It is
 // settled once every promise it names is closed (done or dismissed), gone,
@@ -293,6 +338,9 @@ function promiseMarksSettled(s) {
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
+  { // payment-method-consents.js refuseDeferredConsentRecording — one bell per intent
+    key: 'consent_version_stale', categories: ['billing'], prefix: CONSENT_STALE_PREFIX, rule: consentReauthorized,
+  },
   { // emitter removed in #5223; unread rows remain. Only the visit itself settles it.
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: staleVisitSettled,
   },
