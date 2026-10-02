@@ -2246,7 +2246,7 @@ function EstimatePipelineViewV2({
                                     body: JSON.stringify({
                                       to: e.customerPhone,
                                       fromNumber: "+19412975749",
-                                      customerId: e.customerId || undefined,
+                                      customerIdHint: e.customerId || undefined,
                                     }),
                                   },
                                 );
@@ -3255,7 +3255,7 @@ export function MobileEstimateRow({
                 body: JSON.stringify({
                   to: estimate.customerPhone,
                   fromNumber: "+19412975749",
-                  customerId: estimate.customerId || undefined,
+                  customerIdHint: estimate.customerId || undefined,
                 }),
               });
               if (!r?.success)

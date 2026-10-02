@@ -5443,7 +5443,7 @@ function CustomerWorkspaceHeader({
                 <CallBridgeLink
                   phone={contact.phone}
                   customerName={contact.name || name}
-                  customerId={c.id}
+                  customerIdHint={c.id}
                 >
                   {contact.phone}
                 </CallBridgeLink>
@@ -5469,7 +5469,7 @@ function CustomerContactLinks({
   phone,
   email,
   customerName,
-  customerId,
+  customerIdHint,
   phoneClassName,
   emailClassName,
 }) {
@@ -5479,7 +5479,7 @@ function CustomerContactLinks({
         <CallBridgeLink
           phone={phone}
           customerName={customerName}
-          customerId={customerId}
+          customerIdHint={customerIdHint}
           className={phoneClassName}
         >
           {phone}
@@ -5667,7 +5667,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
-                customerId={c.id}
+                customerIdHint={c.id}
                 phoneClassName="u-nums text-zinc-900 hover:underline"
                 emailClassName="text-zinc-900 hover:underline"
               />
@@ -5708,7 +5708,7 @@ function CustomerOverlayHeader({
                   phone={slot.phone}
                   email={slot.email}
                   customerName={slot.name || customerName}
-                  customerId={c.id}
+                  customerIdHint={c.id}
                   phoneClassName="u-nums text-zinc-900 hover:underline mr-3"
                   emailClassName="text-zinc-900 hover:underline"
                 />
@@ -5812,7 +5812,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
-                customerId={c.id}
+                customerIdHint={c.id}
                 phoneClassName="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
                 emailClassName="text-ink-secondary hover:text-zinc-900 no-underline truncate"
               />
@@ -6360,21 +6360,21 @@ function CustomerProfileBilling({
         </>
       )}
       <BillingLanePanelV2
-        customerId={c.id}
+        customerIdHint={c.id}
         billingMode={c.billingMode}
         tier={c.tier}
         monthlyRate={c.monthlyRate}
         canEdit={isAdmin}
       />{" "}
       <AdminAutopayPanelV2
-        customerId={c.id}
+        customerIdHint={c.id}
         monthlyRate={c.monthlyRate}
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
         collectionHold={collectionHold}
       />{" "}
       <AccountCreditPanelV2
-        customerId={c.id}
+        customerIdHint={c.id}
         customerName={`${c.firstName} ${c.lastName}`}
         canEdit={isAdmin}
       />{" "}
@@ -7834,7 +7834,7 @@ function CustomerProfileMobileActions({
             <CallBridgeLink
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-              customerId={c.id}
+              customerIdHint={c.id}
               styledButton
               className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >

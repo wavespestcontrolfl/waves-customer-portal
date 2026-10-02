@@ -215,7 +215,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                   />{" "}
                   <CallBridgeLink
                     phone={c.phone}
-                    customerId={customerId}
+                    customerIdHint={customerId}
                     customerName={`${c.first_name || ""} ${c.last_name || ""}`.trim()}
                     className="text-zinc-900 hover:underline"
                   >
@@ -299,7 +299,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                         body: JSON.stringify({
                           to: c.phone,
                           fromNumber: "+19412975749",
-                          customerId,
+                          customerIdHint: customerId,
                         }),
                       });
                       const res = await r.json().catch(() => ({}));

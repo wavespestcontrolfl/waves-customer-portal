@@ -202,7 +202,7 @@ describe('admin communications voice route', () => {
       expect(call.from).toBe(MAIN);
     });
 
-    test('gate on: a service-contact number sent with customerId calls from that customer\'s home line', async () => {
+    test('gate on: a service-contact number sent with customerIdHint calls from that customer\'s home line', async () => {
       homeLineLive.mockReturnValue(true);
       db.mockImplementation((table) => {
         if (table === 'customers') return query({ result: { ...parrishCustomer, phone: '+15550000001', service_contact_phone: '+15551234567' } });
@@ -213,7 +213,7 @@ describe('admin communications voice route', () => {
         await fetch(`${baseUrl}/admin/communications/call`, {
           method: 'POST',
           headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: '+15551234567', customerId: 'cust-1' }),
+          body: JSON.stringify({ to: '+15551234567', customerIdHint: '11111111-1111-4111-8111-111111111111' }),
         });
       });
       expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));

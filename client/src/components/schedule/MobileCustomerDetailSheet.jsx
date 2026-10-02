@@ -181,7 +181,7 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
             {/* Phone */}
             {c.phone && (
               <ContactRow label="Phone number">
-                <CallBridgeLink phone={c.phone} customerId={customerId} customerName={`${c.first_name || c.firstName || ''} ${c.last_name || c.lastName || ''}`.trim()} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</CallBridgeLink>
+                <CallBridgeLink phone={c.phone} customerIdHint={customerId} customerName={`${c.first_name || c.firstName || ''} ${c.last_name || c.lastName || ''}`.trim()} className="text-ink-primary" style={{ fontSize: 17 }}>{c.phone}</CallBridgeLink>
               </ContactRow>
             )}
             {c.email && (

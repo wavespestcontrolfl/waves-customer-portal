@@ -1857,11 +1857,7 @@ router.post('/call', async (req, res, next) => {
         .first();
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
-      // Any number the selected customer is known by (primary, secondary or a
-      // service contact): Customer 360 sends customerId for its service-contact
-      // call links so the call links to — and takes the caller ID of — the
-      // customer whose page it is, not a phone-only lookup.
-      const contactColumns = require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS;
+      const contactColumns = relatedCommitmentId ? require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS : ['phone'];
       if (!normalizedTo || !contactColumns.some((column) => normalizedTo === normalizePhone(customer[column]))) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
@@ -1873,9 +1869,11 @@ router.post('/call', async (req, res, next) => {
       // number is one they are known by. Otherwise the phone-only lookup
       // below decides, as for any click-to-call.
       if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
-      // A soft link (Leads: lead.customer_id): used only when the dialed
-      // number is one that customer is known by; otherwise the call proceeds
-      // on the phone-only lookup, never refused.
+      // A soft link (the client's customerIdHint — the customer whose page,
+      // thread, estimate or lead the number came from): used only when the
+      // dialed number is one that customer is known by (primary, secondary or
+      // a service contact); otherwise the phone-only lookup decides, so a
+      // stale number on an old thread or estimate is never refused.
       if (!customer && customerIdHint && UUID_RE.test(String(customerIdHint))) customer = await customerKnownByNumber(customerIdHint, to);
       if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);

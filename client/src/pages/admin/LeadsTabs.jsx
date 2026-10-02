@@ -2641,7 +2641,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                               lead.phone,
                                               `${lead.first_name || ""} ${lead.last_name || ""}`.trim(),
                                               undefined,
-                                              null,
                                               lead.customer_id,
                                             )
                                           }
