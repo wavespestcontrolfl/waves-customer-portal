@@ -260,23 +260,54 @@ describe('rider context fall-backs', () => {
     expect(seedCalls).toEqual([rider.overrideDates, null]);
   });
 
-  test('inside the ride savepoint, the seeder\'s post-commit work waits on the OUTER transaction', async () => {
+  const riderOnLawn = async () => {
     const ctx = RiderAccept.createContext();
     await seedLawn(ctx);
-    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    return RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+  };
+
+  test('a KEPT ride: the seeder\'s post-commit work fires only after the outer transaction commits', async () => {
+    const rider = await riderOnLawn();
     conn.persisted = [
       ...lawnRows(8),
       ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: `v${d}` })),
     ];
-    const outer = Object.assign(conn, { isTransaction: true });
+    let commitOuter;
+    const outer = Object.assign(conn, { isTransaction: true, executionPromise: new Promise((r) => { commitOuter = r; }) });
     const scopes = [];
+    const fired = [];
     try {
-      const ride = await RiderAccept.seedWithRide(outer, pest(), rider, async (_c, _d, commitScope) => {
-        scopes.push(commitScope); return { insertedRows: [] };
+      const ride = await RiderAccept.seedWithRide(outer, pest(), rider, async (_c, _d, scope) => {
+        if (scope) { scopes.push(scope); scope.executionPromise.then(() => fired.push('alert'), () => fired.push('dropped')); }
+        return { insertedRows: [] };
       });
       expect(ride.rides).toBe(true);
-      expect(scopes).toEqual([outer]);
-    } finally { delete conn.isTransaction; }
+      expect(scopes).toHaveLength(1);
+      await new Promise((r) => setImmediate(r));
+      expect(fired).toEqual([]); // kept, but the accept has not committed yet
+      commitOuter();
+      await new Promise((r) => setImmediate(r));
+      expect(fired).toEqual(['alert']);
+    } finally { delete conn.isTransaction; delete conn.executionPromise; }
+  });
+
+  test('a ROLLED-BACK ride: post-commit work queued inside it never fires, even when the accept commits', async () => {
+    const rider = await riderOnLawn();
+    conn.persisted = [
+      ...lawnRows(8),
+      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: null })),
+    ];
+    const outer = Object.assign(conn, { isTransaction: true, executionPromise: Promise.resolve() });
+    const fired = [];
+    try {
+      const ride = await RiderAccept.seedWithRide(outer, pest(), rider, async (_c, dates, scope) => {
+        if (scope) scope.executionPromise.then(() => fired.push(`alert:${dates ? 'ride' : 'walk'}`), () => fired.push('dropped'));
+        return { insertedRows: [] };
+      });
+      expect(ride.rides).toBe(false);
+      await new Promise((r) => setImmediate(r));
+      expect(fired).toEqual(['dropped']);
+    } finally { delete conn.isTransaction; delete conn.executionPromise; }
   });
 
   test('no rider: the plain seed runs once, no savepoint ride', async () => {
