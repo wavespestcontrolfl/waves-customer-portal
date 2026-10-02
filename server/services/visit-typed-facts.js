@@ -133,6 +133,24 @@ function currentValuesFor(type, raw) {
   return current;
 }
 
+// The form's present values a fill is judged beside: those the completion
+// accepts on their own, less both sides of any pair it already refuses
+// together. A clash that predates the read (a legacy value, or "None
+// observed" beside "Live roaches") is the person's to fix at submit; judged
+// with it, every fill would be refused, unrelated ones too (Codex P2 on
+// #5632). A clash no pair explains leaves nothing to judge beside.
+function acceptedBaseline(type, current) {
+  const alone = Object.entries(current).filter(([key, value]) => !refused(type, { [key]: value }));
+  const clashing = new Set();
+  alone.forEach(([a, valueA], i) => {
+    for (const [b, valueB] of alone.slice(i + 1)) {
+      if (refused(type, { [a]: valueA, [b]: valueB })) clashing.add(a).add(b);
+    }
+  });
+  const baseline = Object.fromEntries(alone.filter(([key]) => !clashing.has(key)));
+  return refused(type, baseline) ? {} : baseline;
+}
+
 // What the record keeps from the model's answer, in the form's own encoding
 // (a select's option; chips joined ", " in the form's option order), with the
 // words each value stands on. A value heard but not held up by the note, or a
@@ -163,12 +181,10 @@ function validateTypedFacts(type, json, note, current = {}) {
     values[field.key] = kept.map((p) => p.value).join(', ');
     heard[field.key] = kept;
   }
-  // Fills are judged beside what the form already holds, less a present
-  // value the completion refuses on its own (a legacy value): that one is
-  // the person's to fix at submit, and judged with it every fill would be
-  // refused.
-  const standingCurrent = Object.fromEntries(Object.entries(current).filter(([key, value]) => !refused(type, { [key]: value })));
-  const judged = (fills) => refused(type, { ...standingCurrent, ...fills });
+  // Fills are judged beside what the form already holds that the completion
+  // accepts (acceptedBaseline).
+  const baseline = acceptedBaseline(type, current);
+  const judged = (fills) => refused(type, { ...baseline, ...fills });
   if (judged(values)) {
     // Every side of a clash is left for a person: a field the completion
     // refuses on its own (chips that contradict each other), and both fields
@@ -213,6 +229,10 @@ async function readTypedFacts({ note, findingsType, current = {} }) {
   const text = redactAccessCodes(String(note || '').trim());
   if (!text) return empty('empty_note');
   if (text.length > MAX_NOTE_CHARS) return empty('too_long');
+  // A form that already holds every field the note could fill has nothing
+  // to read for: no model call (Codex P2 on #5632).
+  const present = currentValuesFor(findingsType, current);
+  if (fields.every((field) => Object.prototype.hasOwnProperty.call(present, field.key))) return empty('nothing_to_fill');
   let result;
   try {
     result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -231,7 +251,7 @@ async function readTypedFacts({ note, findingsType, current = {} }) {
   return {
     status: 'read',
     type: findingsType,
-    ...validateTypedFacts(findingsType, result.json, text, currentValuesFor(findingsType, current)),
+    ...validateTypedFacts(findingsType, result.json, text, present),
     version: TYPED_FACTS_VERSION,
   };
 }

@@ -239,6 +239,17 @@ describe('the form\'s present values (slice 2: the office form sends them)', () 
     expect(facts.values).toEqual({ species: 'German' });
   });
 
+  test('a clash the form already holds takes no unrelated fill with it (Codex P2 on #5632)', () => {
+    // "None observed" beside "Live roaches": each stands alone, the pair is
+    // refused. The person fixes it at submit; the species the note says
+    // still fills.
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+    }), ROACH_NOTE, { activity_level: 'None observed', evidence_observed: 'Live roaches' });
+    expect(facts.values).toEqual({ species: 'German' });
+    expect(facts.unclearFields).toEqual([]);
+  });
+
   test('the present values keep only the form\'s own fields, as text', () => {
     expect(currentValuesFor('cockroach', {
       species: 'German', made_up: 'x', activity_level: 3, evidence_observed: ['Live roaches'], customer_prep: '   ',
@@ -269,6 +280,19 @@ describe('readTypedFacts', () => {
     expect(await readTypedFacts({ note: 'Saw roaches. '.repeat(Math.ceil(MAX_NOTE_CHARS / 13) + 1), findingsType: 'cockroach' }))
       .toMatchObject({ status: 'too_long' });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a form that already holds every field the note could fill never calls the model (Codex P2 on #5632)', async () => {
+    const current = Object.fromEntries(voiceFieldsFor('cockroach').map((field) => [field.key, field.options[0]]));
+    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach', current }))
+      .toMatchObject({ status: 'nothing_to_fill', type: 'cockroach', values: {}, unclearFields: [] });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    // One field still open is read for.
+    dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', {})));
+    const { species, ...open } = current;
+    expect(species).toBeTruthy();
+    expect((await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach', current: open })).status).toBe('read');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
   test('access codes never reach the provider', async () => {

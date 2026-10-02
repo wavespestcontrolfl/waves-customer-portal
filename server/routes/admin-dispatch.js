@@ -820,7 +820,9 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
 // the client names. Writes nothing: the form shows each field with its words
 // for a person to confirm. A visit whose form this step does not read
 // answers { available: false }; a failed read answers { available: true,
-// status: 'failed' } with nothing filled, never an error. Off = 404.
+// status: 'failed' } with nothing filled, never an error, and a form that
+// already holds every field the note could fill answers status
+// 'nothing_to_fill' with no model call. Off = 404.
 router.post('/:serviceId/typed-facts', async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').typedVoiceFillLive()) {
