@@ -128,7 +128,11 @@ old list).
   check, an ACH-in-flight classification from a `processing` payments row, and a
   hold on any attached PaymentIntent (the reader never calls Stripe). Otherwise
   every due-style amount is null with `collectible: false`, the reason and
-  "needs reconciliation — check the Invoices page" (or `bank_payment_processing`). Amount
+  "needs reconciliation — check the Invoices page" (or `bank_payment_processing`). Each tool call runs in one read-only REPEATABLE READ
+  snapshot (`InvoiceService.list` takes an optional `database`), so the status
+  buckets, re-read rows and payment linkage agree; an invoice whose owner changed
+  during the read is unavailable, never shown. `overdue_count` counts only
+  collectible overdue invoices. Amount
   due is `invoiceAmountDue`; the invoice rows and the unpaid and overdue counts
   come from `InvoiceService.list`. `account_summary.total_due` sums only invoices
   whose fences passed, counts the ones needing reconciliation separately, and is

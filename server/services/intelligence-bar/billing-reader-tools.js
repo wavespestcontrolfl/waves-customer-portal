@@ -52,7 +52,6 @@ const SUMMARY_PAGE = 100;
 const SUMMARY_MAX_PAGES = 10;
 // The fence runs per invoice (a few indexed reads each): bounded, in small batches.
 const FENCE_SUMMARY_CAP = 100;
-const FENCE_BATCH = 5;
 const PAYMENT_ROW_CAP = 50;
 const PLAN_HISTORY_CAP = 5;
 // metadata keys that name the invoice a payment settles (the admin-invoices applied-money fence's keys).
@@ -107,23 +106,48 @@ const cents = (value) => Math.round((Number(value) || 0) * 100);
 const fromCents = (value) => Math.round(value) / 100;
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const LONG_DIGITS_RE = /\b(?:\d[ -]?){13,19}\b/g;
+// Digits with up to three non-alphanumeric separators between them (spaces, dashes, dots, slashes, underscores, any
+// mix, or none), 13 or more digits in all.
+const DIGIT_RUN_RE = /\d(?:[^A-Za-z0-9]{0,3}\d){12,}/g;
+const ISO_DATE_RUN_RE = /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/;
+const UUID_IN_TEXT_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+function luhnValid(digits) {
+  let sum = 0;
+  for (let at = 0; at < digits.length; at += 1) {
+    let digit = Number(digits[digits.length - 1 - at]);
+    if (at % 2 === 1) { digit *= 2; if (digit > 9) digit -= 9; }
+    sum += digit;
+  }
+  return sum % 10 === 0;
+}
+// A card number never leaves: a 13+ digit run is masked when it passes the Luhn check, and (conservatively) when it
+// does not either, unless it is an ISO date or timestamp.
+function maskCardNumbers(text) {
+  return text.replace(DIGIT_RUN_RE, (run) => {
+    const digits = run.replace(/\D/g, '');
+    if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) return '[number]';
+    if (ISO_DATE_RUN_RE.test(run)) return run;
+    return '[number]';
+  });
+}
+// Emails and card numbers are masked; record ids (UUIDs) pass through untouched, so a digit-heavy id still works in
+// the follow-up read, and the text around them is masked.
+const maskSensitive = (text) => String(text).split(UUID_IN_TEXT_RE)
+  .map((part, at) => (at % 2 ? part : maskCardNumbers(part.replace(EMAIL_RE, '[email]'))))
+  .join('');
 // Free text (a decline message, a manual-payment note, a ledger note) can echo
 // an email or a card number: both are masked before anything leaves.
 function scrub(value, max = 240) {
   if (value === null || value === undefined) return null;
-  const text = String(value).replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]').trim();
+  const text = maskSensitive(value).trim();
   return text ? text.slice(0, max) : null;
 }
 
 // THE egress scrubber: every string that leaves either tool (any free-text column, a reason built from row data, a
 // payer or customer name) passes through it once, at the single exit (executeBillingReaderTool), so a field added
 // later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
-const UUID_IN_TEXT_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
 function scrubEgress(value) {
-  // Record ids (UUIDs) pass through untouched, so a digit-heavy id still works in the follow-up read; the text
-  // around them is masked.
-  if (typeof value === 'string') return value.split(UUID_IN_TEXT_RE).map((part, at) => (at % 2 ? part : part.replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]'))).join('');
+  if (typeof value === 'string') return maskSensitive(value);
   if (Array.isArray(value)) return value.map(scrubEgress);
   if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner)]));
   return value;
@@ -211,9 +235,16 @@ async function resolveBillingCustomer(input, actionContext) {
 }
 
 
+// One read-only REPEATABLE READ snapshot per tool call: every query of the call (the invoice list, both summary
+// buckets, the fences, recorded payments, credit, plans) runs on this connection, so status buckets, re-read rows and
+// payment linkage cannot disagree. None of the functions called takes a lock or starts its own top-level
+// transaction in read-only mode (the read-only charge fence releases and promotes nothing).
+const inSnapshot = (work) => db.transaction(work, { isolationLevel: 'repeatable read', readOnly: true });
+
 // ─── the payment fences ─────────────────────────────────────────────
 
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
+const RECORD_CHANGED_REASON = 'this record changed hands during the read; ask again';
 const CARD_INCOMPLETE_REASON = 'a card payment did not complete — check the Invoices page';
 const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page';
 const CHARGE_FENCE_REASONS = {
@@ -355,6 +386,7 @@ async function decideCollectibility(invoice, listed, database) {
     const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: listed.customer_id });
     if (member.reason === 'deposit_settlement') return needsReconciliation('an estimate deposit has been received and is not yet applied to this invoice');
     if (member.reason === 'charge_reconciliation') return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS, { allowBank: member.code !== 'STRIPE_CHARGED_DB_FAILED' });
+    if (member.reason === 'customer_changed') return held('unavailable', RECORD_CHANGED_REASON);
     if (member.reason) return held('not_collectible', MEMBER_REASONS[member.reason] || MEMBER_REASONS.not_collectible);
     // The collection fence re-read the invoice: the attached-intent hold and the amount use THAT row, never the
     // older one the caller passed (an intent attached or credit applied between the two reads).
@@ -369,24 +401,23 @@ async function decideCollectibility(invoice, listed, database) {
 
 // The caller's row may be older than the checks: the invoice is re-read once here, every check runs on that row,
 // and EVERY verdict (held ones included) carries it back so the projected facts and the reason come from one state.
-async function invoiceCollectibility(listed, database = db) {
+async function invoiceCollectibility(listed, database) {
   let current = listed;
   try {
     current = (await database('invoices').where({ id: listed.id }).first()) || listed;
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] invoice re-read failed (${err.code || err.name || 'error'})`);
   }
+  // Ownership changed during the read: the invoice is refused for this customer, never projected under their header.
+  if (String(current.customer_id) !== String(listed.customer_id)) return held('unavailable', RECORD_CHANGED_REASON);
   const verdict = await decideCollectibility(current, listed, database);
   return { ...verdict, row: verdict.row || current };
 }
 
-async function fenceAll(invoices) {
+// Sequential: every read shares the call's one snapshot connection.
+async function fenceAll(invoices, database) {
   const out = new Map();
-  for (let at = 0; at < invoices.length; at += FENCE_BATCH) {
-    const batch = invoices.slice(at, at + FENCE_BATCH);
-    const results = await Promise.all(batch.map((invoice) => invoiceCollectibility(invoice)));
-    batch.forEach((invoice, index) => out.set(String(invoice.id), results[index]));
-  }
+  for (const invoice of invoices) out.set(String(invoice.id), await invoiceCollectibility(invoice, database));
   return out;
 }
 
@@ -417,10 +448,10 @@ function projectPlan(plan, fence) {
 
 // ─── account facts ──────────────────────────────────────────────────
 
-async function readDisputeHold(customerId) {
+async function readDisputeHold(customerId, database) {
   try {
     const { activeDisputeHolds } = require('../collections/collection-hold');
-    const hold = await activeDisputeHolds(db('collections_flags').where({ customer_id: customerId })).first('created_at');
+    const hold = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('created_at');
     return { active: Boolean(hold), since: hold ? iso(hold.created_at) : null };
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] dispute hold lookup failed (${err.code || err.name || 'error'})`);
@@ -428,16 +459,13 @@ async function readDisputeHold(customerId) {
   }
 }
 
-async function readCredit(customerId) {
+async function readCredit(customerId, database) {
   try {
     const CustomerCredit = require('../customer-credit');
-    // One REPEATABLE READ read-only snapshot: a grant, application or reversal commits the balance and the
-    // ledger together, so reading them in separate statements could straddle it and report a false mismatch.
-    let balance; let sum;
-    await db.transaction(async (trx) => {
-      balance = await CustomerCredit.getBalance(customerId, trx);
-      sum = await trx('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first();
-    }, { isolationLevel: 'repeatable read', readOnly: true });
+    // Read inside the call's one snapshot: a grant, application or reversal commits the balance and the ledger
+    // together, so both reads see the same state.
+    const balance = await CustomerCredit.getBalance(customerId, database);
+    const sum = await database('customer_credit_ledger').where({ customer_id: customerId }).sum({ total: 'delta' }).first();
     const ledgerSum = money(sum && sum.total) || 0;
     return {
       credit_balance: balance,
@@ -452,11 +480,11 @@ async function readCredit(customerId) {
 
 // Every page of one InvoiceService.list query (the Invoices page's own
 // reader), bounded. `complete: false` is returned when the bound was hit.
-async function listAllInvoices(InvoiceService, params, { stopAbove = Infinity } = {}) {
+async function listAllInvoices(InvoiceService, params, { stopAbove = Infinity, database } = {}) {
   const rows = [];
   let total = 0;
   for (let page = 0; page < SUMMARY_MAX_PAGES; page += 1) {
-    const result = await InvoiceService.list({ ...params, limit: SUMMARY_PAGE, offset: page * SUMMARY_PAGE });
+    const result = await InvoiceService.list({ ...params, database, limit: SUMMARY_PAGE, offset: page * SUMMARY_PAGE });
     total = result.total;
     rows.push(...result.invoices);
     // Provably more rows than the caller can use: stop now (each page costs a joined query plus a count).
@@ -487,43 +515,45 @@ function paymentPlanFromList(row) {
   };
 }
 
-async function accountSummary(InvoiceService, customer, today) {
+async function accountSummary(InvoiceService, customer, today, database) {
   const customerId = customer.id;
-  const [unpaid, overdue, processing, credit, hold] = await Promise.all([
-    listAllInvoices(InvoiceService, { customerId, status: 'unpaid', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP }),
-    InvoiceService.list({ customerId, status: 'overdue', archived: 'hide', limit: 1, offset: 0 }),
-    listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP }),
-    readCredit(customerId),
-    readDisputeHold(customerId),
-  ]);
+  // One snapshot: the unpaid and processing buckets, the fences, credit and hold all read the same state, so an
+  // invoice cannot fall out of (or into) both buckets mid-read.
+  const unpaid = await listAllInvoices(InvoiceService, { customerId, status: 'unpaid', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP, database });
+  const processing = await listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP, database });
+  const credit = await readCredit(customerId, database);
+  const hold = await readDisputeHold(customerId, database);
   const unknowns = [];
   // total_due is the sum of the invoices whose fences passed. It needs every unpaid invoice read AND fenced:
   // a partial read, or more invoices than the fence is run for, makes it unknown rather than a partial number.
   let fenced = null;
-  if (!unpaid.complete || unpaid.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} unpaid invoices to check for reconciliation: total_due and its splits are null (unknown), not zero. Page through get_customer_invoices.`);
-  else fenced = await fenceAll(unpaid.rows);
+  if (!unpaid.complete || unpaid.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} unpaid invoices to check for reconciliation: total_due, overdue_count and the splits are null (unknown), not zero. Page through get_customer_invoices.`);
+  else fenced = await fenceAll(unpaid.rows, database);
   // Each processing invoice is classified by the same per-invoice result as the list.
   let fencedProcessing = null;
   if (!processing.complete || processing.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} processing invoices to check: the processing split and needs_reconciliation_count are null (unknown).`);
-  else fencedProcessing = await fenceAll(processing.rows);
+  else fencedProcessing = await fenceAll(processing.rows, database);
   const states = fenced && fencedProcessing
     ? [...unpaid.rows.map((invoice) => fenced.get(String(invoice.id)).state), ...processing.rows.map((invoice) => fencedProcessing.get(String(invoice.id)).state)]
     : null;
   const countState = (state) => (states ? states.filter((one) => one === state).length : null);
   const reconcileCount = countState('needs_reconciliation');
   const bankInFlight = countState('bank_payment_processing');
+  const unavailableCount = states ? countState('unavailable') : null;
   const otherNotCollectible = fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).state === 'not_collectible').length : null;
   const fresh = (invoice) => fenced.get(String(invoice.id)).row || invoice;
   const rowsWhere = (test) => (fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).collectible && test(fresh(invoice))).map(fresh) : null);
   const sum = (rows) => (rows ? fromCents(rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)) : null);
   if (reconcileCount > 0) unknowns.push(`${reconcileCount} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
   if (otherNotCollectible > 0) unknowns.push(`${otherNotCollectible} unpaid invoice(s) are not collectible from this customer (for example billed to a third party, or nothing due after credit) and are not in total_due.`);
+  if (unavailableCount > 0) unknowns.push(`${unavailableCount} invoice(s) changed hands during the read and are left out of every figure here: ask again.`);
   const notYetSent = (invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status));
   const summary = {
     total_due: sum(rowsWhere(() => true)),
     outstanding_count: unpaid.total,
     needs_reconciliation_count: reconcileCount,
-    overdue_count: overdue.total,
+    // Only collectible invoices count as overdue (the list's own `overdue` is null for the rest): never a raw status count.
+    overdue_count: fenced ? rowsWhere((invoice) => isOverdue(invoice, today)).length : null,
     not_yet_sent_due: sum(rowsWhere(notYetSent)),
     presented_self_pay_due: sum(rowsWhere((invoice) => !notYetSent(invoice))),
     processing: {
@@ -535,7 +565,7 @@ async function accountSummary(InvoiceService, customer, today) {
     ...credit,
     dispute_hold: hold,
     as_of: today,
-    basis: 'total_due adds up only the unpaid invoices that pass the payment paths\' collectibility checks (amount due = total minus applied credit; an invoice billed to a third-party payer is not collectible from the customer); invoices that need reconciliation are counted separately and excluded. total_due includes not_yet_sent_due (drafts and scheduled invoices the customer has not been sent); presented_self_pay_due is what the customer was actually sent and owes personally.',
+    basis: 'total_due adds up only the unpaid invoices that pass the payment paths\' collectibility checks (amount due = total minus applied credit; an invoice billed to a third-party payer is not collectible from the customer); invoices that need reconciliation are counted separately and excluded. overdue_count counts only collectible invoices that are overdue. total_due includes not_yet_sent_due (drafts and scheduled invoices the customer has not been sent); presented_self_pay_due is what the customer was actually sent and owes personally.',
   };
   // The credit read's own reason (all three credit fields null) is kept; the invoice warnings are appended to it.
   const warnings = [credit.unknown, ...unknowns].filter(Boolean);
@@ -574,7 +604,11 @@ function invoiceItem(listedRow, today, fence, heldIds) {
 async function getCustomerInvoices(input, actionContext) {
   const resolved = await resolveBillingCustomer(input, actionContext);
   if (resolved.error) return resolved;
-  const { customer } = resolved;
+  // Every read below shares ONE read-only REPEATABLE READ snapshot.
+  return inSnapshot((database) => listForCustomer(resolved.customer, input, database));
+}
+
+async function listForCustomer(customer, input, database) {
   const InvoiceService = require('../invoice');
   const { collectionHoldInvoiceIds } = require('../collections/collection-hold');
   const today = etDateString();
@@ -586,27 +620,32 @@ async function getCustomerInvoices(input, actionContext) {
   const includeArchived = input.include_archived === true;
 
   const page = await InvoiceService.list({
-    customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest',
+    customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest', database,
   });
-  const summary = await accountSummary(InvoiceService, customer, today);
-  const fences = await fenceAll(page.invoices);
+  const summary = await accountSummary(InvoiceService, customer, today, database);
+  const fences = await fenceAll(page.invoices, database);
   const unknowns = [];
   let heldIds = new Set();
   try {
-    heldIds = await collectionHoldInvoiceIds(page.invoices.map((invoice) => invoice.id));
+    heldIds = await collectionHoldInvoiceIds(page.invoices.map((invoice) => invoice.id), { database });
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] per-invoice hold lookup failed (${err.code || err.name || 'error'})`);
     heldIds = null;
     unknowns.push('The per-invoice dispute hold could not be read; say it is unknown (the account-level dispute_hold above is the customer-wide state).');
   }
 
+  // An invoice whose ownership changed during the read is unavailable: never shown, never counted.
+  const unavailable = page.invoices.filter((row) => fences.get(String(row.id)).state === 'unavailable');
+  if (unavailable.length) unknowns.push(`${unavailable.length} invoice(s) changed hands during the read and are left out: ask again.`);
+  const shown = page.invoices.filter((row) => fences.get(String(row.id)).state !== 'unavailable');
   const returned = page.invoices.length;
   const hasMore = offset + returned < page.total;
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: page.invoices.map((row) => invoiceItem(row, today, fences.get(String(row.id)), heldIds)),
-    returned_count: returned,
+    invoices: shown.map((row) => invoiceItem(row, today, fences.get(String(row.id)), heldIds)),
+    ...(unavailable.length ? { unavailable_invoices: unavailable.map((row) => ({ id: row.id, reason: RECORD_CHANGED_REASON })) } : {}),
+    returned_count: shown.length,
     total_matching: page.total,
     has_more: hasMore,
     next_offset: hasMore ? offset + returned : null,
@@ -668,8 +707,8 @@ const RECORDED_PAYMENT_COLUMNS = ['payments.id', 'payments.payment_date', 'payme
   'payments.refund_amount', 'payments.refund_status', 'payments.payer_id', 'payments.payment_method_type', 'payments.card_brand',
   'pm.method_type as live_method_type', 'pm.card_brand as live_card_brand'];
 
-async function loadRecordedPayments(customerId, invoice) {
-  const rows = await db('payments')
+async function loadRecordedPayments(customerId, invoice, database) {
+  const rows = await database('payments')
     .leftJoin('payment_methods as pm', 'pm.id', 'payments.payment_method_id')
     .where({ 'payments.customer_id': customerId })
     .where(function linkedToInvoice() {
@@ -683,7 +722,7 @@ async function loadRecordedPayments(customerId, invoice) {
     .select(RECORDED_PAYMENT_COLUMNS);
   // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every invoice on it.
   const statementRows = invoice.payer_statement_id != null
-    ? await db('payments').leftJoin('payment_methods as pm', 'pm.id', 'payments.payment_method_id').where({ 'payments.statement_id': invoice.payer_statement_id })
+    ? await database('payments').leftJoin('payment_methods as pm', 'pm.id', 'payments.payment_method_id').where({ 'payments.statement_id': invoice.payer_statement_id })
       .orderBy('payments.created_at', 'desc').limit(PAYMENT_ROW_CAP + 1)
       .select([...RECORDED_PAYMENT_COLUMNS, 'payments.statement_id'])
     : [];
@@ -698,7 +737,7 @@ async function loadRecordedPayments(customerId, invoice) {
   let names = new Map();
   if (payerIds.length) {
     try {
-      names = new Map((await db('payers').whereIn('id', payerIds).select('id', 'display_name')).map((payer) => [Number(payer.id), scrub(payer.display_name, 120)]));
+      names = new Map((await database('payers').whereIn('id', payerIds).select('id', 'display_name')).map((payer) => [Number(payer.id), scrub(payer.display_name, 120)]));
     } catch (err) {
       logger.warn(`[intelligence-bar:billing-reader] payer name lookup failed (${err.code || err.name || 'error'})`);
     }
@@ -730,11 +769,22 @@ async function getInvoiceDetail(input, actionContext) {
   if (!input.invoice_id || !UUID_RE.test(String(input.invoice_id))) {
     return { error: 'A valid invoice_id is required', code: 'invalid_target' };
   }
+  if (input.customer_id && !UUID_RE.test(String(input.customer_id))) {
+    return { error: 'A valid customer_id is required', code: 'invalid_target' };
+  }
+  // Every read below shares ONE read-only REPEATABLE READ snapshot.
+  return inSnapshot((database) => detailInSnapshot(input, actionContext, database));
+}
+
+async function detailInSnapshot(input, actionContext, database) {
+  if (!input.invoice_id || !UUID_RE.test(String(input.invoice_id))) {
+    return { error: 'A valid invoice_id is required', code: 'invalid_target' };
+  }
   const invoiceId = String(input.invoice_id).toLowerCase();
   if (input.customer_id && !UUID_RE.test(String(input.customer_id))) {
     return { error: 'A valid customer_id is required', code: 'invalid_target' };
   }
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  const invoice = await database('invoices').where({ id: invoiceId }).first();
   const unavailable = { error: 'That invoice is unavailable for this customer', code: 'record_unavailable' };
   if (!invoice) return unavailable;
   if (input.customer_id && String(input.customer_id).toLowerCase() !== String(invoice.customer_id)) return unavailable;
@@ -742,21 +792,22 @@ async function getInvoiceDetail(input, actionContext) {
   if (scope.length && !scope.map(String).includes(String(invoice.customer_id))) {
     return { error: 'Choose the target for this lookup; the current request has not established it', code: 'target_clarification_required' };
   }
-  const customer = await db('customers').where({ id: invoice.customer_id }).first('id', 'first_name', 'last_name', 'phone', 'deleted_at');
+  const customer = await database('customers').where({ id: invoice.customer_id }).first('id', 'first_name', 'last_name', 'phone', 'deleted_at');
   if (!customer || customer.deleted_at) return unavailable;
 
   const today = etDateString();
-  const fence = await invoiceCollectibility(invoice);
+  const fence = await invoiceCollectibility(invoice, database);
+  if (fence.state === 'unavailable') return { error: `That invoice is unavailable: ${RECORD_CHANGED_REASON}`, code: 'record_unavailable' };
   const facts = effectiveRow(invoice, fence);
-  const recorded = await loadRecordedPayments(customer.id, invoice);
-  const plans = await db('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(PLAN_HISTORY_CAP + 1)
+  const recorded = await loadRecordedPayments(customer.id, facts, database);
+  const plans = await database('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(PLAN_HISTORY_CAP + 1)
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
-  const hold = await readDisputeHold(customer.id);
+  const hold = await readDisputeHold(customer.id, database);
 
   let prepayTerm = null;
   const termId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
   if (termId) {
-    prepayTerm = await db('annual_prepay_terms').where({ id: termId }).first('id', 'status', 'term_start', 'term_end', 'prepay_amount');
+    prepayTerm = await database('annual_prepay_terms').where({ id: termId }).first('id', 'status', 'term_start', 'term_end', 'prepay_amount');
   }
 
   const lines = lineItems(facts.line_items);

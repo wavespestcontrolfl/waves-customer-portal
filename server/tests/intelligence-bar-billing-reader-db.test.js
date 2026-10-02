@@ -146,6 +146,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('payment_plans').insert({ customer_id: L, invoice_id: leakInvoice.id, total_balance: 20, payment_amount: 5, payment_frequency: MID, status: MID, plan_start_date: day(0), next_payment_date: day(7) });
     // Digit-heavy record ids must survive the egress scrubber (it would read 16 digits as a card number).
     N = '98765432-9876-4987-8987-987654321098';
+    // Fixed ids survive in the scratch database between runs: clear the previous run's rows first.
+    await db('invoices').where({ customer_id: N }).del();
+    await db('customers').where({ id: N }).del();
     await db('customers').insert({ id: N, first_name: `Numeric${run}`, last_name: `Ids${run}`, phone: `+1555${digits()}1`.slice(0, 12), address_line1: '100 Example Court' });
     await invoice('n_numeric', N, { id: '12345678-1234-4123-8123-123456789012', total: 12 });
     // More payment plans than the history shows.
@@ -273,7 +276,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       // Fence passes -> collectible, even for the invoice the real fence holds.
       const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
       expect(by(list, 'amb')).toMatchObject({ collectible: true, balance_due: 45 });
-      expect(spy).toHaveBeenCalledWith(inv.amb.id, db, { readOnly: true });
+      expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true });
+      // ... on the call's snapshot connection, not the pool.
+      expect(spy.mock.calls.find(([id]) => id === inv.amb.id)[1]).not.toBe(db);
       // An attached PaymentIntent still holds it: the reader cannot confirm that outcome.
       expect(by(list, 'open')).toMatchObject({ collectible: false, balance_due: null });
       // Terminal invoices never reach the second fence.
@@ -298,7 +303,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('account summary: total_due adds up only collectible invoices; reconciliation and other holds are counted apart', async () => {
     const { account_summary: summary } = await read('get_customer_invoices', { customer_id: A });
     // credited 100 + draft 40 + fillers 10+11+12+13 + failsup 66 (archived excluded; open, amb, orphan, failamb held by the fence; paid, void, processing terminal).
-    expect(summary).toMatchObject({ total_due: 252, needs_reconciliation_count: 4, not_yet_sent_due: 40, overdue_count: 1, outstanding_count: 11 });
+    expect(summary).toMatchObject({ total_due: 252, needs_reconciliation_count: 4, not_yet_sent_due: 40, overdue_count: 0, outstanding_count: 11 });
+    // The one overdue invoice is held by the fence, so it is not counted as overdue (never a raw status count).
     expect(summary.dispute_hold).toMatchObject({ active: false });
     expect(summary.unknown).toMatch(/4 invoice\(s\) \(unpaid or processing\) need reconciliation and are NOT in total_due/);
     expect(summary).toMatchObject({ credit_balance: 25 });
@@ -387,6 +393,76 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       expect(summary.total_due).toBeNull();
       expect(summary.unknown).toMatch(/More than 100 unpaid invoices to check for reconciliation/);
     } finally { spy.mockRestore(); }
+  });
+
+  test('overdue_count counts collectible overdue invoices only', async () => {
+    const b = await read('get_customer_invoices', { customer_id: B });
+    expect(b.account_summary.overdue_count).toBe(1);
+    expect(by(b, 'b_open')).toMatchObject({ overdue: true, collectible: true });
+    const a = await read('get_customer_invoices', { customer_id: A });
+    expect(by(a, 'open')).toMatchObject({ overdue: null, collectible: false });
+    expect(a.account_summary.overdue_count).toBe(0);
+  });
+
+  test('each call runs in ONE read-only REPEATABLE READ snapshot: a commit mid-call is invisible to every read', async () => {
+    const InvoiceService = require('../services/invoice');
+    const original = InvoiceService.list.bind(InvoiceService);
+    let flipped = false;
+    const modes = new Set();
+    // After the page is read, another connection pays the invoice and commits: the rest of the call must not see it.
+    const spy = jest.spyOn(InvoiceService, 'list').mockImplementation(async (params) => {
+      const result = await original(params);
+      const { rows: [mode] } = await params.database.raw("select current_setting('transaction_isolation') as isolation, current_setting('transaction_read_only') as read_only");
+      modes.add(`${mode.isolation}/${mode.read_only}/${params.database.isTransaction}`);
+      if (!flipped && params.limit !== 100) {
+        flipped = true;
+        await db('invoices').where({ id: inv.credited.id }).update({ status: 'paid', credit_applied: 150 });
+      }
+      return result;
+    });
+    try {
+      const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
+      expect(by(list, 'credited')).toMatchObject({ status: 'sent', credit_applied: 50, collectible: true, balance_due: 100 });
+      expect(list.account_summary.total_due).toBe(252);
+      // Every list read ran on the call's one connection: a read-only REPEATABLE READ transaction.
+      expect([...modes]).toEqual(['repeatable read/on/true']);
+      expect(new Set(spy.mock.calls.map(([params]) => params.database)).size).toBe(1);
+    } finally {
+      spy.mockRestore();
+      await db('invoices').where({ id: inv.credited.id }).update({ status: 'sent', credit_applied: 50 });
+    }
+    // The next call sees the restored state like any other.
+    expect(by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'credited')).toMatchObject({ collectible: true, balance_due: 100 });
+  });
+
+  test('an invoice that changed hands during the read is unavailable: left out of the list, the totals and the detail, never shown under the old header', async () => {
+    const payCombined = require('../services/pay-combined');
+    const original = payCombined.memberCollectionPending;
+    const spy = jest.spyOn(payCombined, 'memberCollectionPending').mockImplementation(async (invoice, options) => (
+      String(invoice.id) === String(inv.credited.id) ? { reason: 'customer_changed' } : original(invoice, options)));
+    try {
+      const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
+      expect(by(list, 'credited')).toBeUndefined();
+      expect(list.unavailable_invoices).toEqual([{ id: inv.credited.id, reason: 'this record changed hands during the read; ask again' }]);
+      expect(list.account_summary.total_due).toBe(152);
+      expect(list.account_summary.unknown).toMatch(/1 invoice\(s\) changed hands during the read/);
+      expect(list.unknowns.join(' ')).toMatch(/changed hands during the read/);
+      const detail = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+      expect(detail).toMatchObject({ code: 'record_unavailable' });
+      expect(detail.error).toMatch(/changed hands during the read; ask again/);
+      expect(json(detail)).not.toContain('Synthetic credited');
+    } finally { spy.mockRestore(); }
+  });
+
+  test('card numbers are masked whatever the separator, Luhn-valid or not; ISO dates, UUIDs and amounts are left alone', async () => {
+    const Q = await customer(`Cards${run}`, `Masked${run}`);
+    const masked = ['4111.1111.1111.1111', '4111/1111/1111/1111', '4111 1111 1111 1111', '4111_1111_1111_1111', '4111-1111.1111/1111', '4111111111111111', '378282246310005', '1234567890123', '1234 5678 9012 3456 78'];
+    for (const [n, number] of masked.entries()) await invoice(`q_card_${n}`, Q, { total: 5, title: `Paid with ${number} thanks` });
+    await invoice('q_kept', Q, { total: 5, title: 'Visit 2026-10-02 14:05:10 invoice 12.50 id 12345678-1234-4123-8123-123456789012 ok' });
+    const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
+    expect(text).not.toMatch(/4111|378282|1234567890123|1234 5678/);
+    expect((text.match(/Paid with \[number\] thanks/g) || []).length).toBe(masked.length);
+    expect(text).toContain('Visit 2026-10-02 14:05:10 invoice 12.50 id 12345678-1234-4123-8123-123456789012 ok');
   });
 
   test('a dispute hold is stated for that customer only, and a failed per-invoice lookup is unknown (null), never false', async () => {
