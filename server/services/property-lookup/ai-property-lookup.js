@@ -3486,7 +3486,33 @@ function shouldRequireManateeResultCityMatch(address) {
   return !(zip && MANATEE_ZIPS.has(zip));
 }
 
+// Two normalized route addresses name the same premise when house number,
+// route type/number and unit tail agree and the directions do not conflict:
+// a roll row that omits the typed direction ("9155 SR 70" vs typed
+// "9155 SR 70 E") is formatting variance, like the audit treats it; an
+// OPPOSITE direction ("SR 70 W") is a different road. Null when either side
+// is not a route address — callers keep their own rules for ordinary streets.
+function routeAddressMatch(normalizedAddress, target) {
+  const parse = (value) => {
+    const m = /^(\d+[A-Z]?)\s+(.+)$/.exec(String(value || ''));
+    if (!m) return null;
+    const label = stripUnitDesignators(m[2]);
+    const route = parseCountyRouteLabel(label);
+    if (!route) return null;
+    const tail = m[2].startsWith(label) ? m[2].slice(label.length).trim() : '';
+    return { house: m[1], route, tail, direction: route.postDirection || route.preDirection || null };
+  };
+  const a = parse(normalizedAddress);
+  const b = parse(target);
+  if (!a || !b) return null;
+  if (a.house !== b.house || a.route.type !== b.route.type || a.route.number !== b.route.number) return false;
+  if (a.tail !== b.tail) return false;
+  return !a.direction || !b.direction || a.direction === b.direction;
+}
+
 function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
+  const route = routeAddressMatch(normalizedAddress, target);
+  if (route !== null) return route;
   const targetSuffix = extractStreetSuffix(target);
   const resultSuffix = extractStreetSuffix(normalizedAddress);
   if (targetSuffix && resultSuffix !== targetSuffix) return false;
@@ -3622,9 +3648,14 @@ function isUniqueCountyAddressMatch(rows, address, requiresCityMatch) {
   const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
   if (!target || (requiresCityMatch && !targetCity)) return null;
 
-  const matches = rows
+  const normalizedRows = rows
     .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
-    .filter((row) => row.parcelId && row.situsAddress && row.normalizedAddress === target)
+    .filter((row) => row.parcelId && row.situsAddress);
+  // Exact equality first; only when nothing is exact may a route row that
+  // omits the typed direction stand in (routeAddressMatch) — and the
+  // uniqueness rule below still refuses an ambiguous pair.
+  const exact = normalizedRows.filter((row) => row.normalizedAddress === target);
+  const matches = (exact.length ? exact : normalizedRows.filter((row) => routeAddressMatch(row.normalizedAddress, target) === true))
     .filter((row) => {
       if (!targetCity) return true;
       const rowCity = normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress);

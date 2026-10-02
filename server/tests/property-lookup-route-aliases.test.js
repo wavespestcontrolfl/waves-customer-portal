@@ -17,7 +17,7 @@ jest.mock('../services/logger', () => ({
 const { auditAddressHouseNumber, _private } = require('../services/property-lookup/ai-property-lookup');
 const { routeSpellingVariants } = require('../services/property-lookup/route-spellings');
 
-const { addressHasSubpremise, FL_FLOOR_RE, normalizeCountyStreetLine, manateeAddressSearchCandidates, countyAddressSearchCandidates } = _private;
+const { addressHasSubpremise, FL_FLOOR_RE, normalizeCountyStreetLine, manateeAddressSearchCandidates, countyAddressSearchCandidates, pickManateeSearchResult, pickCharlotteAddressResult } = _private;
 const { queryStreetSitusAddresses } = require('../services/property-lookup/county-parcel-gis');
 
 describe('normalizeCountyStreetLine route aliases', () => {
@@ -363,5 +363,30 @@ describe('auditAddressHouseNumber on a numbered route', () => {
     mockRoll(['123 17TH ST E']);
     const east = await auditAddressHouseNumber('123 17th St E, Bradenton, FL 34202');
     expect(east).toMatchObject({ hasExactMatch: true });
+  });
+});
+
+describe('county result pickers on a route', () => {
+  const manatee = (situsList) => ({
+    cols: [{ title: 'Parcel ID' }, { title: 'Property Type' }, { title: 'Owner(s)' }, { title: 'Situs Address' }, { title: 'Postal City' }],
+    rows: situsList.map((situs, i) => [`90000020${i}`, 'COMMERCIAL', 'SYNTHETIC OWNER', situs, 'BRADENTON']),
+  });
+  const charlotte = (standards) => ({
+    features: standards.map((standard, i) => ({ attributes: { ACCOUNT: `40000000${i}`, STANDARD: standard, POSTOFFICE: 'PORT CHARLOTTE', ZIPCODE: '33948', ACTIVE: 'Y' } })),
+  });
+
+  test('a row that omits the typed direction is accepted ("9155 SR 70" for typed "9155 FL-70 E")', () => {
+    expect(pickManateeSearchResult(manatee(['9155 SR 70']), '9155 FL-70 E, Bradenton, FL 34202')).toMatchObject({ parcelId: '900000200' });
+    expect(pickCharlotteAddressResult(charlotte(['9155 SR 31']), '9155 FL-31 N, Port Charlotte, FL 33948')).toMatchObject({ parcelId: '400000000' });
+  });
+
+  test('an opposite direction is still refused', () => {
+    expect(pickManateeSearchResult(manatee(['9155 SR 70 W']), '9155 FL-70 E, Bradenton, FL 34202')).toBeNull();
+    expect(pickCharlotteAddressResult(charlotte(['9155 SR 31 S']), '9155 FL-31 N, Port Charlotte, FL 33948')).toBeNull();
+  });
+
+  test('an exact row wins over a direction-less one; two direction-less candidates stay ambiguous', () => {
+    expect(pickCharlotteAddressResult(charlotte(['9155 SR 31', '9155 SR 31 N']), '9155 FL-31 N, Port Charlotte, FL 33948')).toMatchObject({ parcelId: '400000001' });
+    expect(pickCharlotteAddressResult(charlotte(['9155 SR 31 STE 1', '9155 SR 31 STE 2']), '9155 FL-31 N, Port Charlotte, FL 33948')).toBeNull();
   });
 });
