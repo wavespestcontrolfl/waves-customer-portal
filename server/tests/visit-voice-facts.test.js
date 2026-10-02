@@ -59,6 +59,12 @@ const NOTE = 'Ghost ants on the kitchen counter and the back slider, light. Chec
   + 'Baited the counter edge and the slider track, sprayed around the outside of the house. Told her to keep the counters wiped.';
 
 const answer = (json) => ({ ok: true, json });
+// What one reading says about one place, whatever else the note holds the
+// sheet on: heard, unclear, or neither.
+const placeIn = (facts, label) => {
+  if (facts.areas.some((entry) => entry.area === label)) return 'heard';
+  return facts.unclearAreas.includes(label) ? 'unclear' : 'none';
+};
 
 afterEach(() => {
   mockDbCurrent = null;
@@ -87,8 +93,10 @@ describe('validateVoiceFacts', () => {
       pests: [{ name: 'spiders', quote: 'spiders in the eaves' }],
     }, NOTE);
     // A place heard on a quote the note does not hold is unresolved (the
-    // sheet holds), never recorded and never silently dropped.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null, unclearSpray: false, noSpray: false });
+    // sheet holds), never recorded and never silently dropped; so is what the
+    // note itself treats that the reading left out (outside, the ants, the
+    // spray around the house).
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Outside', 'Garage'], pests: [], unclearPests: ['ants'], spray: null, unclearSpray: true, noSpray: false });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -168,7 +176,7 @@ describe('validateVoiceFacts', () => {
     // A denied area is never recorded and never silently dropped: the sheet
     // asks for it plainly.
     // The perimeter heard on a denied quote is unclear too: never a spot treatment.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null, unclearSpray: true, noSpray: false });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], unclearPests: [], spray: null, unclearSpray: true, noSpray: false });
   });
 
   test('an inexact quote for a place never drops it silently', () => {
@@ -262,7 +270,7 @@ describe('validateVoiceFacts', () => {
       pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
       spray: { method: 'not_said', quote: '' },
     }, note);
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null, unclearSpray: false, noSpray: false });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false });
   });
 
   test('a negative earlier in the sentence is about something else (codex r5 on #5538)', () => {
@@ -296,9 +304,9 @@ describe('validateVoiceFacts', () => {
   test('a quote that calls its treatment undone, or denies its own place, is unclear (GitHub Codex P1 on #5538)', () => {
     const note = 'Left the garage untreated, sprayed outside. Sprayed outside but not the garage. Treated everything except inside.';
     const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
-    expect(read('garage', 'Left the garage untreated, sprayed outside')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
-    expect(read('garage', 'Sprayed outside but not the garage')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
-    expect(read('inside', 'Treated everything except inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(placeIn(read('garage', 'Left the garage untreated, sprayed outside'), 'Garage')).toBe('unclear');
+    expect(placeIn(read('garage', 'Sprayed outside but not the garage'), 'Garage')).toBe('unclear');
+    expect(placeIn(read('inside', 'Treated everything except inside'), 'Inside')).toBe('unclear');
     expect(read('outside', 'Sprayed outside but not the garage').areas.map((entry) => entry.area)).toEqual(['Outside']);
   });
 
@@ -356,8 +364,10 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'perimeter', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: null, unclearSpray: true });
     expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' }).spray).toMatchObject({ method: 'perimeter' });
     expect(read({ method: 'spot', quote: 'Spot sprayed the garage door frames' }).spray).toMatchObject({ method: 'spot' });
-    // "Spot" with where the spots were is a spot spray (pre-push P1).
-    expect(read({ method: 'spot', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: { method: 'spot' }, unclearSpray: false });
+    // "Spot" with where the spots were is a spot spray (pre-push P1), in a
+    // note that sprays nowhere else around the house.
+    expect(validateVoiceFacts({ areas: [], pests: [], spray: { method: 'spot', quote: 'Spot sprayed around the house where ants trailed' } }, 'Spot sprayed around the house where ants trailed.'))
+      .toMatchObject({ spray: { method: 'spot' }, unclearSpray: false });
   });
 
   test('a pest named after its sentence\'s treatment shares it (codex local r18 on #5538)', () => {
@@ -379,8 +389,8 @@ describe('validateVoiceFacts', () => {
   test('a place is judged by the treatment that governs it, across "and" (codex local r19 on #5538)', () => {
     const note = 'Sprayed outside and did not treat inside.';
     const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Sprayed outside and did not treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
-    expect(read('inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
-    expect(read('outside')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
+    expect(placeIn(read('inside'), 'Inside')).toBe('unclear');
+    expect(placeIn(read('outside'), 'Outside')).toBe('heard');
   });
 
   test('an observation between a treatment and a pest breaks the shared treatment (codex local r19 on #5538)', () => {
@@ -448,12 +458,12 @@ describe('validateVoiceFacts', () => {
     const note = 'Sprayed inside for ants, left the garage untreated. Sprayed around the house, garage untreated. The inside was left untreated, sprayed outside. The perimeter was left unsprayed, sprayed the kitchen.';
     const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
     const spray = (quote) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'perimeter', quote } }, note);
-    expect(area('inside', 'Sprayed inside for ants, left the garage untreated')).toMatchObject({ areas: [{ area: 'Inside' }], unclearAreas: [] });
-    expect(area('garage', 'Sprayed inside for ants, left the garage untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(placeIn(area('inside', 'Sprayed inside for ants, left the garage untreated'), 'Inside')).toBe('heard');
+    expect(placeIn(area('garage', 'Sprayed inside for ants, left the garage untreated'), 'Garage')).toBe('unclear');
     expect(spray('Sprayed around the house, garage untreated').spray).toMatchObject({ method: 'perimeter' });
     // The fact's own place, or way of spraying, undone in its own clause
     // still holds it.
-    expect(area('inside', 'The inside was left untreated, sprayed outside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(placeIn(area('inside', 'The inside was left untreated, sprayed outside'), 'Inside')).toBe('unclear');
     expect(spray('The perimeter was left unsprayed, sprayed the kitchen')).toMatchObject({ spray: null, unclearSpray: true });
   });
 
@@ -480,18 +490,18 @@ describe('validateVoiceFacts', () => {
   test('an undone word is said of what it names, never of another place in its clause (codex local r22 on #5538)', () => {
     const note = 'Sprayed inside for ants and left the garage untreated. Sprayed outside and the inside was left untreated. Sprayed outside, left the garage and the shed untreated.';
     const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
-    expect(area('inside', 'Sprayed inside for ants and left the garage untreated')).toMatchObject({ areas: [{ area: 'Inside' }], unclearAreas: [] });
-    expect(area('garage', 'Sprayed inside for ants and left the garage untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
-    expect(area('outside', 'Sprayed outside and the inside was left untreated')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
-    expect(area('inside', 'Sprayed outside and the inside was left untreated')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
-    expect(area('garage', 'Sprayed outside, left the garage and the shed untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(placeIn(area('inside', 'Sprayed inside for ants and left the garage untreated'), 'Inside')).toBe('heard');
+    expect(placeIn(area('garage', 'Sprayed inside for ants and left the garage untreated'), 'Garage')).toBe('unclear');
+    expect(placeIn(area('outside', 'Sprayed outside and the inside was left untreated'), 'Outside')).toBe('heard');
+    expect(placeIn(area('inside', 'Sprayed outside and the inside was left untreated'), 'Inside')).toBe('unclear');
+    expect(placeIn(area('garage', 'Sprayed outside, left the garage and the shed untreated'), 'Garage')).toBe('unclear');
   });
 
   test('a place is judged by the treatment of its own clause (codex local r18 on #5538)', () => {
     const note = 'Did not treat inside but sprayed outside for ants.';
     const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Did not treat inside but sprayed outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
-    expect(read('outside')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
-    expect(read('inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(placeIn(read('outside'), 'Outside')).toBe('heard');
+    expect(placeIn(read('inside'), 'Inside')).toBe('unclear');
   });
 
   test('a perimeter may name the house with ordinary words in between (codex local r18 on #5538)', () => {
@@ -513,8 +523,9 @@ describe('validateVoiceFacts', () => {
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
     expect(read({ method: 'perimeter', quote: 'sprayed around the house' })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
     expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' })).toMatchObject({ spray: { method: 'perimeter' }, unclearSpray: false });
-    // A spot quote that does not hold reads as no method, which is spot anyway.
-    expect(read({ method: 'spot', quote: 'spot sprayed the frames' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: false });
+    // A spot reading of a note that sprayed all the way around the house left
+    // the perimeter out: unclear (GitHub Codex on #5538).
+    expect(read({ method: 'spot', quote: 'spot sprayed the frames' })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });
 
   test('"didn\'t spray" in the note\'s own words is no spraying, and a spot spray its own words deny is unclear (GitHub Codex P1 on #5538)', () => {
@@ -522,9 +533,10 @@ describe('validateVoiceFacts', () => {
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
     expect(read({ method: 'none', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: false, noSpray: true });
     // Never on words the note does not hold (that is unclear, so the sheet
-    // asks), and "not said" is no claim at all.
+    // asks), and "not said" of a note that says it did not spray is unclear
+    // too, never a spot spray (GitHub Codex on #5538).
     expect(read({ method: 'none', quote: 'did not spray anything' })).toMatchObject({ noSpray: false, unclearSpray: true });
-    expect(read({ method: 'not_said', quote: '' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: false });
+    expect(read({ method: 'not_said', quote: '' })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
     expect(read({ method: 'spot', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });
 
@@ -540,9 +552,46 @@ describe('validateVoiceFacts', () => {
   });
 
   test('a malformed answer is no facts', () => {
-    const none = { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false };
-    expect(validateVoiceFacts(null, NOTE)).toEqual(none);
-    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual(none);
+    const none = { areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false };
+    const quietNote = 'Customer was not home; left a door hanger.';
+    expect(validateVoiceFacts(null, quietNote)).toEqual(none);
+    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, quietNote)).toEqual(none);
+  });
+
+  test('a place, pest or spray the note treats that the reading left out holds the sheet (GitHub Codex on #5538)', () => {
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed inside and outside' }],
+      pests: [{ name: 'ants', quote: 'for ants' }],
+      spray: { method: 'not_said', quote: '' },
+    }, 'Sprayed inside and outside for ants and roaches. Sprayed all the way around the house.');
+    expect(facts).toMatchObject({ unclearAreas: ['Inside'], unclearPests: ['roaches'], unclearSpray: true });
+    // Nothing is held for a place only looked at, a pest not treated for, or a
+    // spray the note denies at a place.
+    const quiet = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }],
+      spray: { method: 'spot', quote: 'Sprayed outside for ants' },
+    }, "Checked the bait stations inside, no roaches seen. Sprayed outside for ants. Didn't spray the garage.");
+    expect(quiet).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [], pests: [{ name: 'ants' }], unclearPests: [], unclearSpray: false });
+  });
+
+  test('a place only looked at, or a quote naming only another place, is unclear (GitHub Codex on #5538)', () => {
+    const note = 'Checked the bait stations inside; treated outside for ants.';
+    const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }, { area: 'outside', quote: 'treated outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(placeIn(read('inside', 'Checked the bait stations inside'), 'Inside')).toBe('unclear');
+    expect(placeIn(read('inside', 'treated outside'), 'Inside')).toBe('unclear');
+    expect(placeIn(read('outside', 'treated outside for ants'), 'Outside')).toBe('heard');
+  });
+
+  test('a pest only seen is no target, alone or after another pest\'s treatment (GitHub Codex on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('Saw spiders by the shed but did not treat them; baited inside.', [{ name: 'spiders', quote: 'Saw spiders by the shed' }])).toEqual([]);
+    expect(read('Treated outside for spiders, and ants were seen in the kitchen.', [
+      { name: 'spiders', quote: 'Treated outside for spiders' },
+      { name: 'ants', quote: 'ants were seen in the kitchen' },
+    ])).toEqual(['spiders']);
+    // Seen, then treated in the next sentence, is a target.
+    expect(read('Saw roaches under the sink. Sprayed under the sink.', [{ name: 'roaches', quote: 'Saw roaches under the sink' }])).toEqual(['roaches']);
   });
 });
 

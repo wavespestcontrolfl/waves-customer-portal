@@ -338,6 +338,12 @@ export function factsHold(facts) {
   if (facts.unclearSpray) {
     return 'It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.';
   }
+  // A pest the note treats for that was not heard: never left off the
+  // products' targets (Codex #5538).
+  const unclearPests = facts.unclearPests || [];
+  if (unclearPests.length) {
+    return `It isn’t clear whether you treated for ${joinAnd(unclearPests)}. Say plainly which pests you treated for, then write it again.`;
+  }
   if (!facts.areas.length) return 'Say where you treated (inside, outside or garage) in your note, then write it again.';
   // Every product goes on the record with the pests it was for, as the
   // re-service sheet requires a pest; none heard means none would be recorded.
@@ -354,6 +360,7 @@ function HeardLine({ facts }) {
     unclear.length ? `not clear: ${joinAnd(unclear.map((area) => area.toLowerCase()))}` : '',
     SPRAY_HEARD[facts.spray] || (facts.unclearSpray ? 'not clear: how you sprayed' : '') || (facts.noSpray ? 'no spraying' : ''),
     facts.pests.length ? `for ${facts.pests.join(', ')}` : '',
+    (facts.unclearPests || []).length ? `not clear: whether for ${joinAnd(facts.unclearPests)}` : '',
   ].filter(Boolean);
   return (
     <p className="tech-visit-muted" data-testid="fast-complete-heard">

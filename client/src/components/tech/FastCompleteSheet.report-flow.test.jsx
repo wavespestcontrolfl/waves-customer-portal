@@ -296,6 +296,14 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
+  test('a pest the note treats for that was not heard holds the send (GitHub Codex on #5538)', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: ['ants'], unclearPests: ['roaches'], spray: 'spot', unclearSpray: false } }));
+    await generate();
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · spot spraying · for ants · not clear: whether for roaches');
+    expect(screen.getByText('It isn’t clear whether you treated for roaches. Say plainly which pests you treated for, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
   test('a perimeter heard but not held up by the note holds the send, never a spot treatment (GitHub Codex P1)', async () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [], spray: null, unclearSpray: true } }));
     await generate();

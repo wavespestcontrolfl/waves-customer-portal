@@ -31,6 +31,7 @@
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
+const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
 // Bump on any prompt or schema change.
 const VOICE_FACTS_VERSION = 'visit-voice-facts-v6';
@@ -221,9 +222,28 @@ const SENTENCE_BREAK_RE = /[.!?;\n]/g;
 // stations"): nothing, or only an article.
 const PHRASE_GAP_RE = /^\s*(?:(?:the|a|an|some|more)\s+)*$/;
 const OBSERVATION_WORDS_RE = /\b(?:saw|see|sees|seen|seeing|noticed|notice|found|find|spotted|observed|checked|check(?:ing)?|inspected|inspect(?:ing)?|looked|look(?:ing)?|heard|showed|shows)\b/;
-function wordsIn(note, from, to, re, kind) {
-  return [...note.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
-    .map((m) => ({ kind, at: from + m.index, end: from + m.index + m[0].length }));
+// A treatment word that names a thing ("bait stations", "the bait", "glue
+// boards", "granules") is not something done: "checked the bait stations
+// inside" only looked inside (Codex #5538). Every other treatment word is an
+// action: sprayed, treated, baited, dusted, placed, applied, spread...
+const OBJECT_WORD_RE = /^(?:baits|stations?|glue boards?|granules?|granular|treatments?|placements?)$/;
+const ARTICLE_BEFORE_RE = /\b(?:the|a|an|some|more|any|their|his|her|my|our|of)\s+$/;
+function isActionWord(text, at, word) {
+  if (OBJECT_WORD_RE.test(word)) return false;
+  if (/^(?:bait|spray|dust)$/.test(word)) {
+    if (ARTICLE_BEFORE_RE.test(text.slice(0, at))) return false;
+    if (/^\s+stations?\b/.test(text.slice(at + word.length))) return false;
+  }
+  return true;
+}
+// The action and observation words between two offsets, in order.
+function governingWords(text, from, to) {
+  const scan = (re, kind) => [...text.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
+    .map((m) => ({ kind, at: from + m.index, end: from + m.index + m[0].length, word: m[0] }));
+  return [
+    ...scan(TREATMENT_WORD_RE, 'treatment').filter((w) => isActionWord(text, w.at, w.word)),
+    ...scan(OBSERVATION_WORDS_RE, 'observation'),
+  ].sort((a, b) => a.at - b.at);
 }
 function treatedInSentence(name, note, others) {
   const breaksOf = (re) => [...note.matchAll(re)].map((m) => m.index);
@@ -253,15 +273,16 @@ function treatedInSentence(name, note, others) {
     const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
     const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
     const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
-    const words = [...wordsIn(note, start, stop, TREATMENT_WORD_RE, 'treatment'), ...wordsIn(note, start, stop, OBSERVATION_WORDS_RE, 'observation')]
-      .sort((a, b) => a.at - b.at);
-    if (!words.length) {
-      // A sentence that names the pests and nothing done to them ("the
-      // target pests were ants and roaches") takes the next treatment in the
-      // note, else the last one before it, unless the note denies it or it
-      // names another pest heard (codex local r23 on #5538).
-      const all = wordsIn(note, 0, note.length, TREATMENT_WORD_RE, 'treatment');
-      const tie = all.find((w) => w.at >= stop) || all.filter((w) => w.end <= start).pop();
+    const words = governingWords(note, start, stop);
+    if (!words.some((w) => w.kind === 'treatment')) {
+      // A sentence that does nothing to the pests takes the next treatment in
+      // the note, unless the note denies it or it names another pest heard:
+      // one that only names them ("the target pests were ants and roaches",
+      // codex local r23 on #5538) or only saw them ("saw roaches under the
+      // sink. Sprayed under the sink."). One that does not even see them
+      // takes, failing that, the last treatment before it.
+      const all = governingWords(note, 0, note.length).filter((w) => w.kind === 'treatment');
+      const tie = all.find((w) => w.at >= stop) || (words.length ? null : all.filter((w) => w.end <= start).pop());
       return !!tie && undenied(tie) && !namesAnother(tie);
     }
     const before = words.filter((w) => w.end <= at);
@@ -269,9 +290,36 @@ function treatedInSentence(name, note, others) {
     if (nearest?.kind === 'treatment') return undenied(nearest);
     const next = words.find((w) => w.at >= end && w.kind === 'treatment');
     if (next) return undenied(next) && !namesAnother(next);
+    // A pest an observation follows in its own clause was only seen ("ants
+    // were seen in the kitchen"): an earlier treatment is not its (Codex
+    // #5538).
+    const clauseEnd = Math.min(stop, ...clauseBreaks.filter((i) => i >= end));
+    const seenAfter = words.find((w) => w.at >= end && w.at < clauseEnd)?.kind === 'observation';
     const earlier = before.pop();
-    return !nearest && earlier?.kind === 'treatment' && undenied(earlier);
+    return !nearest && !seenAfter && earlier?.kind === 'treatment' && undenied(earlier);
   });
+}
+
+// The pests the note ties to a treatment in the catalog's own pest words
+// (treatment-target-vocabulary.js, and the common names technicians say:
+// roaches, bees, rodents) that no heard pest covers: the reading left them
+// out, so the sheet holds rather than record a product's targets without
+// them (Codex #5538).
+const singularPestWord = (word) => (/(?:mice|lice|fish)$/.test(word)
+  ? word
+  : word.replace(/ies$/, 'y').replace(/(ch|sh|x|o)es$/, '$1').replace(/s$/, ''));
+const PEST_WORDS = [...new Set([
+  ...PEST_TARGET_SUGGESTIONS
+    .flatMap((target) => target.toLowerCase().split(/\s*[&/()]\s*/))
+    .map((part) => part.trim().split(/[\s-]+/).pop()),
+  'roaches', 'bees', 'rodents',
+].filter((word) => word && word.length >= 3 && word !== 'bugs'))];
+function pestsLeftOut(note, heardNames) {
+  const heard = heardNames.map(singularPestWord);
+  const covered = (word) => heard.some((name) => name.includes(word) || word.includes(name));
+  return PEST_WORDS.flatMap((plural) => [...new Set([plural, singularPestWord(plural)])])
+    .filter((word) => !covered(singularPestWord(word)) && treatedInSentence(word, note, heardNames))
+    .filter((word, index, all) => all.findIndex((other) => singularPestWord(other) === singularPestWord(word)) === index);
 }
 
 // A quote that calls its own treatment undone never counts, read where the
@@ -326,6 +374,42 @@ function undoneInQuote(quote, { assertion, subject }) {
 // "instead of".
 const AREA_WORDS = { inside: 'inside|interior|indoors', outside: 'outside|exterior|outdoors|perimeter', garage: 'garage' };
 const AREA_PLACE_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [area, new RegExp(String.raw`\b(?:${words})\b`)]));
+
+// What a place is governed by at a mention: the action or observation word
+// nearest before it in its clause, else the nearest after it ("inside:
+// sprayed"). An observation deciding means it was only looked at ("checked
+// the bait stations inside", Codex #5538); a clause with neither (just "glue
+// boards in the garage") is left to the quote's own treatment word.
+function placeGovernor(text, at, end) {
+  const { from, to } = clauseBounds(text, at);
+  const words = governingWords(text, from, to);
+  return words.filter((w) => w.end <= at).pop() || words.find((w) => w.at >= end) || null;
+}
+function placeOnlyLookedAt(area, quote) {
+  const place = AREA_PLACE_RE[area].exec(quote);
+  return !!place && placeGovernor(quote, place.index, place.index + place[0].length)?.kind === 'observation';
+}
+// A quote that names another place in its plain words and never this one is
+// that place's: { area: 'inside', quote: 'treated outside' } (Codex #5538).
+function namesOnlyAnotherPlace(area, quote) {
+  return !AREA_PLACE_RE[area].test(quote)
+    && AREA_ORDER.some((other) => other !== area && AREA_PLACE_RE[other].test(quote));
+}
+// The places the note itself says were treated, in their plain words,
+// whatever the reading listed (Codex #5538): a mention an action governs that
+// the note neither denies nor calls undone. Never "inside the garage" (the
+// garage's), a place a denial or "except" names, or one only looked at.
+function placesTreatedInNote(note) {
+  return new Set(AREA_ORDER.filter((area) => [...note.matchAll(new RegExp(AREA_PLACE_RE[area].source, 'g'))].some((m) => {
+    const at = m.index;
+    const end = at + m[0].length;
+    if (area !== 'garage' && /^\s+(?:the\s+)?garage\b/.test(note.slice(end))) return false;
+    const { from, to } = clauseBounds(note, at);
+    if (AREA_DENIED_RE[area].test(note.slice(from, end)) || UNDONE_RE.test(note.slice(from, to))) return false;
+    const governor = placeGovernor(note, at, end);
+    return governor?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at));
+  })));
+}
 const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [
   area,
   new RegExp(String.raw`\b(?:${DENIAL_WORDS}|except|but\s+not|other\s+than|instead\s+of)\s+(?:(?:in|on|at|to)\s+)?(?:the\s+|a\s+|any\s+)?(?:${words})\b`),
@@ -403,8 +487,15 @@ function validateVoiceFacts(json, note) {
     // treated inside): never recorded, and never silently dropped either,
     // since a missed indoor treatment loses the customer's indoor wait. The
     // sheet holds until the note is read again or the tech says it plainly.
-    if (!read || read.denied || !treatmentAssertion(read.quote) || AREA_DENIED_RE[entry.area].test(read.quote)) unresolvedAreas.add(entry.area);
+    if (!read || read.denied || !treatmentAssertion(read.quote) || AREA_DENIED_RE[entry.area].test(read.quote)
+      || placeOnlyLookedAt(entry.area, read.quote) || namesOnlyAnotherPlace(entry.area, read.quote)) unresolvedAreas.add(entry.area);
     else if (!heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
+  }
+  // A place the note says was treated that the reading left out holds the
+  // sheet too: a missed indoor treatment loses the customer's indoor wait
+  // (Codex #5538).
+  for (const area of placesTreatedInNote(grounding)) {
+    if (!heardAreas.has(area)) unresolvedAreas.add(area);
   }
   const pests = new Map();
   for (const entry of listOf(answer.pests)) {
@@ -413,21 +504,20 @@ function validateVoiceFacts(json, note) {
     if (!name || pests.has(name)) continue;
     if (!deniedInNote(quote, grounding, { assertion: nameAssertion(name), denialAfter: TRAILING_DENIAL.pest })) pests.set(name, quote);
   }
-  // Every product's targets come from these. A single pest is the note's one
-  // subject, unless its own words deny the treatment ("didn't treat for
-  // roaches"). With more than one pest heard, each must be tied to a
-  // treatment by its sentence (treatedInSentence) whatever its quote holds,
-  // so one only seen ("saw ants inside") is left out (Codex #5538), even when
-  // its quote is the whole sentence ("treated for ants outside and saw
-  // roaches inside", pre-push P1 on #5538).
+  // Every product's targets come from these. Each pest heard, one alone too,
+  // must be tied to a treatment by its sentence (treatedInSentence) whatever
+  // its quote holds, so one only seen ("saw spiders by the shed but did not
+  // treat them") is left out (Codex #5538), even when its quote is the whole
+  // sentence ("treated for ants outside and saw roaches inside", pre-push P1
+  // on #5538).
   const heardNames = [...pests.keys()];
-  const targets = [...pests].filter(([name, quote]) => (pests.size === 1
-    ? !treatmentAssertion(quote) || !deniedInNote(quote, grounding, TREATMENT_FACT)
-    : treatedInSentence(name, grounding, heardNames.filter((other) => other !== name))));
+  const targets = [...pests].filter(([name]) => treatedInSentence(name, grounding, heardNames.filter((other) => other !== name)));
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
     pests: targets.slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
+    // Pests the note treats for that the reading left out (Codex #5538).
+    unclearPests: pestsLeftOut(grounding, heardNames),
     ...readSpray(answer.spray || {}, grounding),
   };
 }
@@ -457,19 +547,43 @@ const SPRAY_SUBJECT = { perimeter: PERIMETER_WORDS_RE, spot: SPOT_WORDS_RE };
 // spray whose own words deny it. "Didn't spray" said in so many words is
 // noSpray (its quote is the denial, so only its grounding is checked): the
 // sheet then holds while a spray product is still on the visit.
+// What the note itself says about spraying, whatever the reading chose
+// (Codex #5538): a spray around the house (the perimeter words, governed by
+// a spray the note does not deny or call undone, in a clause that does not
+// say "spot"), and a spray it denies ("didn't spray today").
+const SPRAY_ACTION_RE = /^spray(?:ed|ing|s)?$/;
+function sprayInNote(note) {
+  const perimeter = [...note.matchAll(new RegExp(PERIMETER_WORDS_RE.source, 'g'))].some((m) => {
+    const { from, to } = clauseBounds(note, m.index);
+    if (SPOT_WORDS_RE.test(note.slice(from, to)) || UNDONE_RE.test(note.slice(from, to))) return false;
+    const governor = placeGovernor(note, m.index, m.index + m[0].length);
+    return governor?.kind === 'treatment' && SPRAY_ACTION_RE.test(governor.word)
+      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at));
+  });
+  const denied = [...note.matchAll(/\bspray(?:ed|ing|s)?\b/g)].some((m) => DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, m.index)));
+  return { perimeter, denied };
+}
+
 function readSpray(spray, grounding) {
+  const said = sprayInNote(grounding);
   if (spray.method === 'none') {
     // Heard but not in the note's words: unclear, so the sheet asks rather than
     // record the house mix as sprayed.
     const grounded = !!groundedQuote(spray.quote, grounding);
     return { spray: null, unclearSpray: !grounded, noSpray: grounded };
   }
-  const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, { ...TREATMENT_FACT, subject: SPRAY_SUBJECT[spray.method] });
+  // Not said, or not a method: a note that says how (around the house) or
+  // that it did not spray holds the sheet rather than record a spot spray.
+  if (!SPRAY_METHODS.has(spray.method)) return { spray: null, unclearSpray: said.perimeter || said.denied, noSpray: false };
+  const read = readQuote(spray.quote, grounding, { ...TREATMENT_FACT, subject: SPRAY_SUBJECT[spray.method] });
   const contradicted = !!read && !METHOD_SUPPORTED[spray.method](read.quote);
   const holds = !!read && !read.denied && !contradicted;
   return {
     spray: holds ? { method: spray.method, quote: read.quote } : null,
-    unclearSpray: (spray.method === 'perimeter' && !holds) || (spray.method === 'spot' && (!!read?.denied || contradicted)),
+    // A spot reading of a note that also sprayed around the house left the
+    // perimeter (and its trace) out: unclear too.
+    unclearSpray: (spray.method === 'perimeter' && !holds)
+      || (spray.method === 'spot' && (!!read?.denied || contradicted || said.perimeter)),
     noSpray: false,
   };
 }
@@ -484,8 +598,8 @@ function readSpray(spray, grounding) {
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false,
-    heard: { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false }, version: VOICE_FACTS_VERSION,
+    status, areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false,
+    heard: { areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
@@ -514,6 +628,8 @@ async function readVoiceFacts(note) {
     // Heard, but not held up by the note: the sheet asks for it plainly.
     unclearAreas: heard.unclearAreas,
     pests: heard.pests.map((entry) => entry.name),
+    // Treated for, in the note, but not heard: the sheet asks for them plainly.
+    unclearPests: heard.unclearPests,
     // 'perimeter' | 'spot' | null (not said)
     spray: heard.spray?.method || null,
     // A spray heard that the note does not hold up: the sheet asks for it

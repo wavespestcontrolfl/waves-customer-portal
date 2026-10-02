@@ -932,11 +932,12 @@ function useReportDraft({ request, base }) {
         areas: listOf(heard.areas),
         unclearAreas: listOf(heard.unclearAreas),
         pests: listOf(heard.pests),
+        unclearPests: listOf(heard.unclearPests),
         spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
         unclearSpray: heard.unclearSpray === true,
         noSpray: heard.noSpray === true,
       }
-      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false };
+      : { status: 'failed', areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false };
     if (sequence !== sequenceRef.current) return;
     const payload = buildPayload(facts);
     let written = null;
