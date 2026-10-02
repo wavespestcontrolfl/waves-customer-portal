@@ -50,6 +50,13 @@ jest.mock('../services/invoice', () => ({
   buildLineItemsForScheduledService: (...args) => mockBuildLineItems(...args),
 }));
 
+// Charge-now reads the deferred annual-prepay hold (PAF-D) and fails closed
+// on an unreadable answer; this suite's visit is not under one.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  pafDeferredPrepayCoversVisit: jest.fn(async () => false),
+}));
+
 const adminScheduleRouter = require('../routes/admin-schedule');
 
 const layer = adminScheduleRouter.stack.find(

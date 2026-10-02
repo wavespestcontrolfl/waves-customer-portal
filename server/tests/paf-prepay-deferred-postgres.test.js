@@ -316,6 +316,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect(text).toMatch(/nothing (is )?due today/);
     });
 
+    it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
+      const removed = await deferredAccept();
+      await trx('payment_methods').where({ id: removed.pmId }).del();
+      expect(await completeWithText(removed, removed.parentId)).not.toMatch(/being charged/);
+      const optedOut = await deferredAccept();
+      await trx('autopay_log').insert({ customer_id: optedOut.customerId, event_type: 'autopay_disabled', created_at: new Date() });
+      expect(await completeWithText(optedOut, optedOut.parentId)).not.toMatch(/being charged/);
+    });
+
     it('a later visit of a year already released keeps the regular text', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'pending' } });
       const text = await completeWithText(f, f.childId);
@@ -463,6 +472,18 @@ postgres('annual prepay charged after the first visit', () => {
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'visit', id: f.parentId } }),
         { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    it('a dead year never sends the office a visit it did not hold (a service the term does not cover)', async () => {
+      const f = await deferredAccept();
+      const otherId = randomUUID();
+      await trx('scheduled_services').insert({ id: otherId, customer_id: f.customerId, service_type: 'Mosquito Control',
+        scheduled_date: day(0), window_start: '11:00', window_end: '12:00', status: 'confirmed', estimated_price: 90,
+        source_estimate_id: f.estimateId });
+      await perform(otherId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_before_visit', reason: 'invoice_void' });
     });
 
     it('a failed due-date update leaves the job waiting for the next pass', async () => {
