@@ -576,6 +576,17 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'perimeter', quote: 'Sprayed around the house and did not bait the garage' })).toMatchObject({ spray: { method: 'perimeter' }, unclearSpray: false });
   });
 
+  test('"spot" qualifies only its own spray, so a mixed note never reads as spot alone (codex local r27 on #5538)', () => {
+    const mixed = 'Sprayed the perimeter outside for ants and spot sprayed inside for roaches.';
+    expect(validateVoiceFacts({ areas: [], pests: [], spray: { method: 'spot', quote: 'spot sprayed inside for roaches' } }, mixed))
+      .toMatchObject({ unclearSpray: true });
+    expect(validateVoiceFacts({ areas: [], pests: [], spray: { method: 'not_said', quote: '' } }, mixed))
+      .toMatchObject({ unclearSpray: true });
+    // An untreated place in the clause is that place's, never the perimeter's.
+    expect(validateVoiceFacts({ areas: [], pests: [], spray: { method: 'spot', quote: 'spot sprayed the kitchen' } },
+      'Sprayed around the house and left the garage untreated. Spot sprayed the kitchen.')).toMatchObject({ unclearSpray: true });
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;

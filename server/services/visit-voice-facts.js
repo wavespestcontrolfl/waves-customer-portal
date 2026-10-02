@@ -443,7 +443,7 @@ function placesTreatedInNote(note) {
     const end = at + m[0].length;
     if (area !== 'garage' && /^\s+(?:the\s+)?garage\b/.test(note.slice(end))) return false;
     const { from, to } = clauseBounds(note, at);
-    if (AREA_DENIED_RE[area].test(note.slice(from, end)) || UNDONE_RE.test(note.slice(from, to))) return false;
+    if (AREA_DENIED_RE[area].test(note.slice(from, end)) || undoneFor(note, from, to, AREA_PLACE_RE[area])) return false;
     const governor = placeGovernor(note, at, end);
     return governor?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at))
       && !notToday(note, governor.at);
@@ -606,14 +606,27 @@ function sprayAssertion(method) {
 // a spray the note does not deny or call undone, in a clause that does not
 // say "spot"), and a spray it denies ("didn't spray today").
 const SPRAY_ACTION_RE = /^spray(?:ed|ing|s)?$/;
+// An undone word in a clause undoes only what it is said of (undoneObject):
+// the subject's own words, or nothing named.
+function undoneFor(text, from, to, subjectRe) {
+  return [...text.slice(from, to).matchAll(new RegExp(UNDONE_RE.source, 'g'))].some((u) => {
+    const object = undoneObject(text, from + u.index);
+    return !object || subjectRe.test(object);
+  });
+}
 const SPRAY_WORD_RE = /\bspray(?:ed|ing|s)?\b/;
 function sprayInNote(note) {
   const perimeter = [...note.matchAll(new RegExp(PERIMETER_WORDS_RE.source, 'g'))].some((m) => {
     const { from, to } = clauseBounds(note, m.index);
-    if (SPOT_WORDS_RE.test(note.slice(from, to)) || UNDONE_RE.test(note.slice(from, to))) return false;
+    if (undoneFor(note, from, to, PERIMETER_WORDS_RE)) return false;
     const governor = placeGovernor(note, m.index, m.index + m[0].length);
-    return governor?.kind === 'treatment' && SPRAY_ACTION_RE.test(governor.word)
-      && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at)) && !notToday(note, governor.at);
+    if (governor?.kind !== 'treatment' || !SPRAY_ACTION_RE.test(governor.word)) return false;
+    // "Spot" qualifies only the spray it stands on: "spot sprayed around the
+    // house where ants trailed" is spot, while "sprayed the perimeter outside
+    // for ants and spot sprayed inside" also sprayed the perimeter (codex
+    // local r27 on #5538).
+    if (/\bspot[\s-]*$/.test(note.slice(from, governor.at))) return false;
+    return !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, governor.at)) && !notToday(note, governor.at);
   });
   const denied = [...note.matchAll(/\bspray(?:ed|ing|s)?\b/g)].some((m) => DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, m.index)));
   return { perimeter, denied };
