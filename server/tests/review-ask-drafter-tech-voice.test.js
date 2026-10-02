@@ -57,6 +57,8 @@ function builder(table) {
     whereRaw() { return q; },
     whereNotNull() { return q; },
     orWhereNotNull() { return q; },
+    whereNot() { return q; },
+    orWhere(arg) { if (typeof arg === 'function') arg(q); return q; },
     orderBy() { return q; },
     limit() { return q; },
     modify(fn) { fn(q); return q; },
@@ -82,7 +84,7 @@ beforeEach(() => {
 });
 
 const INPUT = {
-  customer: { id: 'cust-1', first_name: 'Marta', email: 'marta@example.com' },
+  customer: { id: 'cust-1', first_name: 'Marta', email: 'marta@example.com', phone: '+19415550100' },
   recipientFirstName: 'Marta',
   serviceType: 'Cockroach Treatment Service',
   techName: 'Adam Benetti',
@@ -323,7 +325,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const hi = { ...GOOD, body: "Hi Mary-Jane. I know you had to get to work. A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(hi));
     judge([{ ask_only: false, greeting_only: true, supported: true, quotes: [] }, { ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: true, supported: false, quotes: [] }]);
-    expect(await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Mary-Jane', customer: { id: 'cust-1', first_name: 'Mary-Jane' } })).toBe(hi.body);
+    expect(await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Mary-Jane', customer: { id: 'cust-1', first_name: 'Mary-Jane', phone: '+19415550100' } })).toBe(hi.body);
   });
 
   test('GitHub r1: the fact check starts on the provider the writer did not use', async () => {
@@ -706,6 +708,25 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(text).not.toContain('tenant call');
     // r24: the recipient's number is passed into the call query (before its limit and transcript pick).
     expect(mockGetRecentCalls.mock.calls[0][1]).toMatchObject({ phone: '(941) 555-0100' });
+  });
+
+  test('#5524 r24 pre-push: the text history is narrowed to the recipient\'s own number in the query', async () => {
+    const raws = [];
+    db.mockImplementation((table) => {
+      const q = builder(table);
+      if (table === 'sms_log') {
+        const orig = q.where;
+        q.whereRaw = (sql, b) => { raws.push([sql, b]); return q; };
+        q.whereNot = () => q;
+        q.where = jest.fn((arg, ...rest) => { if (typeof arg === 'function') { arg(q); return q; } return orig(arg, ...rest); });
+        q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg(q); return q; });
+      }
+      return q;
+    });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    expect(raws.some(([sql, b]) => /from_phone/.test(sql) && b[0] === '9415550100')).toBe(true);
+    expect(raws.some(([sql, b]) => /to_phone/.test(sql) && b[0] === '9415550100')).toBe(true);
   });
 
   test('a bare link after a question stays with its sentence', () => {

@@ -220,7 +220,7 @@ function etCalendarDaysBetween(a, b) {
   return Math.max(0, Math.round((dayB - dayA) / 86400000));
 }
 
-async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY, before = null) {
+async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY, before = null, phone = null) {
   try {
     // Hide unresolved 'sending' placeholders (review-ask / manual / auto-send
     // reservations) the same way every other sms_log reader does: an ask the
@@ -235,6 +235,17 @@ async function recentSmsThread(customerId, limit = MAX_SMS_HISTORY, before = nul
       // Tech voice bounds history at the visit BEFORE the limit, so later
       // conversations can't fill the window and push the visit's own out.
       .modify((q) => { if (before) q.where("created_at", "<", before); })
+      // Tech voice: only texts with the recipient's own number (inbound from
+      // it, outbound to it), applied before the limit; another household
+      // contact on the same account is not the recipient.
+      .modify((q) => {
+        if (!phone) return;
+        const digits = String(phone).replace(/\D/g, "").slice(-10);
+        if (digits.length !== 10) { q.whereRaw("1 = 0"); return; }
+        q.where((w) => w
+          .where((x) => x.where("direction", "inbound").whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]))
+          .orWhere((x) => x.whereNot("direction", "inbound").whereRaw("right(regexp_replace(coalesce(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])));
+      })
       .orderBy("created_at", "desc")
       .limit(limit)
       .select("direction", "message_body", "created_at");
@@ -564,7 +575,7 @@ async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, s
   const before = window ? window.before : new Date(0);
   const [report, sms, calls, emails, priorTouches] = await Promise.all([
     serviceReportFacts(serviceRecordId),
-    recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY, before),
+    customer.phone ? recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY, before, customer.phone) : [],
     // The recipient's own number narrows the calls in the query itself.
     customer.phone ? ContextAggregator.getRecentCalls(customer.id, { before, phone: customer.phone }).catch(() => []) : [],
     customerOwnEmails(customer.id, before, customer.email),
