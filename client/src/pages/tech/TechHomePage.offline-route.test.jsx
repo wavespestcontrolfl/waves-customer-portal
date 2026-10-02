@@ -25,6 +25,7 @@ const row = (id, overrides = {}) => ({ id, technicianId: 'tech-fixture', custome
 const SAVED_AT = '2026-10-02T11:42:00.000Z';
 let scheduleMode; // 'ok' | 'offline' | 'server-error' | 'hang'
 let fetchMock;
+let deferredSchedule;
 
 function seedSnapshot(overrides = {}) {
   localStorage.setItem(ROUTE_SNAPSHOT_KEY, JSON.stringify({
@@ -46,10 +47,14 @@ function mount({ enabled = false, id = 'tech-fixture', path = '/tech' } = {}) {
 
 beforeEach(() => {
   scheduleMode = 'ok';
+  deferredSchedule = undefined;
   fetchMock = vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) {
       if (scheduleMode === 'offline') throw new TypeError('Failed to fetch');
       if (scheduleMode === 'hang') return new Promise(() => {});
+      if (scheduleMode === 'rejected-401') return { ok: false, status: 401, json: async () => ({ error: 'Session expired' }) };
+      if (scheduleMode === 'rejected-403') return { ok: false, status: 403, json: async () => ({ error: 'Not allowed' }) };
+      if (scheduleMode === 'deferred') return new Promise((resolve) => { deferredSchedule = resolve; });
       if (scheduleMode === 'server-error') return { ok: false, status: 503, json: async () => ({ error: 'Route connection unavailable' }) };
       return { ok: true, status: 200, json: async () => ({ services: [row('live-one'), row('foreign', { technicianId: 'other-tech' })], rainChance: 10, visitCloseout: true }) };
     }
@@ -141,6 +146,43 @@ it('keeps the real error when the server answered or the snapshot belongs to som
   mount();
   await screen.findByText(/Your route could not be loaded/);
   expect(screen.queryByText(/Fixture saved-one/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ['401', 'rejected-401', null],
+  ['403', 'rejected-403', 'fixture-only'],
+])('deletes the saved route when the server rejects the route read with %s', async (_label, mode, tokenAfter) => {
+  seedSnapshot();
+  scheduleMode = mode;
+  mount();
+  await waitFor(() => expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull());
+  // A 401 also ends the session; a 403 keeps the login but not the route.
+  expect(localStorage.getItem('waves_admin_token')).toBe(tokenAfter);
+  expect(screen.queryByText(/Fixture saved-one/)).not.toBeInTheDocument();
+});
+
+it('never saves a route reply that lands after the session ended', async () => {
+  scheduleMode = 'deferred';
+  mount();
+  await waitFor(() => expect(deferredSchedule).toBeTypeOf('function'));
+  localStorage.removeItem('waves_admin_token');
+  localStorage.removeItem('waves_admin_user');
+  await act(async () => {
+    deferredSchedule({ ok: true, status: 200, json: async () => ({ services: [row('late-one')], rainChance: 0 }) });
+  });
+  expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull();
+  expect(screen.queryByText(/Fixture late-one/)).not.toBeInTheDocument();
+});
+
+it('never saves a route reply that lands after the page unmounted', async () => {
+  scheduleMode = 'deferred';
+  const view = mount();
+  await waitFor(() => expect(deferredSchedule).toBeTypeOf('function'));
+  view.unmount();
+  await act(async () => {
+    deferredSchedule({ ok: true, status: 200, json: async () => ({ services: [row('late-one')], rainChance: 0 }) });
+  });
+  expect(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).toBeNull();
 });
 
 it('falls back to the saved route when the live request times out', async () => {

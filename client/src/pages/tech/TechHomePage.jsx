@@ -63,7 +63,7 @@ import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
@@ -374,8 +374,12 @@ export default function TechHomePage({ section = 'today' }) {
     // off and fall back to the saved route (below) instead.
     const abort = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = abort ? setTimeout(() => abort.abort(), ROUTE_FETCH_TIMEOUT_MS) : null;
+    const token = getAdminAuthToken();
+    // A reply that lands after this login ended (logout here or in another
+    // tab, a different login since) must not write the route back to the
+    // device or onto the screen.
+    const sessionEnded = () => getAdminAuthToken() !== token;
     try {
-      const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
         ...(abort ? { signal: abort.signal } : {}),
@@ -392,8 +396,8 @@ export default function TechHomePage({ section = 'today' }) {
         if (res.ok) throw Object.assign(bodyErr instanceof Error ? bodyErr : new Error('Route body unreadable'), { bodyRead: true });
         data = {};
       }
-      if (seq !== scheduleSeq.current) return;
-      if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      if (seq !== scheduleSeq.current || sessionEnded()) return;
+      if (!res.ok) throw Object.assign(new Error(data.error || `Route failed to load (${res.status})`), { status: res.status });
       if (!isSchedulePayload(data)) throw Object.assign(new Error('Route payload unreadable'), { bodyRead: true });
       const next = scheduleStateFromResponse(data);
       setScheduleError('');
@@ -409,7 +413,20 @@ export default function TechHomePage({ section = 'today' }) {
         services: scheduleRowsFromResponse(data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
       } });
     } catch (err) {
-      if (seq !== scheduleSeq.current) return;
+      // The server refused this login's route: the saved copy goes now, and
+      // a 401 ends the session so an offline reopen cannot unlock the shell
+      // from the stored profile either. Skipped when another login has taken
+      // over since the request left.
+      const ended = sessionEnded();
+      if ((err?.status === 401 || err?.status === 403) && !ended) {
+        clearStaffDeviceData();
+        if (err.status === 401) {
+          localStorage.removeItem('waves_admin_token');
+          localStorage.removeItem('adminToken');
+          localStorage.removeItem('waves_admin_user');
+        }
+      }
+      if (seq !== scheduleSeq.current || ended) return;
       console.error('Failed to fetch schedule:', err);
       // Offline fallback: the last good route this tech loaded today, read
       // fresh each time (another tab or a later login may have replaced
@@ -442,6 +459,9 @@ export default function TechHomePage({ section = 'today' }) {
 
   useEffect(() => {
     fetchSchedule();
+    // Unmount (logout navigates away) orphans any read still in flight so
+    // it can neither set state nor save the route afterwards.
+    return () => { scheduleSeq.current += 1; };
   }, [fetchSchedule]);
 
   // Mark En Route — POST /api/tech/services/:id/en-route. The server
