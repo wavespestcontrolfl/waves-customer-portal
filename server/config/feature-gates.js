@@ -1154,6 +1154,15 @@ const gates = {
   // block and snapshot shape byte-identical. Read at call time by
   // server/services/sms-shadow-drafter.js — this entry is for logGateStatus only.
   smsOffersScheduler: gateEnvValue('GATE_SMS_OFFERS_SCHEDULER'),
+  // SMS offer ledger (SMS booking completion, slice 1 of
+  // sms-booking-complete-scope 2026-10-02): after the provider accepts a reply
+  // that quoted appointment times, record in sms_offers which slots the SENT
+  // text carried, for which job, and until when (services/sms-offers.js, called
+  // from messaging/send-customer-message.js). Records only: nothing reads the
+  // table to act, and no text changes. Dark in every environment: gate off, the
+  // send path does not load the ledger module. Read at call time by
+  // sms-offers.js offerLedgerLive() — this entry is for logGateStatus only.
+  smsOfferLedger: gateEnvValue('GATE_SMS_OFFER_LEDGER'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
