@@ -719,7 +719,10 @@ async function runInner({ now = new Date() } = {}) {
       copy.title,
       copy.why,
       { scheduled_service_id: row.id, customer_id: row.customer_id, issue, ...copy.metadata },
-      { link: copy.link, detail: copy.detail },
+      // Quiet refresh: a standing row (rung before this copy existed) takes the new title, why,
+      // link and metadata without ringing or changing its read state. A reopen after an
+      // auto-clear still rings (raiseAdminAlertWithReopen overrides ringOnRefresh).
+      { link: copy.link, detail: copy.detail, refreshOnDedupe: true, ringOnRefresh: () => false },
     ];
   }));
 

@@ -222,3 +222,79 @@ describe('estimate accepted bell', () => {
       subject: { type: 'estimate', id: 'e1' }, doneWhen: 'estimate_followed_up', who: 'person' }).headline).toBe('Estimates — John Cowley accepted Silver $104.98/mo');
   });
 });
+
+// Codex r1 P2: severity and lifecycle follow the accept's outcome. An accept with nothing to do
+// is an FYI row (needs-me leaves it out); only a real next step is needs-you, and its
+// done-when is a name that already exists elsewhere (no new predicate).
+describe('estimate accepted: severity follows the outcome', () => {
+  const base = { customerName: 'John Cowley', waveguardTier: 'Silver', monthlyTotal: 104.98 };
+  const needsYou = [
+    ['payer invoice not delivered', { payerBilled: true, invoiceLinkDelivered: false }, 'invoice_followed_up'],
+    ['commercial plan, office to schedule', { waveguardTier: 'Commercial' }, 'visit_booked'],
+    ['commercial plan, pay link sent', { waveguardTier: 'Commercial', invoicePayUrl: '/pay/x' }, 'visit_booked'],
+    ['recurring invoice not sent', { billByInvoice: true }, 'invoice_followed_up'],
+    ['one-time invoice not sent', { billByInvoice: true, treatAsOneTime: true, serviceLabel: 'Rodent Service' }, 'invoice_followed_up'],
+    ['one-time with no booking link or slot', { treatAsOneTime: true, serviceLabel: 'Rodent Service' }, 'visit_booked'],
+    ['annual prepay, no invoice', { billingTerm: 'prepay_annual', annualPrepayAmount: 660 }, 'invoice_followed_up'],
+    ['recurring fallthrough', {}, 'invoice_followed_up'],
+  ];
+  const nothingToDo = [
+    ['termite signature pending', { invoiceKind: 'annual_prepay_deferred' }],
+    ['payer invoice delivered', { payerBilled: true, invoiceLinkDelivered: true }],
+    ['settled by credit', { invoiceSettledByCredit: true }],
+    ['pay link going out (recurring)', { billByInvoice: true, invoiceMode: true, invoiceLinkDelivered: true }],
+    ['pay link going out (one-time)', { billByInvoice: true, invoiceMode: true, invoiceLinkDelivered: true, treatAsOneTime: true, serviceLabel: 'Rodent Service' }],
+    ['one-time appointment confirmed', { treatAsOneTime: true, serviceLabel: 'Rodent Service', reservationCommitted: true }],
+    ['one-time booking link sent', { treatAsOneTime: true, serviceLabel: 'Rodent Service', bookingUrl: '/book/x' }],
+    ['prepay paid by card', { billingTerm: 'prepay_annual', prepayChargeOutcome: 'paid' }],
+    ['prepay paid by credit', { billingTerm: 'prepay_annual', prepayChargeOutcome: 'paid', prepayCoveredByCredit: true }],
+    ['prepay bank processing', { billingTerm: 'prepay_annual', prepayChargeOutcome: 'processing' }],
+    ['prepay outcome ambiguous', { billingTerm: 'prepay_annual', prepayChargeOutcome: 'ambiguous' }],
+    ['prepay charge deferred', { billingTerm: 'prepay_annual', prepayChargeOutcome: 'deferred' }],
+    ['prepay invoice created', { billingTerm: 'prepay_annual', invoiceMode: true, invoiceLinkDelivered: true }],
+    ['setup fee deferred', { setupFeeDeferred: true }],
+    ['invoice created, pay link sent', { invoiceMode: true, invoiceLinkDelivered: true }],
+    ['invoice created, link not delivered', { invoiceMode: true, invoiceLinkDelivered: false }],
+    ['after-visit billing, auto pay off', { afterVisitBilling: true, afterVisitDisabled: true }],
+    ['after-visit billing, auto pay paused', { afterVisitBilling: true, afterVisitPaused: true }],
+    ['after-visit billing', { afterVisitBilling: true }],
+  ];
+
+  test.each(needsYou)('a real next step is needs-you with an existing done-when: %s', (_name, over, doneWhen) => {
+    const payload = buildAcceptNotificationPayload({ ...base, ...over });
+    expect(payload.adminDoneWhen).toBe(doneWhen);
+    expect(payload.adminWhy).toMatch(/[Nn]ext:/);
+  });
+
+  test.each(nothingToDo)('nothing to do carries no done-when: %s', (_name, over) => {
+    const payload = buildAcceptNotificationPayload({ ...base, ...over });
+    expect(payload.adminDoneWhen ?? null).toBeNull();
+    expect(payload.adminWhy).not.toMatch(/Next:/);
+  });
+
+  // The route's own raise, with the real composer: severity from adminDoneWhen, fyiRow so the
+  // bell still rings for every accept.
+  const raise = (over) => {
+    const payload = buildAcceptNotificationPayload({ ...base, ...over });
+    return require('../services/admin-alert-compose').raiseAdminAlert('estimate', {
+      area: 'Estimates', action: payload.adminAction, why: payload.adminWhy,
+      severity: payload.adminDoneWhen ? 'needs-you' : 'fyi', link: '/admin/estimates?estimateId=e1',
+      subject: { type: 'estimate', id: 'e1' }, doneWhen: payload.adminDoneWhen || 'already_done', who: 'person',
+    }, { icon: '\u2705', bell: true, fyiRow: true, detail: payload.adminBody, metadata: { estimateId: 'e1' } });
+  };
+
+  test('a real next step rings a needs-you row', async () => {
+    await raise({});
+    const [, , , opts] = lastCall();
+    expect(opts).toMatchObject({ bell: true, link: '/admin/estimates?estimateId=e1',
+      metadata: { severity: 'needs-you', doneWhen: 'invoice_followed_up', subject: { type: 'estimate', id: 'e1' } } });
+  });
+
+  test('nothing to do still rings, as an FYI row that needs-me leaves out', async () => {
+    await raise({ billingTerm: 'prepay_annual', prepayChargeOutcome: 'paid' });
+    const [, title, body, opts] = lastCall();
+    expect(title).toBe('Estimates — John Cowley accepted Silver annual prepay');
+    expect(body).toBe('Paid by card on file; nothing to do.');
+    expect(opts).toMatchObject({ bell: true, metadata: { severity: 'fyi', doneWhen: 'already_done' } });
+  });
+});

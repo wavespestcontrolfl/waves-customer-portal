@@ -15299,12 +15299,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         area: 'Estimates',
         action: notificationPayload.adminAction,
         why: notificationPayload.adminWhy,
-        severity: 'needs-you',
+        // A real next step is work (needs-you); an accept with nothing to do is a fact, kept as an
+        // FYI row (fyiRow: the owner wants the bell to ring for every accept) that needs-me leaves
+        // out, so it never sits in the open-work list. The done-when names are existing ones; the
+        // row is closed by the person who does the step.
+        severity: notificationPayload.adminDoneWhen ? 'needs-you' : 'fyi',
         link: `/admin/estimates?estimateId=${estimate.id}`,
         subject: { type: 'estimate', id: estimate.id },
-        doneWhen: 'estimate_followed_up',
+        doneWhen: notificationPayload.adminDoneWhen || 'already_done',
         who: 'person',
-      }, { icon: '\u2705', bell: true, detail: notificationPayload.adminBody, metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      }, { icon: '\u2705', bell: true, fyiRow: true, detail: notificationPayload.adminBody, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',
@@ -20647,7 +20651,8 @@ async function fireBundleQuoteRequestedNotification({ estimate, suggestedService
 // Owner audit 2026-10-01: the admin bell says WHO and WHAT so it is actionable unopened.
 // `adminAction` completes "Estimates — <action>" ("John Cowley accepted Silver $104.98/mo"),
 // `adminWhy` is the plain next step, and `adminBody` (the full state of billing) rides in the
-// bell's detail. adminTitle stays as the long-form title for any reader of the payload.
+// bell's detail. `adminDoneWhen` is set only where a person has a real next step (the row is
+// needs-you); an accept with "nothing to do" carries none and is raised as an FYI row. adminTitle stays as the long-form title for any reader of the payload.
 // Where the accepted price differs from the price first sent, the why labels it "originally quoted".
 function buildAcceptNotificationPayload(args = {}) {
   const copy = buildAcceptNotificationCopy(args);
@@ -20777,6 +20782,7 @@ function buildAcceptNotificationCopy({
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
         adminNext: "Next: send the invoice to the payer's billing contact",
+        adminDoneWhen: 'invoice_followed_up',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
         customerLink: '/?tab=billing',
@@ -20842,6 +20848,7 @@ function buildAcceptNotificationCopy({
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${planLabel}${proposedNote} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
       adminNext: invoicePayUrl ? 'Pay link sent; next: schedule the recurring visits' : 'Next: confirm the details and schedule the recurring visits',
+      adminDoneWhen: 'visit_booked',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. A Waves team member will confirm the details and schedule your service.`,
       customerLink: '/?tab=billing',
@@ -20855,6 +20862,7 @@ function buildAcceptNotificationCopy({
           adminTitle: `One-time estimate accepted: ${customerName}`,
           adminBody: `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
           adminNext: 'Next: send the invoice yourself',
+          adminDoneWhen: 'invoice_followed_up',
           customerTitle: 'Estimate accepted',
           customerBody: `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
           customerLink: invoicePayUrl || '/?tab=billing',
@@ -20874,6 +20882,7 @@ function buildAcceptNotificationCopy({
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice was not sent automatically; office follow-up needed.`,
         adminNext: 'Next: send the invoice yourself',
+        adminDoneWhen: 'invoice_followed_up',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
         customerLink: invoicePayUrl || '/?tab=billing',
@@ -20902,6 +20911,7 @@ function buildAcceptNotificationCopy({
       adminTitle: `One-time estimate accepted: ${customerName}`,
       adminBody,
       adminNext: reservationCommitted ? 'The appointment is confirmed; nothing to do' : (bookingUrl ? 'Booking link sent; wait for them to pick a time' : 'Next: schedule the appointment'),
+      adminDoneWhen: (!reservationCommitted && !bookingUrl) ? 'visit_booked' : null,
       customerTitle: 'One-time service approved',
       customerBody,
       customerLink: bookingUrl || '/?tab=schedule',
@@ -20979,6 +20989,7 @@ function buildAcceptNotificationCopy({
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. Invoice follow-up needed.`,
         adminNext: 'Next: send the annual prepay invoice',
+        adminDoneWhen: 'invoice_followed_up',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.`,
         customerLink: '/?tab=billing',
@@ -21056,6 +21067,7 @@ function buildAcceptNotificationCopy({
     adminTitle: `Estimate accepted: ${customerName}`,
     adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice follow-up needed.`,
     adminNext: 'Next: send the invoice and check the first visit is booked',
+    adminDoneWhen: 'invoice_followed_up',
     customerTitle: 'Estimate accepted',
     customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Our team will follow up with the invoice details.`,
     customerLink: '/?tab=billing',
