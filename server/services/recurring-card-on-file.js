@@ -1756,8 +1756,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           await requeueDeferred({ charge_returned: true });
           continue;
         }
-        const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
-        deferredHeldTermId = heldTerm?.id || null;
+        // The year must still be live: a cancelled term (e.g. the prepay flag
+        // removed) goes back to wait, and the release pass hands its held
+        // visit to the office as cancelled_after_visit (pre-push audit P0).
+        const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
+        deferredHeldTermId = heldTerm && String(heldTerm.status || '') !== 'cancelled' ? heldTerm.id : null;
         if (!deferredHeldTermId || !(await PafRelease.visitStillPerformed(job.released_for_visit_id, deferredHeldTermId))
           || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
           await requeueDeferred();

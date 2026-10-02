@@ -2410,7 +2410,9 @@ const StripeService = {
           // way, payer-billed or outside the coverage clears it.
           if (requireHeldTermId != null) {
             const heldRow = await trx('scheduled_services').where({ id: lockedSvc.id }).first('paf_held_term_id');
-            if (String(heldRow?.paf_held_term_id || '') !== String(requireHeldTermId)) {
+            const heldTerm = await trx('annual_prepay_terms').where({ id: requireHeldTermId }).first('status', 'prepay_invoice_id');
+            if (String(heldRow?.paf_held_term_id || '') !== String(requireHeldTermId)
+              || !heldTerm || String(heldTerm.status || '') === 'cancelled' || String(heldTerm.prepay_invoice_id || '') !== String(invoiceId)) {
               throw Object.assign(new Error('The visit is no longer held by this annual prepay. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
             }
           }

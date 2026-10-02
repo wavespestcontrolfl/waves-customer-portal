@@ -750,6 +750,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
+    it('a released year whose term was cancelled is never charged and reaches the office (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled' });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
