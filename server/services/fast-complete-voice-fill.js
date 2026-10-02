@@ -538,12 +538,14 @@ function pushUnclear(unclear, heard, reason) {
 // time, Taurus, Talstar and the surfactant" covers every product it lists, so
 // the same-as-last words are looked for in the whole sentence, never across
 // sentences.
-// A contrast ("Taurus same as last time, but Talstar was new") ends the span.
-function sentenceOf(transcript, heard) {
+// With { contrast: true } a contrast ends the span too ("Taurus same as last
+// time, but Talstar was new"): the phrase is looked for there, while a
+// contradiction is looked for in the whole sentence ("... but a different rate").
+function sentenceOf(transcript, heard, { contrast = false } = {}) {
   const first = norm(String(heard).split(/\.{3}|…/)[0]);
   if (!first) return '';
-  return String(transcript || '').split(/(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i)
-    .find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
+  const split = contrast ? /(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i : /(?<=[.!?])\s+/;
+  return String(transcript || '').split(split).find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
 }
 
 // The amount as the schema carries it: 0 / '' / missing is "not spoken" (nothing
@@ -896,8 +898,9 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
 function productSameAsLast(raw, amount, heard, transcript, unclear) {
   // a spoken number wins over the flag
   if (raw.sameAsLast !== true || amount !== null) return false;
-  const said = `${heard} . ${sentenceOf(transcript, heard)}`;
-  if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(said)) return true;
+  const said = `${heard} . ${sentenceOf(transcript, heard, { contrast: true })}`;
+  const whole = `${heard} . ${sentenceOf(transcript, heard)}`;
+  if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(whole)) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
   return false;
 }

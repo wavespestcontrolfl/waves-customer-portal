@@ -1154,3 +1154,9 @@ test('invented internal text offered as customer note is a Check, not an office 
   expect(out.officeNote).toBe('');
   expect(out.unclear).toContainEqual({ heard: 'Customer refused payment and requested cancellation.', reason: 'note_not_heard' });
 });
+
+test('"Taurus same as last time but a different rate" with heard "Taurus" is no flag', () => {
+  const t = 'Taurus same as last time but a different rate.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});
