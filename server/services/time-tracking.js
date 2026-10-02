@@ -266,6 +266,12 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
           throw Object.assign(new Error(require('./street-level-hold').HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
         }
       }
+    } else if (scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq)) {
+      // A technician-scoped start must name a visit (codex #5568 r16 P2): a
+      // null or empty job id would skip the assignment lookup above, close
+      // the current job entry below and insert an unowned one. Same miss as
+      // a visit that is not theirs.
+      throw Object.assign(new Error('Job not found'), { status: 404, code: 'job_not_assigned' });
     }
 
     // Close any other active job entry.

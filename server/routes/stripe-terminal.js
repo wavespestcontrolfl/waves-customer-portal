@@ -229,25 +229,30 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // mint's row lock, a follow-up). The common Tap-to-Pay flow is a
     // completion-created invoice with no PI and gets amount due here. Gated +
     // best-effort + idempotent; full coverage flips to 'prepaid', rejected below.
-    const { autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
-    const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);
+    //
+    // Ownership + credit are ONE transaction (codex #5568 r16 P1): the locked
+    // technician re-check runs FIRST and credit is applied only on a pass, so a
+    // reassignment can never leave credit consumed — a full-coverage apply
+    // flips the invoice to 'prepaid', which reverseAppliedCredit refuses to
+    // undo. A miss applies nothing. Full-coverage side effects (stop dunning,
+    // annual-prepay term sync) are deferred and run after commit.
+    const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
+    let handoffCreditResult = null;
+    const ownershipHeld = await db.transaction(async (trx) => {
+      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
+      handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
+      return true;
+    });
+    if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
-    invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;
-    // Locked re-validation right after the credit seam, before ANY return —
-    // including the full-coverage 'prepaid' exit below, which never reaches
-    // the mint transaction's own re-check (codex #5568 r15 P1). A miss gives
-    // the applied credit back and answers as the pre-check does.
-    if (!(await db.transaction((trx) => technicianMayCollectInvoiceLocked(trx, req, invoice)))) {
-      if (handoffAppliedCredit > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_not_assigned' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
-        }
+    if (handoffCreditResult?.fullyCovered) {
+      try {
+        await runPostFullCoverageSideEffects(invoice_id);
+      } catch (e) {
+        logger.warn(`[stripe-terminal] post-coverage side effects skipped for ${invoice_id}: ${e.message}`);
       }
-      return res.status(404).json({ error: 'Invoice not found' });
     }
+    invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;
     if (invoice.status === 'prepaid') {
       return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
     }

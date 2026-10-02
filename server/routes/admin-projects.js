@@ -837,6 +837,11 @@ async function assertTechnicianProjectLinkStillAssigned(trx, req, { service_reco
     if (scheduled
       && String(scheduled.technician_id || '') === String(req.technicianId || '')
       && technicianVisitRowInScope(actor, scheduled)) return;
+    // A linked visit decides on its own (codex #5568 r16 P1): a record whose
+    // visit was reassigned, cancelled or aged out of the window must not
+    // authorize through the record's technician_id. The record-only fallback
+    // below is for a record with no linked visit at all.
+    refuse();
   }
   if (service_record_id) {
     const service = await trx('service_records')
@@ -1302,9 +1307,13 @@ router.get('/scheduled-service/:id/application-prefill', async (req, res, next) 
   try {
     const scheduled = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type', 'status', 'scheduled_date');
     if (!scheduled) return res.status(404).json({ error: 'Scheduled service not found' });
-    if (!isAdmin(req) && String(scheduled.technician_id || '') !== String(req.technicianId || '')) {
+    // Canonical current-visit predicate (codex #5568 r16 P2): a bare
+    // technician_id compare kept a cancelled or long-past visit readable.
+    // Any non-admin role is judged as a technician.
+    if (!isAdmin(req)
+      && !technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, scheduled)) {
       return res.status(403).json({ error: 'Scheduled service access denied' });
     }
 
@@ -1788,7 +1797,7 @@ router.post('/', async (req, res, next) => {
     let row;
     try {
       row = await db.transaction(async (trx) => {
-      await assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id });
+      await assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id: linkedScheduledServiceId });
       const [inserted] = await trx('projects').insert({
         customer_id,
         project_type,

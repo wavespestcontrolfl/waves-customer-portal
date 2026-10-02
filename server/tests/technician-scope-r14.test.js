@@ -106,9 +106,13 @@ describe('finding 2: project create re-validates the visit under a row lock', ()
       .rejects.toMatchObject({ status: 403 });
   });
 
-  test('a service record assigned to the technician still authorizes (unchanged path)', async () => {
+  test('a service record assigned to the technician authorizes only when no visit is linked (codex #5568 r16)', async () => {
     const trx = fakeTrx({ scheduled_services: visit({ technician_id: 'tech-B' }), service_records: { id: 'r1', technician_id: 'tech-A' } });
-    await expect(assertTechnicianProjectLinkStillAssigned(trx, tech, { service_record_id: 'r1', scheduled_service_id: 'v1' })).resolves.toBeUndefined();
+    // a linked visit that is out of scope refuses even though the record is theirs
+    await expect(assertTechnicianProjectLinkStillAssigned(trx, tech, { service_record_id: 'r1', scheduled_service_id: 'v1' }))
+      .rejects.toMatchObject({ status: 403 });
+    // no linked visit at all: the legacy record fallback still applies
+    await expect(assertTechnicianProjectLinkStillAssigned(fakeTrx({ service_records: { id: 'r1', technician_id: 'tech-A' } }), tech, { service_record_id: 'r1' })).resolves.toBeUndefined();
     await expect(assertTechnicianProjectLinkStillAssigned(fakeTrx({ service_records: { id: 'r1', technician_id: 'tech-B' } }), tech, { service_record_id: 'r1' }))
       .rejects.toMatchObject({ status: 403 });
   });
@@ -203,20 +207,173 @@ describe('codex #5568 r15', () => {
   const path = require('path');
   const src = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 
-  test('the handoff re-checks ownership under lock right after the credit seam, before the prepaid exit', () => {
+  test('the handoff locks ownership and applies credit in one transaction, before the prepaid exit (superseded by r16)', () => {
     const s = src('routes/stripe-terminal.js');
-    const seam = s.indexOf('const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);');
-    const fence = s.indexOf('if (!(await db.transaction((trx) => technicianMayCollectInvoiceLocked(trx, req, invoice)))) {', seam);
-    const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", seam);
-    expect(seam).toBeGreaterThan(-1);
-    expect(fence).toBeGreaterThan(seam);
-    expect(fence).toBeLessThan(prepaidExit);
-    expect(s.slice(fence, prepaidExit)).toMatch(/reverseAppliedCredit\(\{ invoiceId: invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_not_assigned' \}\)/);
+    const lock = s.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+    const apply = s.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })', lock);
+    const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", apply);
+    expect(lock).toBeGreaterThan(-1);
+    expect(apply).toBeGreaterThan(lock);
+    expect(apply).toBeLessThan(prepaidExit);
   });
 
   test('review triggers bind the record or visit to the technician, not only the customer', () => {
     const s = src('routes/admin-review-requests.js');
     expect(s.match(/technicianOwnsReviewSubject\(req, \{ serviceRecord: sr \}\)/g)).toHaveLength(2);
     expect(s).toMatch(/technicianOwnsReviewSubject\(req, \{ scheduledServiceId \}\)/);
+  });
+});
+
+describe('codex #5568 r16', () => {
+  const src = (rel) => read(rel);
+
+  describe('finding 1: handoff ownership + credit are one transaction', () => {
+    const handler = () => {
+      const s = src('routes/stripe-terminal.js');
+      return s.slice(s.indexOf("router.post('/handoff'"), s.indexOf("router.post('/validate-handoff'"));
+    };
+
+    test('the locked ownership check runs first inside the transaction, and credit only after it passes', () => {
+      const h = handler();
+      const txn = h.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
+      const lock = h.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+      const apply = h.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })');
+      const miss = h.indexOf("if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });");
+      expect(txn).toBeGreaterThan(0);
+      expect(lock).toBeGreaterThan(txn);
+      expect(apply).toBeGreaterThan(lock);
+      expect(miss).toBeGreaterThan(apply);
+    });
+
+    test('a miss applies nothing: no credit call outside the transaction and no post-credit reversal for not-assigned', () => {
+      const h = handler();
+      expect(h.match(/autoApplyAccountCreditIfEnabled\(/g)).toHaveLength(1);
+      // the old unlocked-apply-then-reverse block is gone; the only not-assigned
+      // reversal left is the mint-time race (ownershipLostAtMint)
+      const before = h.slice(0, h.indexOf('if (ownershipLostAtMint) {'));
+      expect(before).not.toMatch(/reverseAppliedCredit\(/);
+    });
+
+    test('deferred full-coverage side effects run after commit, the invoice is re-read, then the prepaid exit', () => {
+      const h = handler();
+      const commit = h.indexOf("if (!ownershipHeld) return res.status(404)");
+      const effects = h.indexOf('await runPostFullCoverageSideEffects(invoice_id);');
+      const reread = h.indexOf("invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;");
+      const prepaid = h.indexOf("if (invoice.status === 'prepaid') {");
+      expect(effects).toBeGreaterThan(commit);
+      expect(reread).toBeGreaterThan(effects);
+      expect(prepaid).toBeGreaterThan(reread);
+    });
+
+    test('the rate-limit and mint-failure reversal paths and the mint locked re-check stay', () => {
+      const s = src('routes/stripe-terminal.js');
+      expect(s).toMatch(/system:handoff_mint_failed/);
+      expect(s).toMatch(/system:handoff_not_assigned/);
+      expect(handler()).toMatch(/technicianMayCollectInvoiceLocked\(trx, req, invoice\)\)\) \{\s*ownershipLostAtMint = true;/);
+    });
+  });
+
+  describe('finding 2: record-only project create judges the DERIVED visit', () => {
+    test('the create transaction passes linkedScheduledServiceId, not the raw body field', () => {
+      const s = src('routes/admin-projects.js');
+      expect(s).toMatch(/assertTechnicianProjectLinkStillAssigned\(trx, req, \{ service_record_id, scheduled_service_id: linkedScheduledServiceId \}\)/);
+      expect(s).not.toMatch(/await assertTechnicianProjectLinkStillAssigned\(trx, req, \{ service_record_id, scheduled_service_id \}\)/);
+    });
+
+    test('a derived visit that fell out of scope refuses even when the record is theirs; a record with no visit keeps the fallback', async () => {
+      const { assertTechnicianProjectLinkStillAssigned } = require('../routes/admin-projects')._private;
+      const tech = { techRole: 'technician', technicianId: 'tech-A' };
+      const rows = (v) => ({ scheduled_services: { id: 'v1', customer_id: 'c1', technician_id: 'tech-A', status: 'confirmed', scheduled_date: TODAY, ...v }, service_records: { id: 'r1', technician_id: 'tech-A' } });
+      const trx = fakeTrx(rows({ status: 'cancelled' }));
+      await expect(assertTechnicianProjectLinkStillAssigned(trx, tech, { service_record_id: 'r1', scheduled_service_id: 'v1' })).rejects.toMatchObject({ status: 403 });
+      expect(lockedOn(trx, 'scheduled_services')).toBe(true);
+      await expect(assertTechnicianProjectLinkStillAssigned(fakeTrx(rows({ scheduled_date: STALE })), tech, { service_record_id: 'r1', scheduled_service_id: 'v1' })).rejects.toMatchObject({ status: 403 });
+      await expect(assertTechnicianProjectLinkStillAssigned(fakeTrx(rows({})), tech, { service_record_id: 'r1', scheduled_service_id: 'v1' })).resolves.toBeUndefined();
+      await expect(assertTechnicianProjectLinkStillAssigned(fakeTrx({ service_records: { id: 'r1', technician_id: 'tech-A' } }), tech, { service_record_id: 'r1', scheduled_service_id: null })).resolves.toBeUndefined();
+    });
+  });
+
+  describe('finding 3: application-prefill uses the canonical current-visit predicate', () => {
+    test('the handler loads status + scheduled_date and judges any non-admin as a technician', () => {
+      const s = src('routes/admin-projects.js');
+      const h = s.slice(s.indexOf("router.get('/scheduled-service/:id/application-prefill'"));
+      const head = h.slice(0, h.indexOf('const addonRows'));
+      expect(head).toMatch(/\.first\('id', 'customer_id', 'technician_id', 'service_id', 'service_type', 'status', 'scheduled_date'\)/);
+      expect(head).toMatch(/!isAdmin\(req\)\s*&& !technicianVisitRowInScope\(\{ techRole: 'technician', technicianId: req\.technicianId \}, scheduled\)/);
+      expect(head).not.toMatch(/String\(scheduled\.technician_id/);
+      expect(head).toMatch(/403/);
+    });
+  });
+
+  describe('finding 4: visual note create revalidates under a row lock at the insert', () => {
+    const route = () => {
+      const s = src('routes/visual-service-moments.js');
+      return s.slice(s.indexOf("router.post('/jobs/:jobId/visual-moments'"), s.indexOf("router.patch('/visual-moments/:momentId'"));
+    };
+
+    test('the insert happens inside a transaction that first locks the visit FOR UPDATE and re-judges create rules + scope', () => {
+      const r = route();
+      const txn = r.indexOf('await db.transaction(async (trx) => {');
+      const lock = r.indexOf("trx('scheduled_services').where({ id: job.id }).forUpdate().first()");
+      const gate = r.indexOf('canCreateVisualServiceMoment({\n        job: locked,');
+      const scope = r.indexOf('visitInScopeForCreate(req, locked)');
+      const insert = r.indexOf("trx('visual_service_moments').insert(insert)");
+      expect(txn).toBeGreaterThan(0);
+      expect(lock).toBeGreaterThan(txn);
+      expect(gate).toBeGreaterThan(lock);
+      expect(scope).toBeGreaterThan(gate);
+      expect(insert).toBeGreaterThan(scope);
+      expect(r).not.toMatch(/db\('visual_service_moments'\)\.insert/);
+    });
+
+    test('create scope judges any non-admin as a technician; admin is unscoped', () => {
+      const s = src('routes/visual-service-moments.js');
+      expect(s).toMatch(/function visitInScopeForCreate\(req, job\) \{\s*if \(req\.techRole === 'admin'\) return true;/);
+      expect(s).toMatch(/technicianVisitRowInScope\(\{ techRole: 'technician', technicianId: req\.technicianId \}, job\)/);
+    });
+  });
+
+  describe('finding 5: a technician-scoped startJob needs a job id', () => {
+    let timeTracking;
+    let calls;
+    beforeAll(() => {
+      jest.resetModules();
+      calls = [];
+      jest.doMock('../models/db', () => {
+        const fn = jest.fn((table) => {
+          const c = { table };
+          for (const m of ['where', 'whereNot', 'whereNotIn', 'whereIn', 'update']) c[m] = (...a) => { if (m === 'update') calls.push(['update', table]); return c; };
+          c.forUpdate = () => c;
+          c.first = async () => (table === 'time_entries' ? { id: 'shift-1' } : null);
+          c.insert = (row) => { calls.push(['insert', table, row]); return { returning: async () => [{ id: 'entry-1', ...row }] }; };
+          return c;
+        });
+        fn.transaction = async (cb) => cb(fn);
+        fn.raw = (x) => x;
+        return fn;
+      });
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: async () => false, HOLD_REFUSAL: 'hold' }));
+      jest.doMock('../services/track-transitions', () => ({ markOnProperty: async () => ({ ok: true }) }));
+      jest.doMock('../services/track-transition-alerts', () => ({ recordTrackTransitionResultFailure: async () => {} }));
+      timeTracking = require('../services/time-tracking');
+    });
+    beforeEach(() => { calls.length = 0; });
+
+    test.each([[null], [''], [undefined]])('job id %p from a technician closes nothing and inserts nothing, 404 job_not_assigned', async (jobId) => {
+      await expect(timeTracking.startJob('tech-A', jobId, { scopeReq: { techRole: 'technician', technicianId: 'tech-A' } }))
+        .rejects.toMatchObject({ status: 404, code: 'job_not_assigned' });
+      expect(calls.some(([k, t]) => (k === 'insert' || k === 'update') && t === 'time_entries')).toBe(false);
+    });
+
+    test('the unscoped (geofence/admin) start without a job id still works', async () => {
+      await expect(timeTracking.startJob('tech-A', null, {})).resolves.toMatchObject({ job_id: null });
+      await expect(timeTracking.startJob('tech-A', null, { scopeReq: { techRole: 'admin', technicianId: 'a' } })).resolves.toMatchObject({ job_id: null });
+    });
+
+    test('both routes map job_not_assigned to 404', () => {
+      expect(src('routes/tech-notifications.js')).toMatch(/err\.code === 'job_not_assigned'\) return res\.status\(404\)/);
+      expect(src('routes/tech-timetracking.js')).toMatch(/err\.code === 'job_not_assigned'\) return res\.status\(404\)/);
+    });
   });
 });

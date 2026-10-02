@@ -65,6 +65,14 @@ async function momentVisitInScope(req, moment) {
   return !!job && require('../services/technician-visit-scope').technicianVisitRowInScope(req, job);
 }
 
+// Create-time scope: admin unscoped; any other role is judged as a technician
+// against the canonical current/recent assignment predicate.
+function visitInScopeForCreate(req, job) {
+  if (req.techRole === 'admin') return true;
+  return require('../services/technician-visit-scope')
+    .technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, job);
+}
+
 function canMutateMoment(req, moment) {
   if (!moment) return { ok: false, status: 404, error: 'Visual note not found' };
   if (req.techRole === 'admin') return { ok: true };
@@ -139,6 +147,9 @@ router.post('/jobs/:jobId/visual-moments', authStack, upload.single('media'), as
     if (!createGate.ok) {
       return res.status(createGate.status).json({ error: createGate.error });
     }
+    if (!visitInScopeForCreate(req, job)) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
 
     const body = {
       ...(req.body || {}),
@@ -163,7 +174,30 @@ router.post('/jobs/:jobId/visual-moments', authStack, upload.single('media'), as
       return res.status(err.statusCode || 400).json({ error: err.message });
     }
 
-    const [row] = await db('visual_service_moments').insert(insert).returning('*');
+    // Locked revalidation at the insert boundary (codex #5568 r16 P1): the
+    // gate above read the visit unlocked, before the media upload, so a
+    // reassignment or cancellation landing in between would still let the
+    // former technician attach a note. Lock the visit row FOR UPDATE, re-judge
+    // the same create rules plus the canonical current-visit predicate (any
+    // non-admin role as a technician), then insert in the same transaction.
+    let row;
+    let refusal = null;
+    await db.transaction(async (trx) => {
+      const locked = await trx('scheduled_services').where({ id: job.id }).forUpdate().first();
+      const lockedGate = canCreateVisualServiceMoment({
+        job: locked,
+        technicianId: req.technicianId,
+        techRole: req.techRole,
+        enabled,
+      });
+      if (!lockedGate.ok) { refusal = lockedGate; return; }
+      if (!visitInScopeForCreate(req, locked)) {
+        refusal = { status: 403, error: 'Not assigned to this service' };
+        return;
+      }
+      [row] = await trx('visual_service_moments').insert(insert).returning('*');
+    });
+    if (refusal) return res.status(refusal.status).json({ error: refusal.error });
     const [moment] = await formatRows([row], true);
     logger.info(`[visual-service-notes] saved moment=${row.id} job=${job.id} tech=${req.technicianId} tag=${row.tag_code}`);
     return res.status(201).json({
