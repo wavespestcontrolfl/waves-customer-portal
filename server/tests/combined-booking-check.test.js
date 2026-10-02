@@ -187,8 +187,12 @@ describe('visit prices', () => {
   const priced = (rows, price) => rows.map((row) => (row.recurring_parent_id ? { ...row, estimated_price: price } : row));
   const verdictFor = (pest, lawn, opts = {}) => evaluateCombinedBooking({ estimate: opts.estimate || estimate([PEST, LAWN]), rows: [...pest, ...lawn] });
 
-  test('upcoming series visits at the accepted per-visit price pass (within two cents)', () => {
-    expect(verdictFor(priced(pestRows(), 150), priced(lawnRows(), 100.02)).ok).toBe(true);
+  test('upcoming series visits at the accepted per-visit price pass, within two cents either way (compared in cents)', () => {
+    for (const [pest, lawn] of [[150.02, 100.02], [149.98, 99.98], [150, 100]]) {
+      expect(verdictFor(priced(pestRows(), pest), priced(lawnRows(), lawn)).ok).toBe(true);
+    }
+    expect(codes(verdictFor(priced(pestRows(), 150.03), priced(lawnRows(), 100)))).toEqual(['price_mismatch']);
+    expect(codes(verdictFor(priced(pestRows(), 149.97), priced(lawnRows(), 100)))).toEqual(['price_mismatch']);
   });
 
   test('a visit priced off the accepted price is reported per service, with the soonest affected day', () => {

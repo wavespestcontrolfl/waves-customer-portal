@@ -77,7 +77,7 @@ const SETTLE_MINUTES = 3;
 const ROUTING_HORIZON_DAYS = 14;
 const addDaysET = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
 
-const PRICE_TOLERANCE = 0.02;
+const PRICE_TOLERANCE_CENTS = 2;
 const money = (value) => `$${(Math.round(Number(value) * 100) / 100).toFixed(2)}`;
 
 const CANCELLED = new Set(['cancelled', 'canceled']);
@@ -242,7 +242,8 @@ function checkPrices(dated, families, prices) {
     const shares = performs.map((family) => prices.get(family));
     if (!judged.length || shares.some((share) => share == null)) continue;
     const expected = Math.round(shares.reduce((a, b) => a + b, 0) * 100) / 100;
-    if (Math.abs(price - expected) <= PRICE_TOLERANCE) continue;
+    // In whole cents: float subtraction makes $150.02 - $150 read as just over two cents.
+    if (Math.abs(Math.round(price * 100) - Math.round(expected * 100)) <= PRICE_TOLERANCE_CENTS) continue;
     for (const family of judged) {
       const entry = off.get(family) || { count: 0, earliest: row.day, detail: `${money(price)}, accepted ${money(expected)}` };
       entry.count += 1;
