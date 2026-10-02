@@ -328,6 +328,27 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual(expect.arrayContaining([['4141', 'active'], ['4141', 'retired']]));
   });
 
+  test('a code cleared and restored BETWEEN passes still files again (write-time reset)', async () => {
+    const n = await neighborhood('Quick Restore');
+    const customerId = await customerWithCode('4242', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('neighborhood_access').where({ neighborhood_id: n }).update({ status: 'retired' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: '' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: '4242' });
+    expect((await sweepSavedGateCodes()).customers).toBe(1);
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual(expect.arrayContaining([['4242', 'active'], ['4242', 'retired']]));
+  });
+
+  test('a formatting-only resave or an unrelated edit keeps the filing (no reset)', async () => {
+    const n = await neighborhood('Format Grove');
+    const customerId = await customerWithCode('#4343', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: ' # 4343 ' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ access_notes: 'Dog in back yard.' });
+    expect(await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).toBeDefined();
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+  });
+
   test('a duplicate that demotes an office code into a conflict rings the bell for that customer', async () => {
     const n = await neighborhood('Office Pair');
     await trx('neighborhood_access').insert([

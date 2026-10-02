@@ -609,7 +609,10 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
   // A cleared code clears its filing: restoring the same code later is new
-  // evidence (A → blank → A files again, like A → B → A).
+  // evidence (A → blank → A files again, like A → B → A). The
+  // neighborhood_access_filing_reset trigger does this at write time for any
+  // change, including one undone before this pass; this catches rows from
+  // before the trigger existed.
   await db.raw(`DELETE FROM neighborhood_access_filings f WHERE NOT EXISTS (
     SELECT 1 FROM property_preferences pp
     WHERE pp.customer_id = f.customer_id AND btrim(coalesce(pp.neighborhood_gate_code, '')) <> '')`);
