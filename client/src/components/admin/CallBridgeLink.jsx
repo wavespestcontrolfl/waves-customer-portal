@@ -54,6 +54,7 @@ export default function CallBridgeLink({
   customerName = "",
   fromNumber = DEFAULT_FROM,
   customerId = null,
+  customerIdHint = null,
   className,
   style,
   // Opt-in for callers that fully style the button via className (e.g. a
@@ -71,7 +72,7 @@ export default function CallBridgeLink({
       type="button"
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation();
-        callViaBridge(phone, customerName, fromNumber, customerId);
+        callViaBridge(phone, customerName, fromNumber, customerId, customerIdHint);
       }}
       className={className}
       // Default: apply BASE_STYLE so link-style callers keep the inline-tel:
