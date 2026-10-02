@@ -348,6 +348,16 @@ describe('validateVoiceFacts', () => {
     expect(read("Didn't treat for roaches today.", [{ name: 'roaches', quote: "Didn't treat for roaches" }])).toEqual([]);
   });
 
+  test('a spray read as a method its own words do not support is unclear (GitHub Codex P1 on #5538)', () => {
+    const note = 'Spot sprayed the garage door frames. Sprayed all the way around the house. Spot sprayed around the house where ants trailed.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'perimeter', quote: 'Spot sprayed the garage door frames' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'spot', quote: 'Sprayed all the way around the house' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' }).spray).toMatchObject({ method: 'perimeter' });
+    expect(read({ method: 'spot', quote: 'Spot sprayed the garage door frames' }).spray).toMatchObject({ method: 'spot' });
+  });
+
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
     const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

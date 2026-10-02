@@ -270,6 +270,18 @@ function validateVoiceFacts(json, note) {
   };
 }
 
+// What a quote must say for the method it is read as (Codex #5538): a spray
+// around the house says so in the prompt's own words (around the house or
+// the outside, the perimeter, the foundation, all the way around); a quote
+// that also calls itself spot spraying, or a spot quote that says around the
+// house, contradicts itself and is unclear.
+const PERIMETER_WORDS_RE = /\b(?:perimeter|foundation|all\s+(?:the\s+way\s+)?around|around\s+(?:the\s+)?(?:outside|exterior|house|home|building|structure)|outside\s+of\s+the\s+(?:house|home))\b/;
+const SPOT_WORDS_RE = /\bspot(?:s|ted|ting)?\b/;
+const METHOD_SUPPORTED = {
+  perimeter: (quote) => PERIMETER_WORDS_RE.test(quote) && !SPOT_WORDS_RE.test(quote),
+  spot: (quote) => !PERIMETER_WORDS_RE.test(quote),
+};
+
 // How the sprays went down: only a grounded quote the note does not deny. A
 // perimeter spray decides the trace and the sprays' method, so one the note
 // does not hold up is unclear, never silently a spot treatment; so is a spot
@@ -284,10 +296,11 @@ function readSpray(spray, grounding) {
     return { spray: null, unclearSpray: !grounded, noSpray: grounded };
   }
   const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
-  const holds = !!read && !read.denied;
+  const contradicted = !!read && !METHOD_SUPPORTED[spray.method](read.quote);
+  const holds = !!read && !read.denied && !contradicted;
   return {
     spray: holds ? { method: spray.method, quote: read.quote } : null,
-    unclearSpray: (spray.method === 'perimeter' && !holds) || (spray.method === 'spot' && !!read?.denied),
+    unclearSpray: (spray.method === 'perimeter' && !holds) || (spray.method === 'spot' && (!!read?.denied || contradicted)),
     noSpray: false,
   };
 }
