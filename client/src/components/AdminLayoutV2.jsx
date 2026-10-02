@@ -257,6 +257,8 @@ export default function AdminLayoutV2() {
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      // A superseded field check must not linger in a dead zone.
+      abort?.abort();
     };
   }, [navigate, verifyRun]);
 
@@ -280,10 +282,14 @@ export default function AdminLayoutV2() {
   // signal on another page) re-runs it as the bounded field check, so the
   // workspace can still open from its pass (Codex #5573 r9).
   const onFieldNow = isFieldPath(location.pathname);
+  const wasOnField = useRef(onFieldNow);
   useEffect(() => {
-    // A still-pending non-field check has no time bound: restart it as the
-    // field check too (pre-push P1).
-    if (!onFieldNow || authStatus === "ready") return;
+    // Only a real move INTO Today restarts the check (a direct /admin/today
+    // load already started the bounded one; Codex #5573 r10). A still-pending
+    // non-field check has no time bound: restart it as the field check too.
+    const entered = onFieldNow && !wasOnField.current;
+    wasOnField.current = onFieldNow;
+    if (!entered || authStatus === "ready") return;
     setAuthStatus("checking");
     setVerifyRun((n) => n + 1);
   }, [onFieldNow]);

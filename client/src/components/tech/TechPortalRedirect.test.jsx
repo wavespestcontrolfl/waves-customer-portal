@@ -3,10 +3,11 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const platform = vi.hoisted(() => ({ native: false }));
 vi.mock('../../native/platform', () => ({ isNativeApp: () => platform.native }));
+vi.mock('./AddToHomeScreenHint', () => ({ default: () => <p>Install hint</p> }));
 import TechPortalRedirect from './TechPortalRedirect';
 
 function Where() { const { pathname, search, hash } = useLocation(); return <output>{pathname}{search}{hash}</output>; }
@@ -16,7 +17,8 @@ function renderAt(path) {
     <Route path="*" element={<Where />} />
   </Routes></MemoryRouter>);
 }
-afterEach(() => { cleanup(); platform.native = false; });
+beforeEach(() => { localStorage.setItem('waves_admin_token', 'fixture-only'); });
+afterEach(() => { cleanup(); platform.native = false; localStorage.clear(); });
 
 describe('retired /tech portal redirect', () => {
   it.each([
@@ -37,5 +39,13 @@ describe('retired /tech portal redirect', () => {
     platform.native = true;
     renderAt('/tech/tools');
     expect(screen.getByRole('status').textContent).toBe('/');
+  });
+
+  it('signed out: shows the Field Tools page with the install hint and a sign-in link back to Today (Codex #5573 r10)', () => {
+    localStorage.clear();
+    renderAt('/tech/tools?visit=row%3Atwo');
+    expect(screen.getByText('Install hint')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', `/admin/login?next=${encodeURIComponent('/admin/today/tools?visit=row%3Atwo')}`);
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

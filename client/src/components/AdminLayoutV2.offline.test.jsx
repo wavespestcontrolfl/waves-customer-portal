@@ -229,6 +229,15 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
   });
 
+  it("a direct /admin/today load makes one staff check, not two (Codex #5573 r10)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    const fetchMock = vi.fn(async () => response(200, TECH));
+    vi.stubGlobal("fetch", fetchMock);
+    renderAt();
+    expect(await screen.findByText("Saved route content")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/admin/auth/me"))).toHaveLength(1);
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

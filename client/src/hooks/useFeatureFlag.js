@@ -66,6 +66,9 @@ export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined
   const [enabled, setEnabled] = useState(defaultValue);
   useEffect(() => {
     let mounted = true;
+    // Unloaded (e.g. refetched for a new account): fail closed to the default
+    // until this read answers, never the previous value (Codex #5573 r10).
+    if (cache === null) setEnabled(defaultValue);
     loadFlags().then((flags) => {
       if (!mounted) return;
       setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
@@ -99,6 +102,8 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
       });
       return undefined;
     }
+    // Unloaded: back to the default and not ready until this read answers.
+    setState({ enabled: defaultValue, ready: false });
     loadFlags().then((flags) => {
       if (!mounted) return;
       setState({

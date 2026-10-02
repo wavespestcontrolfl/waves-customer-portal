@@ -82,3 +82,28 @@ it('useFeatureFlag re-reads when its refreshKey changes after refetchFlags (Code
   expect(await screen.findByText('b:false')).toBeTruthy();
   cleanup();
 });
+
+it('a refetch for a new account fails closed until the new read answers (Codex #5573 r10)', async () => {
+  const React = await import('react');
+  const { render, screen, act, cleanup } = await import('@testing-library/react');
+  localStorage.setItem('waves_admin_token', 'fixture-only');
+  let release;
+  let first = true;
+  vi.stubGlobal('fetch', vi.fn(() => {
+    if (first) { first = false; return Promise.resolve({ ok: true, status: 200, json: async () => ({ flags: { 'admin-navigation': true } }) }); }
+    return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ flags: { 'admin-navigation': true } }) }); });
+  }));
+  const mod = await import('./useFeatureFlag');
+  function Probe({ who }) {
+    const enabled = mod.useFeatureFlag('admin-navigation', false, who);
+    return React.createElement('output', null, `${who}:${enabled}`);
+  }
+  const view = render(React.createElement(Probe, { who: 'a' }));
+  expect(await screen.findByText('a:true')).toBeTruthy();
+  act(() => { mod.refetchFlags(); });
+  view.rerender(React.createElement(Probe, { who: 'b' }));
+  expect(await screen.findByText('b:false')).toBeTruthy();
+  await act(async () => { release(); });
+  expect(await screen.findByText('b:true')).toBeTruthy();
+  cleanup();
+});
