@@ -201,7 +201,7 @@ function validateEffectiveDate(effectiveDate) {
 // a corrected address can — and because the idempotency key includes the
 // resolved recipient, a corrected address mints a fresh key and sends,
 // while same-address retries keep deduping against the prior attempt.
-async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'] }) {
+async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'], expectedContentHash = null }) {
   let attempted = false;
   try {
     const EmailTemplateLibrary = require('./email-template-library');
@@ -214,6 +214,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
     const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
+      ...(expectedContentHash ? { expectedContentHash } : {}),
       to,
       recipientType: 'customer',
       recipientId: customer.id,

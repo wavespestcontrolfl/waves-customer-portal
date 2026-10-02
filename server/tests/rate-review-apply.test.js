@@ -929,6 +929,15 @@ describe('scheduling races', () => {
 });
 
 describe('retireDraftNotices and the rebuild guard', () => {
+  test('a definitively unsent (unreachable) notice is retired so it can be prepared again', async () => {
+    const book = pestBook();
+    await scheduleBook(book);
+    notices()[0].status = 'unreachable';
+    const out = await apply.retireDraftNotices(BATCH_KEY);
+    expect(out).toMatchObject({ ok: true, retired: 1 });
+    expect(snapshots()[0].notice_id).toBeNull();
+  });
+
   test('a draft carrying a letter frozen by a send attempt is kept (it may already be in the inbox)', async () => {
     const book = pestBook();
     await scheduleBook(book);

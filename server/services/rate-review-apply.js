@@ -1057,12 +1057,14 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
     if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
-    // Retirable = exactly what the DELETE below accepts: a draft, or a
-    // previewed draft ('viewed') with no sent_at and no delivered leg. A
-    // 'sending' claim or an 'unreachable' attempt is in flight and is kept
-    // linked. Rows are locked, deleted under the same predicate, and ONLY
-    // the rows confirmed deleted are unlinked (a count mismatch rolls back).
-    const retirable = (q) => q.whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
+    // Retirable = exactly what the DELETE below accepts: a draft, a
+    // previewed draft ('viewed'), or a definitively unsent attempt
+    // ('unreachable': no contact / every leg policy-blocked — the comms lane
+    // drops its frozen words) with no sent_at and no delivered leg. A
+    // 'sending' claim is in flight and is kept linked. Rows are locked,
+    // deleted under the same predicate, and ONLY the rows confirmed deleted
+    // are unlinked (a count mismatch rolls back).
+    const retirable = (q) => q.whereIn('status', ['draft', 'viewed', 'unreachable']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
     // A draft carrying a letter frozen by a send attempt (comms lane,
     // metadata.pending_letter) may already sit in the customer's inbox — the
     // provider can accept and still report a failure — so it is kept like

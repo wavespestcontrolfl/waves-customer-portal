@@ -75,6 +75,7 @@ const REASONS = Object.freeze({
   too_many_lines: `More than ${LINE_SLOTS} reviewed lines on one account`,
   no_contact: 'No email or phone on file',
   in_flight: 'A send for this customer is in progress',
+  renewal_declined: 'Customer declined to renew the prepaid plan',
 });
 
 function badInput(message, status = 400) {
@@ -280,6 +281,7 @@ async function loadBatch(dbh, batchKey) {
     customers: new Map(customers.map((c) => [String(c.id), c])),
     prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
     firstVisits,
+    declinedTerms: await declinedPrepayTermIds(dbh, notices),
     unscheduled: approvedUnscheduled.length,
   };
 }
@@ -289,6 +291,7 @@ async function loadBatch(dbh, batchKey) {
 const LINE_RULES = [
   ['not_approved', ({ snapshot }) => !snapshot || String(snapshot.status) !== 'approved'],
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
+  ['renewal_declined', ({ notice, declinedTerms }) => declinedTerms.has(String(parseJson(notice.metadata, {}).term_id || ''))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   // A line carrying words frozen by an earlier attempt may already be in
   // the customer's inbox (a crash after the provider took it, or a provider
@@ -315,7 +318,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
-    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now });
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -343,9 +346,9 @@ function planBatch(data, { today, now }) {
 // The digest the send must match: per sendable letter, the exact words
 // (the frozen ones for a retry, else the letter as it would render now —
 // cost block, dates, first application) and the channels it goes out on.
-function digestFor(entries, costBlock) {
+function digestFor(entries, costBlock, templateHash = null) {
   const h = crypto.createHash('sha256');
-  h.update(`cost:${costBlock || ''}\n`);
+  h.update(`cost:${costBlock || ''}\ntemplate:${templateHash || ''}\n`);
   for (const e of entries) {
     if (e.reason || !e.lines.length) continue;
     const frozen = frozenFor(e);
@@ -376,12 +379,12 @@ function assertBatchKey(batchKey) {
 async function sendPreview(batchKey, { dbh = db, now = new Date() } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  const [data, costBlock] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh)]);
+  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh), letterTemplateHash()]);
   const entries = planBatch(data, { today: etDateString(now), now });
   return {
     ok: true,
     batchKey,
-    digest: digestFor(entries, costBlock),
+    digest: digestFor(entries, costBlock, templateHash),
     costBlockReady: !!costBlock,
     unscheduled: data.unscheduled,
     counts: summarize(entries),
@@ -399,6 +402,16 @@ async function sendPreview(batchKey, { dbh = db, now = new Date() } = {}) {
 }
 
 // ── render ─────────────────────────────────────────────────────────────
+
+// The active letter template's content hash: bound into the send digest
+// and handed to the email library, which refuses a send whose template
+// changed since the owner reviewed it. null = not installed.
+async function letterTemplateHash() {
+  const EmailTemplateLibrary = require('./email-template-library');
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY);
+  if (!loaded?.template || String(loaded.template.status) !== 'active' || !loaded.activeVersion) return null;
+  return EmailTemplateLibrary.templateContentHash(loaded.template, loaded.activeVersion);
+}
 
 async function renderLetter(payload) {
   const EmailTemplateLibrary = require('./email-template-library');
@@ -516,7 +529,15 @@ async function letterForClaim(dbh, entry, { claimKey, costBlock }) {
   return frozen;
 }
 
-async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
+async function markFrozenSmsSent(dbh, entry, frozen) {
+  frozen.sms_sent = true;
+  for (const l of entry.lines) {
+    const meta = parseJson(l.notice.metadata, {});
+    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: frozen }) });
+  }
+}
+
+async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, now }) {
   const claimed = await claimLines(dbh, entry.lines, now);
   if (!claimed) return { outcome: 'in_flight' };
   const customer = entry.customer;
@@ -529,14 +550,21 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
     vars: payload,
     templateKey: TEMPLATE_KEY,
     categories: ['billing', 'rate_review_notice'],
+    expectedContentHash: templateHash,
   });
-  const sms = await PriceChangeNotices.sendNoticeSms({
-    customer,
-    vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
-    actorId,
-    hasEmailLeg: email.sent,
-    operatorInitiated: true,
-  });
+  // The text leg has no provider idempotency key: a reclaim of a crashed
+  // attempt whose text already went out (recorded on the frozen letter
+  // right after it sent) never texts again.
+  const sms = frozen.sms_sent
+    ? { sent: true, attempted: true }
+    : await PriceChangeNotices.sendNoticeSms({
+      customer,
+      vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
+      actorId,
+      hasEmailLeg: email.sent,
+      operatorInitiated: true,
+    });
+  if (sms.sent && !frozen.sms_sent) await markFrozenSmsSent(dbh, entry, frozen);
   if (!email.sent && !sms.sent) {
     const attempted = email.attempted || sms.attempted;
     // Attempted (provider/template failure — the provider may still have
@@ -580,10 +608,11 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
 async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, now = new Date() } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  const [data, costBlock] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh)]);
+  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh), letterTemplateHash()]);
   if (!costBlock) return { ok: false, reason: 'cost_block_missing' };
+  if (!templateHash) throw badInput('The rate review letter template is not installed', 503);
   const entries = planBatch(data, { today: etDateString(now), now });
-  if (String(expectedDigest || '') !== digestFor(entries, costBlock)) return { ok: false, reason: 'list_changed' };
+  if (String(expectedDigest || '') !== digestFor(entries, costBlock, templateHash)) return { ok: false, reason: 'list_changed' };
   const sendable = entries.filter((e) => !e.reason && e.lines.length);
   if (!sendable.length) return { ok: false, reason: 'nothing_to_send' };
   await renderLetter(letterPayload({ customer: sendable[0].customer, lines: sendable[0].lines, costBlock, noticeUrl: portalUrl('/') })); // template installed?
@@ -593,7 +622,7 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, actorId, now });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, now });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;

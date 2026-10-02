@@ -274,6 +274,52 @@ describe('sendBatch', () => {
     expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).sent).toBe(1);
   });
 
+  test('a template published after the preview refuses the send', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    const lib = require('../services/email-template-library');
+    const original = lib.loadTemplateByKey.getMockImplementation();
+    lib.loadTemplateByKey.mockImplementation(async (key) => {
+      const out = await original(key);
+      return out && { ...out, activeVersion: { ...out.activeVersion, subject: 'A different subject' } };
+    });
+    try {
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toEqual({ ok: false, reason: 'list_changed' });
+    } finally { lib.loadTemplateByKey.mockImplementation(original); }
+    expect(emailLeg).not.toHaveBeenCalled();
+  });
+
+  test('the email leg is pinned to the reviewed template content', async () => {
+    mockDb.reset(book());
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(emailLeg.mock.calls[0][0].expectedContentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('a reclaimed crash whose text already went out never texts again', async () => {
+    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
+    const n = draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) });
+    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, sms_sent: true, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
+    mockDb.reset(book({ notices: [n] }));
+    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(out).toMatchObject({ sent: 1, texted: 1 });
+    expect(smsLeg).not.toHaveBeenCalled();
+    expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true });
+  });
+
+  test('a prepaid renewal the customer declined is held back, never sent', async () => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', term_end: '2027-05-14' },
+    });
+    const b = book({ notices: [prepay] });
+    b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'cancel' }];
+    mockDb.reset(b);
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.customers[0].suppressedLines[0].reason).toBe('renewal_declined');
+    expect(preview.counts.letters).toBe(0);
+  });
+
   test('the gate flipped off mid-batch stops the rest', async () => {
     const b = book({ customers: [customer(1), customer(2)], notices: [draft(1), draft(2, { customer_id: CUSTOMER(2), rate_review_row_id: ROW(2) })] });
     mockDb.reset(b);
