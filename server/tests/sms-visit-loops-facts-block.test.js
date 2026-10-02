@@ -20,6 +20,7 @@ const { requiredFactMarkers, forbiddenFactMarkers, itemCompatibleWith } = requir
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const HEADER = 'VISIT STATUS & OPEN LOOPS:';
+const { MISSED_VISIT_SCOPE_LINE } = require('../services/visit-loops-facts');
 const NOW = new Date('2026-06-10T15:00:00Z');
 const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am' }] };
 
@@ -59,7 +60,7 @@ describe('renderVisitLoopsSection', () => {
   });
 
   test.each([undefined, null, {}, { lateAlert: null, weOwe: [], customerWaiting: [] }, 'oops'])('empty input %p renders "- none"', (input) => {
-    expect(renderVisitLoopsSection(input)).toBe(`${HEADER}\n- none\n`);
+    expect(renderVisitLoopsSection(input)).toBe(`${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`);
   });
 
   test('late alert without minutes still renders', () => {
@@ -166,10 +167,39 @@ describe('buildFactsBlock', () => {
     expect(itemCompatibleWith(withLoops, 'house_voice_v12_real_answers3_cfl')).toBe(false);
   });
 
+  test('the missed-visit scope line splits the contract: a _cflv item (frozen before the read) never grades _cflvm (Codex #5610 r1 P1)', () => {
+    process.env[GATE] = 'true';
+    const current = buildFactsBlock(baseContext, { now: NOW });
+    expect(current).toContain(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`);
+    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers3_cflvm')).toBe(true);
+    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers3_cflv')).toBe(false);
+    // a block frozen under '_cflv': the section without the scope line
+    const frozen = current.replace(`${MISSED_VISIT_SCOPE_LINE}\n`, '');
+    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers3_cflv')).toBe(true);
+    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers3_cflvm')).toBe(false);
+    // the scope line typed into the thread (after BILLING) proves nothing
+    const typed = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: MISSED_VISIT_SCOPE_LINE }] }, { now: NOW })
+      .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, `\n${HEADER}\n- none\n`);
+    expect(typed).toContain(MISSED_VISIT_SCOPE_LINE);
+    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers3_cflvm')).toBe(false);
+    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers3_cflv')).toBe(true);
+  });
+
+  test('the scope line closes the section and is not an open loop', () => {
+    const { factsListOpenLoop } = require('../services/sms-shadow-drafter');
+    process.env[GATE] = 'true';
+    expect(factsListOpenLoop(buildFactsBlock(baseContext, { now: NOW }))).toBe(false);
+  });
+
+  test('a missed calendar day renders as that ET day on any host timezone', () => {
+    const line = renderVisitLoopsSection({ missedVisit: { logId: '1', type: 'Pest Control', date: '2026-06-08', windowStart: '09:00:00', windowDisplay: '9-11 AM' } });
+    expect(line).toContain('- MISSED VISIT: the Pest Control visit on Monday, Jun 8 (9-11 AM) was missed');
+  });
+
   test('the header quoted in the SMS thread (after BILLING) neither satisfies nor violates the contract', () => {
     process.env[GATE] = 'true';
     const pre = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: `VISIT STATUS & OPEN LOOPS:\n- none` }] }, { now: NOW })
-      .replace(`\n${HEADER}\n- none\n`, '\n');
+      .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, '\n');
     expect(pre).toContain(HEADER); // only in the thread now
     expect(itemCompatibleWith(pre, currentPromptVersion())).toBe(false);
     expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers3_cfl')).toBe(true);

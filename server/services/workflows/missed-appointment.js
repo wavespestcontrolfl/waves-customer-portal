@@ -38,6 +38,7 @@ class MissedAppointment {
       original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
       // what was missed and where, frozen now: the row's own fields can change later
       occurrence_service_type: service.service_type || null,
+      occurrence_service_id: service.service_id || null,
       occurrence_property_id: service.property_id || null,
       notes: reason || 'skip',
     });

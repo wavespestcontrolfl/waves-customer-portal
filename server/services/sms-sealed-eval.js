@@ -44,6 +44,7 @@ const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER } = require('./sms-label-facts');
+const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -172,9 +173,10 @@ const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   cf: [COMPANY_FACTS_HEADER],
   cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER],
   cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
-  // MISSED VISIT rides inside the same always-rendered section (a line only when a
-  // miss is open): the same markers as '_cflv'
-  cflvm: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
+  // MISSED VISIT (#5610): the section's fixed scope line marks the contract — a
+  // '_cflv' item was frozen before the missed-visit read existed and may hide an
+  // open miss behind "- none", so it must never grade '_cflvm' (Codex #5610 r1 P1)
+  cflvm: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, MISSED_VISIT_SCOPE_LINE],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
@@ -243,8 +245,17 @@ function hasRenderedVisitLoops(facts) {
   const upcoming = head.split(UPCOMING_DELIMITER)[1];
   return typeof upcoming === 'string' && upcoming.includes(VISIT_LOOPS_LINE);
 }
+// The scope line, rendered on its own line inside the same UPCOMING SERVICES ..
+// BILLING span as the section header (thread text sits after BILLING and never counts).
+const MISSED_SCOPE_LINE = `\n${MISSED_VISIT_SCOPE_LINE}\n`;
+function hasRenderedMissedScope(facts) {
+  const head = String(facts).split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(MISSED_SCOPE_LINE);
+}
 function factPresent(facts, marker) {
   if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
+  if (marker === MISSED_VISIT_SCOPE_LINE) return hasRenderedMissedScope(facts);
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
   if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
   if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
@@ -265,11 +276,11 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === VISIT_LOOPS_MARKER) {
-      // the twin of hasRenderedVisitLoops: the header line inside the text between the first
-      // UPCOMING SERVICES line and the first BILLING: line
+    if (marker === VISIT_LOOPS_MARKER || marker === MISSED_VISIT_SCOPE_LINE) {
+      // the twin of hasRenderedVisitLoops / hasRenderedMissedScope: the line inside the text
+      // between the first UPCOMING SERVICES line and the first BILLING: line
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in split_part(split_part(${col}, ?::text, 1), ?::text, 2)) > 0)`);
-      bindings.push(VISIT_LOOPS_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
+      bindings.push(marker === VISIT_LOOPS_MARKER ? VISIT_LOOPS_LINE : MISSED_SCOPE_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
     } else if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
       // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
       // text before the first BILLING: line matches the same regex source.

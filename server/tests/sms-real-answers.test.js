@@ -995,6 +995,38 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).not.toContain('OPEN TIMES');
   });
 
+  test('gate on: a listed MISSED VISIT fetches OPEN TIMES for a plain "thanks", sized for the missed service, with no identity call (Codex #5610 r1 P1)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-10-05', fullDate: 'Monday, October 5', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const { dispatchWithFallback } = require('../services/llm/call');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: {
+        summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [],
+        visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+      },
+      inboundMessage: 'Thanks so much!',
+      intent: { intent: 'gratitude_reply' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    // sized for the missed service, not the engine default
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Mosquito Control' });
+    expect(result.factsBlock).toContain('- MISSED VISIT: the Mosquito Control visit');
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+    // the missed visit IS the job: no service-identity model call
+    expect(dispatchWithFallback.mock.calls.some(([, payload]) => payload?.laneId === 'sms_service_identity')).toBe(false);
+  });
+
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn();

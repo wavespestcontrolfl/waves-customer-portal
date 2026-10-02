@@ -402,29 +402,43 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
 // that nobody followed up. Only LOGGED misses count: the sweep is the canonical
 // judgment, so a merely lagging status is never called a miss here.
 // What was missed and where come from the occurrence scope frozen at log time
-// (occurrence_service_type / occurrence_property_id): the live row can be corrected
+// (occurrence_service_type / occurrence_service_id / occurrence_property_id): the live row can be corrected
 // or reused since. A row logged before those columns existed has no frozen scope —
 // unknown, so it is skipped, never read from the current row.
 const MISSED_LOOKBACK_DAYS = 7;
+// The fixed last line of the gate-on VISIT STATUS & OPEN LOOPS section once the
+// missed-visit read exists: tells the model what MISSED VISIT covers, and marks
+// the section's contract — a sealed-eval item frozen before this read (which could
+// have hidden an open miss) lacks it, so it never grades the '_cflvm' prompt.
+const MISSED_VISIT_SCOPE_LINE = `(MISSED VISIT lists a logged no-show from the last ${MISSED_LOOKBACK_DAYS} days that nobody has rebooked.)`;
 const MISSED_PAGE = 10;
 const MISSED_PAGES_MAX = 20;
 const LIVE_OR_DONE = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
-// Every service family a service type names: a combined visit ("Pest Control &
-// Lawn Care", "Pest & Rodent Control") is a SET, and a follow-up must cover all of it.
-// Explicit tree/shrub tokens win over the generic fertilization token ("Tree &
-// Shrub Fertilization" is not lawn).
-function serviceFamilies(serviceType) {
-  const t = String(serviceType || '').toLowerCase();
-  const out = new Set();
-  const treeShrub = /tree|shrub|ornamental|palm/.test(t);
-  if (treeShrub) out.add('tree_shrub');
-  if ((treeShrub ? /lawn|turf|weed|sod/ : /lawn|turf|fertiliz|weed|sod/).test(t)) out.add('lawn');
-  if (/mosquito/.test(t)) out.add('mosquito');
-  if (/termite|wdo|wood.destroying/.test(t)) out.add('termite');
-  if (/rodent|\brats?\b|mice|mouse/.test(t)) out.add('rodent');
-  if (/pest|roach|\bants?\b|spider|perimeter|general|bug/.test(t)) out.add('pest');
-  if (!out.size && t.trim()) out.add(t.trim());
-  return out;
+// One service identity, compared the way the catalog-aware invariants compare
+// visits (completion-record-invariants, lead-to-cash-invariants): the catalog
+// row by service_id, else the ONE catalog row whose name matches the label
+// (trimmed, case-insensitive), else the label itself. No keyword taxonomy: a
+// different catalog service (another flea package, palm injection vs tree &
+// shrub) is a different service, and a renamed label of the same catalog row
+// is the same one.
+const normName = (s) => String(s || '').trim().toLowerCase();
+async function catalogIdsByName(conn, labels) {
+  const wanted = [...new Set(labels.map(normName).filter(Boolean))];
+  const byName = new Map();
+  if (!wanted.length) return byName;
+  const rows = (await conn('services').whereRaw('lower(trim(name)) = ANY(?)', [wanted]).select('id', 'name')) || [];
+  for (const r of rows) {
+    const k = normName(r.name);
+    // a name several catalog rows share identifies none of them
+    byName.set(k, byName.has(k) && byName.get(k) !== String(r.id) ? null : String(r.id));
+  }
+  return byName;
+}
+function serviceIdentityKey(serviceId, label, byName) {
+  if (serviceId) return `id:${serviceId}`;
+  const id = byName.get(normName(label));
+  if (id) return `id:${id}`;
+  return normName(label) ? `name:${normName(label)}` : null;
 }
 // The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
 // internal job block as the end, so only the start is the promised window.
@@ -437,9 +451,9 @@ function missedWindowStart(originalWindow) {
 // new_date — moved off the missed slot, completed, or performed: tracker complete or
 // a service record), or a visit BOOKED AFTER the miss was logged (a recurring series
 // pre-creates its future children, so a visit that already existed is not one) at
-// the same frozen property, on or after the missed slot, whose services together
-// cover every family that was missed.
-async function noshowFollowedUp(conn, customerId, noshow, families) {
+// the same frozen property, after the missed slot, for the same service
+// (serviceIdentityKey on the frozen catalog id / label).
+async function noshowFollowedUp(conn, customerId, noshow) {
   const date = calendarDay(noshow.original_date);
   const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
   const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
@@ -454,12 +468,15 @@ async function noshowFollowedUp(conn, customerId, noshow, families) {
     .whereIn('status', LIVE_OR_DONE)
     .where('created_at', '>', noshow.logged_at);
   if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
-  const later = (await query.select('service_type', 'scheduled_date', 'window_start')) || [];
+  const later = (await query.select('service_id', 'service_type', 'scheduled_date', 'window_start')) || [];
   // a same-day visit counts only when it starts AFTER the missed slot; unknown starts do not
   const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
     || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
-  const covered = new Set(later.filter(afterMiss).flatMap((r) => [...serviceFamilies(r.service_type)]));
-  return [...families].every((f) => covered.has(f));
+  const candidates = later.filter(afterMiss);
+  if (!candidates.length) return false;
+  const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, ...candidates.map((r) => r.service_type)]);
+  const missedKey = serviceIdentityKey(noshow.occurrence_service_id, noshow.occurrence_service_type, byName);
+  return Boolean(missedKey) && candidates.some((r) => serviceIdentityKey(r.service_id, r.service_type, byName) === missedKey);
 }
 // The newest UNFOLLOWED no-show in the lookback, paged in a stable order so a page
 // of followed-up rows never hides an older open one (the page cap is a backstop).
@@ -476,13 +493,11 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
       .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
       .offset(p * MISSED_PAGE).limit(MISSED_PAGE)
       .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at',
-        'rl.occurrence_service_type', 'rl.occurrence_property_id',
+        'rl.occurrence_service_type', 'rl.occurrence_service_id', 'rl.occurrence_property_id',
         'ss.scheduled_date as ss_scheduled_date', 'ss.window_start', 'ss.status', 'ss.track_state',
         conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'))) || [];
     for (const noshow of noshows) {
-      const families = serviceFamilies(noshow.occurrence_service_type);
-      if (!families.size) continue;
-      if (await noshowFollowedUp(conn, customerId, noshow, families)) continue;
+      if (await noshowFollowedUp(conn, customerId, noshow)) continue;
       const startHms = missedWindowStart(noshow.original_window);
       return {
         logId: String(noshow.id),
@@ -671,4 +686,4 @@ function visitStatusSignature(visitLoops) {
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, serviceFamilies, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };

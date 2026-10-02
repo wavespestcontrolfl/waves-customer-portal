@@ -632,17 +632,27 @@ describe('weOwe and customerWaiting', () => {
 });
 
 describe('missedVisit (logged customer no-shows)', () => {
-  const { serviceFamilies } = require('../services/visit-loops-facts');
   const noshow = (over = {}) => ({
     id: 'rl-1', scheduled_service_id: 'visit-1', original_date: '2026-09-29', original_window: '09:00:00-10:30:00', new_date: null,
-    logged_at: new Date('2026-09-30T06:00:00Z'), occurrence_service_type: 'Pest Control', occurrence_property_id: 'prop-1',
+    logged_at: new Date('2026-09-30T06:00:00Z'), occurrence_service_type: 'Pest Control', occurrence_service_id: null, occurrence_property_id: 'prop-1',
     ss_scheduled_date: '2026-09-29', window_start: '09:00:00', status: 'confirmed', track_state: null, recorded: false, ...over,
   });
   const isFollowUpQuery = (ops) => hasOp(ops, 'where', (a) => a[0] && typeof a[0] === 'object' && 'property_id' in a[0]);
-  const run = (rows, later = []) => {
+  // the catalog: rows matched by the lower(trim(name)) = ANY(names) read
+  const CATALOG = [
+    { id: 'svc-pest', name: 'Pest Control' }, { id: 'svc-lawn', name: 'Lawn Care' },
+    { id: 'svc-flea', name: 'Flea Treatment' }, { id: 'svc-flea-pkg', name: 'Flea Treatment Package' },
+    { id: 'svc-palm', name: 'Palm Injection' }, { id: 'svc-ts', name: 'Tree & Shrub Care' },
+    { id: 'svc-dup-a', name: 'Inspection' }, { id: 'svc-dup-b', name: 'inspection ' },
+  ];
+  const run = (rows, later = [], catalog = CATALOG) => {
     const conn = fakeConn({
       reschedule_log: (ops) => (hasOp(ops, 'offset', (a) => a[0] === 0) ? [].concat(rows).slice(0, 10) : [].concat(rows).slice(10)),
       scheduled_services: (ops) => (isFollowUpQuery(ops) ? later : []),
+      services: (ops) => {
+        const names = ops.find((o) => o.op === 'whereRaw').args[1][0];
+        return catalog.filter((c) => names.includes(c.name.trim().toLowerCase()));
+      },
     });
     return loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn }).then((out) => ({ out, conn }));
   };
@@ -667,8 +677,8 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ status: 'cancelled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
-  test('followed up by a visit booked AFTER the miss, at the frozen property, covering every missed family', async () => {
-    const later = (over = {}) => ({ service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
+  test('followed up by a visit booked AFTER the miss, at the frozen property, for the same service', async () => {
+    const later = (over = {}) => ({ service_id: null, service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
     expect((await run([noshow()], [later()])).out.missedVisit).toBeNull();
     // the follow-up read: same property, booked after the log, never the missed row itself
     const { conn } = await run([noshow()], [later()]);
@@ -678,10 +688,6 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect(hasOp(q.ops, 'whereNot', (a) => a[0] === 'id' && a[1] === 'visit-1')).toBe(true);
     // another service does not cover it
     expect((await run([noshow()], [later({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
-    // a combined miss needs every family covered
-    const combined = noshow({ occurrence_service_type: 'Pest Control & Lawn Care' });
-    expect((await run([combined], [later({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ type: 'Pest Control & Lawn Care' });
-    expect((await run([combined], [later({ service_type: 'Lawn Care' }), later()])).out.missedVisit).toBeNull();
     // a same-day visit counts only when it starts after the missed slot
     expect((await run([noshow()], [later({ scheduled_date: '2026-09-29', window_start: '08:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
     expect((await run([noshow()], [later({ scheduled_date: '2026-09-29', window_start: '14:00:00' })])).out.missedVisit).toBeNull();
@@ -695,12 +701,23 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect(out.missedVisit).toMatchObject({ logId: 'rl-old', date: '2026-09-25' });
   });
 
-  test('service families: combined visits are sets; tree & shrub tokens win over fertilization', () => {
-    expect([...serviceFamilies('Pest Control & Lawn Care')].sort()).toEqual(['lawn', 'pest']);
-    expect([...serviceFamilies('Pest & Rodent Control')].sort()).toEqual(['pest', 'rodent']);
-    expect([...serviceFamilies('Tree & Shrub Fertilization')]).toEqual(['tree_shrub']);
-    expect([...serviceFamilies('Lawn Fertilization')]).toEqual(['lawn']);
-    expect(serviceFamilies('').size).toBe(0);
+  test('same service = the catalog identity (service_id, else the one catalog row by exact name), never a keyword family (Codex #5610 r1 P1)', async () => {
+    const later = (over = {}) => ({ service_id: null, service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
+    const open = async (missed, rows) => (await run([noshow(missed)], rows)).out.missedVisit;
+    // the frozen catalog id matches a later row's id, whatever its label says now
+    expect(await open({ occurrence_service_id: 'svc-pest' }, [later({ service_id: 'svc-pest', service_type: 'General Pest (renamed)' })])).toBeNull();
+    // a label-only side resolves through the catalog name: same row = same service
+    expect(await open({ occurrence_service_id: 'svc-pest' }, [later({ service_type: ' pest control ' })])).toBeNull();
+    expect(await open({ occurrence_service_type: 'Pest Control' }, [later({ service_id: 'svc-pest', service_type: 'x' })])).toBeNull();
+    // different catalog services never cover each other: another flea package, palm vs tree & shrub
+    expect(await open({ occurrence_service_type: 'Flea Treatment' }, [later({ service_type: 'Flea Treatment Package' })])).toMatchObject({ logId: 'rl-1' });
+    expect(await open({ occurrence_service_type: 'Palm Injection' }, [later({ service_type: 'Tree & Shrub Care' })])).toMatchObject({ logId: 'rl-1' });
+    expect(await open({ occurrence_service_id: 'svc-pest' }, [later({ service_id: 'svc-lawn', service_type: 'Pest Control' })])).toMatchObject({ logId: 'rl-1' });
+    // off-catalog labels compare as labels (trimmed, case-insensitive); an ambiguous catalog name too
+    expect(await open({ occurrence_service_type: 'Wasp Nest Removal' }, [later({ service_type: 'wasp nest removal' })])).toBeNull();
+    expect(await open({ occurrence_service_type: 'Wasp Nest Removal' }, [later({ service_type: 'Bee Removal' })])).toMatchObject({ logId: 'rl-1' });
+    expect(await open({ occurrence_service_type: 'Inspection' }, [later({ service_type: 'INSPECTION' })])).toBeNull();
+    expect(await open({ occurrence_service_type: 'Inspection' }, [later({ service_id: 'svc-dup-a', service_type: 'Inspection' })])).toMatchObject({ logId: 'rl-1' });
   });
 
   test('the signature names the logged occurrence', async () => {

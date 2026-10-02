@@ -3527,11 +3527,24 @@ function visitIdField(visit, visits = []) {
   return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
 }
 
-function unnamedServiceIdentity(visits, openEstimate) {
+// The open MISSED VISIT the facts list (gate-on context.visitLoops), or null.
+function openMissedVisit(context) {
+  const m = context?.visitLoops?.missedVisit;
+  return m && typeof m === 'object' && String(m.type || '').trim() ? m : null;
+}
+// Re-booking a missed visit is a new visit of the missed service (/book under
+// GATE_SMS_OFFERS_SCHEDULER: the missed row is no longer a live visit to move).
+function missedVisitIdentity(missed) {
+  return { serviceType: String(missed.type), certain: true, reason: 'missed_visit' };
+}
+
+function unnamedServiceIdentity(visits, openEstimate, missed = null) {
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
   if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  // an unrebooked miss outranks the last completed visit: it is the job still owed
+  if (missed) return missedVisitIdentity(missed);
   const completed = visits.find((v) => !v.upcoming);
   if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
   return { serviceType: null, certain: true, reason: 'engine_default' };
@@ -3539,13 +3552,13 @@ function unnamedServiceIdentity(visits, openEstimate) {
 
 // Code accepts only an option it offered (the schema already constrains the
 // provider; this re-checks) — anything else is uncertain.
-function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services, missed = null) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
-  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
+  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate, missed);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
 
@@ -3564,7 +3577,7 @@ async function serviceIdentityFor(inboundMessage, context, { openEstimate = null
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, openMissedVisit(context));
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
@@ -4422,7 +4435,7 @@ function formatEtDate(value) {
     // service_date / scheduled_date are Postgres DATE values — calendar
     // days, not instants. Reparsing one as an instant puts it at midnight
     // UTC, which formats in ET as the PREVIOUS day. Anchor date-only values
-    // to noon instead (same idiom as the legacy drafter in twilio-webhook).
+    // to noon instead.
     // pg hands DATE columns over as Date objects at local midnight, so the
     // local calendar parts are the true day.
     const pad = (n) => String(n).padStart(2, '0');
@@ -4430,7 +4443,9 @@ function formatEtDate(value) {
       ? `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
       : String(value);
     const dateOnly = dayString.match(/^(\d{4}-\d{2}-\d{2})/);
-    const date = dateOnly ? new Date(`${dateOnly[1]}T12:00:00`) : new Date(value);
+    // noon UTC, not host-local noon: the same ET calendar day on any host TZ
+    // (local noon on a host east of UTC+12 is the previous day in ET)
+    const date = dateOnly ? new Date(`${dateOnly[1]}T12:00:00Z`) : new Date(value);
     return date.toLocaleDateString('en-US', {
       weekday: 'long',
       month: 'short',
@@ -4623,7 +4638,8 @@ function visitLoopStatus(context, factsBlock) {
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
-// header, then one line per present field, or the single line "- none". Pure.
+// header, then one line per present field, or the single line "- none", then the
+// fixed MISSED_VISIT_SCOPE_LINE. Pure.
 function renderVisitLoopsSection(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const lines = [
@@ -4640,7 +4656,9 @@ function renderVisitLoopsSection(visitLoops) {
       return since ? ` (since ${since})` : '';
     }),
   ].filter(Boolean);
-  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n`;
+  // the scope line closes the section (it is not a "- " item: factsListOpenLoop stops before it)
+  const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
+  return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n${MISSED_VISIT_SCOPE_LINE}\n`;
 }
 
 /**
@@ -5379,10 +5397,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // its service_interest wins inside the engine — so no classification
   // then. Carried on the snapshot so the send-time recheck asks the same
   // question.
-  const needsOpenTimes = Boolean(schedulingIntent)
+  // A listed MISSED VISIT (#5610, Codex r1 P1): its rule offers the earliest OPEN
+  // TIMES slot whatever the inbound says ("thanks" included), so the times are
+  // fetched for it too — sized for the missed service (missedVisitIdentity).
+  const missedVisit = openMissedVisit(context);
+  const asksAboutJob = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
     || pestReportSignal(inboundMessage, context);
+  const needsOpenTimes = asksAboutJob || Boolean(missedVisit);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -5404,8 +5427,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  // Only the missed visit asks for times: they are for re-booking it — no identity
+  // model call. Otherwise the identity step picks the job (the missed visit is one
+  // of its fallbacks: unnamedServiceIdentity).
   const identity = willFetchOpenTimes && !estimateId
-    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
+    ? (asksAboutJob ? await serviceIdentityFor(inboundMessage, context, { openEstimate }) : missedVisitIdentity(missedVisit))
     : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
