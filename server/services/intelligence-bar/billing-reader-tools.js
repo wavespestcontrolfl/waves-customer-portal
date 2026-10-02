@@ -106,9 +106,9 @@ const cents = (value) => Math.round((Number(value) || 0) * 100);
 const fromCents = (value) => Math.round(value) / 100;
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-// Digits with up to three non-alphanumeric separators between them (spaces, dashes, dots, slashes, underscores, any
-// mix, or none), 13 or more digits in all.
-const DIGIT_RUN_RE = /\d(?:[^A-Za-z0-9]{0,3}\d){12,}/g;
+// Digit groups joined by non-alphanumeric separators of ANY length (spaces, tabs, newlines and indentation, dashes,
+// dots, slashes, underscores, any mix, or none): 13 or more digits in all. Only a letter or digit ends a run.
+const DIGIT_RUN_RE = /\d(?:[^A-Za-z0-9]*\d){12,}/g;
 const ISO_DATE_RUN_RE = /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/;
 const UUID_IN_TEXT_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
 function luhnValid(digits) {
@@ -246,6 +246,7 @@ const optionalRead = (database, work) => database.transaction(work);
 // ─── the payment fences ─────────────────────────────────────────────
 
 const RECONCILE_POINTER = 'needs reconciliation — check the Invoices page';
+const VISIT_DID_NOT_HAPPEN_REASON = 'the visit for this invoice did not happen (cancelled/skipped) — check the Invoices page';
 const RECORD_CHANGED_REASON = 'this record changed hands during the read; ask again';
 const CARD_INCOMPLETE_REASON = 'a card payment did not complete — check the Invoices page';
 const ATTACHED_INTENT_REASON = 'a payment was started on this invoice and its outcome is not confirmed here — check the Invoices page';
@@ -384,6 +385,15 @@ async function processingStatusOutcome(invoice, database, terminalError) {
  * flag), which the list reports as dispute_hold, and visitRefusesSettlement, a lock-taking settlement-write guard.
  * Anything unexpected, or a check that cannot run, holds the balance.
  */
+// The linked visit's never-ran status, or null: invoice-helpers neverRanVisitStatus (the predicate
+// visitRefusesSettlement applies under its lock) on a plain read of the visit the invoice links to.
+async function linkedVisitNeverRan(invoice, database) {
+  const visitId = await require('../invoice').linkedScheduledServiceId(invoice, database);
+  if (!visitId) return null;
+  const visit = await database('scheduled_services').where({ id: visitId }).first('status');
+  return require('../invoice-helpers').neverRanVisitStatus(visit && visit.status);
+}
+
 async function decideCollectibility(invoice, listed, database) {
   const status = invoiceStatusKey(invoice.status);
   try {
@@ -404,6 +414,10 @@ async function decideCollectibility(invoice, listed, database) {
   // The collection fence re-read the invoice: the attached-intent hold and the amount use THAT row, never the
   // older one the caller passed (an intent attached or credit applied between the two reads).
   const fresh = member.row;
+  // A visit that never ran refuses settlement (visitRefusesSettlement): the same pure status check, read-only, through
+  // the canonical invoice-to-visit linkage (including a service-record-only link).
+  const neverRan = await linkedVisitNeverRan(fresh, database);
+  if (neverRan) return { ...held('needs_reconciliation', VISIT_DID_NOT_HAPPEN_REASON), row: fresh };
   if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
   return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
 }
@@ -793,11 +807,12 @@ async function loadRecordedPayments(customerId, invoice, database) {
         recorded_at: iso(row.created_at),
         // A statement-level row covers every invoice on the statement: its amount is never this invoice's share.
         amount: row.statement_id != null ? null : money(row.amount),
-        ...(row.statement_id != null ? { statement_level: { statement_id: String(row.statement_id), statement_amount: money(row.amount), applies_to: 'every invoice on the payer statement, not this invoice alone' } } : {}),
+        ...(row.statement_id != null ? { statement_level: { statement_id: String(row.statement_id), statement_amount: money(row.amount), refunded_amount: money(row.refund_amount) || 0, refund_status: row.refund_status || null, applies_to: 'every invoice on the payer statement, not this invoice alone' } } : {}),
         status: row.status,
         method: [tender || row.processor || invoice.payment_method || 'manual', row.live_card_brand || row.card_brand].filter(Boolean).join(' '),
-        refunded_amount: money(row.refund_amount) || 0,
-        refund_status: row.refund_status || null,
+        // A statement row carries the WHOLE statement's cumulative refund: it is statement-level, never this invoice's.
+        refunded_amount: row.statement_id != null ? null : money(row.refund_amount) || 0,
+        refund_status: row.statement_id != null ? null : row.refund_status || null,
         ...(payer != null ? { funded_by_payer: { id: Number(payer) || null, name: names.get(Number(payer)) || null } } : {}),
       };
     }),
@@ -815,26 +830,101 @@ async function getInvoiceDetail(input, actionContext) {
   return inSnapshot((database) => detailInSnapshot(input, actionContext, database));
 }
 
-async function detailInSnapshot(input, actionContext, database) {
-  if (!input.invoice_id || !UUID_RE.test(String(input.invoice_id))) {
-    return { error: 'A valid invoice_id is required', code: 'invalid_target' };
-  }
-  const invoiceId = String(input.invoice_id).toLowerCase();
-  if (input.customer_id && !UUID_RE.test(String(input.customer_id))) {
-    return { error: 'A valid customer_id is required', code: 'invalid_target' };
-  }
-  const invoice = await database('invoices').where({ id: invoiceId }).first();
-  const unavailable = { error: 'That invoice is unavailable for this customer', code: 'record_unavailable' };
-  if (!invoice) return unavailable;
-  if (input.customer_id && String(input.customer_id).toLowerCase() !== String(invoice.customer_id)) return unavailable;
+const RECORD_UNAVAILABLE = { error: 'That invoice is unavailable for this customer', code: 'record_unavailable' };
+
+// Authorize and load: the invoice and its customer inside the call's snapshot, or the refusal to return.
+async function authorizeInvoiceRead(input, actionContext, database) {
+  if (!input.invoice_id || !UUID_RE.test(String(input.invoice_id))) return { refusal: { error: 'A valid invoice_id is required', code: 'invalid_target' } };
+  if (input.customer_id && !UUID_RE.test(String(input.customer_id))) return { refusal: { error: 'A valid customer_id is required', code: 'invalid_target' } };
+  const invoice = await database('invoices').where({ id: String(input.invoice_id).toLowerCase() }).first();
+  if (!invoice) return { refusal: RECORD_UNAVAILABLE };
+  if (input.customer_id && String(input.customer_id).toLowerCase() !== String(invoice.customer_id)) return { refusal: RECORD_UNAVAILABLE };
   const scope = Array.isArray(actionContext.readCustomerIds) ? actionContext.readCustomerIds : [];
   if (scope.length && !scope.map(String).includes(String(invoice.customer_id))) {
-    return { error: 'Choose the target for this lookup; the current request has not established it', code: 'target_clarification_required' };
+    return { refusal: { error: 'Choose the target for this lookup; the current request has not established it', code: 'target_clarification_required' } };
   }
   const customer = await database('customers').where({ id: invoice.customer_id }).first('id', 'first_name', 'last_name', 'phone', 'deleted_at');
-  if (!customer || customer.deleted_at) return unavailable;
+  if (!customer || customer.deleted_at) return { refusal: RECORD_UNAVAILABLE };
+  return { invoice, customer };
+}
 
-  const today = etDateString();
+// Annual prepay resolution: the invoice's own term id, or the term-side link (annual_prepay_terms.prepay_invoice_id)
+// the Invoices detail reader also resolves through.
+async function resolvePrepayTerm(facts, database) {
+  const termColumns = ['id', 'status', 'term_start', 'term_end', 'prepay_amount'];
+  const ownTermId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
+  if (ownTermId) {
+    return { termId: ownTermId, role: facts.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term', term: await database('annual_prepay_terms').where({ id: ownTermId }).first(termColumns) };
+  }
+  if (!(await database.schema.hasTable('annual_prepay_terms'))) return { termId: null, role: null, term: null };
+  const term = await database('annual_prepay_terms').where({ prepay_invoice_id: facts.id }).first(termColumns);
+  return term ? { termId: term.id, role: 'prepay_invoice', term } : { termId: null, role: null, term: null };
+}
+
+function annualPrepayProjection({ termId, role, term }) {
+  if (!termId) return null;
+  return {
+    role,
+    term_id: termId,
+    term_status: term ? term.status : null,
+    term_start: term ? dateOnly(term.term_start) : null,
+    term_end: term ? dateOnly(term.term_end) : null,
+    prepay_amount: term ? money(term.prepay_amount) : null,
+  };
+}
+
+// The warnings the detail carries for every bounded or failed optional read.
+function detailWarnings({ hold, plans, recorded }) {
+  const unknowns = [];
+  if (hold.unknown) unknowns.push(hold.unknown);
+  if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);
+  if (recorded.namesUnavailable) unknowns.push('The payer name could not be read: a third-party payer is shown without its name.');
+  if (recorded.truncated) unknowns.push('More payment rows are tied to this invoice than were read: the newest are shown.');
+  return unknowns;
+}
+
+// The invoice document: facts from the one snapshot row, the due projection from the fence.
+function invoiceDocument(facts, fence, today) {
+  return {
+    id: facts.id,
+    invoice_number: facts.invoice_number,
+    title: scrub(facts.title, 160),
+    status: facts.status,
+    service_type: facts.service_type || null,
+    service_date: dateOnly(facts.service_date),
+    created_at: iso(facts.created_at),
+    sent_at: iso(facts.sent_at),
+    viewed_at: iso(facts.viewed_at),
+    due_date: dateOnly(facts.due_date),
+    paid_at: iso(facts.paid_at),
+    subtotal: money(facts.subtotal),
+    discount_amount: money(facts.discount_amount) || 0,
+    discount_label: scrub(facts.discount_label, 120),
+    tax_rate: facts.tax_rate === null || facts.tax_rate === undefined ? null : Number(facts.tax_rate),
+    tax_amount: money(facts.tax_amount) || 0,
+    total: money(facts.total),
+    credit_applied: money(facts.credit_applied) || 0,
+    ...projectDue(facts, fence, today),
+    payment_method: facts.payment_method || null,
+    payment_reference: scrub(facts.payment_reference, 120),
+    payment_recorded_by: scrub(facts.payment_recorded_by, 80),
+    payment_recorded_at: iso(facts.payment_recorded_at),
+    archived: Boolean(facts.archived_at),
+  };
+}
+
+function discountsProjection(facts, lines) {
+  return {
+    document_discount: { amount: money(facts.discount_amount) || 0, label: scrub(facts.discount_label, 120) },
+    discount_lines: lines.filter((line) => line.is_discount),
+    account_credit_applied: money(facts.credit_applied) || 0,
+  };
+}
+
+async function detailInSnapshot(input, actionContext, database) {
+  const loaded = await authorizeInvoiceRead(input, actionContext, database);
+  if (loaded.refusal) return loaded.refusal;
+  const { invoice, customer } = loaded;
   const fence = await invoiceCollectibility(invoice, database);
   if (fence.state === 'unavailable') return { error: `That invoice is unavailable: ${RECORD_CHANGED_REASON}`, code: 'record_unavailable' };
   const facts = effectiveRow(invoice, fence);
@@ -842,73 +932,19 @@ async function detailInSnapshot(input, actionContext, database) {
   const plans = await database('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(PLAN_HISTORY_CAP + 1)
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
   const hold = await readDisputeHold(customer.id, database);
-
-  let prepayTerm = null;
-  let termId = facts.annual_prepay_term_id || facts.annual_prepay_covered_term_id;
-  let prepayRole = facts.annual_prepay_term_id ? 'prepay_invoice' : 'covered_by_prepay_term';
-  const termColumns = ['id', 'status', 'term_start', 'term_end', 'prepay_amount'];
-  if (termId) {
-    prepayTerm = await database('annual_prepay_terms').where({ id: termId }).first(termColumns);
-  } else if (await database.schema.hasTable('annual_prepay_terms')) {
-    // The term-side link (annual_prepay_terms.prepay_invoice_id) the Invoices detail reader also resolves through.
-    prepayTerm = await database('annual_prepay_terms').where({ prepay_invoice_id: facts.id }).first(termColumns);
-    if (prepayTerm) { termId = prepayTerm.id; prepayRole = 'prepay_invoice'; }
-  }
-
+  const prepay = await resolvePrepayTerm(facts, database);
   const lines = lineItems(facts.line_items);
-  const unknowns = [];
-  if (hold.unknown) unknowns.push(hold.unknown);
-  if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);
-  if (recorded.namesUnavailable) unknowns.push('The payer name could not be read: a third-party payer is shown without its name.');
-  if (recorded.truncated) unknowns.push('More payment rows are tied to this invoice than were read: the newest are shown.');
-
   return {
-    invoice: {
-      id: facts.id,
-      invoice_number: facts.invoice_number,
-      title: scrub(facts.title, 160),
-      status: facts.status,
-      service_type: facts.service_type || null,
-      service_date: dateOnly(facts.service_date),
-      created_at: iso(facts.created_at),
-      sent_at: iso(facts.sent_at),
-      viewed_at: iso(facts.viewed_at),
-      due_date: dateOnly(facts.due_date),
-      paid_at: iso(facts.paid_at),
-      subtotal: money(facts.subtotal),
-      discount_amount: money(facts.discount_amount) || 0,
-      discount_label: scrub(facts.discount_label, 120),
-      tax_rate: facts.tax_rate === null || facts.tax_rate === undefined ? null : Number(facts.tax_rate),
-      tax_amount: money(facts.tax_amount) || 0,
-      total: money(facts.total),
-      credit_applied: money(facts.credit_applied) || 0,
-      ...projectDue(facts, fence, today),
-      payment_method: facts.payment_method || null,
-      payment_reference: scrub(facts.payment_reference, 120),
-      payment_recorded_by: scrub(facts.payment_recorded_by, 80),
-      payment_recorded_at: iso(facts.payment_recorded_at),
-      archived: Boolean(facts.archived_at),
-    },
+    invoice: invoiceDocument(facts, fence, etDateString()),
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     line_items: lines,
-    discounts: {
-      document_discount: { amount: money(facts.discount_amount) || 0, label: scrub(facts.discount_label, 120) },
-      discount_lines: lines.filter((line) => line.is_discount),
-      account_credit_applied: money(facts.credit_applied) || 0,
-    },
+    discounts: discountsProjection(facts, lines),
     recorded_payments: recorded.payments,
     recorded_payments_note: 'Informational: the payments-table rows tied to this invoice, with no verdict on whether it was paid or what is owed. collectible and balance_due decide that.',
     payment_plan: paymentPlanDetail(plans, fence),
     dispute_hold: hold,
-    annual_prepay: termId ? {
-      role: prepayRole,
-      term_id: termId,
-      term_status: prepayTerm ? prepayTerm.status : null,
-      term_start: prepayTerm ? dateOnly(prepayTerm.term_start) : null,
-      term_end: prepayTerm ? dateOnly(prepayTerm.term_end) : null,
-      prepay_amount: prepayTerm ? money(prepayTerm.prepay_amount) : null,
-    } : null,
-    unknowns,
+    annual_prepay: annualPrepayProjection(prepay),
+    unknowns: detailWarnings({ hold, plans, recorded }),
     note: BALANCE_RULE,
   };
 }

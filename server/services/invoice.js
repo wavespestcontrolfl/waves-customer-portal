@@ -12643,6 +12643,7 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim
 // back, exercised directly by the ported Postgres adoption-restore cases
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can

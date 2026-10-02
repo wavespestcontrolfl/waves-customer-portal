@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2; let TIED;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2; let TIED; let VISIT;
   const inv = {};
   const tokens = [];
 
@@ -170,6 +170,15 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     TIED = await customer(`Tied${run}`, `Rows${run}`);
     const tiedAt = new Date(Date.now() - 3 * 86400e3);
     for (let n = 0; n < 5; n += 1) await invoice(`tied${n}`, TIED, { total: 10 + n, service_date: day(-3), created_at: tiedAt, due_date: day(5) });
+    // Invoices whose linked visit never ran: linked directly, linked only through the service record, and a live visit.
+    VISIT = await customer(`Visit${run}`, `Never${run}`);
+    const visitRow = async (status) => (await db('scheduled_services').insert({ customer_id: VISIT, scheduled_date: day(-1), service_type: 'Pest Control', status }).returning('id'))[0];
+    const [cancelledVisit, skippedVisit, liveVisit] = await Promise.all([visitRow('cancelled'), visitRow('no_show'), visitRow('confirmed')]);
+    const idOf = (row) => row.id || row;
+    await invoice('vis_direct', VISIT, { total: 30, scheduled_service_id: idOf(cancelledVisit) });
+    const [record] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(skippedVisit) }).returning('id');
+    await invoice('vis_record', VISIT, { total: 40, service_record_id: record.id || record });
+    await invoice('vis_live', VISIT, { total: 50, scheduled_service_id: idOf(liveVisit) });
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -245,7 +254,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       subtotal: 900, total: 900, invoice_count: 3, token: crypto.randomBytes(16).toString('hex'), paid_at: new Date() }).returning('id');
     inv.statementId = statement.id || statement;
     await invoice('g_stmt', G, { total: 300, status: 'paid', paid_at: new Date(), payer_statement_id: inv.statementId });
-    await db('payments').insert({ customer_id: null, payer_id: payerId, statement_id: inv.statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe',
+    await db('payments').insert({ customer_id: null, payer_id: payerId, statement_id: inv.statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe', refund_amount: 250, refund_status: 'partial',
       description: `Payer statement S-${inv.statementId} settlement (ach)`, metadata: json({ statement_id: inv.statementId, payer_id: payerId, source: 'synthetic' }) });
     const gBulk = await invoice('g_bulk', G, { total: 90 });
     await db.batchInsert('payments', Array.from({ length: 51 }, (_, n) => ({ customer_id: G, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
@@ -529,7 +538,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(alias.invoice).toMatchObject({ collectible: true, balance_due: 150 });
     const stmt = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
     expect(stmt.recorded_payments).toEqual([expect.objectContaining({ amount: null, status: 'paid', funded_by_payer: { id: expect.any(Number), name: `Synthetic Payer ${run}` },
-      statement_level: { statement_id: String(inv.statementId), statement_amount: 900, applies_to: expect.stringMatching(/not this invoice alone/) } })]);
+      statement_level: expect.objectContaining({ statement_id: String(inv.statementId), statement_amount: 900, applies_to: expect.stringMatching(/not this invoice alone/) }) })]);
     const legacy = await read('get_invoice_detail', { invoice_id: inv.g_legacy.id });
     expect(legacy.recorded_payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([5, 70]);
     expect(legacy.recorded_payments.find((p) => p.amount === 70)).toMatchObject({ status: 'refunded', refunded_amount: 20, refund_status: 'succeeded' });
@@ -588,6 +597,36 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const prepay = await read('get_invoice_detail', { invoice_id: inv.t_prepay.id });
     expect(prepay.annual_prepay).toMatchObject({ term_start: day(-30), term_end: day(335) });
     expect(prepay.recorded_payments).toBeDefined();
+  });
+
+  test('an invoice whose linked visit never ran (direct or through its service record) is held and left out of total_due', async () => {
+    const list = await read('get_customer_invoices', { customer_id: VISIT, limit: 50 });
+    for (const key of ['vis_direct', 'vis_record']) {
+      expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: true,
+        reason: 'the visit for this invoice did not happen (cancelled/skipped) — check the Invoices page' });
+    }
+    expect(by(list, 'vis_live')).toMatchObject({ collectible: true, balance_due: 50 });
+    expect(list.account_summary).toMatchObject({ total_due: 50, needs_reconciliation_count: 2 });
+    expect((await read('get_invoice_detail', { invoice_id: inv.vis_record.id })).invoice).toMatchObject({ collectible: false, needs_reconciliation: true });
+  });
+
+  test('card numbers split by long separators, tabs, newlines and indentation are masked', async () => {
+    const Q = await customer(`Wide${run}`, `Gaps${run}`);
+    const spaced = ['4111    1111    1111    1111', '4111\n        1111\n        1111\n        1111', '4111\t1111\t1111\t1111', '4111 \t\n  - 1111  . \n 1111 /   1111'];
+    for (const [n, number] of spaced.entries()) await invoice(`q_wide_${n}`, Q, { total: 5, title: `Paid ${number} thanks` });
+    const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
+    expect(text).not.toMatch(/4111|1111/);
+    expect((text.match(/Paid \[number\] thanks/g) || []).length).toBe(spaced.length);
+    // An ISO date-time (space-separated) is still left alone.
+    await invoice('q_wide_date', Q, { total: 5, title: 'Seen 2026-10-02 14:05:10 ok' });
+    expect(json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }))).toContain('Seen 2026-10-02 14:05:10 ok');
+  });
+
+  test('a statement row\'s refund is statement-level: the child entry carries no refund of its own', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
+    const row = detail.recorded_payments[0];
+    expect(row).toMatchObject({ amount: null, refunded_amount: null, refund_status: null });
+    expect(row.statement_level).toMatchObject({ statement_amount: 900, refunded_amount: 250, refund_status: 'partial' });
   });
 
   test('invoices tied on every sort key page deterministically: no duplicate, no skip, id order', async () => {

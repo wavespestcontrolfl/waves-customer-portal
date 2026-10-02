@@ -64,11 +64,16 @@ async function lockVisitForSettlement(trx, scheduledServiceId, columns) {
   }
 }
 
+// The pure half of visitRefusesSettlement: the visit status when it never ran, else null.
+function neverRanVisitStatus(rawStatus) {
+  const status = invoiceStatusKey(rawStatus);
+  return VISIT_NEVER_RAN_STATUSES.includes(status) ? status : null;
+}
+
 async function visitRefusesSettlement(trx, scheduledServiceId) {
   if (!scheduledServiceId) return null;
   const visit = await lockVisitForSettlement(trx, scheduledServiceId, ['id', 'status']);
-  const status = invoiceStatusKey(visit?.status);
-  return VISIT_NEVER_RAN_STATUSES.includes(status) ? status : null;
+  return neverRanVisitStatus(visit?.status);
 }
 
 function invoiceStatusKey(status) {
@@ -333,6 +338,7 @@ module.exports = {
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,
+  neverRanVisitStatus,
   lockVisitForSettlement,
   assertInvoiceCollectible,
   assertInvoiceNotWithdrawnFromCustomer,
