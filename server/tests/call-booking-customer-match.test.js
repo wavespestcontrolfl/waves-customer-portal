@@ -18,6 +18,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: () => false, isOwnedNumber: () => false }));
 let mockCaptured = null;
+jest.mock('../services/service-contact-events', () => ({ recordServiceContactChanges: jest.fn(async () => ({})) }));
 const mockApplyUpdates = jest.fn(async (args) => { mockCaptured = JSON.parse(JSON.stringify(args.updates)); return { emailApplied: true }; });
 jest.mock('../services/customer-email-fanout', () => ({
   applyCustomerUpdatesWithEmailClaimGuard: (...args) => mockApplyUpdates(...args),
@@ -32,7 +33,7 @@ const { _test } = require('../services/call-recording-processor');
 
 const {
   validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
-  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller, householdContactWouldRevokeConsent,
+  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller, householdContactWouldRevokeConsent, persistCallSecondaryContact,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
@@ -220,6 +221,7 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
     expect(householdContactWouldRevokeConsent(null)).toBe(false);
     // wiring: the check precedes the slot write and the outcome is final (marked complete), the contact stays on the card payload
     expect(source).toContain("householdPersist = 'deferred_existing_contact_consent';");
+    expect(source).toContain('preserveExistingConsent: true');
     expect(source).toContain('if (householdContactWouldRevokeConsent(consentRow)) {');
     const cardPayload = source.slice(source.indexOf("matched_customer_id: String(customerId),"));
     expect(cardPayload.slice(0, 600)).toContain('household_contact: {');
@@ -449,6 +451,35 @@ const SKIP = !process.env.DATABASE_URL;
     process.env[HOUSEHOLD_GATE] = 'true';
     expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
     delete process.env[HOUSEHOLD_GATE];
+  });
+
+  test('CONCURRENT consent: a stamp that lands after the writer read the row is neither cleared nor inherited (guard is inside the conditional UPDATE)', async () => {
+    const dbMock = require('../models/db');
+    const SALLY = '+19415550177';
+    const holder = member({ service_contact_phone: '+19415550150', service_contact_name: 'Existing Contact' });
+    await trx('customers').insert(holder);
+    const stamp = new Date('2026-10-01T12:00:00Z');
+    // The writer's snapshot is STALE: it read the row before the consent stamp landed.
+    const stale = { ...holder, service_contacts_consent_at: null };
+    await trx('customers').where({ id: holder.id }).update({ service_contacts_consent_at: stamp, service_contacts_consent_source: 'portal' });
+    const run = async (opts) => {
+      let first = true;
+      dbMock.mockImplementation((table) => {
+        if (first && table === 'customers') { first = false; return { where: () => ({ first: async () => stale }) }; }
+        return trx(table);
+      });
+      dbMock.raw = (...args) => trx.raw(...args);
+      return persistCallSecondaryContact(holder.id, { first_name: 'Sally', last_name: 'Example', phone: SALLY, wants_notifications: true }, opts);
+    };
+    expect(await run({ smsConsentExplicit: false, preserveExistingConsent: true })).toBe('skipped_consent_preserved');
+    const after = await trx('customers').where({ id: holder.id }).first();
+    expect(after.service_contacts_consent_at).toEqual(stamp);
+    expect(after.service_contact2_phone).toBeNull();
+    expect(after.service_contact_phone).toBe('+19415550150');
+    // control: the ordinary writer (no guard) would have cleared the stamp and slotted the unconsented phone
+    expect(await run({ smsConsentExplicit: false })).toBe('written');
+    expect((await trx('customers').where({ id: holder.id }).first()).service_contact2_phone).toBe(SALLY);
+    dbMock.mockReset();
   });
 
   test('a number stored only in secondary_phone is identity evidence, never "unknown"', async () => {

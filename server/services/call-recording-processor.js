@@ -3285,7 +3285,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, preserveExistingConsent = false } = {}) {
   if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
@@ -3421,6 +3421,18 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
+  // preserveExistingConsent (household contacts, no explicit consent): the guard
+  // is part of the SAME conditional UPDATE, so a consent stamp that lands between
+  // the read above and this write can neither be cleared by this contact's phone
+  // (existing contacts keep their texts) nor be inherited by it — the UPDATE
+  // simply matches no row, and the contact stays on the review card.
+  if (preserveExistingConsent) {
+    const slotPhones = SERVICE_CONTACT_SLOTS.map((slot) => `NULLIF(TRIM(COALESCE(??, '')), '')`).join(', ');
+    write = write.whereRaw(
+      `NOT (service_contacts_consent_at IS NOT NULL AND COALESCE(${slotPhones}) IS NOT NULL)`,
+      SERVICE_CONTACT_SLOTS.map((slot) => slot.phone),
+    );
+  }
   const contactRole = String(contact.role || '').trim().toLowerCase();
   const slotWrite = {
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
@@ -3444,13 +3456,18 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
-    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+    ...((contact.phone && !smsConsentExplicit && (customer.service_contacts_consent_at || preserveExistingConsent)) ? {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
     } : {}),
   };
   const updated = await write.update(slotWrite);
+  if (!updated && preserveExistingConsent) {
+    const fresh = await db('customers').where({ id: customerId })
+      .first('service_contacts_consent_at', ...SERVICE_CONTACT_SLOTS.map((slot) => slot.phone));
+    if (householdContactWouldRevokeConsent(fresh)) return 'skipped_consent_preserved';
+  }
   // Stamp taken AFTER the UPDATE resolves: if it blocked behind a concurrent
   // locked save, the stamp still lands after that save's lock-held
   // timestamp, keeping timeline order.
@@ -12556,7 +12573,7 @@ const CallRecordingProcessor = {
           // Existing authorized contacts keep their texts; this contact is on the card.
           householdPersist = 'deferred_existing_contact_consent';
         } else {
-          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
+          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false, preserveExistingConsent: true });
           householdIncomplete = householdPersist === 'skipped_slot_race';
         }
       } catch (persistErr) {
