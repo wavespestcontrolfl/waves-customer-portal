@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { NavLink, Outlet, matchPath, useLocation, useOutletContext } from 'react-router-dom';
 import TechFieldShell from '../../components/tech/TechFieldShell';
 import { useTechNavigationLock } from '../../components/tech/TechNavigationLock';
@@ -22,6 +23,12 @@ export default function TodayShell() {
   const lock = useTechNavigationLock();
   const { pathname } = useLocation();
   const isMobile = useIsMobile();
+  // Field modals portal onto <body>, outside .tech-field: this class lets the
+  // admin font override skip them while the workspace is mounted (index.css).
+  useEffect(() => {
+    document.body.classList.add('tech-field-active');
+    return () => document.body.classList.remove('tech-field-active');
+  }, []);
   // Same document gate the field shell applies (and the retired /tech shell
   // applied) when the flag is off: a bookmarked /admin/today/documents must
   // not mount the library against dark-gated endpoints.

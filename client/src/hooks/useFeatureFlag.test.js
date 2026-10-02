@@ -62,3 +62,23 @@ it('useFeatureFlagReady re-reads when its refreshKey changes after refetchFlags'
   expect(await screen.findByText('b:true:false')).toBeTruthy();
   cleanup();
 });
+
+it('useFeatureFlag re-reads when its refreshKey changes after refetchFlags (Codex #5573 r8)', async () => {
+  const React = await import('react');
+  const { render, screen, act, cleanup } = await import('@testing-library/react');
+  localStorage.setItem('waves_admin_token', 'fixture-only');
+  let answer = { 'admin-navigation': true };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ flags: answer }) })));
+  const mod = await import('./useFeatureFlag');
+  function Probe({ who }) {
+    const enabled = mod.useFeatureFlag('admin-navigation', false, who);
+    return React.createElement('output', null, `${who}:${enabled}`);
+  }
+  const view = render(React.createElement(Probe, { who: 'a' }));
+  expect(await screen.findByText('a:true')).toBeTruthy();
+  answer = { 'admin-navigation': false };
+  await act(async () => { await mod.refetchFlags(); });
+  view.rerender(React.createElement(Probe, { who: 'b' }));
+  expect(await screen.findByText('b:false')).toBeTruthy();
+  cleanup();
+});

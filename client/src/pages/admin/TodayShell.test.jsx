@@ -129,6 +129,14 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByText('Protocols page')).toBeNull();
   });
 
+  it('marks <body> while mounted so portaled field dialogs keep their fonts (Codex #5573 r8)', async () => {
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Field navigation' });
+    expect(document.body).toHaveClass('tech-field-active');
+    view.unmount();
+    expect(document.body).not.toHaveClass('tech-field-active');
+  });
+
   it('flag off + documents unavailable: /admin/today/documents shows the unavailable notice, not the library', async () => {
     flags.shellEnabled = false;
     docs.available = false;

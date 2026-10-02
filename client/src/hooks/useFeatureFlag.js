@@ -61,7 +61,8 @@ async function loadFlags() {
 // feature unless they have an explicit `enabled: false` row. Fetch errors
 // still fail closed to the default — the cache entry for the key is absent,
 // so the default applies.
-export function useFeatureFlag(key, defaultValue = false) {
+// refreshKey: see useFeatureFlagReady (a long-lived shell re-reads per account).
+export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined) {
   const [enabled, setEnabled] = useState(defaultValue);
   useEffect(() => {
     let mounted = true;
@@ -72,7 +73,7 @@ export function useFeatureFlag(key, defaultValue = false) {
     return () => {
       mounted = false;
     };
-  }, [key, defaultValue]);
+  }, [key, defaultValue, refreshKey]);
   return enabled;
 }
 

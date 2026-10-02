@@ -31,7 +31,9 @@ export default function TechFieldShell({ children, techName, techRole, staffProf
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
   const legacyTool = ['protocols', 'lawn-diagnostic', 'social-post'].map(tool => `${base}/${tool}`).some(path => matchPath(path, pathname));
   if (!ready) return <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'} role="status">Loading field workspace…</div>;
-  if (!enabled) return children;
+  // The retired /tech shell showed the install hint whatever the flag said:
+  // the flag-off (or fail-closed) view keeps it (Codex #5573 r8).
+  if (!enabled) return <><AddToHomeScreenHint />{children}</>;
   const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (

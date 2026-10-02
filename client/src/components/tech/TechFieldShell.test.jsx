@@ -6,7 +6,7 @@ import { BrowserRouter, Link, MemoryRouter, Route, Routes, useOutletContext } fr
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const flag = vi.hoisted(() => ({ enabled: true, ready: true }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlagReady: () => flag }));
-vi.mock('./AddToHomeScreenHint', () => ({ default: () => null }));
+vi.mock('./AddToHomeScreenHint', () => ({ default: () => <p>Install hint</p> }));
 import TechFieldShell from './TechFieldShell';
 import TechNavigationLock from './TechNavigationLock';
 const unmounted = vi.fn();
@@ -40,6 +40,13 @@ it('uses the existing route when disabled and waits for an unresolved flag', () 
   renderShell();
   expect(screen.getByRole('status')).toHaveTextContent('Loading field workspace');
   expect(screen.queryByText('Route content')).not.toBeInTheDocument();
+});
+
+it('the flag-off view keeps the install hint the retired /tech shell showed (Codex #5573 r8)', () => {
+  flag.enabled = false;
+  renderShell();
+  expect(screen.getByText('Install hint')).toBeInTheDocument();
+  expect(screen.getByText('Existing route')).toBeInTheDocument();
 });
 
 it.each(['/admin/today/documents', '/admin/today/documents/', '/ADMIN/TODAY/DOCUMENTS/'])('keeps documents gated at %s', (path) => {

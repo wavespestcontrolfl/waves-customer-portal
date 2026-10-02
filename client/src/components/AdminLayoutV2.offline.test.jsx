@@ -149,6 +149,32 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(await screen.findByText("Today as Newer Tech")).toBeInTheDocument();
   });
 
+  it("leaving Today after an offline open re-runs the online check before another admin page mounts (Codex #5573 r8)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
+    const fetchMock = offline();
+    vi.stubGlobal("fetch", fetchMock);
+    function Today() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/schedule")}>to schedule</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<Today />} />
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByRole("button", { name: "to schedule" });
+    const before = fetchMock.mock.calls.length;
+    await act(async () => { screen.getByRole("button", { name: "to schedule" }).click(); });
+    await act(async () => {});
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+    expect(screen.queryByText("Schedule content")).not.toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

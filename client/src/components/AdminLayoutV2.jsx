@@ -141,8 +141,10 @@ export default function AdminLayoutV2() {
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
   // focus returns to the "Open menu" button (F0014).
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
-  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
-  const navigationEnabled = useFeatureFlag("admin-navigation", false);
+  // Per verified account, like the field-workspace read below: an account
+  // switch in another tab refetches flags (Codex #5573 r8).
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, user?.id ?? null);
+  const navigationEnabled = useFeatureFlag("admin-navigation", false, user?.id ?? null);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
@@ -166,6 +168,11 @@ export default function AdminLayoutV2() {
   // stored one (another tab signed in): the check reruns for the new login
   // instead of applying the old login's answer.
   const [verifyRun, setVerifyRun] = useState(0);
+  // True while the shell stands on the offline pass alone (no server answer):
+  // that readiness is the field workspace's only. Leaving /admin/today
+  // re-runs the online check before any other admin page mounts (Codex #5573
+  // r8).
+  const [offlineReady, setOfflineReady] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
 
@@ -210,6 +217,7 @@ export default function AdminLayoutV2() {
           return;
         }
         setUser(profile);
+        setOfflineReady(false);
         setAuthStatus("ready");
         // A failed cache write must not leave a stale copy behind.
         try {
@@ -232,9 +240,13 @@ export default function AdminLayoutV2() {
           navigate(adminLoginUrl(location), { replace: true });
           return;
         }
-        const stored = field && err?.status === undefined ? loadStaffOfflinePass(token) : null;
+        // Judged on the path NOW: navigating off Today while the check was
+        // pending must not open another admin page from the pass.
+        const onField = field && isFieldPath(locationRef.current.pathname);
+        const stored = onField && err?.status === undefined ? loadStaffOfflinePass(token) : null;
         if (stored) {
           setUser(stored);
+          setOfflineReady(true);
           setAuthStatus("ready");
           return;
         }
@@ -262,6 +274,14 @@ export default function AdminLayoutV2() {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+
+  useEffect(() => {
+    if (!offlineReady || isFieldPath(location.pathname)) return;
+    setOfflineReady(false);
+    setUser(null);
+    setAuthStatus("checking");
+    setVerifyRun((n) => n + 1);
+  }, [offlineReady, location.pathname]);
 
   // Field workspace only: a 401 from ANY staff API call for the current token
   // ends the session here (token, stored profile and saved route go), so an

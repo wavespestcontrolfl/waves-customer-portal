@@ -186,14 +186,16 @@ input[type="week"] {
    shift. In production renderHTML (server/index.js) injects html.admin-app
    server-side for /admin paths. */
 html.admin-app,
-html.admin-app *:not(.tech-field):not(.tech-field *),
+html.admin-app *:not(.tech-field):not(.tech-field *):not(body.tech-field-active > :not(#root)):not(body.tech-field-active > :not(#root) *),
 .admin-shell-v2,
 .admin-shell-v2 *:not(.tech-field):not(.tech-field *) {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 /* The field workspace (/admin/today, TechFieldShell) keeps its own type:
    DM Sans base and Montserrat headings from tech-field.css, and the legacy
-   field tools' inline font choices (Codex #5573 r6). */
+   field tools' inline font choices (Codex #5573 r6). While /admin/today is
+   mounted (body.tech-field-active, set by TodayShell), nodes the field UI
+   portals straight onto <body> keep their own type too (r8). */
 /* Skip link: off-screen until focused (the admin shell was the only portal without one). */
 .admin-shell-v2 .admin-skip-link {
   position: fixed;
