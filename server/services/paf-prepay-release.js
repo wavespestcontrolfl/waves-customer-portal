@@ -143,10 +143,13 @@ async function planHasUnfinishedCompletion(estimateId, customerId) {
 // The released visit still stands as performed: completed, and its CURRENT
 // closeout record is a performed, non-backfill one (pre-push audit P0). The
 // sweep re-checks this before charging a job released earlier.
-async function visitStillPerformed(visitId) {
+async function visitStillPerformed(visitId, heldTermId = null) {
   if (!visitId) return false;
-  const visit = await db('scheduled_services').where({ id: visitId }).first('status');
+  const visit = await db('scheduled_services').where({ id: visitId }).first('status', 'paf_held_term_id');
   if (String(visit?.status || '') !== 'completed') return false;
+  // …and still held by this year: a re-closeout paid another way, payer-billed
+  // or outside the coverage cleared the stamp (pre-push audit P0).
+  if (heldTermId != null && String(visit.paf_held_term_id || '') !== String(heldTermId)) return false;
   const record = await db('service_records').where({ scheduled_service_id: visitId })
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
   if (!record || String(record.status || '') !== 'completed') return false;

@@ -715,7 +715,7 @@ postgres('annual prepay charged after the first visit', () => {
       StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(
         Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }));
       await sweep();
-      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true, requirePerformedVisit: true }));
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true, requirePerformedVisit: true, requireHeldTermId: f.termId }));
       expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', released_for_visit_id: null });
       expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
@@ -737,6 +737,17 @@ postgres('annual prepay charged after the first visit', () => {
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', charge_returned: true });
+    });
+
+    it('a released visit re-closed without the held stamp sends the job back to wait (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      // Reopened and closed again paid another way: completion cleared the stamp.
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: null, prepaid_method: 'cash', prepaid_amount: 120 });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {

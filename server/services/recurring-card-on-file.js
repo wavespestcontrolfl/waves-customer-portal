@@ -1744,6 +1744,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // reopened / cancelled / rescheduled since the release, or a closeout
       // that started after it, sends the job back to wait for the next
       // release pass — never a charge, never a pay link.
+      let deferredHeldTermId = null;
       if (deferredToFirstVisit) {
         const PafRelease = require('./paf-prepay-release');
         // Released with NO visit = the year settled before any visit; reaching
@@ -1755,7 +1756,9 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           await requeueDeferred({ charge_returned: true });
           continue;
         }
-        if (!(await PafRelease.visitStillPerformed(job.released_for_visit_id))
+        const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id');
+        deferredHeldTermId = heldTerm?.id || null;
+        if (!deferredHeldTermId || !(await PafRelease.visitStillPerformed(job.released_for_visit_id, deferredHeldTermId))
           || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
           await requeueDeferred();
           continue;
@@ -1926,7 +1929,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
               // charge's own visit lock (GitHub Codex #5567 r13).
               ...(deferredToFirstVisit && job.released_for_visit_id
                 && String(job.released_for_visit_id) === String(job.payer_scope_scheduled_service_id)
-                ? { requireCompletedVisit: true, requirePerformedVisit: true } : {}),
+                ? { requireCompletedVisit: true, requirePerformedVisit: true, ...(deferredHeldTermId ? { requireHeldTermId: deferredHeldTermId } : {}) } : {}),
             }
             : { requireSelfPayCustomerId: invoice.customer_id }),
         }));
