@@ -54,7 +54,7 @@ import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimat
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import { FIRST_INVOICE_AT_CONFIRM_COPY, captureTimingProps, resolvePaymentTiming } from '../lib/paymentTiming';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
@@ -3049,12 +3049,15 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
 // method" after a capture already succeeded — the parent retires the saved
 // intent and remounts this modal with a fresh one.
+// prepayAfterVisit (GATE_PAF_PREPAY, /data recurringCardPolicy
+// .prepayAfterFirstVisit): the annual prepay is charged after the first visit —
+// nothing today; the checkbox renders the after_visit_prepay authorization.
 // afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
 // pay-after-first-visit card rail — the checkbox renders the after_visit_card
 // (v12) authorization, the variant the accept records.
 // afterVisitSetup (GATE_PAF_SETUP_FEE): the setup fee is billed with the first
 // visit — the copy names it and the checkbox renders the after_visit_card text.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false }) {
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, prepayAfterVisit = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3094,7 +3097,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
   const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
   // The checkbox assents to the RENDERED authorization: a variant change while
   // the modal is open clears it.
-  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, prepayAfterVisit, afterVisitSetup]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3236,9 +3239,15 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           {replay
-            ? (prepay
+            ? (prepay && prepayAfterVisit
+              ? `Your ${bank ? 'bank account' : 'card'} is already saved for this plan — nothing is charged today. When you continue, we show your exact 12-month total${bank ? ' — bank transfers have no added card surcharge' : ' — including any card surcharge'} — and it is ${bank ? 'debited' : 'charged'} after your first visit.`
+              : prepay
               ? `Your ${bank ? 'bank account' : 'card'} is already saved for this plan. When you continue, we show your exact 12-month total${bank ? ' — bank transfers have no added card surcharge' : ' — including any card surcharge'} — before anything is charged.`
               : `Your ${bank ? 'bank account' : 'card'} is already saved for this plan — nothing is charged today.`)
+            : (prepay && prepayAfterVisit)
+              ? (bank
+                ? 'Save your bank account to confirm your plan — nothing is charged today. We show your exact 12-month total before you confirm, and debit it from this account after your first visit. Bank transfers have no added card surcharge.'
+                : 'Save your card to confirm your plan — nothing is charged today. We show your exact 12-month total — including any card surcharge — before you confirm, and charge this card after your first visit.')
             : prepay
               ? (bank
                 ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
@@ -3266,7 +3275,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           />
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {prepay
-              ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+              ? (prepayAfterVisit
+                ? (bank ? AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT : AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)
+                : (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT))
               : (bank ? ACH_CONSENT_TEXT : ((afterVisit || afterVisitSetup) ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
           </span>
         </label>
@@ -3926,7 +3937,7 @@ export function ContactGapFields({
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3976,7 +3987,11 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
             : 'your payment method on file is billed for your first visit after it is completed.'}`
           : `${existingApptLede} Next step creates your invoice and makes secure payment available.`)
         : paymentPreference === 'prepay_annual'
-          ? (prepayInLane
+          ? (prepayInLane && prepayAfterVisit
+            // GATE_PAF_PREPAY: nothing is charged at confirm; the year is
+            // charged to the saved method after the first performed visit.
+            ? `${existingApptLede} Nothing is charged today — your saved ${prepayCardCapture ? (captureMethodType === 'us_bank_account' ? 'bank account' : 'card') : 'payment method'} is ${prepayCardCapture && captureMethodType === 'us_bank_account' ? 'debited' : 'charged'} the 12-month total after your first visit.`
+            : prepayInLane
             // Tender-accurate (Codex #3492 r10): the auto-satisfy lane
             // charges the SAVED method — which may be a bank account — so
             // only a capture accept may say "card".
@@ -4267,6 +4282,12 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
           {(() => {
             const chargedTotal = Number(acceptResult?.prepayChargedTotal);
             const chargedText = Number.isFinite(chargedTotal) && chargedTotal > 0 ? ` of ${fmtMoney(chargedTotal)}` : '';
+            if (acceptResult.prepayChargeStatus === 'after_first_visit') {
+              // GATE_PAF_PREPAY: approved, nothing charged yet. The cited
+              // amount is the ACKNOWLEDGED total that will be charged (a
+              // credit may lower it, never raise it); absent, name no number.
+              return `Your plan is approved. Nothing was charged today — your annual prepay${chargedText} is charged to your saved card (or debited from your saved bank account) after your first visit.`;
+            }
             if (acceptResult.prepayChargeStatus === 'processing') {
               return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;
             }
@@ -7312,6 +7333,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Attests the quote step's authorization checkbox was checked
           // (auto-satisfy accepts — Codex #3492 r11); server-enforced.
           prepayChargeConsentAccepted: prepayChargeAckRef.current?.consentAccepted === true ? true : undefined,
+          // GATE_PAF_PREPAY: attests the after-first-visit authorization the
+          // quote step displayed; sent only when the quote named it.
+          prepayChargeConsentVariant: prepayChargeAckRef.current?.consentVariant ?? undefined,
           // Missing-contact capture: only sent when the field was actually
           // rendered (a real contactGaps gap) and the customer typed
           // something — email is optional/skippable, so a blank field sends
@@ -8489,6 +8513,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Every surface that renders the setup-fee promise reads THIS, so the copy,
   // the payment options and the attestation always agree.
   const setupFeePromiseEnabled = setupFeeServerAnswer ?? !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit;
+  // GATE_PAF_PREPAY: the in-lane annual prepay is charged after the first
+  // visit (server implies prepayInLane). Absent = today's charge-at-confirm copy.
+  const prepayAfterVisit = !!data?.recurringCardPolicy?.prepayAfterFirstVisit;
   const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
     enabled: setupFeePromiseEnabled,
     serviceMode,
@@ -9261,6 +9288,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 selectedFrequency={combinedFrequency}
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
+                prepayAfterFirstVisit={prepayAfterVisit}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
@@ -9305,18 +9333,26 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               : null;
             const quoteCheckboxNeeded = captureConsentLive === null;
             const consentSatisfied = quoteCheckboxNeeded ? prepayConsentChecked === true : captureConsentLive === true;
+            // GATE_PAF_PREPAY: the server deferred the charge to after the
+            // first visit — the quote step must not say "due today"/"pay".
+            const afterVisitQuote = prepayChargeQuote.consentVariant === 'after_visit_prepay';
+            const quoteBank = ['us_bank_account', 'ach'].includes(prepayChargeQuote.methodType);
             return (
             <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, textAlign: 'center' }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                 Confirm your annual prepay total
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 12 }}>
-                {fmtMoney(prepayChargeQuote.total)} due today
+                {afterVisitQuote ? `${fmtMoney(prepayChargeQuote.total)} after your first visit` : `${fmtMoney(prepayChargeQuote.total)} due today`}
               </div>
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 8, lineHeight: 1.5 }}>
-                {Number(prepayChargeQuote.surcharge) > 0
-                  ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
-                  : `Charged to your saved payment method${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`}
+                {afterVisitQuote
+                  ? (Number(prepayChargeQuote.surcharge) > 0
+                    ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge. Your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} is charged after your first visit — nothing is charged today.`
+                    : `${quoteBank ? 'Your saved bank account' : 'Your saved payment method'}${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} is ${quoteBank ? 'debited' : 'charged'} after your first visit — nothing is charged today, and no card surcharge applies. If account credit applies, it can only lower the amount.`)
+                  : (Number(prepayChargeQuote.surcharge) > 0
+                    ? `${fmtMoney(prepayChargeQuote.base)} annual prepay + ${fmtMoney(prepayChargeQuote.surcharge)} credit card surcharge, charged to your card${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''}.`
+                    : `Charged to your saved payment method${prepayChargeQuote.last4 ? ` ending in ${prepayChargeQuote.last4}` : ''} — no card surcharge.`)}
               </div>
               {quoteCheckboxNeeded ? (
                 <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 12, textAlign: 'left', cursor: 'pointer' }}>
@@ -9327,7 +9363,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                     style={{ marginTop: 3, flexShrink: 0 }}
                   />
                   <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-                    {['us_bank_account', 'ach'].includes(prepayChargeQuote.methodType) ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT}
+                    {afterVisitQuote
+                      ? (quoteBank ? AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT : AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)
+                      : (quoteBank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)}
                   </span>
                 </label>
               ) : null}
@@ -9339,12 +9377,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                     totalCents: prepayChargeQuote.totalCents,
                     methodKey: prepayChargeQuote.methodKey || null,
                     consentAccepted: consentSatisfied,
+                    consentVariant: afterVisitQuote ? 'after_visit_prepay' : null,
                   };
                   setPrepayChargeQuote(null);
                   handleConfirm();
                 }}
                 style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 16 }}
-              >{`Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
+              >{afterVisitQuote ? 'Confirm' : `Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
               {/* The quoted method is THIS accept's fresh capture: offer the
                   way out of it here, where the surcharge is first seen (the
                   customer who saved a credit card and wants the no-surcharge
@@ -9389,6 +9428,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
+            prepayAfterVisit={prepayAfterVisit}
             prepayCardCapture={!!data?.recurringCardPolicy?.required}
             captureMethodType={inlineAutoPayActive && inlineCardIntent ? inlineCardState.methodType : 'card'}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
@@ -9408,7 +9448,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   ? (paymentPreference === 'prepay_annual'
                     // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE): the card
                     // IS charged at confirm — never show the "$0 today" story.
-                    ? (inlineAutoPayActive && inlineCardIntent
+                    ? (prepayAfterVisit
+                      // GATE_PAF_PREPAY: nothing is charged at confirm.
+                      ? (inlineAutoPayActive && inlineCardIntent && inlineCardState.methodType === 'us_bank_account'
+                        ? 'Nothing is charged today. Your bank account is debited the 12-month prepay total after your first visit. Bank transfers have no added card surcharge.'
+                        : `Nothing is charged today. Your card on file is charged the 12-month prepay total after your first visit. ${CARD_SURCHARGE_DISCLOSURE}`)
+                      : inlineAutoPayActive && inlineCardIntent
                       // Tender-aware (GATE_ACCEPT_ACH_CAPTURE): the inline
                       // capture reports the selected method — a bank pick
                       // must not sit under a "your card is charged" line.
@@ -9447,6 +9492,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
+                prepayAfterVisit={prepayAfterVisit}
                 {...captureTiming}
               />
             ) : null}
@@ -9476,7 +9522,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual'
-                ? 'Confirm & pay the 12-month plan'
+                ? (prepayAfterVisit ? 'Confirm the 12-month plan' : 'Confirm & pay the 12-month plan')
                 : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card'))
               : null}
             confirmDisabled={!!prepayChargeQuote
@@ -9543,6 +9589,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
+              prepayAfterVisit={prepayAfterVisit}
               {...captureTiming}
             />
           ) : null}
@@ -9614,6 +9661,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 selectedFrequency={combinedFrequency}
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
+                prepayAfterFirstVisit={prepayAfterVisit}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}

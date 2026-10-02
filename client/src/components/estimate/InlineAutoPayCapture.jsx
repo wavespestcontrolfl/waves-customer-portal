@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT, AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 import { FIRST_INVOICE_AT_CONFIRM_COPY } from '../../lib/paymentTiming';
 
 /**
@@ -45,6 +45,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
   // method" after a capture already succeeded — the parent retires the
   // saved intent and remounts this capture (keyed) on a fresh one.
+  // prepayAfterVisit (GATE_PAF_PREPAY, server /data recurringCardPolicy
+  // .prepayAfterFirstVisit): the annual prepay is charged AFTER the first
+  // visit, not at approval — the heading, summary and terms say so and the
+  // consent is the after_visit_prepay variant.
   // afterVisitSetup (GATE_PAF_SETUP_FEE): the monthly-tier setup fee is billed
   // WITH the first visit, so the heading/summary/terms name that and the card
   // consent is the after_visit_card variant the accept records.
@@ -66,7 +70,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, prepayAfterVisit = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false },
   ref,
 ) {
   const held = paused || autopayOff;
@@ -115,7 +119,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // changes (per-application Auto Pay ↔ immediate annual prepay charge, or
   // base ↔ setup fee billed with the first visit), the prior check must not
   // carry over (Codex r5 P1).
-  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, prepayAfterVisit, afterVisitSetup]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop
@@ -292,7 +296,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay
-          ? (bank
+          ? (prepayAfterVisit
+            ? (bank
+              ? 'Nothing is charged today. We show your exact 12-month total before you confirm, and debit it from this bank account after your first visit. Bank transfers have no added card surcharge.'
+              : 'Nothing is charged today. We show your exact 12-month total — including any card surcharge — before you confirm, and charge this card after your first visit.')
+            : bank
             ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
             : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
           : (held
@@ -337,7 +345,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>
           {prepay
-            ? (bank
+            ? (prepayAfterVisit
+              ? (bank
+                ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total after my first visit — at the exact total shown before I confirm, or less if account credit applies — and future invoices as agreed. Cancel anytime.'
+                : 'I authorize Waves to save this card and charge my 12-month annual prepay total after my first visit — at the exact total shown before I confirm, or less if account credit applies — and future invoices as agreed. Cancel anytime.')
+            : bank
               ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
               : 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.')
             // The recorded terms (base v11, shown under "View full terms")
@@ -367,7 +379,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       {termsOpen ? (
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
           {prepay
-            ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
+            ? (prepayAfterVisit
+              ? (bank ? AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT : AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT)
+              : (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT))
             : (bank ? ACH_CONSENT_TEXT : ((afterVisit || afterVisitSetup) ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
         </div>
       ) : null}

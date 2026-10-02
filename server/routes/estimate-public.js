@@ -28919,6 +28919,15 @@ async function composeEstimateDataPayload(estimate, {
         // rail here (this payload resolves with no preference).
         prepayInLane: recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled()
           && recurringCardPolicyForData.afterVisitCard !== true,
+        // GATE_PAF_PREPAY (PR-E): the in-lane prepay charge waits for the first
+        // visit. The capture checkbox, the option card and the review step
+        // render the after_visit_prepay wording, and the confirm step attests
+        // it (prepayChargeConsentVariant) — the same predicate the accept's
+        // quote uses (prepayChargeAfterFirstVisit). Present only when true.
+        ...(recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled()
+          && recurringCardPolicyForData.afterVisitCard !== true
+          && require('../config/feature-gates').pafPrepayLive()
+          ? { prepayAfterFirstVisit: true } : {}),
         // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
         // is on the card rail AND the gate is on — the same predicate that
         // drives the server-rendered "nothing is charged today" wording

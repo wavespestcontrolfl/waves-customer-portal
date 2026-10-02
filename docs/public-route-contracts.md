@@ -1611,8 +1611,14 @@ false`); once released it reads as the existing `pending`/`claimed` sweep postur
 the in-transaction account credit already covered settles exactly as before (no deferral).
 The accept notification (customer account feed) says nothing is charged today and the
 annual prepay is charged to the card on file after the first visit. No message is sent
-because of these fields. Client copy and the attestation ship in PR-E; until then a
-deferred accept re-quotes, so the gate must not be flipped before it.
+because of these fields. (5) PR-E: GET `/api/estimates/:token/data` carries
+`recurringCardPolicy.prepayAfterFirstVisit: true` (present only when true) exactly when an
+in-lane prepay accept would defer (`prepayInLane` plus the gate conjunction above). The React
+estimate page uses it to render the after-visit wording on the plan option, the review step and
+the capture checkbox (`after_visit_prepay` text), renders the quote's `consentVariant` at the
+confirm step, sends `prepayChargeConsentVariant` back, and shows the `after_first_visit` success
+copy. In-lane prepay is React-only (the legacy page redirects), so the legacy renderer is
+unchanged.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
