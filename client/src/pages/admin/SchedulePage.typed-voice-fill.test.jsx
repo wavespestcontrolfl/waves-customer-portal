@@ -121,6 +121,17 @@ describe('typed voice fill on Generate', () => {
     await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick what applies.').length).toBeGreaterThan(0));
   });
 
+  it('the unclear asks follow the latest Generate: a later read that answers nothing clears them (pre-push P1)', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => ({ ...READ, unclearFields: ['evidence_observed'] }) });
+    await openForm(ROACH);
+    await generate();
+    await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick what applies.').length).toBeGreaterThan(0));
+    typedAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'typed')).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText('The notes didn’t make this clear. Pick what applies.')).toBeNull());
+  });
+
   it('a failed read fills nothing and the report is still written', async () => {
     typedAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
     await openForm(ROACH);

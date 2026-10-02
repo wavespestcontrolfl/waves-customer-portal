@@ -16846,7 +16846,14 @@ export function CompletionPanel({
         body: JSON.stringify({ note, current: findingsValues }),
       }).catch(() => null)
       : null;
-    if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) return;
+    if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) {
+      // A read that answered nothing usable (it failed, named another form,
+      // or found nothing left to fill) leaves no field unclear: the asks
+      // always reflect the latest Generate (pre-push P1). Words beside
+      // values still standing stay.
+      setTypedHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      return;
+    }
     const fills = Object.entries(heard.values || {}).filter(([key, value]) => (
       typeof value === "string" && value && String(findingsValues[key] ?? "").trim() === ""
     ));
