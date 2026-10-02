@@ -25,7 +25,9 @@ function mockUpcoming(rows) {
     whereNotNull: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
-    limit: jest.fn().mockResolvedValue(rows),
+    limit: jest.fn().mockReturnThis(),
+    // One page of twelve per call, like the real query.
+    offset: jest.fn(async (n) => rows.slice(n, n + 12)),
   };
   db.mockReturnValue(query);
   return query;
@@ -86,11 +88,24 @@ describe('portal tools', () => {
 
     const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
 
-    expect(query.limit).toHaveBeenCalledWith(12);
     expect(actions.map((a) => a.href)).toEqual(['/reschedule/tok_4', '/reschedule/tok_5', '/reschedule/tok_6']);
     expect(result.visits).toHaveLength(3);
     // Stops checking once three buttons exist.
     expect(loadById).toHaveBeenCalledTimes(6);
+  });
+
+  test('a full page of refused visits does not hide a movable one on the next page', async () => {
+    const query = mockUpcoming(Array.from({ length: 14 }, (_, i) => ({
+      id: i + 1, scheduled_date: '2026-10-10', service_type: 'Pest Control', window_start: '10:00', reschedule_token: `tok_${i + 1}`,
+    })));
+    pageEligibility.mockImplementation(async (svc) => (svc.id === 13 ? { ok: true } : { ok: false, reason: 'grouped' }));
+    const actions = [];
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
+
+    expect(query.offset.mock.calls.map(([n]) => n)).toEqual([0, 12]);
+    expect(actions.map((a) => a.href)).toEqual(['/reschedule/tok_13']);
+    expect(result.available).toBe(true);
   });
 
   test('visits at more than one property carry the street on the button', async () => {
@@ -108,7 +123,9 @@ describe('portal tools', () => {
       'Reschedule Pest Control, Oct 9, 100 Example Ave',
       'Reschedule Pest Control, Oct 9, 200 Sample Ct',
     ]);
-    expect(result.visits.map((v) => v.property)).toEqual(['100 Example Ave', '200 Sample Ct']);
+    // The street is on the button only. Nothing the model receives carries it.
+    expect(JSON.stringify(result)).not.toMatch(/Example Ave|Sample Ct/);
+    expect(result.instruction).toMatch(/each naming its property/);
   });
 
   test('every button a tool reports as shown is in the reply, whatever came before it', async () => {

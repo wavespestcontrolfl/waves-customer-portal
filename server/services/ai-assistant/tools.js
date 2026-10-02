@@ -60,13 +60,13 @@ const PORTAL_SECTIONS = {
   documents: { tab: 'documents', label: 'Open Documents' },
   referrals: { tab: 'refer', label: 'Open Refer' },
 };
-// Reschedule buttons shown at once, and how many upcoming visits are checked
-// to find them (a year of monthly visits).
+// Reschedule buttons shown at once, and (RESCHEDULE_PAGE) the page size of
+// the upcoming-visit read that finds them.
 const MAX_RESCHEDULE_BUTTONS = 3;
+const RESCHEDULE_PAGE = 12;
 // What a portal hand-off is about, named by the model (or by the keyword that
 // forced the hand-off) and worded for the office in assistant.js.
 const ESCALATION_TOPICS = ['cancellation', 'schedule_change', 'billing', 'complaint', 'account_change', 'add_service', 'manager', 'other'];
-const RESCHEDULE_CANDIDATES = 12;
 
 const PORTAL_TOOLS = [
   TOOLS[0],
@@ -193,38 +193,45 @@ async function offerRescheduleLink(customerId, actions) {
     instruction: 'No visit of this customer can be moved online right now. Use the escalate tool so the team moves it.',
   };
   if (!customerId || !Array.isArray(actions)) return NO_LINK;
-  const rows = await db('scheduled_services')
-    .where('customer_id', customerId)
-    .where('scheduled_date', '>=', etDateString())
-    // The reschedule page's own status set (a 'rescheduled' visit is still
-    // upcoming and movable); its verdict below decides the rest.
-    .whereIn('status', [...RESCHEDULABLE_STATUSES])
-    .whereNotNull('reschedule_token')
-    .select('id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
-    .orderBy('scheduled_date')
-    .limit(RESCHEDULE_CANDIDATES);
-
   // A button only for a visit the reschedule page itself will accept: its own
   // loader and GET verdict (account state, status, dispatch review, grouped or
   // frozen visit, the self-serve move notice window), never a mirror of it.
   // Any failure fails closed — no button.
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const movable = [];
-  for (const row of rows) {
-    // The cap applies to buttons, not candidates: a visit the page refuses
-    // must not hide a later one it accepts.
-    if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-    const svc = await loadById(row.id).catch(() => null);
-    const verdict = svc && await pageEligibility(svc).catch((err) => {
-      logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
-      return null;
-    });
-    if (verdict?.ok) movable.push({ row, property: String(svc.address_line1 || '').trim() });
+  // Upcoming visits are read a page at a time until three are movable or
+  // none are left: the button cap applies to movable visits, so no run of
+  // visits the page refuses can hide a later one it accepts.
+  for (let offset = 0; movable.length < MAX_RESCHEDULE_BUTTONS; offset += RESCHEDULE_PAGE) {
+    const rows = await db('scheduled_services')
+      .where('customer_id', customerId)
+      .where('scheduled_date', '>=', etDateString())
+      // The reschedule page's own status set (a 'rescheduled' visit is still
+      // upcoming and movable); its verdict below decides the rest.
+      .whereIn('status', [...RESCHEDULABLE_STATUSES])
+      .whereNotNull('reschedule_token')
+      .select('id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
+      .orderBy('scheduled_date')
+      .orderBy('id')
+      .limit(RESCHEDULE_PAGE)
+      .offset(offset);
+    for (const row of rows) {
+      if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
+      const svc = await loadById(row.id).catch(() => null);
+      const verdict = svc && await pageEligibility(svc).catch((err) => {
+        logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
+        return null;
+      });
+      if (verdict?.ok) movable.push({ row, property: String(svc.address_line1 || '').trim() });
+    }
+    if (rows.length < RESCHEDULE_PAGE) break;
   }
   if (!movable.length) return NO_LINK;
 
   // A customer with visits at more than one property gets the street on each
-  // button, so two same-day visits are never indistinguishable.
+  // button, so two same-day visits are never indistinguishable. The street
+  // goes on the server-built label only: the tool result below is sent to
+  // the model, which is given no account data.
   const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
   const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
@@ -235,15 +242,12 @@ async function offerRescheduleLink(customerId, actions) {
       label: `Reschedule ${type}, ${shortDateLabel(dateKey)}${where}`.slice(0, 80),
       href: `/reschedule/${row.reschedule_token}`,
     });
-    return {
-      date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD',
-      ...(where ? { property } : {}),
-    };
+    return { date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD' };
   });
   return {
     available: true,
     visits,
-    instruction: 'A Reschedule button for each listed visit is now shown under your reply. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.',
+    instruction: `A Reschedule button for each listed visit is now shown under your reply${multiProperty ? ', each naming its property' : ''}. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.`,
   };
 }
 
