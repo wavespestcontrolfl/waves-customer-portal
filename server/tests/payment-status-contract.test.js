@@ -1048,3 +1048,14 @@ describe('a copied Zelle offer is off target for a receipt-status question', () 
     expect(c.copiesOffTarget([Z], i)).toBe(false);
   });
 });
+
+// Codex round-78 P2: a Zelle offer answers a Zelle question or a GENERIC how-to-pay question - never another tender's
+describe('a copied Zelle offer is on target only for Zelle or a generic how-to-pay question', () => {
+  const Z = 'You can pay invoice #WPC-2026-0001 by Zelle to pay@example.com.';
+  test.each(['How can I pay?', 'How do I pay my bill?', 'What payment methods do you take?', 'Can I pay by Zelle?', 'Hi, how can I pay? Thanks!'])('on target: %s', (i) => {
+    expect(c.copiesOffTarget([Z], i)).toBe(false);
+  });
+  test.each(['Can I pay by check?', 'How can I pay with Venmo?', 'Can I pay cash?', 'Can I use my Visa?'])('another tender => off target: %s', (i) => {
+    expect(c.copiesOffTarget([Z], i)).toBe(true);
+  });
+});

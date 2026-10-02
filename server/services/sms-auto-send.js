@@ -905,8 +905,9 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         gratitudeLane
           ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
           : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
-        // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
-        billingFingerprint !== undefined
+        // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection).
+        // (The unanswered-text lane's own handoff check below covers the account state, so there the billing read runs only once, last.)
+        billingFingerprint !== undefined && !claim.unanswered
           ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
           : undefined,
         laneFields.providerPreSendCheck,

@@ -5407,7 +5407,8 @@ function zelleTargetFlags(zelleTarget) {
   if (zelleTarget.invoiceId) return none;
   const zelleTargetConflict = ZELLE_CONFLICT_REASONS.includes(zelleTarget.reason);
   const zelleTargetUnknown = ZELLE_UNKNOWN_TARGET_REASONS.includes(zelleTarget.reason);
-  return { zelleTargetConflict, zelleTargetUnknown, zelleTargetAmbiguous: zelleTarget.reason !== 'no_open_invoice' && !zelleTargetConflict && !zelleTargetUnknown };
+  const quiet = zelleTarget.reason === 'no_open_invoice' || zelleTarget.reason === 'not_payment_scoped';
+  return { zelleTargetConflict, zelleTargetUnknown, zelleTargetAmbiguous: !quiet && !zelleTargetConflict && !zelleTargetUnknown };
 }
 
 /**
@@ -5427,7 +5428,15 @@ async function resolveDraftPaymentState({ context, inboundMessage, frozenReplay 
   // (number, then a unique amount) — not always the newest; a reference that can't be tied to exactly one
   // abstains (no Zelle fact). The resolved id is what is persisted by the caller, so the send-time recheck validates it.
   // Gate off (v11) has no Payment options fact and persists no Zelle snapshot — no target resolution or eligibility read (round 33).
-  const zelleTarget = (frozenReplay || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) ? { invoiceId: null, reason: 'no_open_invoice' } : require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
+  // Codex round-78 P2: the live eligibility read (the pay page's predicate, Stripe PaymentIntent probes included) runs only for a draft
+  // whose message or recent thread touches money - a scheduling question or a "thanks" gets the lightweight fact (no target, no probe)
+  const scoped = require('./payment-status-contract').isPaymentScoped({
+    inboundText: inboundMessage == null ? null : String(inboundMessage), scopeTexts: paymentThreadTexts(context),
+  });
+  let zelleTarget;
+  if (frozenReplay || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) zelleTarget = { invoiceId: null, reason: 'no_open_invoice' };
+  else if (!scoped) zelleTarget = { invoiceId: null, reason: 'not_payment_scoped' };
+  else zelleTarget = require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
   // MONEY-SENTENCE CONTRACT (owner 2026-10-01 ~23:58Z): the SAME liveZelleFacts the send-time recheck re-renders from - the renderer turns
   // them into the one Zelle sentence the reply may copy (offer / invoice unavailable / not offered; none when unresolved or unverifiable).
   const zelleFacts = (frozenReplay || !gateEnvValue('GATE_SMS_REAL_ANSWERS'))

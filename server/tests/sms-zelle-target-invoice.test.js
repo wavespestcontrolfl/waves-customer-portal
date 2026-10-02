@@ -108,6 +108,13 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
   ];
 
   const checkedIds = (checked) => [...new Set(checked)]; // (liveZelleFacts reads the invoice row twice: its number, then its eligibility)
+  // Codex round-78 P2: a draft whose message (and thread) does not touch money runs no live Zelle eligibility read at all
+  test('an unrelated message ("See you Tuesday!") with ONE open invoice: no target, no eligibility probe, nothing persisted', async () => {
+    const { zelleInvoiceId, checked, payPageZelleVisibility } = await draft({ inboundMessage: 'Sounds good, see you Tuesday!', open: [open[0]] });
+    expect(checked).toEqual([]);
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
+    expect(zelleInvoiceId).toBe(null);
+  });
   test('the customer names the OLDER invoice: eligibility is checked on it, ITS id is persisted, and ITS Zelle sentence is rendered', async () => {
     const { zelleInvoiceId, checked, factsBlock } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
     expect(checkedIds(checked)).toEqual(['inv-1']);

@@ -624,7 +624,9 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const statusAsked = inboundAsksPaymentStatus(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
-    if (isZelleTenderLine(t) && statusAsked) return true;
+    // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
+    // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
+    if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
     if (inv && invoiceNamed) return !(named.full.includes(inv[1].toUpperCase()) || namedTails.has(stripZeros(inv[1].toUpperCase().split('-').pop())));
     // Codex round-65 P2: no invoice named - an invoice sentence must match the amount / date / tender the customer did name, like a receipt
@@ -759,13 +761,28 @@ const GENERIC_STATUS_QUESTION_RES = [
 ];
 const GENERIC_INERT_RES = [...INERT_CLAUSE_RES, /^(?:ok(?:ay)?|hi there|good (?:morning|afternoon|evening)|quick question)$/];
 function inboundIsGenericStatusQuestion(inboundText) {
+  return inboundIsOnly(inboundText, GENERIC_STATUS_QUESTION_RES);
+}
+// Codex round-78 P2: the GENERIC how-to-pay questions a copied Zelle offer may answer (any other tender named - check, Venmo, a card -
+// is a different question). Allow-list, like the status questions above.
+const GENERIC_HOW_TO_PAY_RES = [
+  /^(?:how|what's the best way|what is the best way)\s+(?:can|do|should|would|could)?\s*(?:i|we)\s+(?:pay|make (?:a |my |the )?payment)(?: (?:you|this|it|that|my (?:bill|invoice|balance)|the (?:bill|invoice|balance)|online|you guys))?(?: then)?$/,
+  /^(?:what|which)\s+(?:payment\s+)?(?:methods?|options?|ways?(?: to pay)?)\s+(?:do you (?:take|accept|have)|can i use|are there|are available)$/,
+  /^(?:what|which)\s+(?:forms? of )?payments?\s+(?:do you (?:take|accept)|can i use)$/,
+  /^(?:what do you (?:take|accept)|do you take other (?:payment|forms of payment|ways to pay)|can i pay (?:another|a different|some other) way|is there (?:another|a different|any other) way to pay|other ways to pay|ways to pay|payment (?:options|methods))$/,
+];
+function inboundIsGenericHowToPay(inboundText) {
+  return inboundIsOnly(inboundText, GENERIC_HOW_TO_PAY_RES);
+}
+// every clause of the message is one of `questionRes` or inert (greeting, thanks), and at least one is a question
+function inboundIsOnly(inboundText, questionRes) {
   const clauses = String(inboundText || '').replace(/[’‘]/g, "'").toLowerCase().split(/[.?!;\n]+|,\s*(?=(?:thanks|thank you)\b)/)
     .map((c) => c.replace(/^\s*(?:hi|hello|hey)(?: [a-z'.-]+){0,2}\s*,\s*/, '').replace(/[,\s]+$/g, '').replace(/^[,\s]+/, '').replace(/\s+/g, ' '))
     .filter(Boolean);
   if (!clauses.length) return false;
   let asked = false;
   for (const c of clauses) {
-    if (GENERIC_STATUS_QUESTION_RES.some((re) => re.test(c))) { asked = true; continue; }
+    if (questionRes.some((re) => re.test(c))) { asked = true; continue; }
     if (!GENERIC_INERT_RES.some((re) => re.test(c))) return false;
   }
   return asked;
@@ -836,6 +853,7 @@ module.exports = {
   RESOLVED_PAYMENT_STATUSES,
   withoutSnapshotCopies,
   inboundIsGenericStatusQuestion,
+  inboundIsGenericHowToPay,
   candidateFamilyCounts,
   canonText,
   copiedSentences,
