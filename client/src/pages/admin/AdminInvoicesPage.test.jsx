@@ -457,38 +457,28 @@ describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () 
     expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
   });
 
-  it("combined controls: pause and stop-combining while reminders run, resume and stop-combining while paused, none without the customer id", () => {
+  it("combined controls: pause while reminders run, resume while paused, none without the customer id, never a release", () => {
     const withCustomer = { ...customerSchedule, customerId: "cust-1" };
     expect(combinedReminderControls(null)).toEqual([]);
     // an older server response carries no customer id: no button that could post to the wrong place
     expect(combinedReminderControls(customerSchedule)).toEqual([]);
     for (const status of ["active", "held", "autopay_hold"]) {
       const controls = combinedReminderControls({ ...withCustomer, status });
-      expect(controls.map((c) => c.control)).toEqual(["pause", "release"]);
+      expect(controls.map((c) => c.control)).toEqual(["pause"]);
+      expect(controls[0].label).toBe("Pause combined");
       expect(controls[0].promptText).toMatch(/^Why pause combined reminders for this customer\?/);
     }
     const paused = combinedReminderControls({ ...withCustomer, status: "paused" });
-    expect(paused.map((c) => c.control)).toEqual(["resume", "release"]);
-    expect(paused[0].promptText).toBeUndefined();
-    expect(paused[0].confirmText).toBeUndefined();
-    // stopping is always confirmed, and says nothing is sent
-    expect(paused[1].confirmText).toBe(
-      "Stop combined reminders for this customer? Each overdue invoice goes back to its own reminder schedule. Nothing is sent now.",
-    );
-    expect(paused.map((c) => c.label)).toEqual(["Resume combined", "Stop combining"]);
+    expect(paused).toEqual([{ control: "resume", label: "Resume combined" }]);
+    // a released customer is combined again by the next run, so the panel never offers it
+    for (const status of ["active", "held", "autopay_hold", "paused"]) {
+      expect(combinedReminderControls({ ...withCustomer, status }).map((c) => c.control)).not.toContain("release");
+    }
   });
 
-  it("combined controls: the toast says what happened, with the invoice count a release handed back", () => {
-    expect(combinedReminderDoneMessage("pause", { ok: true })).toBe("Combined reminders paused");
-    expect(combinedReminderDoneMessage("resume", { ok: true })).toBe("Combined reminders resumed");
-    expect(combinedReminderDoneMessage("release", { ok: true, released: 3 })).toBe(
-      "Combined reminders stopped. 3 invoices back on their own schedule.",
-    );
-    expect(combinedReminderDoneMessage("release", { ok: true, released: 1 })).toBe(
-      "Combined reminders stopped. 1 invoice back on its own schedule.",
-    );
-    expect(combinedReminderDoneMessage("release", { ok: true, released: 0 })).toBe("Combined reminders stopped");
-    expect(combinedReminderDoneMessage("release", undefined)).toBe("Combined reminders stopped");
+  it("combined controls: the toast says what happened", () => {
+    expect(combinedReminderDoneMessage("pause")).toBe("Combined reminders paused");
+    expect(combinedReminderDoneMessage("resume")).toBe("Combined reminders resumed");
   });
 
   // Codex local review P2: the server omits the count (null) when it cannot read the balance in time; the

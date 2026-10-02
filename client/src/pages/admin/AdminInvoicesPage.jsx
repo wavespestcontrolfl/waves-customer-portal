@@ -9071,20 +9071,17 @@ export function followupActionErrorMessage(err) {
 }
 
 // The staff controls for a customer on combined reminders (POST
-// /admin/customers/:id/dunning-schedule/{pause,resume,release}): which buttons
-// the panel offers for the schedule's status and what each asks first. These
-// act on the CUSTOMER's combined reminders, not on this one invoice. No
-// buttons without the customer id (an older server). Exported for tests.
+// /admin/customers/:id/dunning-schedule/{pause,resume}): which button the
+// panel offers for the schedule's status and what it asks first. These act on
+// the CUSTOMER's combined reminders, not on this one invoice. No button
+// without the customer id (an older server). Release is deliberately not
+// offered here: with the schedule gate on, the next run combines a released
+// customer's invoices again, so a button could not keep what it promised.
+// Exported for tests.
 export function combinedReminderControls(customerSchedule) {
   if (!customerSchedule?.customerId) return [];
-  const release = {
-    control: "release",
-    label: "Stop combining",
-    confirmText:
-      "Stop combined reminders for this customer? Each overdue invoice goes back to its own reminder schedule. Nothing is sent now.",
-  };
   if (customerSchedule.status === "paused") {
-    return [{ control: "resume", label: "Resume combined" }, release];
+    return [{ control: "resume", label: "Resume combined" }];
   }
   return [
     {
@@ -9093,21 +9090,14 @@ export function combinedReminderControls(customerSchedule) {
       promptText:
         'Why pause combined reminders for this customer? (e.g. "customer said they\'ll pay Friday")',
     },
-    release,
   ];
 }
 
 // What the toast says once a combined-reminder control went through.
 // Exported for tests.
-export function combinedReminderDoneMessage(control, result) {
+export function combinedReminderDoneMessage(control) {
   if (control === "pause") return "Combined reminders paused";
   if (control === "resume") return "Combined reminders resumed";
-  if (control === "release") {
-    const n = result?.released;
-    return Number.isInteger(n) && n > 0
-      ? `Combined reminders stopped. ${pluralInvoices(n)} back on ${n === 1 ? "its" : "their"} own schedule.`
-      : "Combined reminders stopped";
-  }
   return "Done";
 }
 
@@ -9147,21 +9137,21 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
       setBusy(false);
     }
   };
-  // Pause / resume / release for the CUSTOMER's combined reminders (the
-  // customer's own schedule routes; every press is on their activity log).
+  // Pause / resume for the CUSTOMER's combined reminders (the customer's own
+  // schedule routes; every press is on their activity log).
   const actCombined = async (customerId, control, body) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     try {
-      const result = await adminFetch(
+      await adminFetch(
         `/admin/customers/${customerId}/dunning-schedule/${control}`,
         {
           method: "POST",
           body: body ? JSON.stringify(body) : undefined,
         },
       );
-      showToast(combinedReminderDoneMessage(control, result));
+      showToast(combinedReminderDoneMessage(control));
       await load();
     } catch (err) {
       showToast(followupActionErrorMessage(err));
@@ -9412,7 +9402,6 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
                       });
                     return;
                   }
-                  if (c.confirmText && !confirm(c.confirmText)) return;
                   actCombined(customerId, c.control);
                 }}
                 variant={"secondary"}
