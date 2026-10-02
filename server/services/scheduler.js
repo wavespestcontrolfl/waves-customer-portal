@@ -1937,16 +1937,22 @@ function initScheduledJobs() {
   // only — never a code.
   cron.schedule('0 7,22,37,52 * * * *', async () => {
     if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
     try {
-      const { runExclusive } = require('../utils/cron-lock');
       // A pass in which any customer's filing failed is reported to job
       // health as failed (the failed customers stay unledgered and retry).
-      await runExclusive('neighborhood-gate-codes', async () => {
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
         const result = await require('./neighborhood-access').sweepSavedGateCodes();
         if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, conflicts: result.conflicts })}`);
         if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
         return result;
       });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
     } catch (err) {
       logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
     }
