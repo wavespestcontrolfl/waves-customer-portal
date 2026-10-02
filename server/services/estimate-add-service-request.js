@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { greetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const AccountMembershipEmail = require('./account-membership-email');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -32,10 +33,6 @@ function parseJson(value, fallback = null) {
 
 function cleanText(value, max = 500) {
   return String(value || '').replace(/[<>]/g, '').trim().slice(0, max);
-}
-
-function firstNameFrom(name, fallback = 'there') {
-  return String(name || '').trim().split(/\s+/)[0] || fallback;
 }
 
 function splitName(name) {
@@ -527,7 +524,8 @@ async function sendCustomerConfirmations({
   sendMessage,
   accountMembershipEmail,
 }) {
-  const firstName = customer.first_name || firstNameFrom(estimate.customer_name);
+  const firstName = customer.first_name
+    || greetingFirstName({ customerName: estimate.customer_name, customer });
   const phone = customer.phone && (!estimate.customer_phone || phonesMatch(estimate.customer_phone, customer.phone))
     ? customer.phone
     : null;

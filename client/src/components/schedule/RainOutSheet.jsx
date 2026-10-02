@@ -21,6 +21,7 @@ import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
 import BestTimeHint from './BestTimeHint';
+import AvailabilityStrip from './AvailabilityStrip';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -528,7 +529,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // On a rest-of-route move the hint advises the tapped visit only; that's
   // fine, it's advisory (commit still shifts siblings by the window delta).
   const landingDate = isCustom ? customDate : (selected?.date || null);
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
+  // availability strip (days around the landing date) instead.
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+    summary: true,
     date: landingDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -859,6 +863,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
             {/* Best-times chips: tappable only while the custom picker is
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
+            <AvailabilityStrip
+              availability={availability}
+              currentDate={landingDate}
+              currentStart={isCustom ? customStart : selected?.window?.start}
+              currentTechnicianId={service.technicianId || service.technician_id}
+              onPick={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
+              style={{ marginTop: -8, marginBottom: 18 }}
+            />
             <BestTimeHint
               bestTimes={bestTimes}
               picked={picked}

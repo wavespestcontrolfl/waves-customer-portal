@@ -23,9 +23,15 @@ const REVIEW_HOLD_CODES = ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', '
 // The one sentence a dispatch completion text appends to invite a review.
 // complete-scheduled-service.js builds the suffix from it and the strip below
 // matches it, so a wording change cannot leave a suffix the strip misses.
-const COMPLETION_REVIEW_INVITE = 'Enjoyed the service? A quick review means the world:';
+// Neutral wording, names Google (owner rulings 2026-09-30 / 10-01: no
+// satisfaction condition, every ask names a Google review).
+const COMPLETION_REVIEW_INVITE = 'A quick Google review would help us a lot:';
+// Texts queued before the wording change still carry the old sentence; the
+// strip keeps matching it so a held or tapped customer's queued text loses
+// its review line either way.
+const LEGACY_COMPLETION_REVIEW_INVITES = ['Enjoyed the service? A quick review means the world:'];
 const COMPLETION_REVIEW_SUFFIX_RE = new RegExp(
-  `\\n\\n${COMPLETION_REVIEW_INVITE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (?:https?:\\/\\/)?[^\\s]+(?=\\s*(?:Reply STOP to (?:unsubscribe|opt out)\\.?)?\\s*$)`,
+  `\\n\\n(?:${[COMPLETION_REVIEW_INVITE, ...LEGACY_COMPLETION_REVIEW_INVITES].map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')}) (?:https?:\\/\\/)?[^\\s]+(?=\\s*(?:Reply STOP to (?:unsubscribe|opt out)\\.?)?\\s*$)`,
   'i',
 );
 const stripCompletionReviewLine = (body) => String(body || '').replace(COMPLETION_REVIEW_SUFFIX_RE, '').trim();

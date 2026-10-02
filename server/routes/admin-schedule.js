@@ -71,6 +71,9 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
+const {
+  techFindingsCopyLive, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer, PALM_CROWN_PROMPT_RULE,
+} = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -490,6 +493,7 @@ function sanitizeServiceType(serviceType) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
+const { deferredCommitScope } = require('../utils/trx-commit-promise');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -985,17 +989,20 @@ function occupancyBlockFor(row) {
 // (pre-probe, these walks inserted with NO cross-series check at all), and a
 // same-instant booking commit is the accepted residual. The update-details
 // path keeps its full peek → rung-1 → guardRecurrenceDestination gate.
-async function seriesCandidateDateClashes(conn, template, date) {
+async function seriesCandidateDateClashRows(conn, template, date) {
   const block = occupancyBlockFor(template);
-  if (!block) return false;
-  const clash = await findConflictingVisits({
+  if (!block) return [];
+  return findConflictingVisits({
     db: conn,
     date,
     windowStart: block.start,
     windowEnd: block.end,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
-  return clash.length > 0;
+}
+
+async function seriesCandidateDateClashes(conn, template, date) {
+  return (await seriesCandidateDateClashRows(conn, template, date)).length > 0;
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -2993,6 +3000,15 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
+// Whether an add-on line can be due on any occurrence after the series
+// anchor, by lineDueOnRecurringDate's own rule: a one-time service key or a
+// 'one_time' pattern is due on the anchor only; every other line recurs.
+function addonRecursAfterAnchor(line) {
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
+}
+
 function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
@@ -4439,7 +4455,12 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // statement leaves a PostgreSQL transaction aborted (25P02) even when
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
-async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+//
+// `commitScope` (default `conn`) is what the operator alerts wait on: a caller
+// writing inside a savepoint it may roll back (extendSeriesOnceLocked's
+// grouped-or-nothing attempts) hands a deferredCommitScope, so a thrown-away
+// row files nothing.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null, commitScope = conn) {
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   let resolvedTerm = null;
   const run = async (c) => {
@@ -4462,7 +4483,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
       // savepoint's executionPromise resolves on RELEASE, so filing against
       // it would let a later rollback leave a false cancellation alert that
       // dedupes the real retry for seven days.
-      notifyConn: conn,
+      notifyConn: commitScope,
     });
   };
   try {
@@ -4482,7 +4503,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
     logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
     if (resolvedTerm) {
       await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
-        conn, resolvedTerm, 'generator_coverage_failed',
+        commitScope, resolvedTerm, 'generator_coverage_failed',
         'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
       ).catch(() => {});
     }
@@ -5115,6 +5136,33 @@ async function loadProjectCompletionContextByServiceId(services) {
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
       treeShrubFastCompleteEnabled,
+      // GATE_NOTE_BOX_PHOTOS: the completion form puts the visit's photos and
+      // their descriptions inside the notes box. Never lawn or tree, shrub &
+      // palm: another lane owns those completions and their photo steps.
+      noteBoxPhotosEnabled: require('../config/feature-gates').noteBoxPhotosLive()
+        && !['lawn', 'tree_shrub', 'palm'].includes(detectServiceLine(service.service_type)),
+      // GATE_LANE_VOICE_FILL: Generate on the completion form fills a
+      // specialty visit's own record from the notes; only a visit whose lane
+      // the reader reads, resolved as the completion resolves it
+      // (services/visit-lane-facts.js voiceLaneFor).
+      laneVoiceFillEnabled: require('../config/feature-gates').laneVoiceFillLive()
+        && require('../services/visit-lane-facts').voiceLaneFor({ profile: completionProfile, serviceType: service.service_type }) != null,
+      // GATE_TYPED_VOICE_FILL: Generate on the completion form fills a typed
+      // visit's own findings from the notes; only a form the reader reads,
+      // the completion profile's own (services/visit-typed-facts.js
+      // voiceTypeFor).
+      typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
+      // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
+      // opens a typed visit the reader reads in the Fast Complete sheet's
+      // report flow, its record read from the note, in place of the typed
+      // form (fastCompleteReportEnabled above stays off for typed forms). Not
+      // a combined service: its companion sections are required at
+      // completion and the sheet has none.
+      typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null
+        && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -5123,6 +5171,17 @@ async function loadProjectCompletionContextByServiceId(services) {
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
       fastCompleteRecapEnabled: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
+      // GATE_FAST_COMPLETE_REPORT — the same schedule-payload ride: with it on,
+      // pest re-services and regular untyped pest visits open the Fast
+      // Complete report flow (talk, generate the report, trace, send). Not a
+      // combined service (pest + rodent bait, pest + termite bait): its
+      // typed companion sections are required at completion and the report
+      // flow has none, so it keeps the full form (Codex #5538). Nor a
+      // service with its own typed findings (cockroach, German roach
+      // knockdowns): /complete requires them and the report flow has none.
+      fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && !(completionProfile?.companions || []).length
+        && !completionProfile?.findingsType,
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5850,6 +5909,17 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // the shared entry for a visit whose customer has no gate code. A failed
+    // read just shows no fallback.
+    let neighborhoodGateByVisit = new Map();
+    try {
+      if (require('../config/feature-gates').neighborhoodAccessLive()) {
+        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+      }
+    } catch (err) {
+      logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
+    }
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6025,6 +6095,7 @@ router.get('/', async (req, res, next) => {
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
+        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -6247,6 +6318,12 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+        // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
+        fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
+        noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+        laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+        typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+        typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6839,6 +6916,11 @@ router.get('/week', async (req, res, next) => {
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+          fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
+          noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
+          laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+          typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+          typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -19018,11 +19100,235 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
+// The stop's technician for a grouped placement, through the SAME eligibility
+// fence a template technician gets (employment, field dispatchability, absence
+// that day, FOR SHARE on a trx). Not assignable = the grouped attempt fails and
+// its savepoint rolls back; an unassigned stop stays unassigned.
+async function assignablePlacementTechnicianId(conn, parent, technicianId, date) {
+  if (!technicianId) return null;
+  const checked = await assignableRecurringTemplateTechnicianId(conn, {
+    ...parent, recurring_technician_override: true, recurring_technician_id: technicianId,
+  }, date);
+  if (!checked || String(checked) !== String(technicianId)) throw new Error('the stop\'s technician is not assignable on that date');
+  return checked;
+}
+
+// Does a just-placed row's own window overlap any booking OUTSIDE its visit?
+async function placedRowOverlapsOutsideVisit(conn, rowId) {
+  const row = await conn('scheduled_services').where({ id: rowId })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+  const block = row && occupancyBlockFor(row);
+  if (!block) return false;
+  const members = row.visit_id
+    ? await conn('scheduled_services').where({ visit_id: row.visit_id }).pluck('id')
+    : [row.id];
+  const outside = await findConflictingVisits({
+    db: conn, date: dateOnly(row.scheduled_date), windowStart: block.start, windowEnd: block.end,
+    excludeServiceIds: members, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  return outside.length > 0;
+}
+
+// Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
+// The proof a grouped-or-nothing placement is judged by: the canonical
+// maybeGroupRow decided, we only read what it did.
+async function rowsShareVisit(conn, rowId, otherIds) {
+  const rows = await conn('scheduled_services').whereIn('id', [rowId, ...otherIds]).select('id', 'visit_id');
+  const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
+  const mine = visitOf(rowId);
+  return !!mine && otherIds.every((id) => String(visitOf(id) || '') === String(mine));
+}
+
+// Grouped-or-nothing placement of ONE extension row:
+// insert it inside a SAVEPOINT (extendSeriesOnceLocked re-entered with a forced
+// date, so the insert stays the one canonical insert), let the canonical
+// maybeGroupRow decide, and keep the row only if it actually shares a visit with
+// every row in `mustShare`; otherwise roll the savepoint back and treat the date
+// as taken. Never a prediction of whether it will group. `stop` = { technicianId,
+// window? }: the stop's own technician (and, for a ride, its window), carried on
+// the template row the insert copies, so no member is re-assigned. Post-commit
+// work waits on a deferredCommitScope: it fires only for a KEPT row, once every
+// enclosing transaction completes. Returns the spawned-visit payload, or null
+// (nothing left behind).
+async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
+  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
+  if (cols.recurring_ongoing) {
+    const fresh = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
+    if (!fresh || !fresh.recurring_ongoing) return null;
+  }
+  const scope = deferredCommitScope(conn);
+  try {
+    const placed = await conn.transaction(async (sp) => {
+      const technicianId = await assignablePlacementTechnicianId(sp, parent, stop.technicianId, dateStr);
+      const template = {
+        ...parent, ...stop.window, recurring_technician_override: true, recurring_technician_id: technicianId,
+      };
+      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
+        ...opts, onSkip: undefined, forceDate: dateStr, commitScope: scope,
+      });
+      if (!visit) throw new Error('nothing placed');
+      if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
+      // The placed row's OWN window (a ride ends by the rider's duration, so it
+      // can run past the stop) must not overlap anything outside its visit —
+      // another customer, a hold. Top-up keeps its advisory-only overlap policy.
+      if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
+        throw new Error('overlaps a booking outside the stop');
+      }
+      return visit;
+    });
+    scope.keep();
+    return placed;
+  } catch (err) {
+    scope.drop(err);
+    logger.info(`[recurring] parent=${parentId} ${dateStr} does not group (${err.message}) — treated as taken`);
+    return null;
+  }
+}
+
+// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a rider series (rides_parent_id) puts its
+// next visit on a lawn occurrence, at that occurrence's CURRENT window and
+// technician (dispatch may have moved it), ending by the rider's own duration.
+// The candidate is not derived here: it is the next date the read-only pair
+// preview (rider-series-preview.previewRiderPair) says the plan still wants to
+// insert — the real anchor, the today+8 plan floor, override-aware property
+// scope, lawn-service identity of the host and of each occurrence, blackouts and
+// weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
+// that rule a ride out). null = no ride: the caller walks its normal cadence.
+async function rideLawnExtension(ctx) {
+  const {
+    conn, parent, parentId, cols, opts, latest, existingDates,
+  } = ctx;
+  const fg = require('../config/feature-gates');
+  if (!fg.pestRidesLawnAtAcceptLive?.() || !fg.gates?.visitGroups || !cols.rides_parent_id || !parent.rides_parent_id) return null;
+  const Preview = require('../services/rider-series-preview');
+  let plan;
+  try {
+    // Savepoint: the preview swallows its own read failures, which would leave
+    // the caller's transaction aborted (25P02) without it.
+    plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
+  } catch (err) {
+    logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
+    return null;
+  }
+  if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
+  // The preview's insert list assumes its proposed MOVES happen too; this
+  // extension only appends. So spacing is enforced against the latest rider
+  // visit that is actually still booked: at least the rule's minimum gap after
+  // it (never, say, D168 next to a kept off-cadence D160).
+  const after = dateOnly(latest.scheduled_date);
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
+  // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
+  const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
+  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  if (!window || window.unplaceable) return null;
+  return placeGroupedExtension(ctx, date, [host.id], {
+    technicianId: host.technician_id || null,
+    window: { window_start: window.start, window_end: window.end },
+  });
+}
+
+// The customer's OWN visit at the candidate's stop (their lawn visit) is not a
+// clash if the new row joins it. Anyone else's visit, a hold, own rows on two
+// technicians (not one stop), or an own visit the row cannot join
+// (placeGroupedExtension rolls back) stays a clash. The row takes the stop's own
+// technician, so no member is re-assigned.
+async function joinOwnStopExtension(ctx, candidate, clashRows) {
+  const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
+  const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
+  if (!ownOnly || stopTechs.length !== 1) return null;
+  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+}
+
+// The next-date search of extendSeriesOnceLocked: a ride on the lawn first
+// (rideLawnExtension), else the cadence walk. Returns { joined } (a grouped
+// placement already made), or { nextStr, hitMaxDate } for the caller to insert.
+async function walkExtensionCandidates(ctx) {
+  const {
+    conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
+    blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
+  } = ctx;
+  const { maxDate = null } = opts;
+  const ridden = await rideLawnExtension(ctx);
+  if (ridden) return { joined: ridden };
+  // Advance until we find an open date or give up. Each step
+  // moves one cadence interval forward from latestStr; capped to
+  // avoid runaway loops on degenerate patterns.
+  let attempt = 1;
+  let nextStr = null;
+  // Set whenever the maxDate cap (top-up's horizon — never set by the
+  // completion path) rejects a candidate. Dates only advance forward as
+  // `attempt` climbs, so once one candidate falls past maxDate every
+  // later attempt does too — this loop can only exit with `nextStr`
+  // still null AND hitMaxDate true because the horizon, not a busy
+  // calendar, is why nothing more got booked (Codex GitHub r1 P2).
+  let hitMaxDate = false;
+  while (attempt <= 12) {
+    const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+    const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+    if (!candidate) {
+      attempt++;
+      continue;
+    }
+    if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+      attempt++;
+      continue;
+    }
+    // Never seed a past-dated visit (+ its reminder) off a stale anchor.
+    if (candidate <= etDateString()) {
+      attempt++;
+      continue;
+    }
+    // topUp's horizon / annual-prepay term_end cap — refuse rather than
+    // insert (never a compensating delete after the fact): a candidate
+    // past the cap is not "the next date", it's "stop for this series".
+    if (maxDate && candidate > maxDate) {
+      hitMaxDate = true;
+      attempt++;
+      continue;
+    }
+    if (existingDates.has(candidate)) { attempt++; continue; }
+    // The blackout nudge can land a candidate on an adjacent day
+    // another visit already occupies (the series dedupe above only
+    // covers THIS series) — probe global occupancy before accepting,
+    // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
+    // (top-up only — never set by the completion path, so its own
+    // behavior is unchanged): seriesCandidateDateClashes is tech-blind
+    // (it has no idea which technician the office actually intends), and
+    // guardRecurrenceDestination's own ruling for every OTHER admin write
+    // path is that an overlap is advisory, never a hard block (staff-side
+    // saves never block on schedule conflicts, owner ruling 2026-08-25).
+    // Treating a clash as a hard skip here on an unattended nightly loop
+    // silently drops whole cadence slots on a busy calendar — a monthly
+    // series can lose most of a year's candidates to one recurring
+    // conflict. Insert on the cadence date and log the overlap instead.
+    if (opts.overlapAdvisoryOnly) {
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+      }
+    } else {
+      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
+      if (clashRows.length) {
+        const joined = await joinOwnStopExtension(ctx, candidate, clashRows);
+        if (joined) return { joined };
+        attempt++; continue;
+      }
+    }
+    nextStr = candidate;
+    break;
+  }
+  return { nextStr, hitMaxDate };
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
 async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
-  const { maxDate = null, onSkip } = opts;
+  const { onSkip } = opts;
+  // opts.forceDate / opts.commitScope are set only by placeGroupedExtension's
+  // grouped-or-nothing attempts: insert on exactly that date (the template
+  // `parent` then carries the stop's window and technician), skip the candidate
+  // search, and file post-commit work only if the attempt is kept.
   let spawnedVisit = null;
   // Find the latest LIVE visit (pending/confirmed or completed) to
   // calculate the next date — shared anchor query (cancelled/rescheduled
@@ -19088,67 +19394,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    // Advance until we find an open date or give up. Each step
-    // moves one cadence interval forward from latestStr; capped to
-    // avoid runaway loops on degenerate patterns.
-    let attempt = 1;
-    let nextStr = null;
-    // Set whenever the maxDate cap (top-up's horizon — never set by the
-    // completion path) rejects a candidate. Dates only advance forward as
-    // `attempt` climbs, so once one candidate falls past maxDate every
-    // later attempt does too — this loop can only exit with `nextStr`
-    // still null AND hitMaxDate true because the horizon, not a busy
-    // calendar, is why nothing more got booked (Codex GitHub r1 P2).
-    let hitMaxDate = false;
-    while (attempt <= 12) {
-      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
-      if (!candidate) {
-        attempt++;
-        continue;
-      }
-      if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
-        attempt++;
-        continue;
-      }
-      // Never seed a past-dated visit (+ its reminder) off a stale anchor.
-      if (candidate <= etDateString()) {
-        attempt++;
-        continue;
-      }
-      // topUp's horizon / annual-prepay term_end cap — refuse rather than
-      // insert (never a compensating delete after the fact): a candidate
-      // past the cap is not "the next date", it's "stop for this series".
-      if (maxDate && candidate > maxDate) {
-        hitMaxDate = true;
-        attempt++;
-        continue;
-      }
-      if (existingDates.has(candidate)) { attempt++; continue; }
-      // The blackout nudge can land a candidate on an adjacent day
-      // another visit already occupies (the series dedupe above only
-      // covers THIS series) — probe global occupancy before accepting,
-      // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
-      // (top-up only — never set by the completion path, so its own
-      // behavior is unchanged): seriesCandidateDateClashes is tech-blind
-      // (it has no idea which technician the office actually intends), and
-      // guardRecurrenceDestination's own ruling for every OTHER admin write
-      // path is that an overlap is advisory, never a hard block (staff-side
-      // saves never block on schedule conflicts, owner ruling 2026-08-25).
-      // Treating a clash as a hard skip here on an unattended nightly loop
-      // silently drops whole cadence slots on a busy calendar — a monthly
-      // series can lose most of a year's candidates to one recurring
-      // conflict. Insert on the cadence date and log the overlap instead.
-      if (opts.overlapAdvisoryOnly) {
-        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-        }
-      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-        attempt++; continue;
-      }
-      nextStr = candidate;
-      break;
-    }
+    // Grouped riding, then the cadence walk (walkExtensionCandidates); a
+    // forced date (a grouped attempt re-entering this function) has neither.
+    const walked = opts.forceDate ? { nextStr: opts.forceDate } : await walkExtensionCandidates({
+      conn, parent, parentId, cols, svcLike, opts, latest, latestStr, rOpts, skipParent, dirParent,
+      blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
+    });
+    if (walked.joined) return walked.joined;
+    const { nextStr, hitMaxDate } = walked;
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
     // portal auto-processor or an admin churn) can stop the series
@@ -19262,7 +19515,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           // completion path (no onSkip passed there) or by any other
           // extendSeriesOnceLocked caller (reconcile, etc.) — this is
           // top-up-only plumbing.
-          if (onSkip) onSkip('unbillable');
+          onSkip?.('unbillable');
           return spawnedVisit;
         }
       }
@@ -19286,7 +19539,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The transient completion-race bell is quiet (this fires per
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.commitScope || conn);
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -23261,6 +23514,24 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             });
         }
 
+        // Coverage money only — the setup line is not per-visit coverage.
+        const switchTermAmount = Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100;
+        // Annual rate review (GATE_RATE_REVIEW): a switch whose term succeeds
+        // one carrying a noticed renewal amount charges that amount unless
+        // staff confirm a different one (acknowledgeNoticedAmount) — the
+        // same guard as the Customer 360 renewal routes, under this
+        // customer's annual-prepay lock, before the term is written.
+        if (require('../config/feature-gates').rateReviewLive()) {
+          const RateReviewApply = require('../services/rate-review-apply');
+          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, visitCount: mintPayload.visitCount ?? null, today: etDateString(), lock: true,
+          });
+          if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+          if (noticed) {
+            await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: liveVisit.customer_id, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'schedule_prepay_switch', invoiceId: invoice.id });
+          }
+        }
+
         const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: liveVisit.customer_id,
           // Estimate-origin switches carry their provenance so a later
@@ -23270,8 +23541,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           prepayInvoiceId: invoice.id,
           planLabel: mintPayload.planLabel,
           monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
-          // Coverage money only — the setup line is not per-visit coverage.
-          prepayAmount: Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100,
+          prepayAmount: switchTermAmount,
           termStart: mintPayload.termStart,
           coverageServiceType: mintPayload.serviceType,
           coverageVisitCount: mintPayload.visitCount,
@@ -23311,6 +23581,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
       if (err && err.switchConflict) return res.status(409).json({ error: err.message });
       throw err;
     }
@@ -24489,6 +24760,9 @@ router.post('/generate-report', async (req, res) => {
       treeShrubReview,
       // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
       promiseMarks,
+      // "Write again" (Fast Complete): a fresh draft for the same inputs, so
+      // the cached one is not read back. The new draft still replaces it.
+      fresh,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -24896,11 +25170,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // summary alone never opens this block (mirrors the generation-gate rule
     // above: real, tech-vetted photo text is substantive, a bare count or an
     // unreviewed summary is not).
-    const photoObservationsBlock = cappedPhotoCaptions.length
+    // Built at use time (below) for a tree & shrub visit with GATE_TS_TECH_FINDINGS_COPY
+    // on: a hidden / edited finding withholds the photo-read captions and summary,
+    // so the block never repeats what the technician replaced.
+    const buildPhotoObservationsBlock = (captions, summary) => (captions.length
       ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
-        + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
-        + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
-      : '';
+        + (summary ? `Summary: ${summary}\n` : '')
+        + captions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
+      : '');
     // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
     // watcher needs to know whether THIS generation actually included the
     // photo block — with the gate off (the default), cappedPhotoCaptions is
@@ -24909,7 +25186,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // mirrors when photoObservationsBlock is non-empty; reused across every
     // response branch below (a cache hit reuses a prior generation built
     // from this SAME identity, so it carries the same grounding truth).
-    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
+    // Re-derived from the technician-filtered captions once grounding is known.
+    let photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -25209,6 +25487,23 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       return true;
     });
     const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
+    // leaves no scores, but the technician's own findings still ground the
+    // report (grounding.techFindings exists only while the gate is on).
+    // GATE_TS_TECH_FINDINGS_COPY: the photo text the writer may use, filtered
+    // BEFORE the input gate below so captions withheld by the technician's
+    // decisions can never hold that gate open on their own.
+    let promptPhotoCaptions = cappedPhotoCaptions;
+    let promptPhotoSummary = photoSummaryText;
+    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
+      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
+      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
+      // The summary was written about the photos as a whole: a replaced finding
+      // withdraws it.
+      promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
+    }
+    photoGroundingUsed = promptPhotoCaptions.length > 0;
+    const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -25219,8 +25514,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
+      || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
-      || cappedPhotoCaptions.length > 0;
+      || promptPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
     // promises (owner "ok yes add these" 2026-10-01): with the writer rules
     // on a grounded visit only. Fail-soft: no record, no mention. Resolved
@@ -25302,6 +25598,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       });
     }
 
+    if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
     // Scores-only requests live or die by the assessment grounding: when the
     // validated assessment was the ONLY substantive input and the grounding
     // load then failed (or resolved to retake-pending), there is nothing real
@@ -25325,7 +25629,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // proceed on the photo block even when the assessment load itself
       // fails; only a TRUE assessment-only request (no captions either)
       // still 503s retryable.
-      && !cappedPhotoCaptions.length;
+      && !promptPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -25357,11 +25661,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const effectiveSystemPrompt = selectReportCopyPrompt(
+    const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
       writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
     );
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
+    // instruction is THE guard, no word filter). In the system prompt so it
+    // reaches every tree & shrub generation even when the grounding context
+    // fails, and joins the draft cache key with it.
+    const effectiveSystemPrompt = selectedSystemPrompt
+      && techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub'
+      ? `${selectedSystemPrompt}\n\n${PALM_CROWN_PROMPT_RULE}`
+      : selectedSystemPrompt;
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25413,6 +25725,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
     }
+    const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);
     const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
@@ -25430,7 +25743,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         ])}`
         : '')
       .digest('hex');
-    const cached = reportCopyCacheGet(cacheKey);
+    const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
@@ -26889,6 +27202,7 @@ router._test = {
   addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
+  addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,
@@ -27029,6 +27343,10 @@ router._test = {
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
+  // The lock-and-refuse phase on its own — the annual rate review apply lane
+  // (services/rate-review-apply.js) validates the locked targets before it
+  // lets the propagation write.
+  lockAndGuardFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
   retiredGateInputsForVisitEdit,
   retiredSaleKeysVouchedByAcceptedEstimate,

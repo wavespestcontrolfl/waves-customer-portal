@@ -101,3 +101,96 @@ describe('deriveOutboundNumber + GATE_SMS_LINE_ADDRESS_FALLBACK', () => {
       .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
   });
 });
+
+describe('home line (GATE_HOME_LINE)', () => {
+  const ORIGINAL = process.env.GATE_HOME_LINE;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_HOME_LINE;
+    else process.env.GATE_HOME_LINE = ORIGINAL;
+  });
+
+  const { homeLineLocationId } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+  const TwilioService = require('../services/twilio');
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const address = { address_line1: '100 Main St', city: 'Palmetto', zip: '34221' };
+  // Stamped Venice for this exact address (e.g. under an older city map).
+  const stamped = { id: 'c3', ...address, home_line_location_id: 'venice', home_line_address_key: addressKey(address) };
+
+  test('a stamp for the current address wins over what the address resolves to today', () => {
+    expect(resolveServiceLocation(stamped).id).toBe('parrish');
+    expect(homeLineLocationId(stamped)).toBe('venice');
+  });
+
+  test('a stamp for an older address is ignored: the new address decides', () => {
+    expect(homeLineLocationId({ ...stamped, address_line1: '9 Other Rd' })).toBe('parrish');
+  });
+
+  test('no stamp, an unknown office id, or a missing key falls back to the address', () => {
+    expect(homeLineLocationId(address)).toBe('parrish');
+    expect(homeLineLocationId({ ...stamped, home_line_location_id: 'tampa' })).toBe('parrish');
+    expect(homeLineLocationId({ ...stamped, home_line_address_key: null })).toBe('parrish');
+  });
+
+  test('gate on: a known customer gets the home line even when a caller passes an office', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota', customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('venice'));
+  });
+
+  test('gate on: with no customer, the passed office still decides (leads)', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota' }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
+  });
+
+  test('gate off: byte-identical to before (passed office wins, stamp ignored)', async () => {
+    delete process.env.GATE_HOME_LINE;
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota', customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
+    expect(await TwilioService.deriveOutboundNumber({ customer: stamped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('parrish'));
+  });
+});
+
+describe('homeLineOfficeId / matchServiceLocation (no default office)', () => {
+  const { homeLineOfficeId, homeLineLocationId, matchServiceLocation } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+
+  test('null when no city, ZIP or nearby geocode names an office', () => {
+    expect(matchServiceLocation({})).toBeNull();
+    expect(matchServiceLocation({ city: 'Orlando', zip: '32801' })).toBeNull();
+    expect(matchServiceLocation({ latitude: 0, longitude: 0 })).toBeNull();
+    expect(homeLineOfficeId({ city: '' })).toBeNull();
+  });
+
+  test('resolveServiceLocation and homeLineLocationId keep the default-office fallback', () => {
+    expect(resolveServiceLocation({}).id).toBe('bradenton');
+    expect(homeLineLocationId({})).toBe('bradenton');
+  });
+
+  test('a matched office or a current stamp is returned as-is', () => {
+    expect(matchServiceLocation({ zip: '34219' }).id).toBe('parrish');
+    expect(matchServiceLocation(NEAR_VENICE).id).toBe('venice');
+    // A derived stamp holds while the address still names an office (here
+    // Parrish by ZIP) — the stored line wins over today's derivation.
+    const address = { address_line1: '1 A St', city: '', zip: '34219' };
+    expect(homeLineOfficeId({ ...address, home_line_location_id: 'sarasota', home_line_address_key: addressKey(address), home_line_source: 'derived' })).toBe('sarasota');
+  });
+});
+
+describe('homeLineOfficeId: a derived stamp never outlives a matched office', () => {
+  const { homeLineOfficeId, homeLineLocationId } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+  const blank = { address_line1: '', city: '', zip: '' };
+  const stampedDefault = { ...blank, home_line_location_id: 'bradenton', home_line_address_key: addressKey(blank), home_line_source: 'derived' };
+
+  test('an old derived default on an address with no office is ignored (calls → main)', () => {
+    expect(homeLineOfficeId(stampedDefault)).toBeNull();
+    expect(homeLineLocationId(stampedDefault)).toBe('bradenton'); // texts keep the default office
+  });
+
+  test('a staff pick holds even when the address names no office', () => {
+    expect(homeLineOfficeId({ ...stampedDefault, home_line_location_id: 'venice', home_line_source: 'staff' })).toBe('venice');
+  });
+});

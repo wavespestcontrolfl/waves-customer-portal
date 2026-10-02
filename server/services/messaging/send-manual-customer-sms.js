@@ -1,16 +1,16 @@
 'use strict';
 
 const logger = require('../logger');
-const TwilioService = require('../twilio');
 const { isEnabled } = require('../../config/feature-gates');
 const {
   sendCustomerMessage,
   classifyDeliveryCertainty,
 } = require('./send-customer-message');
-const {
-  reserveHumanReply,
-  settleHumanReply,
-} = require('../sms-suggest-mode');
+// The reservation path's modules load on first use: while no autonomous lane
+// can claim, this wrapper is a pass-through and every operator route that
+// imports it stays as light as a direct sendCustomerMessage import.
+const reserveHumanReply = (...args) => require('../sms-suggest-mode').reserveHumanReply(...args);
+const settleHumanReply = (...args) => require('../sms-suggest-mode').settleHumanReply(...args);
 
 const INTERLOCK_FIELD = 'manualSmsInterlock';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -81,7 +81,7 @@ async function settle(reply, { state, reviewedBy, reason, acceptedResult = null 
 
 async function prepareReservation(input, reviewedBy) {
   try {
-    const fromNumber = input.metadata?.fromNumber || await TwilioService.deriveOutboundNumber({
+    const fromNumber = input.metadata?.fromNumber || await require('../twilio').deriveOutboundNumber({
       customerLocationId: input.metadata?.customerLocationId,
       customerId: input.customerId || null,
     });
@@ -160,8 +160,16 @@ async function dispatchReserved(input, {
  * thread lock and persists recovery linkage before provider entry.
  */
 async function sendManualCustomerSms(input) {
-  if (!isEnabled('smsGratitudeReplies')
-    && !require('../sms-gratitude-context').gratitudeClaimsPossible()) return sendCustomerMessage(input);
+  const gratitudeLifecycle = isEnabled('smsGratitudeReplies')
+    || require('../sms-gratitude-context').gratitudeClaimsPossible();
+  // The unanswered-text lane interlocks staff REPLIES only. A campaign or
+  // follow-up draft (purpose marketing, estimate_followup, ...) is not an
+  // answer: parking and settling the thread's waiting question as answered by
+  // staff would hide it from the lane and log a false 'ignored' outcome. Those
+  // sends still take the provider-handoff reservation the claim respects.
+  const unansweredReplyLifecycle = input?.purpose === 'conversational'
+    && require('../sms-unanswered-reply').unansweredClaimsPossible();
+  if (!gratitudeLifecycle && !unansweredReplyLifecycle) return sendCustomerMessage(input);
 
   const reviewedBy = input.metadata?.adminUserId || null;
   // Canonical send metadata historically also carries symbolic provenance

@@ -234,7 +234,9 @@ async function namedCustomers(prompt) {
   const singleNames = explicitSingleNames(prompt).filter(name => words.some((word, i) => word === name
     && (!words[i + 1] || AFTER_SINGLE_NAME.has(words[i + 1]))));
   if (!phrases.length && !singleNames.length) return { matches: [], complete: true };
-  const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
+  // phone rides along so a read's name + phone selectors can be checked
+  // against the same row before task scope narrows it (Codex r5 P2).
+  const columns = ['id', 'first_name', 'last_name', 'phone', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
@@ -628,9 +630,18 @@ async function bindSavedAddress(supplied, targets) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
+  // Owner-direct (owner ruling 2026-10-01, owner-direct.js): for the owner
+  // login the record the bar picks IS the target, so the request-text
+  // authority checks below — ambiguous cohort, customer-scoped task vs a
+  // route-wide or outside write, a name without its id, a record the request
+  // did not name — do not refuse. The data checks stay for everyone: a
+  // malformed or missing record (readReferences) and a record that belongs to
+  // a different customer than the same call names (relationshipFailure).
+  // The flag is set by the route from the live request, never by tool input.
+  const direct = context.ownerDirect === true;
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
-  if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
+  if (context.ambiguous && !direct) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   // Every caller names the tool; a call without one has no reviewed scope
   // and is refused like an unclassified tool rather than admitted.
   const scope = scopeOf(toolName);
@@ -642,7 +653,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // recheck. An explicitly named customer who did not resolve keeps the task
   // customer-scoped (as for the broad readers), so a misspelling never widens
   // a request to a whole date or technician.
-  if (scope === 'route_wide' && customerSpecific(context)) {
+  if (scope === 'route_wide' && customerSpecific(context) && !direct) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
   // Outside-write tools carry no customer selector to check below (their
@@ -650,10 +661,10 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // a customer-scoped task even though their preview pulls in unrelated
   // provider text — the same leak readScopeRefusal already blocks for their
   // 'broad' read equivalents.
-  if (OUTSIDE_WRITE_TOOL_NAMES.has(toolName) && customerSpecific(context)) {
+  if (OUTSIDE_WRITE_TOOL_NAMES.has(toolName) && customerSpecific(context) && !direct) {
     return { error: 'This action reaches an outside service, not this customer\'s records. Run it from a request that does not name a customer.', code: 'customer_scope_required' };
   }
-  if (policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
+  if (!direct && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
@@ -674,10 +685,17 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const hash = require('./pending-actions').paramsHash;
   const actionBinding = hash(toolName, boundParams);
   const recordsBinding = hash('ib-target-records', records);
+  // The owner-direct exemption rides on the approval proof (pre-push P1):
+  // the confirm-time re-check runs the request-scope refusals above against
+  // this proof, and a route-wide or outside write the owner proposed with a
+  // customer target would otherwise be refused at Confirm after its approval
+  // was consumed. The proof is server-minted and hashed into the stored
+  // params, so the flag cannot be added afterwards.
   const accepted = forApproval ? {
     targets: (context.targets || []).map(({ customer_id }) => ({ customer_id })),
     references: records.map(({ kind, id }) => ({ kind, id })),
     actionBinding, recordsBinding,
+    ...(direct ? { ownerDirect: true } : {}),
   } : null;
   if (context.actionBinding) {
     return context.actionBinding === actionBinding && context.recordsBinding === recordsBinding ? accepted
@@ -713,8 +731,8 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
       if (eligibility.eligible) permitted.add(permitted.has(winnerId) ? loserId : winnerId);
     }
   }
-  const missingTarget = customerIds(records).some(id => !permitted.has(id));
-  const unlinkedTarget = (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
+  const missingTarget = !direct && customerIds(records).some(id => !permitted.has(id));
+  const unlinkedTarget = !direct && (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
   if (missingTarget || unlinkedTarget) return {
     error: 'Choose the target for this action; the current request has not established it',
     code: 'target_clarification_required', candidates: context.candidates || [],
@@ -724,7 +742,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
     const customer = records.find(r => r.kind === 'customer_id');
     const matchesCustomer = customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === phone;
     if (customer && !matchesCustomer) return { error: 'The message recipient does not match the target customer', code: 'target_relationship_mismatch' };
-    if (!customer && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
+    if (!customer && !direct && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
   }
   return accepted;
 }
@@ -815,26 +833,51 @@ async function bindReadAddress(scope, params, input, context, toolName) {
 // pass the immutable id to the reader. A current-request phone may establish
 // a unique read target only: it stays out of the task's write authority and
 // a model substitute is never accepted.
-// The single selected customer must carry the supplied phone and match any
-// supplied id; anything else is a substitute the task never authorised.
-function selectorMismatch(customer, params, digits) {
-  if (!customer) return true;
-  if (params.phone && digits(customer.phone) !== digits(params.phone)) return true;
-  return Boolean(params.customer_id) && String(params.customer_id).toLowerCase() !== customer.id;
-}
-
 async function resolveCustomerSelector(params, input, context, schema) {
   const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
   const permitted = new Set(context.targets.map(target => target.customer_id));
   const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
-  if (named?.complete === false) return { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+  // A capped name lookup beside another selector cannot be reconciled with
+  // it, so it is refused as a conflict the owner-direct fallback never
+  // forwards (Codex r6 P2); alone it stays a scope question.
+  if (named?.complete === false) {
+    const others = [params.customer_id, params.phone].filter(Boolean).length;
+    return others
+      ? { error: 'The customer name matches too many customers to check against the customer id or phone on this lookup', code: 'selector_conflict' }
+      : { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+  }
   const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
     .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [digits(params.phone)])
     .select(CUSTOMER_FIELDS);
   const explicitRead = !permitted.size && params.phone && !params.customer_name && context.explicitReadPhones?.includes(digits(params.phone));
-  const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
+  // Two selectors on one call that name different customers (a name plus
+  // another customer's id, or a phone another customer carries) are a data
+  // conflict, not a scope question: refused for every login with a code the
+  // owner-direct fallback never bypasses (Codex r3 on #5563), because the
+  // readers resolve customer_id before customer_name and would answer about
+  // the id while the owner asked about the name.
+  // Every supplied selector must fit ONE matched row (a shared name with
+  // customer A's id and customer B's phone fits none), judged before task
+  // authority narrows the matches so an empty or unrelated task scope cannot
+  // turn the conflict into a bypassable scope refusal (pre-push on r3).
+  const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
+  const fitsEverySelector = customer => (!suppliedId || customer.id === suppliedId)
+    && (!params.phone || digits(customer.phone) === digits(params.phone));
+  // Any two selectors that no single customer satisfies — a name that
+  // matched nobody beside an id, an id beside a phone nobody carries — are a
+  // conflict too (Codex r4): the reader would answer about one selector
+  // while the operator supplied another it could not reconcile.
+  const selectorCount = [params.customer_name, suppliedId, params.phone].filter(Boolean).length;
+  const fitting = matches.filter(fitsEverySelector);
+  if (selectorCount >= 2 && !fitting.length) {
+    return { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
+  }
+  // Task authority narrows the FITTING rows only: a customer every selector
+  // agrees on who sits outside the task is a scope question (bypassable for
+  // the owner login), not a conflict.
+  const selected = explicitRead ? fitting : fitting.filter(customer => permitted.has(customer.id));
   const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
-  if (selectorMismatch(customer, params, digits)) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
+  if (!customer) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
   input.customer_id = customer.id;
   delete input.customer_name;
   if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
@@ -851,7 +894,20 @@ function inheritTaskCustomer(input, context, schema) {
   return null;
 }
 
-async function prepareReadInput(params, context, { toolName, schema }) {
+// Owner-direct reads (owner ruling 2026-10-01): the scoped preparation below
+// still runs first, so a read that fits the task keeps its bound customer id
+// and saved address. Only when it would refuse for request-text authority
+// (which customer the request named) does the reader get the call as the
+// model made it — the same input the non-platform path executes. A data
+// refusal (invalid id, missing record, cross-customer mismatch) stands.
+const OWNER_DIRECT_READ_CODES = new Set(['target_clarification_required', 'customer_scope_required']);
+async function prepareReadInput(params, context, options) {
+  const prepared = await prepareScopedReadInput(params, context, options);
+  if (prepared.error && context?.ownerDirect === true && OWNER_DIRECT_READ_CODES.has(prepared.code)) return { input: { ...params }, widened: true };
+  return prepared;
+}
+
+async function prepareScopedReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
   // explicit name is handled by readScopeRefusal, which still admits a
   // reader that carries its own selector or record identifier.
@@ -878,11 +934,24 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
+// Owner-direct task context: whatever resolve() concluded — an unresolved or
+// duplicated name, a second person in the request, a stale page record, a
+// rejected selection — the request still runs. A uniquely resolved customer
+// stays the task target (readers inherit it); nothing else is a target and
+// nothing is refused for it. The page ids survive as hints only.
+function ownerDirectContext(context = {}) {
+  const { error: _error, code: _code, selectable: _selectable, ...rest } = context;
+  const targets = Array.isArray(rest.targets) ? rest.targets : [];
+  return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
+    target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
+    ambiguous: false, ownerDirect: true };
+}
+
 // A sender block inside a customer-scoped task may only target the task
 // customer's own saved address. A domain-wide filter affects every sender at
 // that domain and cannot be bound to one customer, so it is refused there.
 async function validateSenderBlock(params, context) {
-  if (!context?.targets?.length) return null;
+  if (!context?.targets?.length || context.ownerDirect === true) return null;
   if (String(params.domain || '').trim()) {
     return { error: 'A domain-wide block affects every sender at that domain and cannot be proposed inside a task for a specific customer. Block the customer\'s own address instead.', code: 'target_relationship_mismatch' };
   }
@@ -894,4 +963,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

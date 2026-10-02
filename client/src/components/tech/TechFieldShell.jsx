@@ -7,7 +7,7 @@ import './tech-field.css';
 
 // Mounted only after TechLayout verifies the staff profile. One flag read
 // owns the entire workspace; child routes consume the outlet context.
-export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable }) {
+export default function TechFieldShell({ children, techName, techRole, staffProfile = null, documentsAvailable, payGrowthAvailable }) {
   const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
   const { pathname, search } = useLocation();
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
@@ -34,7 +34,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
-            : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
+            : <Outlet context={{ fieldWorkspace: true, techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
         </div>
       </main>
       <nav className="tf-nav" aria-label="Field navigation">

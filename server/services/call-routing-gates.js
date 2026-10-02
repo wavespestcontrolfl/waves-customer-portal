@@ -890,7 +890,7 @@ const FLAG_PAYLOAD_STAMPS = [
   // The surname card's provenance evidence: the names THIS call heard, at
   // filing (codex r18 P1). The merged V1 names the surname backfill writes
   // from arrive as extraPayload.heard_name_v1 from the processor.
-  { flags: new Set(['missing_last_name']),
+  { flags: new Set(['missing_last_name', 'missing_first_name']),
     stamp: ({ extraction }) => ({ heard_name: { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null } }) },
   { flags: ADDRESS_SNAPSHOT_FLAGS, stamp: ({ extraction }) => ({ heard_address: heardAddressSnapshot(extraction) }) },
   { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
@@ -1022,6 +1022,9 @@ function buildTriageItem({
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',
+    // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
+    // collects the first name; never holds the booking.
+    missing_first_name: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-
@@ -1104,6 +1107,9 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   'email_unverified',
   'email_invalid',
   'email_bounce_reverify',
+  // An owed first-name capture on the call's linked customer: replacing the recording does
+  // not supply the name, and a superseded (terminal) card would block re-filing it.
+  'missing_first_name',
 ]);
 
 // Owner ruling 2026-09-30: a street-level address hold's review card (the
@@ -1115,7 +1121,10 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 // The same rule keeps the owed-follow-up card the confirm hook files for such a
 // hold (its skipped_reason marker): a sweep must not retire the office's task or
 // make a system resolution read as "handled".
-const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked'))";
+// An owed first-name card belongs to the call's linked CUSTOMER, not to the transcript:
+// no transcript cleanup (swap, adopt, or an implausible-transcript rejection) closes it,
+// because a terminal card blocks re-filing it (codex #5559 r13).
+const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'missing_first_name')";
 
 module.exports = {
   SUPERSEDE_KEPT_CARD_SQL,

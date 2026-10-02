@@ -257,11 +257,21 @@ describe('buildPestReportV2 — seasonal forecast', () => {
     ],
   };
 
-  it('ranks rising pests first and caps at 3', () => {
+  it('ranks modeled levels and caps at 3 without treating baseline deltas as weekly rises', () => {
     const out = buildForecast(forecast);
     expect(out.pests).toHaveLength(3);
     expect(out.pests.map((p) => p.key)).toEqual(['ghost_ant', 'german_roach', 'termite']);
     expect(out.monthName).toBe('June');
+  });
+
+  it('a low seasonal-baseline riser cannot outrank high modeled pressure; dated comparisons survive shaping', () => {
+    const weekly = { direction: 'down', delta: -1, previous_date: '2026-09-25', current_date: '2026-10-02' };
+    const out = buildForecast({ ...forecast, pests: [
+      { key: 'ants', label: 'Ants', level: 'low', score10: 2, trend: 'up', baseline_comparison: 'above' },
+      { key: 'mosquitoes', label: 'Mosquitoes', level: 'high', score10: 8, trend: 'flat', baseline_comparison: 'near', week_over_week: weekly },
+    ] });
+    expect(out.pests[0]).toMatchObject({ key: 'mosquitoes', baselineComparison: 'near', weekOverWeek: weekly });
+    expect(out.pests[1].weekOverWeek).toBeNull();
   });
 
   it('returns null when there are no pests', () => {

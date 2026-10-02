@@ -80,7 +80,7 @@ class MissedAppointment {
     logger.warn(`Customer ${customerId} has ${totalSkips} skips in 90 days — creating recommendation`);
 
     const suggestedSms =
-      `Hi ${customer.first_name}, we've noticed we've missed you a few times recently. ` +
+      `Hi ${String(customer.first_name || "").trim() || "there"}, we've noticed we've missed you a few times recently. ` +
       `We want to make sure your home stays protected. ` +
       `Can we find a better day/time that works for you? ` +
       `Reply with your preferred day or call us. - Waves Pest Control`;

@@ -8,7 +8,7 @@ const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
 
@@ -310,7 +310,8 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
     // If SMS channel, actually send the SMS
     if (conv.channel === 'sms' && conv.channel_identifier) {
       try {
-        const smsResult = await sendCustomerMessage({
+        // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
+        const smsResult = await sendManualCustomerSms({
           to: conv.channel_identifier,
           body: message,
           channel: 'sms',

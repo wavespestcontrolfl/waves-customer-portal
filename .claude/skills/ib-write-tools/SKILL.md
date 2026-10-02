@@ -16,6 +16,17 @@ never executes from the model loop. The flow is:
 4. Only the operator's click commits, via `/confirm-action` — never a model
    tool; the pending id is never model-visible.
 
+One narrow, gated exception (owner ruling 2026-10-01, PR #5563): under
+`GATE_IB_OWNER_DIRECT=true` AND `GATE_IB_PLATFORM=true`, the full-access owner
+login commits the internal edits listed in
+`services/intelligence-bar/owner-direct.js` (`OWNER_DIRECT_TOOL_NAMES` +
+`executesWithoutCard`) in the same turn without a card. Steps 1–2 still run;
+step 3 is skipped; step 4 runs server-side through `commitPendingAction` (the
+`/confirm-action` body) via `OwnerDirect.runDirectCommit`, so pins, receipt,
+audit row and `IB_WRITES_DISABLED` are unchanged. A new write tool is NOT
+direct unless deliberately added to that list — customer messages, money,
+bulk, grouped-visit and customer-facing-copy writes never are.
+
 ## Adding a new write tool — checklist
 
 1. Implement the tool in the context module

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary } from './ReportViewPage';
+import { cleanVisitSummary, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -580,6 +580,11 @@ export default function ServiceReportDocument({ data, token }) {
   // web hero prints, so the archived document keeps the re-service framing
   // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
   const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  // Re-service report card (GATE_RESERVICE_REPORT_CARD, the same server block
+  // the web report renders): "You told us" and "What we did" print in the
+  // document too, so the permanent PDF agrees with the live page. Null while
+  // the gate is dark — no payload key, nothing printed, cache key unchanged.
+  const reserviceCard = reservice ? reserviceCardView(data.reserviceReportCard) : null;
   // A non-performed callback (inspection_only / customer_declined /
   // incomplete) applied nothing — legacy/typed summary copy written for a
   // performed visit can claim treatment, so it is suppressed below and the
@@ -1039,6 +1044,33 @@ export default function ServiceReportDocument({ data, token }) {
                 titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
               />
             ))}
+          </div>
+        )}
+
+        {/* Re-service card: the customer's booking words (frozen at completion,
+            scrubbed server-side; quote marks only for verbatim words) and the
+            performed-visit summary. The web page's "Still seeing…" button has
+            no print equivalent. */}
+        {reserviceCard?.showTold && (
+          <div className="doc-keep">
+            <SectionHeader>You told us</SectionHeader>
+            {reserviceCard.toldLine && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.toldLine}</p>
+            )}
+            {reserviceCard.toldPests.length > 0 && (
+              <InfoRow label="Reported">{reserviceCard.toldPests.join(', ')}</InfoRow>
+            )}
+          </div>
+        )}
+        {reserviceCard?.showDid && (
+          <div className="doc-keep">
+            <SectionHeader>What we did</SectionHeader>
+            {reserviceCard.rows.map(([label, value]) => (
+              <InfoRow key={label} label={label}>{value}</InfoRow>
+            ))}
+            {reserviceCard.safetyLine && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.safetyLine}</p>
+            )}
           </div>
         )}
 

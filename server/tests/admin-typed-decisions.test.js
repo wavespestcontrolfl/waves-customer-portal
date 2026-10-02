@@ -30,6 +30,7 @@ const { callSubjectHash, smsSubjectHash } = require('../services/typed-decisions
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
 const baseRow = (over = {}) => ({
+  provider: 'typesafe',
   id: ID, capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', package_hash: 'h', served_model: 'jev-1.13.0',
   subject_type: 'sms_log', subject_id: 'sms-1', question_id: 'is_courtesy_only',
   jev_answer: JSON.stringify({ p: 0.9, yes: true, confident: true }), baseline_answers: JSON.stringify({ rules: false }),
@@ -177,7 +178,7 @@ describe('POST /reviews/:id/label', () => {
     const [patch] = called(log, 'decision_reviews', 'update')[0];
     expect(patch.label_status).toBe(status);
     // only jev_wrong carries a correct_value
-    expect(JSON.parse(patch.label)).toEqual({ verdict, correct_value: verdict === 'jev_wrong' ? false : null, note: 'checked the call' });
+    expect(JSON.parse(patch.label)).toEqual({ verdict, correct_value: verdict === 'jev_wrong' ? false : null, note: 'checked the call', reason: null });
     expect(patch.labeled_by).toBe('owner@example.test');
     expect(patch.labeled_at).toBeInstanceOf(Date);
     expect(called(log, 'decision_reviews', 'where')).toContainEqual([{ id: ID }]);
@@ -230,10 +231,23 @@ describe('POST /reviews/:id/label', () => {
     ['jev_wrong with a string for a yes/no question', { verdict: 'jev_wrong', correct_value: 'no' }],
     ['jev_wrong with free text', { verdict: 'jev_wrong', correct_value: 'x'.repeat(3000) }],
     ['jev_wrong whose correct_value repeats Jev\'s answer', { verdict: 'jev_wrong', correct_value: true, seen_answer: SEEN }],
+    ['an unknown one-tap reason', { verdict: 'jev_right', seen_answer: SEEN, reason: 'bad_vibes' }],
+    ['a reason on a verdict other than jev_wrong', { verdict: 'jev_right', seen_answer: SEEN, reason: 'wrong_fact' }],
+    ['a reason on unclear', { verdict: 'unclear', seen_answer: SEEN, reason: 'other' }],
   ])('%s is 400 and writes nothing', async (_name, payload) => {
     const log = installDb({ decision_reviews: { first: [baseRow()] } });
     expect((await post(`/reviews/${ID}/label`, payload)).status).toBe(400);
     expect(called(log, 'decision_reviews', 'update')).toEqual([]);
+  });
+
+  test('the one-tap reason rides inside the label and the audit row names it, never the note text', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_error' })], first: [baseRow()] } });
+    const { status: http } = await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: false, note: 'they only said thanks', reason: 'wrong_tone', seen_answer: SEEN });
+    expect(http).toBe(200);
+    const [patch] = called(log, 'decision_reviews', 'update')[0];
+    expect(JSON.parse(patch.label)).toEqual({ verdict: 'jev_wrong', correct_value: false, note: 'they only said thanks', reason: 'wrong_tone' });
+    expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ reason: 'wrong_tone' }) }));
+    expect(JSON.stringify(mockAudit.mock.calls)).not.toMatch(/only said thanks/);
   });
 
   test('an answer re-recorded since the page loaded is 409 answer_changed, not a label', async () => {

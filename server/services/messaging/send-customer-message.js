@@ -553,7 +553,8 @@ async function sendCustomerMessageCore(input) {
     ...inputRest
   } = input;
   const providerCoordination = require('./provider-handoff-reservation');
-  if (require('../sms-gratitude-context').gratitudeClaimsPossible()
+  if ((require('../sms-gratitude-context').gratitudeClaimsPossible()
+    || require('../sms-unanswered-reply').unansweredClaimsPossible())
     && providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)) {
     providerHandoffReservation = suppliedProviderHandoffReservation;
   }
@@ -1552,6 +1553,15 @@ async function sendCustomerMessageCore(input) {
   // blocking: the text is already out.
   await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);
 
+  // SMS offer ledger (GATE_SMS_OFFER_LEDGER, dark): a reply that came from an
+  // agent decision and quoted appointment times leaves a record of the slots
+  // the SENT text carried. Every decision send (reviewer, scheduled, auto-send)
+  // passes through here with metadata.agentDecisionId. input.body is the text
+  // the send checks approved; sendInput.body may have had its links rewritten.
+  // Not awaited: the text is already out, and a slow database must not hold
+  // the send result. A lost write is re-recorded by the ledger's backfill sweep.
+  void recordSmsOfferAfterSend(input, sendInput, providerOutcome);
+
   return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,
     blocked: false,
@@ -1592,6 +1602,29 @@ async function sendCustomerMessageCore(input) {
       void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
         .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
     }
+  }
+}
+
+// Never throws and never blocks the result: the text is already out. Gate off
+// (the default), the ledger module is not even loaded.
+async function recordSmsOfferAfterSend(input, sendInput, providerOutcome) {
+  try {
+    const agentDecisionId = input?.metadata?.agentDecisionId;
+    // Only a text the carrier took is an offer: the gate-, template- and
+    // owner-silence sentinels report sent:true for a message that reached
+    // nobody, and recording one would supersede a real open offer.
+    if (!agentDecisionId || providerOutcome?.sent !== true || providerOutcome.deliveryOutcome !== 'accepted'
+      || providerOutcome.provider !== 'twilio' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerOutcome.providerMessageId || '')) return;
+    if (!require('../../config/feature-gates').gateEnvValue('GATE_SMS_OFFER_LEDGER')) return;
+    await require('../sms-offers').recordOfferForSend({
+      agentDecisionId,
+      outgoingBody: input.body,
+      providerMessageId: providerOutcome?.providerMessageId || null,
+      to: sendInput.to,
+      sentAt: providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date(),
+    });
+  } catch (err) {
+    logger.warn(`[send-customer-message] sms offer ledger skipped: ${err.message}`);
   }
 }
 
@@ -1724,6 +1757,7 @@ module.exports = {
   _internals: {
     validateContract,
     recordPromiseEvidenceFallback,
+    recordSmsOfferAfterSend,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

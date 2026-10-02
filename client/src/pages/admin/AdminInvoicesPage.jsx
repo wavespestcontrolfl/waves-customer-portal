@@ -105,6 +105,7 @@ import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileShe
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
+import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -120,11 +121,13 @@ async function adminFetch(path, options = {}) {
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
     let code = null;
+    let body = null;
     let serverError = null;
     try {
       const data = await r.clone().json();
       message = data.error || data.message || message;
       code = data.code || null;
+      body = data;
       if (typeof data.error === "string" && data.error) serverError = data.error;
     } catch {
       const text = await r.text().catch(() => "");
@@ -133,6 +136,8 @@ async function adminFetch(path, options = {}) {
     const err = new Error(message);
     err.status = r.status;
     if (code) err.code = code;
+    // Structured refusals (the noticed renewal amount 409) ride along.
+    if (body && typeof body === "object") err.body = body;
     if (serverError) err.serverError = serverError;
     throw err;
   }
@@ -5295,9 +5300,10 @@ function AnnualPrepayModal({
     setActionError("");
     setSaving(true);
     try {
-      await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
+      await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
         method: "POST",
         body: JSON.stringify({
+          ...ack,
           termStart: start || undefined,
           months: Number(months) || undefined,
           planLabel: planLabel.trim() || undefined,
@@ -5317,7 +5323,7 @@ function AnnualPrepayModal({
               ? cadence
               : undefined,
         }),
-      });
+      }));
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
     } catch (err) {
       onError(`Annual prepay failed: ${err.message}`);
@@ -9030,6 +9036,16 @@ const combinedAudience = (invoiceCount) => {
   return invoiceCount === 1 ? "the 1 invoice" : `all ${invoiceCount} invoices`;
 };
 
+// Why combined reminders are paused, as the server reported it: what the
+// office typed, or the system's own reason. null when it gave none.
+const combinedPausedReasonText = (customerSchedule) => {
+  const reason = String(customerSchedule?.pausedReason || "").trim();
+  if (!reason) return null;
+  return customerSchedule.pausedBy === "staff"
+    ? `by the office: "${reason}"`
+    : `automatically: ${reason}`;
+};
+
 // The panel's line for a customer on combined reminders (GET /:id/followup
 // `customerSchedule`): this invoice is reminded together with the customer's
 // other overdue invoices, at the combined step. Exported for tests.
@@ -9040,7 +9056,12 @@ export function combinedReminderSummary(customerSchedule) {
   const lead = Number.isInteger(invoiceCount) && invoiceCount > 0
     ? `On combined reminders with ${pluralInvoices(invoiceCount)} for this customer.`
     : "On combined reminders for this customer.";
-  if (status === "paused") return `${lead} Combined reminders are paused.`;
+  if (status === "paused") {
+    const why = combinedPausedReasonText(customerSchedule);
+    return why
+      ? `${lead} Combined reminders are paused (${why}).`
+      : `${lead} Combined reminders are paused.`;
+  }
   if (!stepLabel) return lead;
   // Eastern wall clock (the portal is Eastern-only), whatever zone the browser is in.
   const when = nextTouchAt ? ` on ${formatETDateTime(nextTouchAt)} ET` : "";
@@ -9068,6 +9089,41 @@ export function followupSendNowPlan(data) {
 // sent, paused, confirm required) when it sent one. Exported for tests.
 export function followupActionErrorMessage(err) {
   return err?.serverError || "Action failed";
+}
+
+// The staff controls for a customer on combined reminders (POST
+// /admin/customers/:id/dunning-schedule/{pause,resume}): which button the
+// panel offers for the schedule's status and what it asks first. These act on
+// the CUSTOMER's combined reminders, not on this one invoice. No button
+// without the customer id (an older server), and none unless the server says
+// the schedule is controllable (combined reminders are switched on for this
+// customer; a schedule waiting to be handed back offers nothing). Resume
+// always confirms, naming why the reminders were paused. Release is
+// deliberately not offered here: the next run combines a released customer's
+// invoices again, so a button could not keep what it promised.
+// Exported for tests.
+export function combinedReminderControls(customerSchedule) {
+  if (!customerSchedule?.customerId || customerSchedule.controllable !== true) return [];
+  if (customerSchedule.status === "paused") {
+    const why = combinedPausedReasonText(customerSchedule);
+    return [
+      {
+        control: "resume",
+        label: "Resume combined",
+        confirmText: why
+          ? `Resume combined reminders for this customer? They were paused ${why}.`
+          : "Resume combined reminders for this customer?",
+      },
+    ];
+  }
+  return [
+    {
+      control: "pause",
+      label: "Pause combined",
+      promptText:
+        'Why pause combined reminders for this customer? (e.g. "customer said they\'ll pay Friday")',
+    },
+  ];
 }
 
 function FollowupPanel({ invoiceId, showToast, isMobile }) {
@@ -9106,6 +9162,36 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
       setBusy(false);
     }
   };
+  // Pause / resume for the CUSTOMER's combined reminders (the customer's own
+  // schedule routes; every press is on their activity log).
+  const actCombined = async (customerId, control, body) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await adminFetch(
+        `/admin/customers/${customerId}/dunning-schedule/${control}`,
+        {
+          method: "POST",
+          body: body ? JSON.stringify(body) : undefined,
+        },
+      );
+      showToast(
+        control === "pause"
+          ? "Combined reminders paused"
+          : "Combined reminders resumed",
+      );
+      await load();
+    } catch (err) {
+      showToast(followupActionErrorMessage(err));
+      // A refusal (409), or a combined schedule that closed since the panel
+      // loaded (404), means the panel is out of date: show the current state.
+      if (err?.status === 409 || err?.status === 404) await load();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
   if (readError)
     return (
       <ActionFeedback error onRetry={load} className="my-4">
@@ -9127,6 +9213,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
   const steps = data.steps || [];
   const nextStep = seq ? steps[seq.step_index] : null;
   const combinedSummary = combinedReminderSummary(data.customerSchedule);
+  const combinedControls = combinedReminderControls(data.customerSchedule);
   const sendNowPlan = followupSendNowPlan(data);
   return (
     <div
@@ -9161,6 +9248,17 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           <Badge className="max-w-full whitespace-normal">not scheduled</Badge>
         )}
       </div>
+      {!seq && combinedSummary && (
+        <div
+          style={{
+            marginBottom: 10,
+            lineHeight: 1.6,
+          }}
+          className="text-ui-body text-ink-secondary"
+        >
+          {combinedSummary}
+        </div>
+      )}
       {seq && (
         <div
           style={{
@@ -9307,6 +9405,60 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           </>
         )}
       </div>{" "}
+      {combinedControls.length > 0 && (
+        <div
+          style={{
+            marginTop: 10,
+            paddingTop: 10,
+            borderTop: "1px solid #E4E4E7",
+          }}
+        >
+          <div
+            style={{
+              marginBottom: 6,
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
+            Combined reminders (all of this customer's overdue invoices)
+          </div>
+          <div
+            style={{
+              display: "flex",
+              gap: 6,
+              flexWrap: "wrap",
+            }}
+          >
+            {combinedControls.map((c) => (
+              <Button
+                key={c.control}
+                disabled={busy}
+                onClick={() => {
+                  const customerId = data.customerSchedule.customerId;
+                  if (c.promptText) {
+                    const reason = prompt(c.promptText);
+                    if (reason !== null)
+                      actCombined(customerId, c.control, {
+                        reason,
+                      });
+                    return;
+                  }
+                  if (c.confirmText && !confirm(c.confirmText)) return;
+                  actCombined(customerId, c.control);
+                }}
+                variant={"secondary"}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
+              >
+                {c.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

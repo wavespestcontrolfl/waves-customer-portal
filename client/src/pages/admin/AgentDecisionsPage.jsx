@@ -15,6 +15,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import CorrectionReasonChips from "../../components/admin/CorrectionReasonChips";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const STATUSES = ["pending_review", "accepted", "corrected", "dismissed", "all"];
@@ -102,6 +103,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [actionError, setActionError] = useState("");
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctedActions, setCorrectedActions] = useState("");
+  const [correctionReason, setCorrectionReason] = useState(null);
   const [idealReply, setIdealReply] = useState("");
   const [actualReply, setActualReply] = useState("");
   const [replyReviewNote, setReplyReviewNote] = useState("");
@@ -118,6 +120,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const draftBaselineRef = useRef({
     correctionNote: "",
     correctedActions: "",
+    correctionReason: null,
     idealReply: "",
     actualReply: "",
     replyReviewNote: "",
@@ -164,17 +167,22 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   useEffect(() => {
     const nextActions = selected?.recommendedActions?.join("\n") || "";
+    // A reviewed row keeps its saved reason pressed, so re-confirming it from
+    // the all / corrected / dismissed filters never erases the classification.
+    const nextReason = selected?.correctionReason ?? null;
     setCorrectionNote("");
     setCorrectedActions(nextActions);
     setActualReply("");
     setIdealReply("");
     setReplyReviewNote("");
     setReplyScenarioLabel("");
+    setCorrectionReason(nextReason);
     setDetail(null);
     draftBaselineRef.current = {
       ...draftBaselineRef.current,
       correctionNote: "",
       correctedActions: nextActions,
+      correctionReason: nextReason,
       actualReply: "",
       idealReply: "",
       replyReviewNote: "",
@@ -236,6 +244,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     && detailAppliedRef.current.decisionId === selected?.id;
 
   const hasDraftChanges = correctionNote !== draftBaselineRef.current.correctionNote
+    || correctionReason !== draftBaselineRef.current.correctionReason
     || correctedActions !== draftBaselineRef.current.correctedActions
     || idealReply !== draftBaselineRef.current.idealReply
     || actualReply !== draftBaselineRef.current.actualReply
@@ -281,6 +290,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       } else if (correctionNote.trim()) {
         body.correctionNote = correctionNote;
       }
+      if (verdict !== "accepted" && correctionReason) body.reason = correctionReason;
       await adminFetch(`/admin/agent-decisions/${decision.id}/review`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -289,10 +299,15 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         && selectionEpochRef.current === submittedSelectionEpoch
         && editEpochRef.current === submittedEditEpoch
         && currentLoadRef.current === load) {
+        // The server stores no reason for an accepted decision; an accepted row
+        // that stays selected must not keep a pressed chip for a later verdict.
+        const keptReason = verdict === "accepted" ? null : correctionReason;
+        setCorrectionReason(keptReason);
         draftBaselineRef.current = {
           ...draftBaselineRef.current,
           correctionNote,
           correctedActions,
+          correctionReason: keptReason,
         };
         setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
         await load();
@@ -302,7 +317,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     } finally {
       setBusyId("");
     }
-  }, [correctedActions, correctionNote, load]);
+  }, [correctedActions, correctionNote, correctionReason, load]);
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision || !replyContextReady) return;
@@ -753,6 +768,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     placeholder="Why was this accepted, corrected, or dismissed?"
                   />
                   </FormField>
+                  <CorrectionReasonChips value={correctionReason} onChange={(value) => updateDecisionDraft(setCorrectionReason, value)} disabled={!!busyId} />
                   <div className="ui-record-actions">
                     <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:accepted`} onClick={() => review(selected, "accepted")}>
                       <CheckCircle2 size={16} aria-hidden /> Accept

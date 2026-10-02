@@ -109,3 +109,38 @@ test('generic review still resolves other workflows', async () => {
   expect(body.decision.id).toBe('d-lead');
   expect(update.update).toHaveBeenCalled();
 });
+
+describe('one-tap correction reason (AI acceleration scope idea D, PR 2)', () => {
+  test('a corrected review stores the reason on the row and returns it', async () => {
+    const lookup = firstBuilder({ id: 'd-lead', workflow: 'lead_response_workflow' });
+    const update = updateBuilder({ id: 'd-lead', workflow: 'lead_response_workflow', status: 'corrected', human_verdict: 'corrected', correction_reason: 'wrong_fact' });
+    db.mockImplementationOnce(() => lookup).mockImplementationOnce(() => update);
+    const { status, body } = await postReview('d-lead', { verdict: 'corrected', correctionNote: 'Quoted the wrong price', reason: 'wrong_fact' });
+    expect(status).toBe(200);
+    expect(update.update.mock.calls[0][0]).toMatchObject({ human_verdict: 'corrected', correction_reason: 'wrong_fact' });
+    expect(body.decision.correctionReason).toBe('wrong_fact');
+  });
+
+  test('a reason on an accepted review is 400 before any read: accepted decisions carry none', async () => {
+    const { status, body } = await postReview('d-lead', { verdict: 'accepted', reason: 'other' });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/corrected or dismissed only/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a dismissed review stores the reason too', async () => {
+    const lookup = firstBuilder({ id: 'd-lead', workflow: 'lead_response_workflow' });
+    const update = updateBuilder({ id: 'd-lead', workflow: 'lead_response_workflow', status: 'dismissed', human_verdict: 'dismissed', correction_reason: 'should_have_escalated' });
+    db.mockImplementationOnce(() => lookup).mockImplementationOnce(() => update);
+    const { status } = await postReview('d-lead', { verdict: 'dismissed', reason: 'should_have_escalated' });
+    expect(status).toBe(200);
+    expect(update.update.mock.calls[0][0].correction_reason).toBe('should_have_escalated');
+  });
+
+  test('an unknown reason is 400 before any read or write', async () => {
+    const { status, body } = await postReview('d-lead', { verdict: 'dismissed', reason: 'bad_vibes' });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/reason must be one of/);
+    expect(db).not.toHaveBeenCalled();
+  });
+});

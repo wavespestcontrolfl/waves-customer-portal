@@ -987,7 +987,7 @@ async function callCustomer(customer) {
   if (!window.confirm(`Call ${customer.firstName || ""} ${customer.lastName || ""} at ${customer.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
   try {
     const result = await adminFetch("/admin/communications/call", {
-      method: "POST", body: JSON.stringify({ to: customer.phone }),
+      method: "POST", body: JSON.stringify({ to: customer.phone, customerIdHint: customer.id }),
     });
     if (!result?.success) window.alert("Call failed: " + (result?.error || "unknown error"));
   } catch (err) {
