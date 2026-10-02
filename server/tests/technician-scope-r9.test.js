@@ -93,7 +93,11 @@ describe('codex #5568 r13', () => {
     expect(fenceAt).toBeGreaterThan(-1);
     expect(fenceAt).toBeLessThan(reuse.indexOf('const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });'));
     const credit = src.slice(src.indexOf('const applyPrepaidCredit = async (invoice, { assertInTrx = null } = {}) => {'));
-    expect(credit.indexOf('if (assertInTrx) await assertInTrx(trx);')).toBeGreaterThan(credit.indexOf("const lockedInvoice = await trx('invoices')"));
+    const inv = credit.indexOf("const lockedInvoice = await trx('invoices')");
+    const keyShare = credit.indexOf("FOR KEY SHARE', [lockedInvoice.customer_id]");
+    const fence = credit.indexOf('await assertInTrx(trx);');
+    expect(keyShare).toBeGreaterThan(inv);
+    expect(fence).toBeGreaterThan(keyShare);
     expect(src).toMatch(/assertEligibleInTrx: assertTechStillOwnsLiveVisit,/);
   });
 });

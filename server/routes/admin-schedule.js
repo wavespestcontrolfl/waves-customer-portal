@@ -17548,11 +17548,16 @@ router.post('/:id/invoice', async (req, res, next) => {
           .where({ id: invoice.id })
           .forUpdate()
           .first();
-        // Ownership after the invoice lock: the billing order (invoice before
-        // visit) every collection path takes, so a concurrent Terminal
-        // handoff cannot deadlock against it (pre-push P1). The route's own
-        // locked pre-check already ran before this credit.
-        if (assertInTrx) await assertInTrx(trx);
+        // Ownership after the invoice lock and the customer KEY SHARE (the
+        // lock the payments FK insert below takes anyway, hoisted as in
+        // scheduled-invoice-mint.js): the billing order invoice → customer →
+        // visit every collection path takes, so a concurrent Terminal handoff
+        // cannot deadlock against it (pre-push P1). The route's own locked
+        // pre-check already ran before this credit.
+        if (assertInTrx) {
+          if (lockedInvoice?.customer_id) await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [lockedInvoice.customer_id]);
+          await assertInTrx(trx);
+        }
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
