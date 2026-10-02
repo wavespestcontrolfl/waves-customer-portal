@@ -2868,7 +2868,68 @@ async function buildStatementLink(recipientLast10) {
   };
 }
 
+// Every VISIT a message body links to, resolved SERVER-SIDE from the text itself (street-level address hold:
+// no client-supplied metadata is trusted or required, so a pasted link, a restored draft, a scheduled replay
+// and an old composer tab are all judged the same). Five visit-keyed bearer shapes, each in its long form and
+// its /l/<code> short form (expandedView resolves the wrapper to its target; appointment short rows carry the
+// token themselves):
+//   /reschedule/<scheduled_services.reschedule_token>     (the reschedule link)
+//   /appointment/<scheduled_services.reschedule_token>    (the appointment page — the same token column)
+//   /track/<scheduled_services.track_view_token>          (the tracking link)
+//   /prep/<scheduled_services.prep_token>                 (a visit's prep page)
+//   /secure/<appointment_card_requests.token>             (a visit-lane card request -> its scheduled_service_id)
+// Each run is judged by the same canonical host / path parse the bearer fences use (an owned host, https or
+// plain http, trailing slash tolerated). A body with no such link answers [] without a database read beyond
+// the short-code lookups expandedView already does for /l/ wrappers. Returns [{ id, status, rescheduleLink }];
+// rescheduleLink is true when the visit was reached through a /reschedule/ link (the one whose click-time
+// status gate the stale-link check below reuses). THROWS on a lookup error — the caller fails closed.
+const RESCHEDULE_PATH_RE = /^\/reschedule\/([A-Za-z0-9_-]{16,})$/i;
+const TRACK_PATH_RE = /^\/track\/([A-Za-z0-9_-]{16,})$/i;
+const PREP_PATH_RE = /^\/prep\/([A-Za-z0-9_-]{16,})$/i;
+async function visitsLinkedInBody(body) {
+  const text = String(body || '');
+  if (!text) return [];
+  const runs = await expandedRuns(text);
+  const hosts = ownedPortalHosts();
+  const tokensFor = (fragment, pathRe) => [...new Set(linkRuns(runs, fragment)
+    .map((run) => canonicalPortalToken(run, hosts, pathRe, ANY_SCHEME)).filter(Boolean))];
+  const reschedule = tokensFor(/\/reschedule\//i, RESCHEDULE_PATH_RE);
+  const appointment = tokensFor(/\/appointment\//i, APPOINTMENT_TOKEN_RE);
+  const track = tokensFor(/\/track\//i, TRACK_PATH_RE);
+  const prep = tokensFor(/\/prep\//i, PREP_PATH_RE);
+  const secure = tokensFor(/\/secure\//i, SECURE_PATH_RE);
+  // Appointment short links keep their wrapper (expandedView): the short row carries the page's token.
+  for (const row of await shortCodeRows(runs, ANY_SCHEME)) {
+    if (row.kind === 'appointment' && row.token) appointment.push(row.token);
+  }
+  const rescheduleKeyed = [...new Set([...reschedule, ...appointment])];
+  if (!rescheduleKeyed.length && !track.length && !prep.length && !secure.length) return [];
+  const found = new Map();
+  if (rescheduleKeyed.length || track.length || prep.length) {
+    const visitRows = await db('scheduled_services')
+      .where((q) => {
+        if (rescheduleKeyed.length) q.orWhereIn('reschedule_token', rescheduleKeyed);
+        if (track.length) q.orWhereIn('track_view_token', track);
+        if (prep.length) q.orWhereIn('prep_token', prep);
+      })
+      .select('id', 'status', 'reschedule_token');
+    for (const r of visitRows) {
+      found.set(String(r.id), { id: String(r.id), status: r.status, rescheduleLink: reschedule.includes(r.reschedule_token) });
+    }
+  }
+  if (secure.length) {
+    const cards = await db('appointment_card_requests').whereIn('token', secure).where({ kind: 'visit' }).select('scheduled_service_id');
+    for (const c of cards) {
+      if (c.scheduled_service_id && !found.has(String(c.scheduled_service_id))) {
+        found.set(String(c.scheduled_service_id), { id: String(c.scheduled_service_id), status: null, rescheduleLink: false });
+      }
+    }
+  }
+  return [...found.values()];
+}
+
 module.exports = {
+  visitsLinkedInBody,
   ownedPortalLinkSpans,
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,

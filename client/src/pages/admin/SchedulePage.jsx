@@ -77,7 +77,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
-import { BAND_FIELD_NAMES, DOSE_UNITS, doseText, injectionBand, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
+import { BAND_FIELD_NAMES, DOSE_UNITS, doseText, injectionBand, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -10953,10 +10953,10 @@ export function treeShrubCloseoutBlocksClient({
     // The record's product, when it is one of this visit's injection products,
     // brings its label: a per-inch label needs the trunk in inches, and a label
     // split by the tech's pick needs that band (the server checks the same).
-    const labelRate = injectionRecordView(injection, injectionProducts).rate;
+    const { rate: labelRate, basis } = injectionRecordView(injection, injectionProducts);
     const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
-    else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
+    else if (basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
     const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || "" : "";
     const pickedBand = labelRate?.pick ? labelRate.bands.find((option) => option.key === bandKey) : null;
     const answered = labelRate?.recordsAs ? String(injection[labelRate.recordsAs] || "").trim().toLowerCase() : "";
@@ -11018,7 +11018,7 @@ function InjectionLabelFields({ rate, band, pickKey, onPick, select, colors }) {
 // The dose: what the label works out for this tree (or palm), and the dose
 // the tech put in as a number of tsp or fl oz, noted when it is over the label.
 function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
-  const { rate: labelRate, trunkInches, doseRange, dose, unreadableDose } = view;
+  const { trunkInches, doseRange, dose, unreadableDose } = view;
   // The unit a dose is entered in: the saved dose's own, so clearing its
   // amount never switches tsp to fl oz under the tech.
   const [doseUnitPick, setDoseUnitPick] = useState(() => dose.unit || "fl_oz");
@@ -11029,12 +11029,12 @@ function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
   const doseUnit = dose.unit || doseUnitPick;
   const overLabel = view.overLabel(doseUnit);
   const underLabel = view.underLabel(doseUnit);
-  const forWhat = labelRate?.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`;
+  const forWhat = view.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`;
   const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
   const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
   const hint = { fontSize: 14, color: colors.muted };
   const problem = { fontSize: 14, color: colors.error };
-  const perPalm = labelRate?.basis === "palm";
+  const perPalm = view.basis === "palm";
   return (
     <>
       {doseRange && (
@@ -11102,7 +11102,7 @@ function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
 // unit is shown, to enter again); otherwise the size as typed. A banded palm
 // label's pick is the palm's size, so it has no field here.
 function InjectionSizeFields({ record, view, onSize, input, colors }) {
-  const { rate: labelRate, trunkInches, unreadableTrunk } = view;
+  const { basis, trunkInches, unreadableTrunk } = view;
   const [trunkTyped, setTrunkTyped] = useState(null);
   const trunkDraft = typedDraft(trunkTyped, record.sizeClassOrDbh);
   const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
@@ -11110,7 +11110,7 @@ function InjectionSizeFields({ record, view, onSize, input, colors }) {
   const problem = { fontSize: 14, color: colors.error };
   return (
     <>
-      {labelRate?.basis === "inch" ? (
+      {basis === "inch" ? (
         <label style={caption}>
           Trunk (inches across, chest high)
           <input
@@ -11128,7 +11128,7 @@ function InjectionSizeFields({ record, view, onSize, input, colors }) {
             style={input}
           />
         </label>
-      ) : labelRate?.recordsAs === "sizeClassOrDbh" ? null : (
+      ) : view.rate?.recordsAs === "sizeClassOrDbh" ? null : (
         <input
           value={record.sizeClassOrDbh || ""}
           onChange={(e) => onSize(e.target.value)}
@@ -11136,7 +11136,7 @@ function InjectionSizeFields({ record, view, onSize, input, colors }) {
           style={input}
         />
       )}
-      {labelRate?.basis === "inch" && trunkTypingUnreadable && (
+      {basis === "inch" && trunkTypingUnreadable && (
         <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
       )}
       {unreadableTrunk && !trunkDraft && (
@@ -11167,8 +11167,11 @@ function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, s
   // The record keeps the catalog id of one of this visit's products, so the
   // server matches its label by id even if the product is renamed.
   const setProduct = (product, productAuto) => {
-    const productId = injectionProducts.find((option) => option.name === product)?.productId ?? null;
-    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId, clearField: bandField }) });
+    const next = injectionProducts.find((option) => option.name === product) || null;
+    // A label measured another way (per palm vs per inch) starts without the
+    // old size.
+    const clearSize = Boolean(next?.basis) && next.basis !== view.basis;
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId: next?.productId ?? null, clearField: bandField, clearSize }) });
   };
   // One injection product on this visit: the record names it, until the tech
   // chooses or types a product of their own (then it is never put back). A
@@ -14822,7 +14825,12 @@ export function CompletionPanel({
   // label rate in mL per inch of trunk or per palm for the dose helper.
   const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
     const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
-    return { name: row.name, productId: row.productId ?? null, rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }) };
+    return {
+      name: row.name,
+      productId: row.productId ?? null,
+      basis: injectionBasis(catalogRow || {}),
+      rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
+    };
   });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({

@@ -478,6 +478,20 @@ describe('four-section report: supplied timeframes and dates', () => {
     expect(allowedPhrases).toEqual(['a few days', 'about 1–2 weeks', 'a week or two']);
   });
 
+  test('a window with no number in an approved line is grounded whole, and only that window passes', () => {
+    const lines = [
+      'Expect a short spike in ant activity for several days, then a steady decline over the next couple of weeks.',
+      'Over the next week or two you may see roaches out in daylight.',
+      'Results build over the next few weeks.',
+    ];
+    const allowed = groundedTimeframePhrases(lines);
+    expect(allowed).toEqual(['several days', 'over the next couple of weeks', 'Over the next week or two', 'over the next few weeks']);
+    for (const line of lines) expect(writerRulesRejection(`WHAT TO EXPECT: ${line}`, { allowedPhrases: allowed })).toBeNull();
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity drops over the next three weeks.', { allowedPhrases: allowed })).toBe('timeframe');
+    // The approved window with a different preposition is a new timeframe.
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity declines within the next couple of weeks.', { allowedPhrases: allowed })).toBe('timeframe');
+  });
+
   test('an approved window never passes shortened or without its hedge', () => {
     expect(writerRulesRejection('Dead roaches may show up for a week or two.', { allowedPhrases })).toBeNull();
     expect(writerRulesRejection('Dead roaches may show up for a week.', { allowedPhrases })).toBe('timeframe');

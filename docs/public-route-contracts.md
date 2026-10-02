@@ -304,12 +304,12 @@ equivalent fetch exactly (no deadline there either). Both PDF
 cache-decision sites (the direct `/:token` route and the queued renderer
 in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
 object `buildReportV1Data` returns and skip storing under the stable
-`-pex1` key when it is set, so a later render — once the window closes or
+`-pex2` key when it is set, so a later render — once the window closes or
 the provider recovers — is what gets cached, not a permanent "no rain
 block" copy. This flag rides the JSON payload the same way
 `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
-`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+`spiders: { headline, whatWeDid, expectation }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
 that eaves were treated — the tech may have tagged it while applying it
@@ -321,7 +321,7 @@ completedActions "serviced-eaves" choice, "Completed the recorded eave and
 soffit service." (`client/src/lib/service-completion-choices.js`), names the
 eaves/soffit and so opens the section, but records no web-removal work of
 any kind — it could just as easily be a residual application or a plain
-inspection. Every wording below opens with "We knocked down webs...", so
+inspection. Every wording below opens with "We swept webs and egg sacs...", so
 that specific claim additionally requires an action that actually says a web
 was removed: either it names web(s)/webbing/a cobweb directly (the
 completedActions "removed-webs" choice, "Removed accessible webs from the
@@ -329,14 +329,15 @@ recorded exterior areas.") or it explicitly SWEPT (the protocol library's
 "Swept eaves, window frames, door frames, and lanai" — sweeping IS the
 web-removal act). A location-only eave/soffit action with neither gets NO
 card at all, gate on or off, residual evidence or not — an unproven "we
-knocked down webs" claim is never invented just because a treatment
-happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
-ALWAYS one of two fixed combinations: (1) the action was recorded but no
+swept webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` are
+ALWAYS one of two fixed combinations (no `nextStep`: owner 2026-10-01, webs
+are not a return-visit item): (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
 tying it to the eaves — de-web-only wording, no treatment claim ("We
-knocked down webs around the eaves and entry points.") and an expectation
-that never says "the residual we applied"; (2) the action was recorded AND
+swept webs and any egg sacs from your eaves and entry points.") and an
+expectation that never credits a residual; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
 (owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
@@ -347,8 +348,8 @@ nothing else stands in for it — matched by exact key, never a substring),
 or the visit separately recorded a genuine `treatmentApplied: true` eave
 action, never just the sweep-only action that gates the section in the
 first place) → combined wording ("We
-knocked down webs and treated the eaves and entry points where spiders
-build.") with a residual-backed expectation — even here, the eaves-treated
+swept webs and any egg sacs, then applied a residual insecticide to the eaves
+and entry points where spiders build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
 alone and never on free text. Neither combination ever interpolates a raw
 completed protocol-action label. Raw protocol-action labels
@@ -375,7 +376,8 @@ Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 (owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
 cracks/voids, never a surface barrier, so it never shares the pyrethroid
 barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
-Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Bait → roach gel bait; Advion Ant Bait Gel → ant bait; Advion WDG Granular
+(a granular bait broadcast by the pound, with no approved line) → no class;
 Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
 explicitly mapped to no class. A product NOT in this map gets no line —
 fail closed, never guessed; extending the map to a new product requires an
@@ -390,9 +392,22 @@ recorded) method is treated as unknown, never assumed exterior; an
 unrecognized or free-text area string never qualifies either, fail closed;
 when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
-rather than silently asserting the claim. Never a "guarantee"
-or "eliminate" claim (screened through the existing `validateCustomerCopy`
-banned-copy guard). The what-to-expect facts (never the rain block, never
+rather than silently asserting the claim. The non-repellent "6-foot
+perimeter band" sentence needs one non-repellent application that is both
+ant-tagged and recorded as a band: an explicit `perimeter_spray` method or a
+perimeter/foundation chip (Perimeter, Exterior perimeter, Property
+perimeter, Foundation, Foundation perimeter) by exact key; any other
+exterior chip is spot work and gets the general non-repellent wording. Each line names the active ingredient from a
+closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
+lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
+pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the
+barrier sentence names only the products recorded exterior. The bait and
+dust lines make no placement claim (the builder reads no area or method),
+the AI writer's plain variant leaves out label durations ("up to 8
+months") and customer instructions, and the Tekko Pro 6-month
+cockroach-nymph sentence needs a roach target on that application. Never a
+"guaranteed" or "eliminated" claim (screened through the existing
+`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
 the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
@@ -1902,6 +1917,33 @@ headline + what we saw (+ why it matters only for needs_attention) with no
 line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
 stamp while the gate is on, so gate-off PDFs are never served after the flip
 (or the reverse on rollback).
+`GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
+for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
+(lawn only, never tree & shrub; no new route, token, privacy or rate-limit
+surface): instead of the peak / shoulder / dormant note it is one calendar-based,
+tier-neutral sentence for the visit's month and grass (St. Augustine,
+Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
+says what the program focuses on that time of year, never what the visit
+applied. It is written from `server/config/protocols.json` months, and any step
+the protocol makes conditional (skipped, soil-test or weather gated, optional,
+or on request) is only stated with a qualifier such as "where the
+lawn needs it" or "when conditions allow". It is at most about 30 words, and
+never naming a product, an ordinance, a county, a blackout, a law, a clock time,
+plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
+carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
+is null, and the old note stays, for a visit that is not a recurring lawn plan
+visit (the visit's catalog service identity must be a recurring lawn plan:
+one-time lawn jobs, callbacks and unresolved identities get no line; the
+WaveGuard tier is never the signal), for a visit with no assessment date, and
+for a June to September visit that may have applied nitrogen (the program
+applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
+with no `analysis_n`, or any applied product the catalog cannot resolve.
+The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
+lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+renders a program line once as a small "This time of year" card above the
+trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
+print `seasonalNote`, so its content and cache signature are unchanged.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

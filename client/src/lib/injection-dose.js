@@ -30,15 +30,35 @@ export const DOSE_UNITS = [
 // worked-out dose: the record shows the label line only.
 export const INJECTION_LABEL_BANDS = LABEL_BANDS.map((row) => ({ ...row, match: new RegExp(row.match, "i") }));
 
-function labelBasis(unit) {
-  if (!isMlUnit(unit)) return null;
-  const per = unit.split("/").slice(1).join("/").trim().toLowerCase();
+// "inch" or "palm" for an injection label unit in mL or g per inch of trunk
+// or per palm ("ml/inch dbh", "g/inch dbh", "ml/palm"); null otherwise.
+// Mirrors injectionBasisOf in server/services/tree-shrub-closeout.js.
+function unitBasis(unit) {
+  const match = /^\s*(?:ml|cc|millilit(?:er|re)s?|g|grams?)\s*\/\s*(.*)$/i.exec(String(unit || ""));
+  if (!match) return null;
+  const per = match[1].trim().toLowerCase();
   if (/^(inch|in\b)/.test(per)) return "inch";
   return /^palm/.test(per) ? "palm" : null;
 }
 
+/**
+ * Whether a catalog injection label is dosed per inch of trunk or per palm,
+ * whatever its unit (Arbor-OTC's is grams): the record needs the trunk in
+ * inches for a per-inch label.
+ */
+export function injectionBasis(product) {
+  return unitBasis(product?.default_unit ?? product?.defaultUnit);
+}
+
+/**
+ * A catalog label's injection rate: { low, high, basis, bands, pick, note,
+ * recordsAs } in mL per inch of trunk (basis "inch") or per palm (basis
+ * "palm"), with the label's band table when it has one; null for any other
+ * label.
+ */
 export function injectionLabelRate(product) {
-  const basis = labelBasis(String(product?.default_unit ?? product?.defaultUnit ?? ""));
+  const unit = String(product?.default_unit ?? product?.defaultUnit ?? "");
+  const basis = isMlUnit(unit) ? unitBasis(unit) : null;
   if (!basis) return null;
   const bounds = String(product?.default_rate ?? product?.defaultRate ?? "")
     .split(/\s*(?:-|–|to)\s*/)
@@ -225,6 +245,9 @@ export function injectionRecordView(record = {}, injectionProducts = []) {
     null;
   const rate = chosen?.rate || null;
   const pickKey = record.labelBand?.product === record.product ? record.labelBand?.key || "" : "";
+  // Per inch or per palm, from the label's unit even when its rate does not
+  // read as a liquid (Arbor-OTC in grams).
+  const basis = chosen?.basis || rate?.basis || null;
   const sizeText = String(record.sizeClassOrDbh || "").trim();
   const trunkInches = trunkInchesText(sizeText);
   const dose = parseDose(record.dose);
@@ -233,13 +256,14 @@ export function injectionRecordView(record = {}, injectionProducts = []) {
     chosen,
     rate,
     pickKey,
+    basis,
     trunkInches,
     band: rate ? injectionBand(rate, trunkInches, pickKey) : null,
     doseRange: rate ? injectionDoseText(rate, trunkInches, pickKey) : null,
     dose,
     // A saved size that is not in inches ("30 cm DBH") or a saved dose that
     // is not tsp or fl oz: shown, to enter again, never read as something else.
-    unreadableTrunk: rate?.basis === "inch" && sizeText && !trunkInches ? sizeText : "",
+    unreadableTrunk: basis === "inch" && sizeText && !trunkInches ? sizeText : "",
     unreadableDose: doseSaved && !dose.amount ? doseSaved : "",
     overLabel: (unit) => Boolean(rate) && doseOverLabel(rate, trunkInches, dose.amount, unit, pickKey),
     underLabel: (unit) => Boolean(rate) && doseUnderLabel(rate, trunkInches, dose.amount, unit, pickKey),
@@ -247,12 +271,15 @@ export function injectionRecordView(record = {}, injectionProducts = []) {
 }
 
 /**
- * The record naming another product. A dose, a band, or a field the band
- * set (clearField: the palm size or target pest the old label's band wrote)
+ * The record naming another product, by name and (for one of this visit's
+ * catalog products) catalog id. A dose, a band, or a field the band set
+ * (clearField: the palm size or target pest the old label's band wrote)
  * belongs to the product it was worked out for, so a new product starts
- * without them; the trunk measured stays.
+ * without them. The size also starts over when the new label measures
+ * another way (clearSize: a trunk for a palm label, or a palm size for a
+ * per-inch one); otherwise the trunk measured stays.
  */
-export function recordForProduct(record = {}, product, { productAuto = false, productId = null, clearField = null } = {}) {
+export function recordForProduct(record = {}, product, { productAuto = false, productId = null, clearField = null, clearSize = false } = {}) {
   if (product === record.product) return { ...record, productAuto, productId: productId ?? record.productId ?? null };
   return {
     ...record,
@@ -262,6 +289,7 @@ export function recordForProduct(record = {}, product, { productAuto = false, pr
     dose: "",
     labelBand: null,
     ...(clearField ? { [clearField]: "" } : {}),
+    ...(clearSize ? { sizeClassOrDbh: "" } : {}),
   };
 }
 

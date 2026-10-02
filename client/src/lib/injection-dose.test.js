@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DOSE_UNITS, doseOverLabel, doseText, doseUnderLabel, injectionBand, injectionDoseText, injectionLabelRate, injectionLabelText,
+  DOSE_UNITS, doseOverLabel, doseText, doseUnderLabel, injectionBand, injectionBasis, injectionDoseText, injectionLabelRate, injectionLabelText,
   injectionRecordView, parseDose, recordForProduct, recordWithBand, trunkInchesText,
 } from './injection-dose';
 
@@ -45,6 +45,18 @@ describe('injectionLabelRate', () => {
     expect(injectionLabelRate({ ...PHOSPHO_JET, default_rate: '' })).toBeNull();
     expect(injectionLabelRate({})).toBeNull();
     expect(injectionLabelRate(null)).toBeNull();
+  });
+});
+
+describe('injectionBasis', () => {
+  it('reads per inch or per palm from the unit, in mL or grams', () => {
+    expect(injectionBasis(IMA_JET_10)).toBe('inch');
+    expect(injectionBasis(PALM_JET)).toBe('palm');
+    // Arbor-OTC's label is grams per inch: no liquid rate, still per inch.
+    expect(injectionBasis({ default_rate: '0.28', default_unit: 'g/inch dbh' })).toBe('inch');
+    expect(injectionLabelRate({ default_rate: '0.28', default_unit: 'g/inch dbh' })).toBeNull();
+    expect(injectionBasis({ default_unit: 'ml/gal' })).toBeNull();
+    expect(injectionBasis({ default_unit: 'oz/1000 sq ft' })).toBeNull();
   });
 });
 
@@ -255,6 +267,8 @@ describe('the record and its product', () => {
       product: PHOSPHO_JET.name, productId: 'pj-1', productAuto: false, sizeClassOrDbh: '10 in DBH', dose: '', labelBand: null,
     });
     expect(recordForProduct(record, IMA_JET.name, { productAuto: true })).toEqual({ ...record, productAuto: true, productId: null });
+    // A label measured another way starts without the old size.
+    expect(recordForProduct(record, PALM_JET.name, { clearSize: true }).sizeClassOrDbh).toBe('');
     // A field the old label's band answered (palm size, target pest) goes with it.
     expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' }, '', { clearField: 'sizeClassOrDbh' }).sizeClassOrDbh).toBe('');
   });

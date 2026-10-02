@@ -956,6 +956,26 @@ describe('POST /admin/communications/customer-link', () => {
     }
   });
 
+  test('appointment: a moved street-level hold (voice_agent, confirmed, customer_confirmed false) is never picked; the next visit is', async () => {
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const appointmentPublic = require('./../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'upcoming', phase: null });
+    try {
+      const movedHold = { id: 'v-hold', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '08:00', status: 'confirmed', source_action: 'voice_agent', customer_confirmed: false };
+      const later = { id: 'v-later', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '13:00', status: 'confirmed', source_action: null, customer_confirmed: true };
+      wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([movedHold, later]) });
+      builders.buildAppointmentPageLink.mockResolvedValue({ url: 'https://wavespest.co/a/abc', line: 'x', appointment: { id: 'v-later' } });
+      await withServer(async (baseUrl) => {
+        expect((await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' })).status).toBe(200);
+      });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-later' }));
+      // The hold was dropped before the page-state read: nothing was asked about it.
+      expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'v-hold' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('appointment + card_request: the route picks the soonest live visit and hands the row to the builder', async () => {
     // A week out in ET — a fixed near-today date rots into pageState 'past' (pre-push Codex P1).
     const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));

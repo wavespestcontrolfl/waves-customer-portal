@@ -82,6 +82,17 @@ function injectionLabelOf(catalog = {}) {
   return { basis, table: INJECTION_LABEL_BANDS.find((row) => row.match.test(name) && row.basis === basis) || null };
 }
 
+// Whether a catalog injection label is dosed per inch of trunk or per palm,
+// from its unit in mL or g ("ml/inch dbh", "g/inch dbh", "ml/palm"); null
+// otherwise. Mirrors injectionBasis in client/src/lib/injection-dose.js.
+function injectionBasisOf(catalog = {}) {
+  const match = /^\s*(?:ml|cc|millilit(?:er|re)s?|g|grams?)\s*\/\s*(.*)$/i.exec(String(catalog.default_unit ?? catalog.defaultUnit ?? ''));
+  if (!match) return null;
+  const per = match[1].trim().toLowerCase();
+  if (/^(inch|in\b)/.test(per)) return 'inch';
+  return /^palm/.test(per) ? 'palm' : null;
+}
+
 // A trunk size in inches ("10 in DBH", "10", "10\""); anything else is NaN.
 // Mirrors trunkInchesText in client/src/lib/injection-dose.js.
 function trunkInches(value) {
@@ -316,9 +327,13 @@ const INJECTION_LABEL_UNIT = /^\s*(?:ml|g)\s*\/\s*(?:inch|in\b|palm)/i;
 function isInjectionProduct(productRef = {}) {
   if (/\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productText(productRef))) return true;
   const catalog = productRef.catalog || productRef;
-  const method = text(catalog.application_method ?? catalog.applicationMethod).toLowerCase();
+  const input = productRef.input || productRef;
+  // The method the tech recorded on this visit counts as much as the
+  // catalog's default (the client reads the same row field).
+  const methods = [catalog.application_method ?? catalog.applicationMethod, input.applicationMethod ?? input.application_method]
+    .map((method) => text(method).toLowerCase());
   const unit = text(catalog.default_unit ?? catalog.defaultUnit);
-  return method === 'trunk_injection' || INJECTION_LABEL_UNIT.test(unit);
+  return methods.includes('trunk_injection') || INJECTION_LABEL_UNIT.test(unit);
 }
 
 function isInsectLikeProduct(productRef = {}) {
@@ -427,8 +442,11 @@ function pushInjectionRecordBlocks(blocks, injection, productRefs) {
     (injection.productId && productRefs.find((ref) => String(ref.input?.productId) === injection.productId)) ||
     productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
   const label = labelRef ? injectionLabelOf(labelRef.catalog) : null;
+  // Per inch or per palm from the label's unit in mL or g (Arbor-OTC in
+  // grams has no liquid rate, but is still dosed per inch).
+  const basis = labelRef ? injectionBasisOf(labelRef.catalog) : null;
   if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
-  else if (label?.basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
+  else if (basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
     pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
   }
   if (label?.table?.pick) pushInjectionBandBlocks(blocks, injection, label.table);
