@@ -40,7 +40,9 @@ describe('buildTurnTimeline', () => {
       ev(9000, 'end_of_agent_speech'),
     ]);
     expect(turns).toHaveLength(1);
-    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 2600, sttMs: 80, appMs: 2400, voiceMs: 200, agentOverCaller: false, callerBargeIns: 0 });
+    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 2600, endpointMs: 0, appMs: 2400, voiceMs: 200, sttMs: 80, ttsMs: 200, agentOverCaller: false, callerBargeIns: 0 });
+    // The three spans add up to the heard gap; provider STT/TTS are diagnostics.
+    expect(turns[0].endpointMs + turns[0].appMs + turns[0].voiceMs).toBe(turns[0].heardGapMs);
   });
 
   test('events out of order in the payload are sorted by time, then sequence number', () => {
@@ -200,6 +202,11 @@ describe('stored turn stats carry the join keys', () => {
     expect(storedStatsFor({ transcription_metadata: out.transcription_metadata })).toEqual(turnStats);
   });
 
+  test('a call whose top-level provenance was rewritten by the recording processor reads Sandy\'s stats under .relay', () => {
+    const row = { transcription_metadata: { source: 'recording', relay: { source: 'voice_relay_session', turn_stats: [{ turn: 1 }] } } };
+    expect(storedStatsFor(row)).toEqual([{ turn: 1 }]);
+  });
+
   test('a reconnected call reads every recovery segment in order, even when the closing socket also wrote its own turn_stats', () => {
     const segments = [{ turn_stats: [{ turn: 1, segmentGeneration: 1 }] }, { turn_stats: [{ turn: 1, segmentGeneration: 2 }, { turn: 2, segmentGeneration: 2 }] }];
     const row = {
@@ -223,6 +230,12 @@ describe('fetchConversationRelayEvents', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe(`https://insights.twilio.com/v1/Voice/${SID}/Events?Edge=carrier_edge&PageSize=200`);
     expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe(`Basic ${Buffer.from('ACtest:secret').toString('base64')}`);
     expect(fetchImpl.mock.calls[1][0]).toBe('https://insights.twilio.com/next');
+  });
+
+  test('every request carries a deadline', async () => {
+    const fetchImpl = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ events: [], meta: {} }) }));
+    await fetchConversationRelayEvents(SID, { ...creds, fetchImpl });
+    expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
   });
 
   test('a 404 (events not ready yet) is unavailable, not an error; other failures throw', async () => {

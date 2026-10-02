@@ -16,6 +16,7 @@
 const INSIGHTS_BASE = 'https://insights.twilio.com/v1/Voice';
 const CALL_SID_RE = /^CA[0-9a-fA-F]{32}$/;
 const MAX_PAGES = 20;
+const REQUEST_TIMEOUT_MS = 15000;
 // Our prompt clock and Twilio's prompt_sent are the same instant seen from
 // two machines; anything further apart than this is a different turn.
 const JOIN_WINDOW_MS = 2000;
@@ -32,7 +33,8 @@ async function fetchConversationRelayEvents(callSid, {
   const events = [];
   let url = `${INSIGHTS_BASE}/${callSid}/Events?Edge=carrier_edge&PageSize=200`;
   for (let page = 0; url && page < MAX_PAGES; page += 1) {
-    const res = await fetchImpl(url, { headers: { Authorization: auth } });
+    // Bounded: a stalled page fails this call, never the whole report.
+    const res = await fetchImpl(url, { headers: { Authorization: auth }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     if (res.status === 404) return { events, available: false };
     if (!res.ok) throw new Error(`Voice Insights events HTTP ${res.status}`);
     const body = await res.json();
@@ -193,11 +195,15 @@ function buildTurnTimeline(events = []) {
     ...t,
     // The release-criteria gap: caller stops → caller hears Sandy.
     heardGapMs: t.outcome === 'spoke' ? span(t.endOfCustomerSpeechAt, t.agentSpeechStartAt) : null,
-    // Twilio's "Application" slice: prompt out → first text back (includes
-    // the websocket round trip; ours splits it further).
+    // Three non-overlapping boundary spans that add up to the heard gap:
+    // end of speech → prompt sent (Twilio's turn handoff, usually 0),
+    // prompt → first text back (us, incl. the websocket round trip),
+    // first text → agent audio (synthesis + playout).
+    endpointMs: t.outcome === 'spoke' ? span(t.endOfCustomerSpeechAt, t.promptSentAt) : null,
     appMs: span(t.promptSentAt, t.firstTokenAt),
-    // First text → audio (Twilio's own tts_latency event when present).
-    voiceMs: t.ttsMs != null ? t.ttsMs : span(t.firstTokenAt, t.agentSpeechStartAt),
+    voiceMs: t.outcome === 'spoke' ? span(t.firstTokenAt, t.agentSpeechStartAt) : null,
+    // sttMs / ttsMs stay as Twilio's provider diagnostics — they overlap the
+    // spans above and are never added to them.
   }));
 }
 
@@ -270,9 +276,11 @@ function summarizeTimeline(joined = []) {
   const group = (rows) => ({
     turns: rows.length,
     heard_gap: stage(rows.map((t) => t.heardGapMs)),
-    stt: stage(rows.map((t) => t.sttMs)),
+    endpoint: stage(rows.map((t) => t.endpointMs)),
     app: stage(rows.map((t) => t.appMs)),
     voice: stage(rows.map((t) => t.voiceMs)),
+    stt_provider: stage(rows.map((t) => t.sttMs)),
+    tts_provider: stage(rows.map((t) => t.ttsMs)),
     // WHOLE-TURN work (every model round and tool call, including any after
     // the first reply was sent), not slices of the first-response gap.
     model_turn_total: stage(rows.map((t) => t.ours && t.ours.modelMs)),

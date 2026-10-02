@@ -57,7 +57,9 @@ function storedStatsFor(row) {
   const fromSegments = segments.flatMap((s) => (Array.isArray(s && s.turn_stats) ? s.turn_stats : []));
   if (fromSegments.length) return fromSegments;
   const tm = parseJson(row.transcription_metadata) || {};
-  return Array.isArray(tm.turn_stats) ? tm.turn_stats : [];
+  if (Array.isArray(tm.turn_stats)) return tm.turn_stats;
+  const relay = parseJson(tm.relay) || {};
+  return Array.isArray(relay.turn_stats) ? relay.turn_stats : [];
 }
 
 async function loadRows() {
@@ -71,7 +73,15 @@ async function loadRows() {
       if (ARGS.sandbox) q.where('source', 'voice_relay_sandbox');
       // Inbound Sandy only: outbound collections calls write the same
       // transcript source marker through the shared buildTranscriptUpdate.
-      else q.whereRaw("transcription_metadata->>'source' = 'voice_relay_session'").where('direction', 'inbound');
+      // A transferred, reconnected or voicemail-fallback call keeps Sandy's
+      // provenance under transcription_metadata.relay / metadata.relay_segments
+      // once the recording processor rewrites the top level.
+      else {
+        q.where('direction', 'inbound').where((w) => w
+          .whereRaw("transcription_metadata->>'source' = 'voice_relay_session'")
+          .orWhereRaw("jsonb_exists(transcription_metadata, 'relay')")
+          .orWhereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'relay_segments')"));
+      }
       q.where('created_at', '>=', sinceDate(ARGS.since)).orderBy('created_at', 'desc').limit(Number(ARGS.limit) || 20);
     }
     return await q;
@@ -88,9 +98,10 @@ function printGroup(label, g) {
   const row = (name, s) => `${name} p50 ${fmt(s.p50)} p95 ${fmt(s.p95)} (n=${s.n})`;
   console.log(`  ${label.padEnd(13)} ${g.turns} turns`);
   console.log(`    heard gap   ${row('', g.heard_gap)}   ← release criterion: p50 ≤ 0.80s, p95 ≤ 1.50s (plain)`);
-  console.log(`    hearing/STT ${row('', g.stt)}`);
-  console.log(`    us (app)    ${row('', g.app)}   ← prompt → first text back`);
-  console.log(`    voice/TTS   ${row('', g.voice)}`);
+  console.log(`    = turn end  ${row('', g.endpoint)}   ← end of speech → prompt sent`);
+  console.log(`    + us (app)  ${row('', g.app)}   ← prompt → first text back`);
+  console.log(`    + to audio  ${row('', g.voice)}   ← first text → agent audio`);
+  console.log(`    Twilio diagnostics (overlap the spans above): STT p50 ${fmt(g.stt_provider.p50)}, TTS p50 ${fmt(g.tts_provider.p50)}`);
   console.log('    whole-turn work (all rounds, incl. after the first reply — not slices of the gap):');
   console.log(`      model     ${row('', g.model_turn_total)}`);
   console.log(`      tools     ${row('', g.tools_turn_total)}`);
@@ -106,7 +117,11 @@ function printSummary(title, s) {
 
 async function main() {
   const rows = await loadRows();
-  if (!rows.length) { console.log('No matching calls.'); return; }
+  if (!rows.length) {
+    console.error('No matching calls; no report written.');
+    process.exitCode = 1;
+    return;
+  }
   const allJoined = [];
   const perCall = [];
   for (const row of rows) {
