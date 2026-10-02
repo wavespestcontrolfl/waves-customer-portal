@@ -295,12 +295,12 @@ describe('What we did', () => {
     expect(out.whatWeDid.found.label).toBe('Mild');
   });
 
-  test('lawn re-service: no activity tap, where without inside/outside phrases is dropped', () => {
+  test('lawn re-service: no activity tap, where reads the recorded yard zone', () => {
     const out = card(
       frozenService(null, { areas_serviced: ['Front Lawn'] }),
       { block: { serviceLine: 'lawn', outcome: 'treated' }, products: [{ application_method: 'liquid_spray', targets: ['dollarweed'] }] },
     );
-    expect(out.whatWeDid).toMatchObject({ pests: ['dollarweed'], where: null, found: null, safetyLine: SAFETY_LINE });
+    expect(out.whatWeDid).toMatchObject({ pests: ['dollarweed'], where: 'the front lawn', found: null, safetyLine: SAFETY_LINE });
   });
 
   test('nothing recorded: no "What we did" section at all', () => {
@@ -475,5 +475,25 @@ describe('lawn words through the real scrub (pre-push P1 on #5542)', () => {
   });
   test('a pest callback is unchanged: lawn-only talk is still dropped', () => {
     expect(card(frozenService(lawnFrozen('Weeds are back in the lawn.')), { scrub: scrubCustomerText })?.youToldUs ?? null).toBeNull();
+  });
+});
+
+describe('Codex r2 (#5542)', () => {
+  const lawnBlock = { serviceLine: 'lawn', outcome: 'treated' };
+  test('lawn callback "where" reads the recorded yard zones', () => {
+    const svc = frozenService(null, { areas_serviced: ['Front yard', 'Back yard', 'Side yards'] });
+    expect(card(svc, { block: lawnBlock }).whatWeDid.where).toBe('the front yard, back yard and side yards');
+  });
+  test('pest callback "where" is unchanged', () => {
+    expect(card(frozenService(null)).whatWeDid.where).toBe('inside and outside');
+  });
+  test('the recap path freezes only when it performs the completion; the project path freezes from its locked row', () => {
+    const fs = require('fs'); const path = require('path');
+    const recap = fs.readFileSync(path.join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
+    expect(recap).toMatch(/const frozenRequest = recapPriorCompleted \? null\s*: require\('\.\/service-report\/reservice-report-card'\)\.freezeReserviceRequest\(locked\);/);
+    const project = fs.readFileSync(path.join(__dirname, '..', 'services', 'project-completion.js'), 'utf8');
+    expect(project).toContain("'customer_request', 'customer_request_source', 'customer_request_pests')");
+    expect(project).toContain("freezeReserviceRequest(lockedVisit)");
+    expect(project.indexOf('freezeReserviceRequest(lockedVisit)')).toBeLessThan(project.indexOf("[serviceRecord] = await trx('service_records').insert(insert)"));
   });
 });

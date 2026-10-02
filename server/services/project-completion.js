@@ -854,7 +854,11 @@ async function completeProjectBackedService({
         lockedVisit = await trx('scheduled_services')
           .where({ id: scheduledService.id })
           .forUpdate()
-          .first('id', 'is_callback', 'service_id', 'service_type')
+          .first('id', 'is_callback', 'service_id', 'service_type',
+            // The customer's booking words freeze onto the record with the
+            // completion, like the /complete and recap paths
+            // (service-report/reservice-report-card.js).
+            'customer_request', 'customer_request_source', 'customer_request_pests')
           .catch(() => null);
         Object.assign(insert, completionTierSnapshotFields({
           serviceRecordCols,
@@ -879,6 +883,12 @@ async function completeProjectBackedService({
           ...parseJsonObject(insert.structured_notes),
           closeoutRequirements: closeoutSnap,
         });
+      }
+      const frozenRequest = lockedVisit && serviceRecordCols.service_data
+        ? require('./service-report/reservice-report-card').freezeReserviceRequest(lockedVisit)
+        : null;
+      if (frozenRequest) {
+        insert.service_data = serializeJsonb({ ...parseJsonObject(insert.service_data), reserviceRequest: frozenRequest });
       }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {

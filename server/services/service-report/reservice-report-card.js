@@ -220,11 +220,29 @@ function buildWhatWeDid(service, block, { products, areas, pestPressureLabels })
   if (block.outcome !== 'treated' || NOT_PERFORMED_OUTCOMES.has(block.outcome)) return null;
   const rows = productRows(products);
   const pests = pestsOf(rows);
-  const where = whereOf(asStringArray(areas));
+  const where = block.serviceLine === 'lawn' ? lawnWhereOf(asStringArray(areas)) : whereOf(asStringArray(areas));
   const found = foundActivity(service, block.serviceLine, pestPressureLabels);
   const safetyLine = hasLiquidApplication(rows) ? SAFETY_LINE : null;
   if (!pests.length && !where && !found && !safetyLine) return null;
   return { pests, where: where || null, found, safetyLine };
+}
+
+// Lawn closeouts record yard zones ("Front yard", "Back yard", "Side yards",
+// client/src/lib/lawn-completion.js), which the pest phrases (inside /
+// outside / garage) never match. Short plain labels only, once each.
+function lawnWhereOf(areas) {
+  const seen = new Set();
+  const labels = [];
+  for (const area of areas) {
+    const label = String(area || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!label || label.length > 40 || !/^[a-z][a-z '&-]*$/.test(label) || seen.has(label)) continue;
+    seen.add(label);
+    labels.push(label);
+  }
+  if (!labels.length) return '';
+  const joined = labels.length === 1 ? labels[0]
+    : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+  return `the ${joined}`;
 }
 
 function stillSeeingTopic(lane, whatWeDid, youToldUs) {

@@ -894,8 +894,12 @@ async function submitRecap({
         // completion-time identity and replaces it (pre-push codex P1).
         if (existing.status !== COMPLETED_STATUS) {
           missing.reportIdentitySnapshot = reportIdentitySnapshot;
-          // The booking words freeze with the completion, fill-if-absent.
-          const frozenRequest = require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+          // The booking words freeze with the completion, fill-if-absent,
+          // and only when THIS recap performs the completion transition
+          // (the locked scheduled row was not already completed): a recap
+          // re-submit on history never freezes today's booking words.
+          const frozenRequest = recapPriorCompleted ? null
+            : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
           if (frozenRequest && !Object.prototype.hasOwnProperty.call(existingData, 'reserviceRequest')) {
             missing.reserviceRequest = frozenRequest;
           }
