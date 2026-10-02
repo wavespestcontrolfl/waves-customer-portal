@@ -2138,7 +2138,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2389,6 +2389,21 @@ const StripeService = {
           // lineage, recurring included. Opt-in.
           if (requireCompletedVisit && String(lockedSvc.status || '') !== 'completed') {
             throw Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+          }
+          // Opt-in (the deferred annual prepay, GATE_PAF_PREPAY): the visit's
+          // CURRENT closeout must be a performed one, read under this same visit
+          // lock that a re-closeout's record insert serializes through.
+          if (requirePerformedVisit) {
+            const latestRecord = await trx('service_records').where({ scheduled_service_id: lockedSvc.id })
+              .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+            let latestNotes = latestRecord?.structured_notes;
+            if (typeof latestNotes === 'string') { try { latestNotes = JSON.parse(latestNotes); } catch { latestNotes = null; } }
+            const outcome = String(latestNotes?.visitOutcome || '');
+            if (!latestRecord || String(latestRecord.status || '') !== 'completed'
+              || ['inspection_only', 'customer_declined', 'incomplete'].includes(outcome)
+              || String(latestNotes?.backfill || '') === 'true') {
+              throw Object.assign(new Error('The visit\'s current closeout is not a performed visit. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+            }
           }
           // Cross-lane exclusion at the money move (hold-rail pre-push r13
           // P0): a /secure appointment-card row appearing on the visit —

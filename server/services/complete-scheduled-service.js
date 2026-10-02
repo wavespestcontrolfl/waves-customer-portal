@@ -9461,6 +9461,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // text all read that stamp, never the live hold, which the year's charge
     // and activation end.
     let deferredPrepayCovered = false;
+    // A fresh closeout that is now payer-billed or paid another way is never
+    // held: clear a stamp an earlier closeout wrote, so it cannot release the
+    // year beside the payer's bill or the other payment (GitHub Codex #5567 r16).
+    if ((visitIsPayerBilled || svc.prepaid_method) && svc.paf_held_term_id && !resumingCommittedCompletion) {
+      await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+      svc.paf_held_term_id = null;
+    }
     if (!visitIsPayerBilled && !svc.prepaid_method) {
       try {
         // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
