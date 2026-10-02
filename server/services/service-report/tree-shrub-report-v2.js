@@ -21,7 +21,7 @@ const { buildTreeShrubVisualCategories, scoreStatus } = require('./tree-shrub-vi
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildTreeShrubInsightCards } = require('./tree-shrub-report-insights');
 const {
-  applyTechFindingsToAssessment, diagnosisOverride, stripCrownHealthClaims,
+  applyTechFindingsToAssessment, diagnosisOverride,
 } = require('./tree-shrub-tech-findings');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
@@ -351,9 +351,10 @@ function buildTreeShrubReportV2({
     // a caption like "confirmed scale infestation" can't bypass the signals guardrail.
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
-    .map((p) => ({ url: p.url, label: p.zone || p.label || null, caption: scrubObservations(techCopy ? stripCrownHealthClaims(p.caption) : p.caption) }));
-  const photoSummaryRaw = treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '';
-  const photoSummary = scrubObservations(techCopy ? stripCrownHealthClaims(photoSummaryRaw) : photoSummaryRaw);
+    .map((p) => ({ url: p.url, label: p.zone || p.label || null, caption: scrubObservations(p.caption) }));
+  const photoSummary = scrubObservations(
+    treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '',
+  );
   const heroPhoto = photos[0] || null;
 
   const overallScore = num(scores.overallScore);

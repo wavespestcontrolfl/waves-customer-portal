@@ -86,46 +86,6 @@ describe('generate-report output shape gate (r14)', () => {
   });
 });
 
-describe('generate-report postProcess (palm-crown backstop) runs before the shape check', () => {
-  const { stripCrownHealthClaims } = require('../services/service-report/tree-shrub-tech-findings');
-  const provider = (name, responses) => ({
-    name, model: `${name}-model`,
-    call: jest.fn().mockImplementation(() => Promise.resolve(responses.shift())),
-  });
-  const shaped = (found) => `WHAT WE DID\n\nWe treated the shrubs and palms.\n\nWHAT WE FOUND\n\n${found}`;
-
-  test('strips a crown claim from a section and returns the stripped, still-valid report', async () => {
-    const openai = provider('openai', [{ ok: true, text: shaped('Older fronds show yellowing. The palm crown looks healthy.') }]);
-    const result = await generateReportCopyWithFallback({
-      systemPrompt: 's', userMessage: 'u', providers: [openai, provider('anthropic', [])], postProcess: stripCrownHealthClaims,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.report).toBe(shaped('Older fronds show yellowing.'));
-    expect(openai.call).toHaveBeenCalledTimes(1);
-  });
-
-  test('a strip that would empty a section is rejected as malformed and retried, never published broken', async () => {
-    const openai = provider('openai', [
-      { ok: true, text: shaped('The palm crown looks healthy.') },
-      { ok: true, text: shaped('Older fronds show yellowing.') },
-    ]);
-    const result = await generateReportCopyWithFallback({
-      systemPrompt: 's', userMessage: 'u', providers: [openai, provider('anthropic', [])], postProcess: stripCrownHealthClaims,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.report).toBe(shaped('Older fronds show yellowing.'));
-    expect(openai.call).toHaveBeenCalledTimes(2);
-  });
-
-  test('without postProcess nothing changes', async () => {
-    const text = shaped('The palm crown looks healthy.');
-    const result = await generateReportCopyWithFallback({
-      systemPrompt: 's', userMessage: 'u', providers: [provider('openai', [{ ok: true, text }]), provider('anthropic', [])],
-    });
-    expect(result.report).toBe(text);
-  });
-});
-
 describe('generate-report provider fallback', () => {
   const cleanReport = 'WHAT WE DID\n\nWe treated the exterior entry points.\n\nWHAT WE FOUND\n\nActivity was low.';
   const provider = (name, responses) => ({

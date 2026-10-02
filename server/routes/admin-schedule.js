@@ -72,7 +72,7 @@ const { resolveSeriesChildIdentity } = require('../services/service-catalog-name
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
 const {
-  techFindingsCopyLive, stripCrownHealthClaims, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer,
+  techFindingsCopyLive, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer, PALM_CROWN_PROMPT_RULE,
 } = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
@@ -23989,10 +23989,6 @@ async function generateReportCopyWithFallback({
   // Under the writer rules only the four-section report is accepted; the
   // deterministic fallback keeps the two-section shape.
   requireSections = false,
-  // Optional rewrite of each model draft BEFORE the shape/section check (the
-  // tree & shrub palm-crown backstop): a rewrite that breaks the required shape
-  // is rejected like any other malformed draft, never published.
-  postProcess = null,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -24050,8 +24046,7 @@ async function generateReportCopyWithFallback({
         break;
       }
 
-      let report = String(result.text || '').trim();
-      if (typeof postProcess === 'function') report = String(postProcess(report) || '').trim();
+      const report = String(result.text || '').trim();
       // The completion parser accepts ONLY the exact two-header,
       // one-line-per-section shape — otherwise-safe prose that misses it
       // would look usable in the panel and then silently publish the
@@ -24905,8 +24900,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // above: real, tech-vetted photo text is substantive, a bare count or an
     // unreviewed summary is not).
     // Built at use time (below) for a tree & shrub visit with GATE_TS_TECH_FINDINGS_COPY
-    // on: captions tied to a hidden / edited finding are dropped and the palm-crown
-    // strip runs, so the block never repeats what the technician replaced.
+    // on: a hidden / edited finding withholds the photo-read captions and summary,
+    // so the block never repeats what the technician replaced.
     const buildPhotoObservationsBlock = (captions, summary) => (captions.length
       ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
         + (summary ? `Summary: ${summary}\n` : '')
@@ -25233,7 +25228,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       const techDecisions = treeShrubReviewGrounding?.techFindings || [];
       promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
       // The summary was written about the photos as a whole: a replaced finding
-      // withdraws it, and the crown strip still applies.
+      // withdraws it.
       promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
     }
     photoGroundingUsed = promptPhotoCaptions.length > 0;
@@ -25395,11 +25390,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const effectiveSystemPrompt = selectReportCopyPrompt(
+    const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
       writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
     );
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
+    // instruction is THE guard, no word filter). In the system prompt so it
+    // reaches every tree & shrub generation even when the grounding context
+    // fails, and joins the draft cache key with it.
+    const effectiveSystemPrompt = selectedSystemPrompt
+      && techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub'
+      ? `${selectedSystemPrompt}\n\n${PALM_CROWN_PROMPT_RULE}`
+      : selectedSystemPrompt;
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25468,9 +25471,6 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           typedProductNameGuards,
         ])}`
         : '')
-      // GATE_TS_TECH_FINDINGS_COPY: a draft built without the crown backstop is
-      // never served once it applies (a gate flip within the cache window).
-      .update(techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub' ? '|tsCrown:1' : '')
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
@@ -25564,15 +25564,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null);
-    // Palm-crown backstop (GATE_TS_TECH_FINDINGS_COPY): tree & shrub reports only
-    // (the instruction in the grounding context is the primary guard). A lawn
-    // "crowns are strong" or a pest "crown molding" is never touched.
-    const crownBackstopOn = techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub';
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
-      ...(crownBackstopOn ? { postProcess: stripCrownHealthClaims } : {}),
       ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
@@ -25622,10 +25617,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      let safeFallback = crownBackstopOn ? stripCrownHealthClaims(report) : report;
-      // A strip that breaks the required shape is never published as the fallback.
-      if (safeFallback !== report && !technicianReportCustomerCopy(safeFallback)?.body) safeFallback = null;
-      const fallbackReport = safeFallback && (screenTradeNames(safeFallback) || writerRulesScreen(safeFallback)) ? null : safeFallback;
+      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -25648,8 +25640,6 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       return res.json({ report: fallbackReport, fallback: true, deterministic: true });
     }
 
-    // The palm-crown backstop already ran inside generateReportCopyWithFallback,
-    // before the shape check, so this copy is both stripped and shape-valid.
     const { report } = generated;
     reportCopyCacheSet(cacheKey, report);
     logger.info('[generate-report] generated', {

@@ -449,28 +449,27 @@ history are withheld; the category reads "tracking", never healthy. **Confirm**
 — the diagnosis row and insight read as the technician's finding ("Your
 technician confirmed …"), still in signals language (no infestation or
 diagnosis claim). **Edit** — the technician's own text replaces the system
-sentence, with the photo-read prose and captions for that category withheld.
+sentence, with the photo-read prose and captions withheld.
 It is the ONLY free technician text this change can add to the public payload:
 it is capped at 400 characters, run through `redactAccessCodes`
 (`context-aggregator.js`, the report-egress access-code redactor) both when
 frozen and when rendered, so gate, garage, lockbox and alarm codes never
-egress, and it passes the palm-crown strip below. **Monitor** keeps today's
+egress, and it passes the customer-copy compliance screen
+(`customerCopyViolations`): completion refuses wording that fails it, and an
+edit with no printable text reads as a hide. **Monitor** keeps today's
 signals-only wording. The photo read itself stays on the stored assessment row
-for the office; admin views are unchanged. Palm-crown rule (owner 2026-10-01,
-photos are ground level): no customer copy on this payload, nor the AI report
-writer's output, may state or imply that a palm's crown, spear leaf or newest
-fronds look healthy or normal — `stripCrownHealthClaims` removes any positive
-claim (a ground-level phrase does not excuse it) while keeping adverse
-statements and "could not check from the ground" disclaimers, and the strong
-leaf-color and fullness sentences no longer say "healthy new growth" or
-"healthy growth". The same overlay governs the other free-text photo surfaces
-of the payload for tree/shrub visits: `data.photos[].caption` (the PDF gallery)
-drops a caption tied to a hidden or edited finding and runs the crown strip, and
-`data.typedReport.photoSummary` is withdrawn when a finding was hidden or edited
-and crown-stripped otherwise. The strip works clause by clause, runs on
-tree/shrub copy only (never lawn or pest), and the instruction not to vouch for
-a palm's crown reaches the AI report writer on every tree/shrub generation. The
-portal Trees & Shrubs score omits an overall whose read the technician hid. The stored-PDF cache
+for the office; admin views are unchanged. The same overlay governs the other
+photo-read surfaces of the payload for tree/shrub visits: any hidden or edited
+finding withholds every `data.photos[].caption` (the PDF gallery), the
+`data.typedReport.photoSummary` and the photo-read plant groups (the photos
+themselves stay). Palm-crown rule (owner 2026-10-01, photos are ground level):
+the photo read and the AI report writer are instructed on every tree/shrub
+generation never to state or imply that a palm's crown, spear leaf or newest
+fronds look healthy; the strong leaf-color and fullness sentences no longer say
+"healthy new growth". Owner 2026-10-02: the instruction is the guard — there is
+no word filter over customer copy, so a saved pre-gate report is not rewritten.
+The portal Trees & Shrubs score omits an overall whose read the technician hid,
+and withholds the score when the decisions cannot be read. The stored-PDF cache
 key carries `-tsfind<revision>` while the gate is on, so flipping it
 re-renders tree/shrub PDFs. Gate off (or unset) is byte-identical to before:
 nothing is frozen, no copy changes and the PDF key is unchanged. Auth, token
