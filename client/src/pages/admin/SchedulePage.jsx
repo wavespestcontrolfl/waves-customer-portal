@@ -43,6 +43,7 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -145,6 +146,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -1061,6 +1063,9 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
 export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// An open photo description (GATE_NOTE_BOX_PHOTOS) may hold typed or
+// dictated words not yet on the photo: Generate and Complete wait for it.
+export const PHOTO_DESCRIPTION_OPEN_ALERT = "Save or cancel the photo description first.";
 // The promise list is an optional read: a stalled one gives up rather than
 // hold the form (Codex #5516).
 const PROMISE_CHECK_TIMEOUT_MS = 15000;
@@ -10614,24 +10619,7 @@ export function defaultApplicationMethod(product = {}, serviceType = "", { inter
 // products DO (owner request 2026-07-23): their targets are the nutrition
 // goals of the application (green-up, iron chlorosis, potassium deficiency),
 // prefilled from the catalog like pest targets. Unknown catalog rows keep it.
-export function productControlsTargets(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  if (!category) return true;
-  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
-    category,
-  );
-}
-
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition, productControlsTargets };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -12836,6 +12824,7 @@ export function CompletionPanel({
   // Completion photos are intentionally kept out of localStorage (a handful
   // of base64 images can exceed its quota).
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [photoDescriptionOpen, setPhotoDescriptionOpen] = useState(false);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -13800,6 +13789,20 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
+  // flag): the visit's photos and their descriptions sit inside the notes
+  // box and the separate photo section goes away. Never on lawn or tree,
+  // shrub & palm: another lane owns those completions and their photo steps.
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
+    && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
+  // Locked while a report is being written, like removePhoto: the request
+  // already read these captions.
+  const setPhotoCaption = (index, caption) => {
+    if (generating) return;
+    setServicePhotos((prev) => prev.map((photo, i) => (i === index
+      ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+      : photo)));
+  };
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
@@ -17683,6 +17686,10 @@ export function CompletionPanel({
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
     // Marks restored with a draft are checked against the promise list once
     // it loads; completing before then would drop them (Codex #5516).
     if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
@@ -19944,8 +19951,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label={noteBoxPhotos ? "Notes and photos" : "Technician notes"}>
               {" "}
+              <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
@@ -19969,13 +19977,16 @@ export function CompletionPanel({
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
                     opacity: generating ? 0.6 : 1,
+                    ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
                   }}
                 />{" "}
                 {dictation.supported && (
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating || dictation.uploading}
+                    // One microphone at a time: an open photo description holds the notes
+                    // mic (it can still stop a recording already going).
+                    disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                     aria-busy={dictation.uploading || undefined}
                     aria-label={
                       dictation.uploading
@@ -20010,6 +20021,35 @@ export function CompletionPanel({
                     {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
+              </div>
+              {noteBoxPhotos && (
+                <>
+                  <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+                  <NoteBoxPhotos
+                    photos={servicePhotos}
+                    max={5}
+                    disabled={generating}
+                    palette={{ text: M.ink, muted: M.ink3, border: M.hairline, card: M.card, danger: M.err, onDanger: M.actionFg }}
+                    dictationServiceId={service.id}
+                    onAdd={() => photoInputRef.current?.click()}
+                    onRemove={removePhoto}
+                    onCaption={setPhotoCaption}
+                    onEditingChange={setPhotoDescriptionOpen}
+                    micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                    onDescribeWithAi={handlePhotoAnalyze}
+                    describing={photoAnalyzing}
+                    describeError={photoAiError}
+                    summary={typedPhotoSummary}
+                    summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                    onSummary={setTypedPhotoSummary}
+                    onAddSummaryToNotes={isTypedFindings ? null : () => {
+                      const summary = typedPhotoSummary.trim();
+                      if (!summary) return;
+                      setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                    }}
+                  />
+                </>
+              )}
               </div>
             </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
@@ -20271,6 +20311,10 @@ export function CompletionPanel({
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
                     return;
                   }
+                  if (photoDescriptionOpen) {
+                    alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+                    return;
+                  }
                   if (promiseMarksPending) {
                     alert(PROMISE_MARKS_LOADING_ALERT);
                     return;
@@ -20402,7 +20446,7 @@ export function CompletionPanel({
                 </span>
               </Field>
             )}
-            {!quickComplete && !hideServicePhotos && (
+            {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -22392,7 +22436,8 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
-          <label style={labelStyle}>Technician Notes</label>{" "}
+          <label style={labelStyle}>{noteBoxPhotos ? "Notes and photos" : "Technician Notes"}</label>{" "}
+          <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
@@ -22416,6 +22461,7 @@ export function CompletionPanel({
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
                 opacity: generating ? 0.6 : 1,
+                ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
               }}
               placeholder={
                 dictation.listening
@@ -22429,7 +22475,9 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating || dictation.uploading}
+                // One microphone at a time: an open photo description holds the notes
+                // mic (it can still stop a recording already going).
+                disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                 aria-busy={dictation.uploading || undefined}
                 aria-label={
                   dictation.uploading
@@ -22463,6 +22511,35 @@ export function CompletionPanel({
                 {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
+          </div>
+          {noteBoxPhotos && (
+            <>
+              <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+              <NoteBoxPhotos
+                photos={servicePhotos}
+                max={5}
+                disabled={generating}
+                palette={{ text: D.text, muted: D.muted, border: D.border, card: D.input, danger: D.red, onDanger: D.white }}
+                dictationServiceId={service.id}
+                onAdd={() => photoInputRef.current?.click()}
+                onRemove={removePhoto}
+                onCaption={setPhotoCaption}
+                onEditingChange={setPhotoDescriptionOpen}
+                micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                onDescribeWithAi={handlePhotoAnalyze}
+                describing={photoAnalyzing}
+                describeError={photoAiError}
+                summary={typedPhotoSummary}
+                summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                onSummary={setTypedPhotoSummary}
+                onAddSummaryToNotes={isTypedFindings ? null : () => {
+                  const summary = typedPhotoSummary.trim();
+                  if (!summary) return;
+                  setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                }}
+              />
+            </>
+          )}
           </div>
           </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
@@ -22725,6 +22802,10 @@ export function CompletionPanel({
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
                   return;
                 }
+                if (photoDescriptionOpen) {
+                  alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+                  return;
+                }
                 if (promiseMarksPending) {
                   alert(PROMISE_MARKS_LOADING_ALERT);
                   return;
@@ -22809,7 +22890,7 @@ export function CompletionPanel({
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
               Combined visits keep it (companions have their own photo gates). */}
-          {!quickComplete && !hideServicePhotos && (
+          {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
@@ -24325,36 +24406,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
-];
-
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
 // treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
 const ORNAMENTAL_TARGET_SUGGESTIONS = [
@@ -24372,24 +24423,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:

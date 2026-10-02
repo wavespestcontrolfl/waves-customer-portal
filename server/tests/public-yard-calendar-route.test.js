@@ -25,7 +25,7 @@ describe('public yard-calendar route', () => {
   test('200 with the calendar payload and an explicit-month cache lifetime', () => {
     const res = call({ month: '10', grass: 'sta' });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({ month: 10, grass: 'sta', area: 'Southwest Florida', reviewedAt: '2026-09-30' });
+    expect(res.body).toMatchObject({ month: 10, grass: 'sta', area: 'Southwest Florida', reviewedAt: '2026-10-02' });
     expect(Array.isArray(res.body.items)).toBe(true);
     expect(res.body.items.find((i) => i.id === 'chinch-bug').level).toBe(1);
     expect(res.body.items.find((i) => i.id === 'mole-cricket')).toBeUndefined();

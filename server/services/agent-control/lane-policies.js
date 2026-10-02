@@ -88,6 +88,8 @@ const LANE_RUNTIME = {
   // customer's texts + completion notes and stores it on review_sequences —
   // no customer-visible output of its own, so internal_write like sms_intent.
   review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // Its verdict authorizes an automatic customer send (tech-voice review asks).
+  review_ask_fact_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
   sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.
@@ -177,6 +179,8 @@ const LANE_RUNTIME = {
   // Both run in-request with a hard timeout and a deterministic result: Gemini -> Sol, and a referee
   // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
   plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  plant_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  pest_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.

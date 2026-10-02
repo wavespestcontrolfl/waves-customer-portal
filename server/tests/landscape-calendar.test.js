@@ -31,14 +31,14 @@ describe('level rule (derived from catalog months)', () => {
 
   test('every item levels array matches the catalog rule for every month', () => {
     const cal = buildYardCalendar({ month: 1 });
-    const slugsOf = { nutsedge: ['yellow-nutsedge', 'purple-nutsedge'], 'winter-weeds': ['cudweed', 'asiatic-hawksbeard'] };
+    const slugsOf = { nutsedge: ['yellow-nutsedge', 'purple-nutsedge'], 'winter-weeds': ['cudweed'] };
     for (const item of cal.items) {
       const entries = (slugsOf[item.id] || [item.id]).map((s) => catalog.getEntry(s));
       item.levels.forEach((lv, i) => {
         const m = i + 1;
         const expected = Math.max(...entries.map((e) => {
           if (e.peak_months.includes(m)) return 3;
-          if (e.active_months.includes(m)) return new Set(e.active_months).size === 12 ? 1 : 2;
+          if (e.active_months.includes(m)) return new Set(e.active_months).size === 12 && e.peak_months.length > 0 ? 1 : 2;
           return 0;
         }));
         expect(lv).toBe(expected);
@@ -54,6 +54,15 @@ describe('level rule (derived from catalog months)', () => {
   });
 });
 
+describe('a year-round entry with no peak', () => {
+  test('is In season every month, never "Low year-round" (Ganoderma: UF/IFAS gives no season)', () => {
+    const g = catalog.getEntry('ganoderma-butt-rot');
+    expect(new Set(g.active_months).size).toBe(12);
+    expect(g.peak_months).toEqual([]);
+    expect(byId(buildYardCalendar({ month: 1 }), 'ganoderma-butt-rot').levels).toEqual(Array(12).fill(2));
+  });
+});
+
 describe('combined rows take the max of their members', () => {
   test('nutsedge and winter weeds match catalog members', () => {
     const yn = catalog.getEntry('yellow-nutsedge');
@@ -61,8 +70,9 @@ describe('combined rows take the max of their members', () => {
     const nut = byId(buildYardCalendar({ month: 6 }), 'nutsedge');
     expect(nut.level).toBe(3);
     expect(yn.peak_months.includes(6) || pn.peak_months.includes(6)).toBe(true);
-    // Mar-Apr and Oct-Nov in season, Dec-Feb off.
-    expect(nut.levels).toEqual([0, 0, 2, 2, 3, 3, 3, 3, 3, 2, 2, 0]);
+    // UF/IFAS EP569: both nutsedges grow in all seasons in Florida, most in
+    // summer (owner 2026-10-02): low year-round, May-Sep peak.
+    expect(nut.levels).toEqual([1, 1, 1, 1, 3, 3, 3, 3, 3, 1, 1, 1]);
     expect(byId(buildYardCalendar({ month: 1 }), 'winter-weeds').levels).toEqual([3, 3, 3, 2, 0, 0, 0, 0, 0, 2, 2, 3]);
   });
 });
@@ -78,7 +88,7 @@ describe('October output (approved mockup)', () => {
   });
 
   test('shape: header, 23 items, plan ahead, catalog-derived fields', () => {
-    expect(oct).toMatchObject({ month: 10, grass: 'all', area: 'Southwest Florida', reviewedAt: '2026-09-30' });
+    expect(oct).toMatchObject({ month: 10, grass: 'all', area: 'Southwest Florida', reviewedAt: '2026-10-02' });
     expect(oct.items).toHaveLength(23);
     expect(oct.planAhead).toHaveLength(2);
     expect(oct.planAhead[0]).toMatch(/^Large patch starts in November/);
@@ -144,7 +154,7 @@ describe('trend', () => {
 
   test('easing_next_month when peak drops', () => {
     expect(t(11, 'sod-webworm')).toBe('easing_next_month'); // Nov peak -> Dec low
-    expect(t(8, 'take-all-root-rot')).toBe('easing_next_month'); // Aug peak -> Sep in season
+    expect(t(9, 'take-all-root-rot')).toBe('easing_next_month'); // Sep peak -> Oct in season
   });
 
   test('null when steady or falling from below peak', () => {

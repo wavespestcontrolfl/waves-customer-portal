@@ -687,6 +687,8 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // list resolve the primary while /send-request (full row) targets
         // the stamped contact (#2955 r3).
         'customers.service_contacts_consent_at',
+        // Per-phone consent boundary (unconsented_slot_phone_keys, #5467).
+        'customers.service_preferences',
         'customers.address_line1',
         'customers.city',
         'customers.zip',

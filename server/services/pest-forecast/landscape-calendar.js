@@ -11,6 +11,9 @@
  * Level rule per calendar month m (1-12), over the entry's catalog months:
  *   m in peak_months                          -> 3  Peak season
  *   m in active_months, active all 12 months  -> 1  Low year-round
+ *     (unless the entry has no peak at all: "low outside its peak" has
+ *     no meaning there, so a year-round, peakless entry is 2 In season
+ *     every month; e.g. Ganoderma, where UF/IFAS gives no season)
  *   m in active_months otherwise              -> 2  In season
  *   anything else                             -> 0  Off season
  * A combined row (several catalog slugs) takes the max level of its members.
@@ -25,7 +28,7 @@
 const catalog = require('../species-catalog');
 const logger = require('../logger');
 
-const REVIEWED_AT = '2026-09-30';
+const REVIEWED_AT = '2026-10-02';
 const AREA = 'Southwest Florida';
 
 const GRASSES = Object.freeze(['sta', 'bah', 'zoy', 'ber']);
@@ -64,7 +67,10 @@ const ITEMS = [
   { id: 'nutsedge', slugs: ['yellow-nutsedge', 'purple-nutsedge'], category: 'weed', name: 'Nutsedge', hosts: 'Irrigated lawns', sign: 'Bright green, upright clumps that outgrow the lawn. Pulling alone rarely controls an established patch.', lookAlike: 'Looks like: a grass weed, but the stem is triangular.' },
   { id: 'doveweed', slugs: ['doveweed'], category: 'weed', name: 'Doveweed', hosts: 'Wet, thin lawns', sign: 'Glossy, grass-like leaves that creep and root at the joints.' },
   { id: 'green-kyllinga', slugs: ['green-kyllinga'], category: 'weed', name: 'Green kyllinga', hosts: 'Wet lawns', sign: 'Low, dense mats of bright green sedge with round seed heads.' },
-  { id: 'winter-weeds', slugs: ['cudweed', 'asiatic-hawksbeard'], category: 'weed', name: 'Winter weeds (cudweed, hawksbeard)', hosts: 'Thin lawns', sign: 'Flat rosettes appearing as nights cool.' },
+  // Cudweed only: UF/IFAS (EP636) says Asiatic hawksbeard often persists
+  // year-round in Florida, so it is not a cool-season-only weed (owner
+  // 2026-10-02, UF/IFAS season check).
+  { id: 'winter-weeds', slugs: ['cudweed'], category: 'weed', name: 'Winter weeds (cudweed)', hosts: 'Thin lawns', sign: 'Flat rosettes appearing as nights cool.' },
 ];
 
 // Prevention windows from the owner-approved protocols, keyed by calendar
@@ -81,7 +87,7 @@ function monthLevel(entry, month) {
   const peak = entry.peak_months || [];
   const active = entry.active_months || [];
   if (peak.includes(month)) return 3;
-  if (active.includes(month)) return new Set(active).size === 12 ? 1 : 2;
+  if (active.includes(month)) return new Set(active).size === 12 && peak.length > 0 ? 1 : 2;
   return 0;
 }
 

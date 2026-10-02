@@ -30,6 +30,7 @@ const { callSubjectHash, smsSubjectHash } = require('../services/typed-decisions
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
 const baseRow = (over = {}) => ({
+  provider: 'typesafe',
   id: ID, capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', package_hash: 'h', served_model: 'jev-1.13.0',
   subject_type: 'sms_log', subject_id: 'sms-1', question_id: 'is_courtesy_only',
   jev_answer: JSON.stringify({ p: 0.9, yes: true, confident: true }), baseline_answers: JSON.stringify({ rules: false }),

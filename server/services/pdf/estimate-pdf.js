@@ -23,7 +23,10 @@ const {
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
-const { proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../estimate-proposal-billing');
+const {
+  commercialTermLines, proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, resolveProposalBillingContext,
+} = require('../estimate-proposal-billing');
+const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -394,21 +397,8 @@ function correctiveWorkBlock(ctx, correctiveWork, y) {
 // terms block prints. Labels mirror client/src/lib/proposal-sections.js —
 // including its validDays omission (the enforced expires_at is the only
 // validity date any renderer may print; codex 1A-i r1).
-function commercialTermLines(commercialTerms) {
-  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
-  // Canonical payment tokens → labels (same map as proposal-sections.js).
-  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
-  return [
-    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
-    ['Initial term', commercialTerms.initialTermMonths != null
-      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
-      : null],
-    ['Renewal', commercialTerms.renewal],
-    ['Price adjustment', commercialTerms.priceAdjustment],
-    ['Cancellation', commercialTerms.cancellation],
-    ['Property access', commercialTerms.accessRequirements],
-  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
-}
+// commercialTermLines now lives in estimate-proposal-billing.js (one
+// definition for the renderer and the served-disclosure evidence).
 
 function quotesPerApplication(proposal) {
   return (proposal.buildings || []).some((building) => (building.lineItems || [])
@@ -489,8 +479,18 @@ function termsBlock(ctx, proposal, totals, y) {
   const structuredTermLines = commercialTermLines(proposal.commercialTerms);
   // The canned sentence is a recurring residential pest term: an all-pest
   // residential proposal only (proposalCallbackTermsEligible).
-  if (ctx.callbackTermsEligible && !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length) {
+  const cannedTermsAllowed = !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length;
+  if (ctx.callbackTermsEligible && cannedTermsAllowed) {
     lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  }
+  // Annual rate review disclosure (owner ruling 2026-09-30) — parity with
+  // the browser document's terms line: every row carries the recurring
+  // residential plan terms (pest, lawn, mosquito, tree & shrub — the scope
+  // the money-back guarantee keys on) and at least one line recurs; never
+  // beside authored, structured or program terms, and never on a
+  // termite-only, rodent, commercial or one-time-only document.
+  if (ctx.rateReviewTermsEligible && cannedTermsAllowed) {
+    lines.push(`${RATE_REVIEW_TERMS_LINE}.`);
   }
   lines.push(...structuredTermLines);
   if (proposal.terms) lines.push(proposal.terms);
@@ -594,6 +594,13 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposal, estimate?.id),
     callbackTermsEligible: proposalCallbackTermsEligible(proposal, estimate?.id),
+    // Frozen (accepted/declined) documents keep their original terms: the
+    // disclosure rides only when the recorded acceptance carried it.
+    // withholdRateReviewTerms (GH Codex r8 P0): the /pdf route could not
+    // prove the served-evidence write durable — never print the line then.
+    rateReviewTermsEligible: billing?.withholdRateReviewTerms === true
+      ? false
+      : proposalRateReviewTermsEligible(proposal, estimate?.id, { estimate, acceptance: billing?.acceptance || null }),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

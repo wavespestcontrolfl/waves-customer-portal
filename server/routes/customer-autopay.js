@@ -381,6 +381,13 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
             method_type: selectedPaymentMethod.method_type || 'card',
           });
         }
+        // The prompt's retry attests the consent version it rendered; a
+        // stale or absent one is refused before the row is written (codex
+        // #5434 r1 P1).
+        const { consentVersionStaleResponse, renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
+        if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+          return res.status(409).json(consentVersionStaleResponse());
+        }
         await ConsentService.recordConsent({
           customerId: req.customerId,
           paymentMethodId: selectedPaymentMethod.id,

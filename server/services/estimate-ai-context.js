@@ -87,7 +87,9 @@ const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cos
 // closed, same as knowledge_entries below): customer-facing facts come from
 // label-verified products_catalog rows and the service library. Add a
 // category here only once its every row is written for customers.
-const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [];
+// The list itself lives in services/knowledge/customer-safe-categories.js,
+// shared with WikiQA's customer-facing callers (GATE_KB_CUSTOMER_AUDIENCE).
+const { KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES } = require('./knowledge/customer-safe-categories');
 
 // AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki below queries
 // knowledge_entries with only the content-accuracy gate (TRUSTED_STATUSES) —

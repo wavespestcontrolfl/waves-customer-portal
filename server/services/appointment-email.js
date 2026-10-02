@@ -104,6 +104,9 @@ async function loadCustomer(customerId) {
       // unconsented, so a projection that omits it would mis-resolve the
       // SMS recipient set this email mirrors (#2955 codex P2).
       'service_contacts_consent_at',
+      // Per-phone consent boundary (unconsented_slot_phone_keys, #5467) lives
+      // here; without it a held on-site phone would read as consented.
+      'service_preferences',
     )
     .first();
   // Secondary-property row with no email of its own: the account owner's

@@ -61,6 +61,8 @@
     "safety_line": null,
     "range": "common",
     "active_months": [
+      1,
+      2,
       3,
       4,
       5,
@@ -69,7 +71,8 @@
       8,
       9,
       10,
-      11
+      11,
+      12
     ],
     "peak_months": [
       5,
@@ -103,8 +106,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "57f62df1d4261a5f77ae3daaba6254ee7dd49ace3ccd07042aeaae09a12173c5"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "f95443fa1040e9085b90a2892df7fd44713302fb64beea5b6cd8a790b27f8da2"
     },
     "role": "weed",
     "risk": "low",
@@ -190,6 +193,8 @@
     "safety_line": null,
     "range": "common",
     "active_months": [
+      1,
+      2,
       3,
       4,
       5,
@@ -198,7 +203,8 @@
       8,
       9,
       10,
-      11
+      11,
+      12
     ],
     "peak_months": [
       5,
@@ -228,12 +234,13 @@
     "legacy_slugs": [],
     "sources": [
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/",
-      "https://blogs.ifas.ufl.edu/entnemdept/2023/06/01/weed-of-the-month-nutsedge/"
+      "https://blogs.ifas.ufl.edu/entnemdept/2023/06/01/weed-of-the-month-nutsedge/",
+      "https://ask.ifas.ufl.edu/publication/EP569"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "bf93a18d9ad0c026074c63b8fdaae1457fc4808255b4f8379d2a809ee155990f"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "8f967ba5e7679e1847a722823d529ec21ef91adccd09e2e54dd5a394d255f9f2"
     },
     "role": "weed",
     "risk": "low",

@@ -10,6 +10,8 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
+const { listPortalPayments } = require('../portal-payment-history');
+const { listPortalServiceHistory } = require('../portal-service-history');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -101,7 +103,62 @@ const PORTAL_TOOLS = [
   },
 ];
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link']);
+// GATE_PORTAL_CHAT_FACTS: the portal tools plus the account-fact tools. A
+// fact tool renders the customer's own rows into a CARD the chat shows (the
+// same rows the portal tab shows); the model is told only that the card is
+// there, never the figures, so there is no money-shaped text for it to
+// misstate (owner ruling 2026-10-01: the AI states a payment fact only by
+// copying a system-rendered sentence; here it copies nothing).
+const RECENT_PAYMENTS_SHOWN = 3;
+// Payment statuses the card knows how to label. Anything else is left off
+// the card and reported to the model as "other" so it hands off.
+// 'upcoming' is a scheduled Auto Pay row (getPaymentHistory orders it first by
+// its future date); it is labeled so it never hides the card, and
+// "Scheduled" is not a completed payment.
+const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 'Failed', refunded: 'Refunded', upcoming: 'Scheduled' };
+// A refund the card may call refunded: the webhook's settled stamps, or a
+// Stripe refund object that succeeded. A pending or failed refund has no
+// label, so the card is withheld.
+const SETTLED_REFUND_STATUSES = new Set(['full', 'partial', 'succeeded']);
+function paymentStatusLabel(p) {
+  let status = String(p.status || '').toLowerCase();
+  // The Billing tab's own rule: an 'upcoming' row whose date has passed has
+  // not resolved yet and shows as processing, never as a future charge.
+  if (status === 'upcoming' && dateKeyOf(p.date) < etDateString()) status = 'processing';
+  const base = PAYMENT_STATUS_LABELS[status];
+  if (!base) return null;
+  if (!(p.refundAmount > 0)) return base;
+  if (!SETTLED_REFUND_STATUSES.has(String(p.refundStatus || '').toLowerCase())) return null;
+  return base === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : base;
+}
+const SHOW_RECENT_PAYMENTS_TOOL = {
+    name: 'show_recent_payments',
+    description: 'Show the customer a card with their most recent payments: date, amount, what it was for, the card or bank used, status, and a receipt link, plus an Open Billing button. Use for any question about a charge, a payment, a receipt, or whether a payment went through. You will be told only that the card was shown and how many payments it lists; the figures are on the card, not in your reply.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+};
+// GATE_PORTAL_CHAT_VISIT_FACTS: the structured visit facts (date, service,
+// technician first name, kinds of product) go to the model so it can answer
+// in its own words; the reviewed summary, which is free text, goes on a card.
+const RECENT_VISITS_READ = 3;
+const VISIT_SUMMARY_CHARS = 600;
+const GET_RECENT_VISITS_TOOL = {
+  name: 'get_recent_visits',
+  description: 'Get the customer\'s most recent completed visits (date, service, the technician\'s first name, the kinds of product applied) and show the customer a card with each visit\'s reviewed summary and report link. Use for any question about what was done at a visit, when the last visit was, or where a service report is.',
+  input_schema: { type: 'object', properties: {}, additionalProperties: false },
+};
+// The portal tool set for the gates that are live: the four base tools, the
+// fact tools, then escalate last.
+function portalToolsFor({ payments = false, visits = false } = {}) {
+  return [
+    ...PORTAL_TOOLS.slice(0, 4),
+    ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
+    ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
+    PORTAL_TOOLS[4],
+  ];
+}
+const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
+
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits']);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -114,8 +171,9 @@ function addAction(actions, action) {
 }
 
 // Tool execution. `actions` collects the buttons a portal tool wants shown
-// under the reply; callers that cannot render buttons leave it out.
-async function executeToolCall(toolName, input, contextCustomerId, actions = null) {
+// under the reply and `cards` the fact cards; callers that cannot render
+// them leave both out.
+async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null) {
   try {
     input = input && typeof input === 'object' ? input : {};
 
@@ -140,6 +198,10 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return await offerRescheduleLink(contextCustomerId, actions);
       case 'open_portal_section':
         return openPortalSection(input.section, actions);
+      case 'show_recent_payments':
+        return await showRecentPayments(contextCustomerId, actions, cards);
+      case 'get_recent_visits':
+        return await getRecentVisits(contextCustomerId, actions, cards);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -251,6 +313,135 @@ async function offerRescheduleLink(customerId, actions) {
   };
 }
 
+// Money for a card: whole dollars and cents, as the Billing tab prints them.
+const moneyLabel = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const longDateLabel = (value) => {
+  const key = dateKeyOf(value);
+  const d = new Date(`${key}T12:00:00Z`);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+};
+const methodLabel = (p) => {
+  if (!p.lastFour) return '';
+  // The same four aliases autopay-eligibility.js and the Billing tab read.
+  const isBank = ['us_bank_account', 'bank', 'ach', 'bank_account'].includes(String(p.methodType || '').toLowerCase());
+  const brand = isBank ? (p.bankName || 'Bank account') : (p.cardBrand ? p.cardBrand.charAt(0).toUpperCase() + p.cardBrand.slice(1) : 'Card');
+  return `${brand} ending in ${p.lastFour}`;
+};
+
+async function showRecentPayments(customerId, actions, cards) {
+  const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
+  if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
+  // Every read starts clean: a card from an earlier call in this turn never
+  // outlives a later read that says it must not be shown.
+  const prior = cards.findIndex((c) => c.type === 'payments');
+  if (prior !== -1) cards.splice(prior, 1);
+  // The Billing page is the fallback on every exit below, so the button goes
+  // on first: the model is not allowed to write a link itself.
+  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
+  let page;
+  try {
+    page = await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
+  } catch (err) {
+    logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
+    return NOT_SHOWN;
+  }
+  // Any payment the card cannot label means no card at all: a card that
+  // skipped the newest (say, disputed) payment would present an older one
+  // as the latest, and the model would confirm a payment that did not land.
+  const unlabeled = page.payments.some((p) => !paymentStatusLabel(p));
+  // Payer ownership unreadable means a third-party payer's payment may be
+  // in the list: show nothing rather than risk it.
+  if (page.payerLookupFailed) return NOT_SHOWN;
+  const rows = unlabeled ? [] : page.payments.map((p) => {
+    const statusLabel = paymentStatusLabel(p);
+    return {
+      id: String(p.id),
+      description: String(p.description || 'Payment').replace(/\s+[—-]\s+per (application|visit)\s*$/i, ''),
+      dateLabel: longDateLabel(p.date),
+      amountLabel: moneyLabel(p.amount),
+      statusLabel,
+      methodLabel: methodLabel(p),
+      receiptUrl: p.receiptUrl || null,
+    };
+  });
+  if (!rows.length) {
+    return {
+      shown: false,
+      count: 0,
+      // An empty page with history behind it (a bounded scan that ended
+      // before the first visible row) is not "no payments".
+      instruction: unlabeled || page.hasMore || Number(page.total || 0) > 0
+        ? 'The recent payments are in a state the card cannot show. Tell the customer the Billing page has the details and offer to pass the question to the team.'
+        : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
+    };
+  }
+  cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
+  return {
+    shown: true,
+    count: rows.length,
+    // Status words only, so the model can say whether the latest payment
+    // went through. Dates, amounts and descriptions stay on the card.
+    statuses: rows.map((r) => r.statusLabel.split(',')[0]),
+    instruction: `A card listing the customer's last ${rows.length} payment${rows.length === 1 ? '' : 's'} (date, amount, description, payment method, status, receipt) is now shown under your reply, with an Open Billing button. Point the customer to it. Do not state any amount, date or description yourself. If the customer asks why a charge is what it is, or disputes it, use the escalate tool.`,
+  };
+}
+
+async function getRecentVisits(customerId, actions, cards) {
+  const UNAVAILABLE = { visits: null, instruction: 'The visit history could not be read. Tell the customer the Completed visits page has it and, for a question about a specific visit, use the escalate tool.' };
+  if (!customerId || !Array.isArray(actions) || !Array.isArray(cards)) return UNAVAILABLE;
+  // Every read starts clean, and the page that lists every completed visit
+  // is the fallback on every exit.
+  const prior = cards.findIndex((c) => c.type === 'visits');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
+  let page;
+  try {
+    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
+  } catch (err) {
+    logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
+    return UNAVAILABLE;
+  }
+  if (!page.services.length) {
+    return {
+      visits: [],
+      // An empty page with history behind it is not "no visits".
+      instruction: page.total > 0
+        ? UNAVAILABLE.instruction
+        : 'No completed visits are on record for this customer. Say so plainly.',
+    };
+  }
+  const rows = page.services.map((svc) => ({
+    id: String(svc.id),
+    service: String(svc.type || 'Visit'),
+    dateLabel: longDateLabel(svc.date),
+    technician: String(svc.technician || '').trim().split(/\s+/)[0] || null,
+    // The reviewed report text, shown to the customer on the card exactly as
+    // the Completed tab shows it. It is free text (it can name a product or
+    // a price), so it goes on the card and never to the model.
+    summary: svc.notes ? String(svc.notes).slice(0, VISIT_SUMMARY_CHARS) : null,
+    // The Waves report page only; a project report hosted elsewhere stays on
+    // the Completed visits page.
+    reportUrl: typeof svc.reportUrl === 'string' && /^\/report\/[A-Za-z0-9_-]+$/.test(svc.reportUrl) ? svc.reportUrl : null,
+    // Kinds only: product names are on the report, and the owner's rule is
+    // that the assistant never names a product brand.
+    productKinds: [...new Set((svc.products || []).map((p) => String(p.product_category || '').trim()).filter(Boolean))],
+  }));
+  cards.push({
+    type: 'visits',
+    title: rows.length === 1 ? 'Your most recent visit' : `Your last ${rows.length} visits`,
+    rows: rows.map(({ productKinds: _kinds, ...row }) => row),
+  });
+  return {
+    // Structured facts only. The summary text and the report link are on the
+    // card, not here.
+    visits: rows.map((r) => ({
+      date: r.dateLabel, service: r.service, technician: r.technician, product_kinds: r.productKinds,
+      summary_on_card: Boolean(r.summary), report_link_on_card: Boolean(r.reportUrl),
+    })),
+    instruction: 'A card under your reply shows each visit with its reviewed summary and report link. You are not given the summary text: say when the visit was, what service it was, who did it and the kinds of product applied, and point the customer to the card for what was found and treated. Do not add a finding, product or date that is not here, and never name a product brand.',
+  };
+}
+
 function openPortalSection(section, actions) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
@@ -268,4 +459,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_SECTIONS, executeToolCall };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall };
