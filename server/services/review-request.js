@@ -4664,11 +4664,18 @@ const ReviewService = {
     // A cadence anchored only to its scheduled visit (enrolled before the
     // service record existed) reads the report from the record that visit has
     // by now, linked by scheduled_service_id.
-    const voiceRecordId = serviceRecordId || (!voiceVisitType || !scheduledServiceId ? null
+    // Record first, like the visit-context recovery above: the completed
+    // record's date, technician and type win over the scheduled row's.
+    const linkedRecord = serviceRecordId || !voiceVisitType || !scheduledServiceId ? null
       : await db("service_records").where({ scheduled_service_id: scheduledServiceId })
-        .orderBy("created_at", "desc").first("id")
-        .then((sr) => sr?.id || null).catch(() => null));
-    const voiceVisit = voiceVisitType ? { serviceRecordId: voiceRecordId, serviceDate, technicianId, serviceType: voiceVisitType } : null;
+        .orderBy("created_at", "desc").first("id", "service_date", "technician_id", "service_type")
+        .catch(() => null);
+    const voiceVisit = !voiceVisitType ? null : {
+      serviceRecordId: serviceRecordId || linkedRecord?.id || null,
+      serviceDate: linkedRecord?.service_date || serviceDate,
+      technicianId: linkedRecord?.technician_id || technicianId,
+      serviceType: linkedRecord?.service_type || voiceVisitType,
+    };
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)

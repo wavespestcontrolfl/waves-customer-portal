@@ -160,7 +160,7 @@ describe('draftTechVoice', () => {
 
   test('the email touch returns a paragraph with no link', async () => {
     const email = {
-      body: 'Marta, it has been a week since the first treatment, and the moisture under the kitchen sink is still worth raising with your property group. Sorry again about the wait that morning when you had to get to work. A Google review would help us a lot.',
+      body: 'Marta, it has been a week since the first treatment, and the moisture under the kitchen sink I flagged is still worth raising with your property group. Sorry again about the wait that morning when you had to get to work. A Google review would help us a lot.',
       details: [
         { text: 'had to get to work', source_quote: 'I need to go to work' },
         { text: 'moisture under the kitchen sink', source_quote: 'Moisture under the kitchen sink' },
@@ -171,7 +171,7 @@ describe('draftTechVoice', () => {
     mockFactCheck.mockImplementation(async (_p, req) => ({
       ok: true,
       json: { sentences: factInput(req).sentences.map((sentence) => (/sink/i.test(sentence)
-        ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['first of two treatments', 'Moisture under the kitchen sink'] }
+        ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['first of two treatments', 'Moisture under the kitchen sink that may lead to mildew; suggested raising it with the property group'] }
         : /work/i.test(sentence)
           ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ["I can't wait too long, I need to go to work"] }
           : { sentence, ask_only: true, greeting_only: false, off_limits: false, supported: false, quotes: [] })) },
@@ -568,6 +568,25 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     // #5524 r12: the company as narrator is not the tech's voice; "from Waves" is fine.
     expect(v('Waves knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
     expect(v("It's Adam from Waves, I know you had to get to work. A Google review would help: {review_url}")).toBeNull();
+  });
+
+  test('#5524 r13 P1: "today" holds only on a quote from a line dated today (the visit day for report lines)', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const today = require('../utils/datetime-et').etCalendarDayOf(new Date());
+    const lines = ['- [customer, 2026-09-10] I saw ants by the door', `- [customer, ${today}] the ants are back by the door`, '- Observations: Moisture under the kitchen sink'];
+    expect(timingUnsupported('You saw ants today.', ['I saw ants by the door'], lines, '2026-09-10')).toBe(true);
+    expect(timingUnsupported('You saw ants today.', ['the ants are back by the door'], lines, '2026-09-10')).toBe(false);
+    // An undated report line is the visit day: fine for "today" on a same-day visit, not otherwise.
+    expect(timingUnsupported('I found moisture under the sink this morning.', ['Moisture under the kitchen sink'], lines, today)).toBe(false);
+    expect(timingUnsupported('I found moisture under the sink this morning.', ['Moisture under the kitchen sink'], lines, '2026-09-10')).toBe(true);
+    expect(timingUnsupported('I found moisture under the sink.', ['Moisture under the kitchen sink'], lines, '2026-09-10')).toBe(false);
+  });
+
+  test('#5524 r13: narration with no narrator is not the technician\'s voice', () => {
+    const { notTechVoice } = Drafter.__private;
+    expect(notTechVoice('Ants were active in the kitchen. A Google review would help: {review_url}', 'Adam')).toBe(true);
+    expect(notTechVoice("It's Adam. Ants were active in the kitchen. Google review: {review_url}", 'Adam')).toBe(false);
+    expect(notTechVoice("It's great. Ants were active. {review_url}", 'Adam')).toBe(true);
   });
 
   test('a bare link after a question stays with its sentence', () => {

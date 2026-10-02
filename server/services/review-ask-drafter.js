@@ -854,9 +854,15 @@ const OFFICE_NARRATION_RE = /\b(?:our|the|your)\s+(?:team|office|crew|staff|tech
 // "Waves" may appear only after a preposition ("Adam from Waves", "a review
 // of Waves"); anywhere else it narrates as the company ("Waves found ants").
 const COMPANY_NARRATION_RE = /(?<!\b(?:with|from|at|of|for|to|by)\s+)\bwaves\b/i;
+// The technician speaks in the first person: the draft says I / me / my
+// somewhere (or introduces itself, "It's Adam"). Narration with no narrator
+// ("Ants were active in the kitchen.") is not their voice.
+const FIRST_PERSON_RE = /\b(?:i|i'm|i've|i'd|me|my|mine)\b/i;
 function notTechVoice(body, techName) {
   if (OFFICE_NARRATION_RE.test(body) || COMPANY_NARRATION_RE.test(body)) return true;
   const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
+  const introduces = names.some((n) => new RegExp(`\\b(?:it'?s|this is)\\s+${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body));
+  if (!FIRST_PERSON_RE.test(String(body).replace(/\{review_url\}/g, "")) && !introduces) return true;
   return names.some((n) => {
     const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const uses = String(body).match(new RegExp(`\\b${esc}\\b`, "gi")) || [];
@@ -1011,7 +1017,26 @@ function quoteSharesContent(sentence, quote, names) {
 
 // One checker verdict against the sentence it names. Returns a reject reason
 // or null.
-function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
+// "Today" / "this morning" (or "yesterday") in a sentence holds only when a
+// quote it cites comes from a record line dated that day; undated lines (the
+// visit report) are dated the visit day. Timing words are left out of the
+// word coverage, so this is where they are proved.
+const SAME_DAY_RE = /\b(?:today|this\s+(?:morning|afternoon|evening)|tonight)\b/i;
+const YESTERDAY_RE = /\b(?:yesterday|last\s+night)\b/i;
+function timingUnsupported(sentence, quotes, recordLines, visitDay) {
+  const today = etCalendarDayOf(new Date());
+  const required = SAME_DAY_RE.test(sentence) ? today
+    : YESTERDAY_RE.test(sentence) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
+  if (!required) return false;
+  return !quotes.some((q) => {
+    const nq = normalizeForMatch(q);
+    const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
+    const dated = line && /\b(\d{4}-\d{2}-\d{2})\b/.exec(line);
+    return (dated ? dated[1] : visitDay) === required;
+  });
+}
+
+function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = [], visitDay = null }, normRecord) {
   // Each verdict must be about the sentence actually being sent.
   if (normalizeForMatch(j.sentence) !== normalizeForMatch(sentence)) return "fact_check_bad_answer";
   // Off-limits topics are judged as a class (health, money, products,
@@ -1027,7 +1052,8 @@ function sentenceVerdictReject(j, sentence, { names, techNames }, normRecord) {
   // Every clause must be backed: each one shares a content word (not filler,
   // not a name) with a cited quote, so "ants and your new baby" cannot ride
   // on a quote about the ants alone.
-  return sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quotes.join(" "), names)) ? null : "unsupported_sentence";
+  if (!sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quotes.join(" "), names))) return "unsupported_sentence";
+  return timingUnsupported(sentence, quotes, recordLines, visitDay) ? "timing_unsupported" : null;
 }
 
 // A sentence's clauses, for per-claim evidence. Clauses with no content words
@@ -1052,7 +1078,7 @@ function factCheckPolicy(writerProvider) {
   return Object.freeze({ name: policy.name, primary: policy.fallback, fallback: policy.primary });
 }
 
-async function factCheckTechVoice(body, { record, firstName, techName, deadline, writerProvider }) {
+async function factCheckTechVoice(body, { record, firstName, techName, deadline, writerProvider, serviceDate = null }) {
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return "out_of_time";
   const sentences = techVoiceSentences(body);
@@ -1076,7 +1102,9 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
   const normRecord = normalizeForMatch(record);
   const reject = !judged || judged.length !== sentences.length
     ? "fact_check_bad_answer"
-    : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, { names, techNames }, normRecord)).find(Boolean) || null;
+    : sentences.map((sentence, i) => sentenceVerdictReject(judged[i] || {}, sentence, {
+      names, techNames, recordLines: String(record).split("\n"), visitDay: serviceDate ? etCalendarDayOf(serviceDate) : null,
+    }, normRecord)).find(Boolean) || null;
   // A malformed answer is the checker's failure, so its ledger row says so;
   // a well-formed "unsupported" verdict is the checker doing its job.
   if (reject === "fact_check_bad_answer") leg.reject(reject);
@@ -1110,7 +1138,7 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
   const flat = normalizeSmsPunctuation(draft.body);
   draft.body = (channel === "email" ? flat.replace(/\s*\n+\s*/g, " ") : flat).trim();
   const reject = verifyTechVoiceDraft(draft, check)
-    || await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider });
+    || await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider, serviceDate: check.serviceDate });
   // A draft the checks refused is a failed writer call on the ledger, so the
   // lane's success rate shows systematic bad output; an unavailable checker
   // or an exhausted budget says nothing about the draft.
@@ -1135,7 +1163,7 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
     const stepKind = channel === "email" ? "email" : resolveStepKind(sequenceStep, serviceDaysAgo);
     const termite = isTermiteService(serviceType);
     const facts = buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx });
-    const check = { channel, firstName, techName, termite, corpus: facts, ownWords: customerOwnWords(ctx) };
+    const check = { channel, firstName, techName, termite, corpus: facts, ownWords: customerOwnWords(ctx), serviceDate };
     // The fact check reads the record without anything Waves texted (earlier
     // review asks included): a claim is never backed by our own wording.
     // ...and only what the CALLER said on calls (labeled transcript turns):
@@ -1298,7 +1326,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;
