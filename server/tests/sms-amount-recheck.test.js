@@ -856,8 +856,10 @@ describe('outgoingAmountsStale carries the live Zelle facts (the provider bounda
   test('pre-v12 body with a Zelle contact: the same staff-contact path, then main\'s owed-amount rule unless the caller trusts the figures', async () => {
     const pre = (body, over = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-1', dbh, ...over });
     await expect(pre('You can Zelle payments@wavespestcontrol.com.')).resolves.toEqual({ stale: false, zelle: FACTS });
-    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.')).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.', { trustOwedAmounts: true })).resolves.toEqual({ stale: false, zelle: FACTS });
+    // Codex round-79 P1: a figure in Zelle instructions that points at no single invoice leaves the target unresolved - blocked even when
+    // the caller trusts the figures (never silently the draft's old invoice)
+    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+    await expect(pre('You can Zelle payments@wavespestcontrol.com for the $9,999.00 balance.', { trustOwedAmounts: true })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 });
 

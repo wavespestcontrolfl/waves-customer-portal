@@ -69,6 +69,11 @@ describe('a staff Zelle contact is rechecked against the decision\'s target invo
     await expect(run('Zelle $210 to pay@example.com', 'inv-A', { trustOwedAmounts: false })).resolves.toMatchObject({ stale: false });
     await expect(run('Zelle $333 to pay@example.com', 'inv-A', { trustOwedAmounts: false })).resolves.toMatchObject({ stale: true });
   });
+  // Codex round-79 P1: a figure matching no single invoice (the $305 aggregate of A + B) is unresolved - blocked, never A by default
+  test('"Zelle $305 to ..." (the A + B aggregate) on a decision targeted at A: blocked, not checked against A', async () => {
+    await expect(run('Zelle $305 to pay@example.com', 'inv-A', { trustOwedAmounts: true })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+    expect(checked).toEqual([]);
+  });
   test('"Zelle $210 to ..." on a decision targeted at the $95 invoice A: invoice B ($210) is the one checked', async () => {
     await expect(run('Zelle $210 to pay@example.com', 'inv-A')).resolves.toMatchObject({ stale: false, zelle: { invoiceId: 'inv-B' } });
     visibility.mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-A', reason: 'not_eligible' }));
