@@ -935,7 +935,7 @@ const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv'
 // confirm. A product picked as a perimeter spray needs a traced length, and
 // a saved trace shows on the customer's report only with such a spray to
 // back it (as on a pest visit).
-function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead }) {
+function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneAreas = [] }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
@@ -949,6 +949,12 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead }) {
   const unusedTrace = draft && traceRead.zone && (areaTrace ? !areaRow : !perimeterRow);
   return [
     ...ready.report,
+    // The record's places are the visit's treated side on the report: with
+    // none, the outdoor re-entry wait is dropped and the indoor one kept
+    // (report-data.js normalizeAdvisoryForTreatmentScope), so a lane visit
+    // never sends without one (codex local r3 on #5629). A read that heard
+    // none leaves them for the tech to pick.
+    [!laneAreas.length, 'Pick where you treated: tap Change beside Where.'],
     ...ready.trace,
     [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
     [unusedTrace, areaTrace
@@ -1188,7 +1194,7 @@ function ReportFlowForm({
   };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
-    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, laneAreas: record?.areas,
   });
 
   // "Update inventory or remove it": once the stock is updated, the tech

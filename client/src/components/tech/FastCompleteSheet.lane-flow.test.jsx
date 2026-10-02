@@ -209,14 +209,35 @@ describe('the lane record on the sheet', () => {
   });
 
   test('a read that failed fills nothing and says so; the report is still written and the tech picks each field', async () => {
-    const request = makeRequest({ laneFacts: () => { throw new Error('offline'); } });
+    let reads = 0;
+    const request = makeRequest({ laneFacts: () => { reads += 1; if (reads === 1) throw new Error('offline'); return { ...READ, areas: [], findings: [] }; } });
     await openSheet(request);
     addProduct('Temprid FX', '1');
     await generate();
     expect(within(recordCard()).getByText('Couldn’t read your note for this just now. Pick each one, or write the report again.')).toBeTruthy();
     expect(within(fieldRow('Evidence observed')).getByText('Not picked')).toBeTruthy();
     expect(request.bodies('generate-report')[0]).toMatchObject({ areasServiced: [], observations: [] });
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    // No place, no send: the report would drop the outdoor re-entry wait
+    // (codex local r3 on #5629). The tech picks one, and the report is
+    // written again from it.
+    expect(screen.getByText('Pick where you treated: tap Change beside Where.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    fireEvent.click(within(recordCard()).getByRole('button', { name: 'Change Where' }));
+    fireEvent.click(within(within(recordCard()).getByRole('group', { name: 'Where' })).getByRole('button', { name: 'Primary bedroom' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    expect(request.bodies('generate-report')[1].areasServiced).toEqual(['Primary bedroom']);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+  });
+
+  test('a read that heard no place holds the send until the tech picks one', async () => {
+    const request = makeRequest({ laneFacts: { ...READ, areas: [] } });
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    await generate();
+    expect(within(fieldRow('Where')).getByText('Not said')).toBeTruthy();
+    expect(screen.getByText('Pick where you treated: tap Change beside Where.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 });
 
@@ -262,7 +283,7 @@ describe('a saved outline on a lane visit (codex local r2 on #5629)', () => {
     const visit = { ...VISIT, serviceType: 'Mosquito Control (Monthly)', serviceKey: 'mosquito_monthly' };
     const request = makeRequest({
       visit, lane: 'mosquito', trace: OUTLINE('yard'),
-      laneFacts: { available: true, status: 'read', lane: 'mosquito', areas: [], findings: [], unclearGroups: [] },
+      laneFacts: { available: true, status: 'read', lane: 'mosquito', areas: [{ area: 'Yard vegetation', quote: 'the yard' }], findings: [], unclearGroups: [] },
     });
     await openSheet(request, { ...SERVICE, serviceType: 'Mosquito Control (Monthly)', laneKey: 'mosquito' });
     addProduct('Example Mosquito Concentrate', '2');
@@ -281,7 +302,7 @@ describe('a saved outline on a lane visit (codex local r2 on #5629)', () => {
     const visit = { ...VISIT, serviceType: 'Fire Ant Treatment', serviceKey: 'fire_ant' };
     const request = makeRequest({
       visit, lane: 'fire_ant', trace: OUTLINE('lawn'),
-      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [], findings: [], unclearGroups: [] },
+      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [{ area: 'Front lawn', quote: 'front lawn' }], findings: [], unclearGroups: [] },
     });
     await openSheet(request, { ...SERVICE, serviceType: 'Fire Ant Treatment', laneKey: 'fire_ant' });
     addProduct('Temprid FX', '1');
@@ -295,7 +316,7 @@ describe('a saved outline on a lane visit (codex local r2 on #5629)', () => {
     const visit = { ...VISIT, serviceType: 'Fire Ant Treatment', serviceKey: 'fire_ant' };
     const request = makeRequest({
       visit, lane: 'fire_ant', trace: OUTLINE('lawn'),
-      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [], findings: [], unclearGroups: [] },
+      laneFacts: { available: true, status: 'read', lane: 'fire_ant', areas: [{ area: 'Front lawn', quote: 'front lawn' }], findings: [], unclearGroups: [] },
     });
     await openSheet(request, { ...SERVICE, serviceType: 'Fire Ant Treatment', laneKey: 'fire_ant' });
     addProduct('Temprid FX', '1', 'Broadcast spray');
