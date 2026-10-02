@@ -168,7 +168,7 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict).toMatchObject({ deferred: true, heldFamilies: ['pest_control'], problems: [] });
     const pestOpen = { code: 'missing_time_tech', families: ['pest_control'], text: '2 pest visits missing time/tech' };
     const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
-    expect(outcomeOf(verdict, [pestOpen, lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...pestOpen, held: true }] });
+    expect(outcomeOf(verdict, [pestOpen, lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...pestOpen, held: 'hold' }] });
     expect(outcomeOf(verdict, [lawnOpen])).toMatchObject({ outcome: 'deferred' });
   });
 
@@ -179,6 +179,186 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, MOSQ], [...pestRows(), ...mosq]).ok).toBe(true);
     expect(codes(run([PEST, MOSQ], [...pestRows(), ...mosq.map((row) => ({ ...row, scheduled_date: DAY0 }))]))).toEqual(['missing_time_tech']);
     expect(codes(run([PEST, MOSQ], [...pestRows(), ...mosq.map((row) => ({ ...row, catalog_service_key: 'mosquito_monthly' }))]))).toEqual(['missing_time_tech']);
+  });
+});
+
+describe('visit prices', () => {
+  // PEST: $600/yr over 4 = $150 a visit; LAWN: $600/yr over 6 = $100 a visit.
+  const priced = (rows, price) => rows.map((row) => (row.recurring_parent_id ? { ...row, estimated_price: price } : row));
+  const verdictFor = (pest, lawn, opts = {}) => evaluateCombinedBooking({ estimate: opts.estimate || estimate([PEST, LAWN]), rows: [...pest, ...lawn] });
+
+  test('upcoming series visits at the accepted per-visit price pass, within two cents either way (compared in cents)', () => {
+    for (const [pest, lawn] of [[150.02, 100.02], [149.98, 99.98], [150, 100]]) {
+      expect(verdictFor(priced(pestRows(), pest), priced(lawnRows(), lawn)).ok).toBe(true);
+    }
+    expect(codes(verdictFor(priced(pestRows(), 150.03), priced(lawnRows(), 100)))).toEqual(['price_mismatch']);
+    expect(codes(verdictFor(priced(pestRows(), 149.97), priced(lawnRows(), 100)))).toEqual(['price_mismatch']);
+  });
+
+  test('a visit priced off the accepted price is reported per service, with the soonest affected day', () => {
+    const verdict = verdictFor(priced(pestRows(), 150), priced(lawnRows(), 90));
+    expect(codes(verdict)).toEqual(['price_mismatch']);
+    expect(texts(verdict)).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    expect(verdict.problems[0]).toMatchObject({ families: ['lawn_care'], earliest: addDays(DAY0, 61) });
+  });
+
+  test('first visits, prepaid visits and unpriced visits are never price-checked', () => {
+    const lawn = lawnRows({ parentOverrides: { estimated_price: 999 } }).map((row, i) => {
+      if (i === 1) return { ...row, estimated_price: 90, prepay_covered: true };
+      if (i === 2) return { ...row, estimated_price: 90, prepay_covered: true };
+      if (i === 3) return { ...row, estimated_price: null };
+      return row.recurring_parent_id ? { ...row, estimated_price: 100 } : row;
+    });
+    expect(verdictFor(priced(pestRows(), 150), lawn).ok).toBe(true);
+  });
+
+  test('a plan whose lines do not add up to the accepted total (a discount or credit) is not price-checked', () => {
+    const verdict = verdictFor(priced(pestRows(), 150), priced(lawnRows(), 90), { estimate: estimate([PEST, LAWN], { annual_total: 1100 }) });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.unpricedFamilies).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('a legacy monthly-dues rodent program has no per-visit price, but its dues count, so pest is still checked', () => {
+    // Pest $600/yr + rodent dues $40/mo = $1,080 accepted.
+    const est = estimate([PEST], { monthly_total: 90, annual_total: 1080 });
+    est.estimate_data.result.recurring.rodentBaitMo = 40;
+    const rodent = priced(series({ key: 'rodent_bait_quarterly', type: 'Rodent Bait Stations', visits: 4, spacing: 91 }), 33);
+    const ok = evaluateCombinedBooking({ estimate: est, rows: [...priced(pestRows(), 150), ...rodent] });
+    expect(ok.problems).toEqual([]);
+    expect(ok.unpricedFamilies).toEqual(['rodent_bait']);
+    const wrongPest = evaluateCombinedBooking({ estimate: est, rows: [...priced(pestRows(), 140), ...rodent] });
+    expect(texts(wrongPest)).toEqual(['3 pest visits priced $140.00, accepted $150.00']);
+  });
+
+  test('the accepted total must match the lines exactly: even a few cents off means a credit, so prices are not known', () => {
+    const verdict = verdictFor(priced(pestRows(), 150), priced(lawnRows(), 90), { estimate: estimate([PEST, LAWN], { annual_total: 1199.98 }) });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.unpricedFamilies).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('different wrong prices on one service are each named', () => {
+    const lawn = priced(lawnRows(), 90).map((row, i) => (i === 2 ? { ...row, estimated_price: 80 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['5 lawn visits priced $90.00 x4, $80.00 x1, accepted $100.00']);
+  });
+
+  test('a termite bait + bond plan (a rider beside the bait) has no per-line price to check', () => {
+    const BAIT = { service: 'termite_bait', name: 'Termite Bait Stations', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40 };
+    const BOND = { service: 'termite_bond_1yr', name: 'Termite Bond 1yr', visitsPerYear: 1, frequency: 'annual', annual: 120, mo: 10 };
+    const plan = check.acceptedPlan(estimate([PEST, BAIT, BOND]));
+    expect(plan.prices.get('termite_bait')).toBeNull();
+    expect(plan.prices.get('pest_control')).toBe(150);
+  });
+
+  test('the billed service price is compared: primary_line_price when stamped; add-ons or a discount skip the visit', () => {
+    const lawn = priced(lawnRows(), 175).map((row, i) => {
+      if (i === 1) return { ...row, primary_line_price: 100, addon_total: 75 }; // $100 service + $75 add-on = $175: correct
+      if (i === 2) return { ...row, addon_total: 75 }; // add-ons, no primary stamp: $175 - $75 = $100 service
+      if (i === 5) return { ...row, addon_total: 75, primary_line_price: 100 }; // add-ons + stamped primary: the primary is checked
+      if (i === 3) return { ...row, estimated_price: 90, line_discount_amount: 10 }; // discounted: skipped
+      if (i === 4) return { ...row, estimated_price: 90, discount_id: 'disc-1' };
+      return { ...row, estimated_price: 100 };
+    });
+    expect(verdictFor(priced(pestRows(), 150), lawn).ok).toBe(true);
+    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90, addon_total: 75 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), wrongPrimary))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // No add-ons, primary $100 above a $90 visit price: invoicing adjusts down to $90, so it bills $90.
+    const adjustedDown = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), adjustedDown))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // A stamped $0 beside a positive primary is a fully discounted visit billed $0 on purpose:
+    // skipped like any discount. A never-priced visit (null) with a primary is checked on the primary.
+    const frozenFree = priced(lawnRows(), 0).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100 } : row));
+    expect(verdictFor(priced(pestRows(), 150), frozenFree).ok).toBe(true);
+    const neverPriced = priced(lawnRows(), null).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), neverPriced))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // No primary stamp: the service is the visit price less the add-ons ($165 - $75 = $90).
+    const derived = priced(lawnRows(), 165).map((row) => (row.recurring_parent_id ? { ...row, addon_total: 75 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), derived))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // Add-ons above the visit price ($50 visit, $75 add-ons): the service clamps to $0 and the
+    // total adjusts across lines, so the service share is not read (never a negative price).
+    const clamped = priced(lawnRows(), 50).map((row) => (row.recurring_parent_id ? { ...row, addon_total: 75 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), clamped))).toEqual([]);
+    // The hourly urgent pass never reports prices.
+    const urgent = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN]), rows: [...priced(pestRows(), 150), ...derived], timeTechOnly: true });
+    expect(urgent.problems).toEqual([]);
+    // With add-ons and an adjustment needed, the service share cannot be read: skipped.
+    const ambiguous = priced(lawnRows(), 150).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100, addon_total: 75 } : row));
+    expect(verdictFor(priced(pestRows(), 150), ambiguous).ok).toBe(true);
+  });
+
+  test('a primary stamped $0 beside a positive visit price is a mismatch (the service line would bill nothing)', () => {
+    const lawn = priced(lawnRows(), 100).map((row, i) => (i === 1 ? { ...row, primary_line_price: 0 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['1 lawn visits priced $0.00, accepted $100.00']);
+  });
+
+  test('a name-only combined route (no catalog row) is read as both of its services', () => {
+    const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30 };
+    const combo = lawnRows().map((row) => ({ ...row, catalog_service_key: null, service_type: 'Lawn + Tree & Shrub Service',
+      ...(row.recurring_parent_id ? { estimated_price: 100 } : {}) }));
+    const verdict = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN, tree]), rows: [...priced(pestRows(), 150), ...combo] });
+    expect(texts(verdict)).toEqual(['5 lawn visits priced $100.00, accepted $160.00', '5 T&S visits priced $100.00, accepted $160.00']);
+  });
+
+  test('a prepay term link with no live prepaid amount (a voided term keeps the link) is still price-checked', () => {
+    const lawn = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, annual_prepay_term_id: 'term-voided' } : row));
+    expect(codes(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['price_mismatch']);
+  });
+
+  test('a price finding whose accepted price can no longer be confirmed stays on the bell, marked', () => {
+    const lawnOff = { code: 'price_mismatch', families: ['lawn_care'], text: '5 lawn visits priced $90.00, accepted $100.00' };
+    const verdict = { ok: true, deferred: false, heldFamilies: [], unpricedFamilies: ['lawn_care'], problems: [] };
+    const { outcome, problems } = outcomeOf(verdict, [lawnOff]);
+    expect(outcome).toBe('problems');
+    expect(composeAdminAlert(composeAlert({ labels: ['Pest', 'Lawn'], problems }, ALERT_IDS)).why)
+      .toBe('5 lawn visits priced $90.00, accepted $100.00 (not re-checked).');
+    // A missing time/tech finding is not held for an unknown price.
+    expect(outcomeOf(verdict, [{ code: 'missing_time_tech', families: ['lawn_care'], text: 'x' }]).outcome).toBe('ok');
+  });
+});
+
+describe('markPrepayCovered', () => {
+  const renewals = require('../services/annual-prepay-renewals');
+  const payer = require('../services/payer');
+  afterEach(() => jest.restoreAllMocks());
+  test('a cash payment covers a visit only in full; an annual stamp only when the validator confirms a live term', async () => {
+    jest.spyOn(payer, 'resolveForInvoice').mockResolvedValue({ payerId: null });
+    const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'live');
+    const rows = [
+      { id: 'partial', prepaid_amount: 10, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'full', prepaid_amount: 120, prepaid_method: 'check', estimated_price: 120 },
+      { id: 'live', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1', estimated_price: 120 },
+      { id: 'stale', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't2', estimated_price: 120 },
+      { id: 'linkonly', annual_prepay_term_id: 't3', estimated_price: 120 },
+      // An unstamped termite renewal visit in its payment-pending grace window: the authority covers it.
+      { id: 'live', catalog_service_key: 'termite_bait', estimated_price: 120 },
+      { id: 'plainlawn', catalog_service_key: 'lawn_care_recurring', estimated_price: 120 },
+      // Priced only through primary_line_price: still asked / compared on that charge.
+      { id: 'primaryonly', prepaid_amount: 120, prepaid_method: 'cash', primary_line_price: 120 },
+      // Completion bills the positive estimated_price ($90), so $90 paid covers it despite a $100 primary.
+      { id: 'estimatedwins', prepaid_amount: 90, prepaid_method: 'cash', estimated_price: 90, primary_line_price: 100 },
+    ];
+    await check.markPrepayCovered({}, rows);
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered]))).toEqual({
+      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false, primaryonly: true, estimatedwins: true,
+    });
+    // Asked for the annual stamps, the term link and the unstamped termite visit; never the plain lawn visit.
+    expect(validator).toHaveBeenCalledTimes(4);
+  });
+
+  test('a payer-billed visit is never covered by the homeowner\'s prepay; an unresolvable payer reads as payer-billed', async () => {
+    jest.spyOn(renewals, 'annualPrepayCoversVisit').mockResolvedValue(true);
+    jest.spyOn(payer, 'resolveForInvoice').mockImplementation(async ({ scheduledServiceId }) => {
+      if (scheduledServiceId === 'broken') throw new Error('payer read failed');
+      return { payerId: scheduledServiceId.startsWith('payer') ? 'p1' : null };
+    });
+    const rows = [
+      { id: 'payercash', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'payerannual', prepaid_amount: 120, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1', estimated_price: 120 },
+      { id: 'broken', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'selfpay', prepaid_amount: 120, prepaid_method: 'cash', estimated_price: 120 },
+    ];
+    await check.markPrepayCovered({}, rows);
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered])))
+      .toEqual({ payercash: false, payerannual: false, broken: false, selfpay: true });
   });
 });
 
@@ -227,15 +407,20 @@ describe('postAlert', () => {
     });
     expect(spec.detail).toBeUndefined();
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'combined-booking-check:estimate-1', refreshOnDedupe: true });
-    expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', itemKeys: ['missing_time_tech:lawn_care'] });
+    expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', itemKeys: ['lawn_care'] });
   });
 
   test('a standing bell re-rings only for a service family it did not carry', () => {
     const lawn = { code: 'missing_time_tech', families: ['lawn_care'] };
     const pest = { code: 'missing_time_tech', families: ['pest_control'] };
+    const lawnPrice = { code: 'price_mismatch', families: ['lawn_care'] };
     const meta = { itemKeys: problemKeys(lawn) };
     expect(ringOnNewProblem(problemKeys(lawn))({}, meta)).toBe(false);
     expect(ringOnNewProblem(problemKeys(pest))({}, meta)).toBe(true);
+    // A bell written with the older code:family keys is read as its families: nothing new, no ring.
+    expect(ringOnNewProblem(problemKeys(lawn))({}, { itemKeys: ['missing_time_tech:lawn_care'] })).toBe(false);
+    // A second kind of problem on a family the bell already carries does not ring again.
+    expect(ringOnNewProblem([...problemKeys(lawn), ...problemKeys(lawnPrice)])({}, meta)).toBe(false);
   });
 });
 
@@ -250,10 +435,10 @@ describe('outcomeOf', () => {
 
   test('a finding about a service that went on hold stays on the bell, marked, instead of closing as fixed', () => {
     const clean = { ok: true, deferred: false, heldFamilies: ['lawn_care'], problems: [] };
-    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }] });
+    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: 'hold' }] });
     // Not on hold: a clean verdict closes it.
     expect(outcomeOf({ ...clean, heldFamilies: [] }, [lawnOpen]).outcome).toBe('ok');
-    const why = composeAdminAlert(composeAlert({ labels: ['Pest'], problems: [{ ...lawnOpen, held: true }] }, ALERT_IDS)).why;
+    const why = composeAdminAlert(composeAlert({ labels: ['Pest'], problems: [{ ...lawnOpen, held: 'hold' }] }, ALERT_IDS)).why;
     expect(why).toBe('5 lawn visits missing time/tech (on hold).');
   });
 });

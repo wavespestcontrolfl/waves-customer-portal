@@ -79,11 +79,12 @@
       ],
       "limits": [
         "Keep fertilizer out of water and storm drains.",
-        "Not for nursery container production."
+        "Not for nursery container production.",
+        "Harmful if inhaled; eye and skin irritant. Avoid breathing dust and wash after handling."
       ],
       "program": "Waves uses the canopy-width palm chart (width² ÷ 105, rounded down). That is a company rate choice; it is not the formula printed on this bag.",
-      "source": "LESCO #510513 · safety data sheet (bag label link pending)",
-      "url": "https://www.siteone.com/pdf/sdsPDF?resourceId=22883&skuId=437827",
+      "source": "LESCO #510513 · bag label · rev. 5-22-19",
+      "url": "/labels/lesco-0-0-16-510513-label.pdf",
       "name": "LESCO 0-0-16 #510513",
       "equipment": [
         "hand",

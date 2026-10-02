@@ -342,6 +342,20 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // A first-name card's "Open customer" links must reach an editable record: a listed customer
+    // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
+    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    if (nameCards.length) {
+      const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
+      for (const item of nameCards) {
+        try {
+          item.owed_customer_open_ids = [...new Set((await owedCustomerOpenTargets(db, item.payload)).map((t) => t.open_id))];
+        } catch (linkErr) {
+          logger.warn(`[admin-triage] first-name link targets read failed: ${linkErr.code || linkErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);
@@ -525,6 +539,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
+      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
+      // Resolve / Dismiss must not settle a customer the operator never saw.
+      || item.reason_code === 'missing_first_name'
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -535,6 +552,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
       }
+    }
+    // Resolve on an owed-first-name card means the names were ENTERED: every listed customer
+    // must be live with a nonblank first name, judged on the LIVE payload under the per-call
+    // lock the append writer also takes (Dismiss is the explicit waiver).
+    if (nextStatus === 'resolved' && item.reason_code === 'missing_first_name') {
+      const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
+      if (!(await everyOwedCustomerNamed(trx, live?.payload))) return { outcome: 'first_name_missing' };
     }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // Judge the LIVE payload, not the route's pre-lock snapshot — a
@@ -720,6 +744,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    case 'first_name_missing': return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
     case 'email_disagreement_unconfirmed': return res.status(409).json({
       error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',
       code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
@@ -741,6 +766,11 @@ async function transition(req, res, nextStatus) {
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
     if (guarded && guarded.reason_code === 'property_role_confirm') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    // A missing first name is settled on the customer record, which only an admin edits:
+    // Resolve is admin-only (Dismiss stays open to the office).
+    if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
@@ -1838,6 +1868,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
+    // customer record, not a routing judgment — a verdict would close it without a name.
+    if (item.reason_code === 'missing_first_name') {
+      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
       return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
@@ -2078,7 +2113,7 @@ router.post('/:id/verdict', async (req, res) => {
         // it in would resolve (and release the hold of) evidence the
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
-          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
+          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

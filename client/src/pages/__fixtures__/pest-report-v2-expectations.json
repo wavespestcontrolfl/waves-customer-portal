@@ -90,32 +90,43 @@
       "monthName": "July",
       "locationLabel": "Parrish, FL",
       "weatherSummary": "Hot and humid with daily storms",
-      "headline": "Ant and mosquito pressure typically peaks in late July.",
-      "disclaimer": "Seasonal outlook based on regional trends.",
+      "headline": "Warm, wet weather puts the modeled ant outlook above the usual July baseline.",
+      "disclaimer": "A seasonal and weather-based model, not a measurement of pest activity.",
       "pests": [
         {
           "key": "ghost_ant",
           "label": "Ghost ants",
           "emoji": null,
           "level": "high",
-          "trend": "rising",
-          "note": "Rain pushes trails indoors."
+          "trend": "up",
+          "note": "Rain pushes trails indoors.",
+          "baselineComparison": "above",
+          "weekOverWeek": {
+            "direction": "down",
+            "delta": -1,
+            "previous_date": "2026-07-08",
+            "current_date": "2026-07-15"
+          }
         },
         {
           "key": "mosquito",
           "label": "Mosquitoes",
           "emoji": null,
           "level": "high",
-          "trend": "steady",
-          "note": "Standing water after storms."
+          "trend": "flat",
+          "note": "Standing water after storms.",
+          "baselineComparison": "near",
+          "weekOverWeek": null
         },
         {
           "key": "spider",
           "label": "Spiders",
           "emoji": null,
           "level": "moderate",
-          "trend": "steady",
-          "note": null
+          "trend": "flat",
+          "note": null,
+          "baselineComparison": "near",
+          "weekOverWeek": null
         }
       ]
     },
@@ -129,13 +140,13 @@
       "spiders": {
         "headline": "Spiders",
         "whatWeDid": "We knocked down webs and treated the eaves and entry points where spiders build.",
-        "expectation": "New webs can appear within days as new spiders arrive from outside — that's normal. The residual we applied kills spiders that land on treated eaves and entry points, so webbing should noticeably thin out over about two weeks.",
+        "expectation": "New webs can appear within days as new spiders arrive from outside \u2014 that's normal. The residual we applied kills spiders that land on treated eaves and entry points, so webbing should noticeably thin out over about two weeks.",
         "nextStep": "If it hasn't thinned out by then, text us and we'll come take another look."
       },
       "whatToExpect": {
         "lines": [
-          "Non-repellent products (like what we used) work by transfer — ants may show up more for a few days as they carry it back to the colony, then drop off over about 1–2 weeks.",
-          "The barrier treatment keeps working after it's applied, but a few insects can still wander in and die near doors and windows for about 10–14 days."
+          "Non-repellent products (like what we used) work by transfer \u2014 ants may show up more for a few days as they carry it back to the colony, then drop off over about 1\u20132 weeks.",
+          "The barrier treatment keeps working after it's applied, but a few insects can still wander in and die near doors and windows for about 10\u201314 days."
         ]
       }
     }

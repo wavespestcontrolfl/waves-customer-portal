@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { TrendingUp } from 'lucide-react';
-import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, loadStaffOfflinePass, saveStaffOfflinePass } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
+import { installStaffSessionGuard } from '../lib/staffSessionGuard';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
@@ -33,11 +34,21 @@ const NAV_ITEMS = [
   { path: '/tech/pay-growth', icon: <TrendingUp aria-hidden="true" />, label: 'Growth', payGrowth: true },
 ];
 
+export const AUTH_CHECK_TIMEOUT_MS = 15000;
+
 export default function TechLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [techName, setTechName] = useState('Tech');
   const [techRole, setTechRole] = useState(null);
+  // The profile this shell verified (or, offline, the stored one it trusted).
+  // Pages read identity from here, so a failed profile cache write cannot
+  // leave them without the signed-in tech's id.
+  const [staffProfile, setStaffProfile] = useState(null);
+  // Bumped when a verification answer arrives for a token that is no longer
+  // the stored one (another tab signed in): the check reruns for the new
+  // login instead of applying the old login's answer.
+  const [verifyRun, setVerifyRun] = useState(0);
   const [authStatus, setAuthStatus] = useState(() => (
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
@@ -58,14 +69,37 @@ export default function TechLayout() {
       localStorage.removeItem('waves_admin_token');
       localStorage.removeItem('adminToken');
       localStorage.removeItem('waves_admin_user');
+      clearStaffDeviceData();
     };
     const loginDestination = `${location.pathname}${location.search}`;
+    // A verification that never answers (dead zone) must not hold the shell
+    // on "Verifying…" forever: cut it off and let the offline fallback below
+    // decide. Headers and body share the one bound.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), AUTH_CHECK_TIMEOUT_MS) : null;
 
+    // Only a failure to REACH the server (or to receive the 2xx body) may
+    // fall back to the stored profile; it is tagged `transport` here. Any
+    // other error — including the profile cache write below — keeps the
+    // verification error.
+    const transport = (err) => Object.assign(err instanceof Error ? err : new Error('Staff check failed'), { transport: true });
     fetch(`${API_BASE}/admin/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
+      ...(abort ? { signal: abort.signal } : {}),
     })
       .then(async (response) => {
-        const profile = await response.json().catch(() => null);
+        // Body-read failures split on the status the server already sent:
+        //   - non-2xx: the server rejected; keep the status so a 401 whose
+        //     body times out still clears the session below.
+        //   - 2xx: the session was accepted but the answer never arrived
+        //     (stall, connection dropped mid-body). That is weak signal, not
+        //     an invalid profile — no status, so the stored-profile fallback
+        //     applies and the valid session is NOT cleared.
+        const profile = await response.json().catch((bodyErr) => {
+          if (response.ok) throw transport(Object.assign(new Error('Staff profile unreadable'), { name: bodyErr?.name || 'Error' }));
+          if (bodyErr?.name === 'AbortError') throw Object.assign(bodyErr, { status: response.status });
+          return null;
+        });
         if (!response.ok) {
           const error = new Error(profile?.error || 'Unable to verify staff access');
           error.status = response.status;
@@ -81,18 +115,30 @@ export default function TechLayout() {
           throw error;
         }
         if (cancelled) return;
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
 
-        localStorage.setItem('waves_admin_user', JSON.stringify(profile));
+        // The freshly verified profile is what renders; a failed cache write
+        // (quota, private mode) must not drop to the stored — possibly
+        // another login's — profile. The stale copy is removed instead so an
+        // offline reopen cannot unlock from it.
+        try {
+          localStorage.setItem('waves_admin_user', JSON.stringify(profile));
+        } catch {
+          try { localStorage.removeItem('waves_admin_user'); } catch { /* storage unavailable */ }
+        }
+        saveStaffOfflinePass(token, profile);
         setTechName(profile.name || getAdminDisplayName('Tech'));
         setTechRole(profile.role);
+        setStaffProfile(profile);
         if (profile.mustChangePassword) {
           navigate('/admin/change-password', { replace: true });
           return;
         }
         setAuthStatus('ready');
-      })
+      }, (fetchErr) => { throw transport(fetchErr); })
       .catch((error) => {
         if (cancelled) return;
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (error?.status === 401 || error?.invalidProfile) {
           clearStaffAuth();
           setAuthStatus('unauthenticated');
@@ -102,13 +148,70 @@ export default function TechLayout() {
           });
           return;
         }
+        // No answer at all (dead zone, DNS, airplane mode, or the bound
+        // above firing): a transport failure with no HTTP status. The shell
+        // may open from the offline pass a previous /admin/auth/me wrote for
+        // THIS token while it is unexpired (lib/adminAuth); the route page
+        // then shows its saved copy. A server answer of any kind (401 above,
+        // 5xx here), no pass, another token's pass, an expired token or a
+        // forced reset keep the verification error.
+        const stored = error?.transport === true && error?.status === undefined ? loadStaffOfflinePass(token) : null;
+        if (stored) {
+          setTechName(stored.name || getAdminDisplayName('Tech'));
+          setTechRole(stored.role);
+          setStaffProfile(stored);
+          setAuthStatus('ready');
+          return;
+        }
         setAuthStatus('error');
-      });
+      })
+      .finally(() => { if (timer) clearTimeout(timer); });
 
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [navigate]);
+  }, [navigate, verifyRun]);
+
+  // Another tab signing in or out changes the stored token under this shell.
+  // Drop the identity verified for the old token at once — the outlet (and
+  // the route page with it) unmounts while 'checking' — and verify the new
+  // one, so no read or save runs under one login's id with another's token.
+  // (A switch in this tab goes through /admin/login, which unmounts the shell.)
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== 'waves_admin_token') return;
+      setStaffProfile(null);
+      setTechRole(null);
+      setAuthStatus(getAdminAuthToken() ? 'checking' : 'unauthenticated');
+      setVerifyRun((n) => n + 1);
+      // Feature flags are per user: drop the old login's cached set so the
+      // remounted shell waits for the new login's flags.
+      Promise.resolve().then(refetchFlags).catch(() => {});
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  // Any staff API call on these screens that the server answers with 401
+  // for the current token ends the session here, whichever handler made it:
+  // token, stored profile and saved route go, so an offline reopen cannot
+  // unlock the shell from a session the server already refused.
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  useEffect(() => installStaffSessionGuard({
+    getToken: getAdminAuthToken,
+    onRejected: () => {
+      localStorage.removeItem('waves_admin_token');
+      localStorage.removeItem('adminToken');
+      localStorage.removeItem('waves_admin_user');
+      clearStaffDeviceData();
+      setAuthStatus('unauthenticated');
+      Promise.resolve().then(refetchFlags).catch(() => {});
+      const { pathname, search } = locationRef.current;
+      navigate(`/admin/login?next=${encodeURIComponent(`${pathname}${search}`)}`, { replace: true });
+    },
+  }), [navigate]);
 
   // While in the tech portal, point the PWA manifest + home-screen title at
   // the field app. The default manifest pins start_url to "/" (the customer
@@ -237,7 +340,7 @@ export default function TechLayout() {
   };
 
   return (
-    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
+    <TechFieldShell techName={techName} techRole={techRole} staffProfile={staffProfile} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -283,7 +386,7 @@ export default function TechLayout() {
         <AddToHomeScreenHint />
         {pathname === '/tech/documents' && !controlledDocumentsAvailable
           ? <p style={{ fontSize: 14, color: DARK.text }}>Staff documents are unavailable.</p>
-          : <Outlet />}
+          : <Outlet context={{ staffProfile }} />}
       </main>
 
       {/* Bottom nav */}

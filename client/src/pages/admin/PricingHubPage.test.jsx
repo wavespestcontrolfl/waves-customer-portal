@@ -37,6 +37,13 @@ vi.mock("./PricingStrategyPage", () => ({
 vi.mock("./AdminPriceChangePage", () => ({
   default: () => <div>Price notices workspace</div>,
 }));
+// The Rate review area is dark behind GATE_RATE_REVIEW: the hub asks the
+// probe hook and shows the area only on 'on'.
+const mockRateReviewGate = vi.fn(() => "off");
+vi.mock("./RateReviewPage", () => ({
+  default: () => <div>Rate review workspace</div>,
+  useRateReviewAvailable: (enabled) => mockRateReviewGate(enabled),
+}));
 
 import PricingHubPage from "./PricingHubPage";
 
@@ -44,6 +51,8 @@ afterEach(cleanup);
 beforeEach(() => {
   mockGetAdminUser.mockReset();
   mockGetAdminUser.mockReturnValue({ role: "admin" });
+  mockRateReviewGate.mockReset();
+  mockRateReviewGate.mockReturnValue("off");
 });
 
 function LocationProbe() {
@@ -125,5 +134,45 @@ describe("PricingHubPage", () => {
     expect(screen.getByText("Strategy workspace")).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Pricing section" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Pricing" })).toBeInTheDocument();
+  });
+});
+
+describe("PricingHubPage — Rate review area (GATE_RATE_REVIEW)", () => {
+  it("does not exist while the gate is off: no tab, and the ops-email deep link falls back to Logic", () => {
+    renderHub("/admin/pricing-logic?area=rate-review&batch=2027-01");
+
+    expect(mockRateReviewGate).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole("button", { name: "Rate review" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Rate review workspace")).not.toBeInTheDocument();
+    expect(screen.getByText("Logic workspace")).toBeInTheDocument();
+  });
+
+  it("appears once the probe says on, and the deep link keeps ?batch=", () => {
+    mockRateReviewGate.mockReturnValue("on");
+    renderHub("/admin/pricing-logic?area=rate-review&batch=2027-01");
+
+    expect(screen.getByRole("button", { name: "Rate review" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("Rate review workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Logic workspace")).not.toBeInTheDocument();
+    expect(screen.getByTestId("location-search")).toHaveTextContent("?area=rate-review&batch=2027-01");
+  });
+
+  it("holds the deep link while the probe is pending instead of flashing Logic", () => {
+    mockRateReviewGate.mockReturnValue("pending");
+    renderHub("/admin/pricing-logic?area=rate-review");
+
+    expect(screen.getByText("Loading pricing…")).toHaveAttribute("role", "status");
+    expect(screen.queryByText("Logic workspace")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rate review" })).not.toBeInTheDocument();
+  });
+
+  it("never probes for a technician and never shows the area to one", () => {
+    mockGetAdminUser.mockReturnValue({ role: "tech" });
+    mockRateReviewGate.mockReturnValue("on");
+    renderHub("/admin/pricing-logic?area=rate-review");
+
+    expect(mockRateReviewGate).toHaveBeenCalledWith(false);
+    expect(screen.queryByRole("button", { name: "Rate review" })).not.toBeInTheDocument();
+    expect(screen.getByText("Logic workspace")).toBeInTheDocument();
   });
 });

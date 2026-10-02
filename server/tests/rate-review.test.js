@@ -38,6 +38,14 @@ afterEach(() => {
   process.env.GATE_RATE_REVIEW = 'true';
   jest.clearAllMocks();
 });
+// buildBatch runs its whole recompute inside one transaction (the batch
+// lock is held from the first read), and getBatch reads in one snapshot:
+// every test goes through db.transaction, dispatching to the scenario the
+// test scripted (a stale implementation from an earlier test would read
+// that test's book).
+beforeEach(() => {
+  db.transaction.mockImplementation((fn) => fn(db));
+});
 
 // ── band math ───────────────────────────────────────────────────────────
 
@@ -1728,7 +1736,8 @@ describe('buildBatch over the synthetic December book', () => {
       expect(row.status).toBe('exception');
       expect(JSON.parse(row.flags)).toContain('reviewed_within_12mo');
       // the read itself is keyed on batch months, exclusive at 12 back
-      const snapshotReads = db.mock.calls.filter(([t]) => t === 'rate_review_snapshots');
+      // the build reads on its transaction connection (the batch lock is held for the whole recompute)
+      const snapshotReads = reviewed.mock.calls.filter(([t]) => t === 'rate_review_snapshots');
       expect(snapshotReads.length).toBeGreaterThan(0);
       const priorCall = reviewed.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([name, args]) => name === 'where' && args[0] === 'batch_key' && args[1] === '>'));
       expect(priorCall).toBeDefined();
@@ -1871,8 +1880,60 @@ describe('runMonthlyRateReview', () => {
     // no batch row at all → nothing to describe, nothing sent
     const empty = fixture.scriptedDb({ priorReviews: [], batchRow: null });
     db.mockImplementation((table) => empty(table));
+    db.transaction.mockImplementation((fn) => empty.transaction(fn)); // getBatch reads the batch and its rows in one snapshot
     expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
   });
+  test('an owner decision that lands while the tick ranks leaves the batch standing: the commit re-judges the flags under the lock and the digest goes out without a rebuild', async () => {
+    const book = fixture.decemberBook();
+    const scenario = {
+      planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: book.ledger,
+      // an unsent batch built on day 1 …
+      batchRow: { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' }, batchStampRows: 1,
+      // … the tick's pre-check sees no decision; by the time the commit holds the lock the owner has edited a row
+      ownerDecisionReads: [[], [{ status: 'green', flags: '["admin_edited"]' }], [{ status: 'green', flags: '["admin_edited"]' }]],
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out).toMatchObject({ ok: true, batchKey: '2026-11', rebuilt: false, rows: 1, emailed: true });
+    expect(out.email.sent).toBe(true);
+    // the ranking ran (the pre-check saw nothing) but nothing was replaced: the decision stands
+    expect(scripted.writes.snapshotInserts).toHaveLength(0);
+    expect(scripted.writes.snapshotDeletes).toBe(0);
+    expect(scripted.writes.batchUpserts).toHaveLength(0);
+    expect(scripted.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2026-11']);
+    expect(scenario.ownerDecisionReads).toHaveLength(0); // the pre-check, the check under the lock, the standing batch's count
+  });
+
+  test('an approval that lands while the tick ranks leaves the batch standing too: the refusal under the lock is a decision, the digest goes out without a rebuild', async () => {
+    const book = fixture.decemberBook();
+    const scenario = {
+      planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: book.ledger,
+      batchRow: { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' }, batchStampRows: 1,
+      // the early refusal sees no sent / approved rows; under the commit lock an approval has landed
+      refusalCounts: [0, 0, 0, 1],
+      // the pre-check sees no decision; the standing batch's count afterwards sees the approved row
+      ownerDecisionReads: [[], [{ status: 'approved', flags: '[]' }]],
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out).toMatchObject({ ok: true, batchKey: '2026-11', rebuilt: false, rows: 1, emailed: true });
+    expect(scripted.writes.snapshotInserts).toHaveLength(0);
+    expect(scripted.writes.snapshotDeletes).toBe(0);
+    expect(scripted.writes.batchUpserts).toHaveLength(0);
+    expect(scenario.refusalCounts).toHaveLength(0);
+    expect(scenario.ownerDecisionReads).toHaveLength(0);
+  });
+
   test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {
     const book = fixture.decemberBook();
     const make = () => {

@@ -37,6 +37,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
+import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import {
@@ -47,6 +48,7 @@ import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDi
 import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constants/retiredSaleLabels';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
+import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -3957,7 +3959,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
+  // availability strip (days around the chosen date) instead.
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+    summary: true,
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -4436,9 +4441,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
           assertSubmitCurrent();
           assertManualPrepayMintEligible({ fresh, manualPrepay });
-          const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
-            method: 'POST',
-            body: JSON.stringify(fresh.mintPayload),
+          // A noticed-amount 409 that lands after the modal closed (or the
+          // customer changed) neither asks nor resends: the submit lifetime
+          // is rechecked before the confirm and before the retry.
+          const minted = await sendWithNoticedAmountConfirm((ack) => {
+            if (ack.acknowledgeNoticedAmount) assertSubmitCurrent();
+            return adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+              method: 'POST',
+              body: JSON.stringify({ ...fresh.mintPayload, ...ack }),
+            });
+          }, (message) => {
+            assertSubmitCurrent();
+            return window.confirm(message);
           });
           assertSubmitCurrent();
           // Advisory notes from the mint (e.g. the promised first visit overlaps
@@ -4450,14 +4464,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           showSubmitFeedback({ alertText: outcome.blockingAlert });
         } catch (e) {
           assertSubmitCurrent();
-          // Loud, never silent: the appointment IS booked, so the operator must
-          // know the year was not invoiced and where to finish it.
-          // Deliberately NOT "the invoice was not created": the mint commits the
-          // invoice and term, sends, and only then writes its audit row, so a
-          // 500 (or a lost response) can mean the customer already HAS the
-          // invoice. Telling the operator to mint another would double-bill the
-          // year (Codex #3161 r3 P2).
-          alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+          // Staff declined the noticed-amount confirm: the mint wrote nothing.
+          if (e?.code === NOTICED_AMOUNT_DECLINED) {
+            alert(`Appointment booked. The annual prepay invoice was not created: ${e.message}\n\nCreate it from Customer 360 → Annual prepay.`);
+          } else {
+            // Loud, never silent: the appointment IS booked, so the operator must
+            // know the year was not invoiced and where to finish it.
+            // Deliberately NOT "the invoice was not created": the mint commits the
+            // invoice and term, sends, and only then writes its audit row, so a
+            // 500 (or a lost response) can mean the customer already HAS the
+            // invoice. Telling the operator to mint another would double-bill the
+            // year (Codex #3161 r3 P2).
+            alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+          }
         }
       }
       // A prepaid year is NOT billed per service report — say what actually
@@ -6358,7 +6377,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               }
             }}
           />
-          <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
+          <SlotConflictNotice
+            // The strip states the route problem itself; the
+            // double-booking notice (no `warning`) always stays.
+            conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
+              ? (slotConflicts || []).filter((conflict) => !conflict.warning)
+              : slotConflicts}
+            style={{ marginBottom: 10 }}
+          />
+          <AvailabilityStrip
+            availability={availability}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
+            currentStart={windowStart}
+            currentTechnicianId={techMode === 'choose' ? techId : null}
+            onPick={(slot) => {
+              // Same adoption as the hint chips: the hour was scored for
+              // one technician, so taking it books that technician.
+              setApptDate(slot.date);
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            style={{ marginBottom: 10 }}
+          />
           <BestTimeHint
             bestTimes={bestTimes}
             picked={picked}

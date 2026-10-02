@@ -18,6 +18,7 @@ const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, c
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
+const { loadVisitLoops, emptyVisitLoops } = require('./visit-loops-facts');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -54,8 +55,24 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
 // masked. Over-redaction is the safe direction for access text; the keyword
 // words themselves stay legible.
-const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
-const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
+// "A combination of ants and roaches" is a pest complaint, not a credential.
+// combo / combination is an access word EXCEPT in that one affirmative form
+// — "of" followed by a pest name (Codex #5542 r13: an allowlist of access
+// points always misses one, e.g. "the combination of my backyard fence").
+// One source for every screen: this module's token passes, the comms scrub
+// (completion-comms-context.js) and the re-service card's location filter.
+// The digit passes above still key on the bare word.
+const COMBINATION_PEST_NAME = '(?:pests?|bugs?|insects?|critters?|(?:fire\\s+)?ants?|roach(?:es)?|cockroach(?:es)?|spiders?|rodents?|rats?|mice|termites?|fleas?|ticks?|mosquito(?:e?s)?|wasps?|bees?|hornets?|fl(?:y|ies)|gnats?|beetles?|silverfish|crickets?|centipedes?|millipedes?|scorpions?|earwigs?|moths?|weevils?|lizards?|frogs?|snakes?|squirrels?|raccoons?)';
+const COMBINATION_NOUN = `(?:combo|combination)s?(?!\\s+of\\s+(?:the\\s+|these\\s+|those\\s+|both\\s+|several\\s+|different\\s+|two\\s+|three\\s+)?${COMBINATION_PEST_NAME}\\b)`;
+const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
+const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
+const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');
+// …but "combination of" next to ANY access point in the same segment ("blue
+// is the combination of the side gate") is a credential again (Codex r11).
+const BARE_COMBINATION_RE = /\b(?:combo|combination)s?\b/i;
+const COMBINATION_ACCESS_POINT_RE = /\b(?:gates?|garage|doors?|locks?|padlocks?|lock\s*box(?:es)?|lockbox(?:es)?|keypads?|sheds?|safe|entry|entrance)\b/i;
+const accessCodeNounIn = (seg) => ACCESS_CODE_NOUN_RE.test(seg)
+  || (BARE_COMBINATION_RE.test(seg) && COMBINATION_ACCESS_POINT_RE.test(seg));
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
 // Lowercase credentials (Codex r7: "gate code blue", "the gate code is
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
@@ -96,7 +113,7 @@ function redactAccessCodes(text) {
   }
   // Alphanumeric credential pass, per sentence-ish segment.
   out = out.split(/([.;\n])/).map((seg) => {
-    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
+    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !accessCodeNounIn(seg)) return seg;
     let masked = seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
       ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
     ));
@@ -1064,7 +1081,7 @@ class ContextAggregator {
   // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
   // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false } = {}) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
@@ -1332,7 +1349,7 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
-    return {
+    const context = {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
       // where this is built) — [{ minutes, scheduledServiceIds }], never
@@ -1479,6 +1496,29 @@ class ContextAggregator {
       sourceHealth: { recentCalls: recentCalls === null ? 'unavailable' : 'ok' },
       summary,
     };
+    // Visit status + open loops (live tech position, lateness, missed visit,
+    // promises we owe, asks still waiting): read-only facts the drafter needs.
+    // Non-enumerable, like scheduledServiceId above: this context is serialized
+    // whole into other LLM-visible payloads (managed assistant snapshot, email
+    // reply facts, lead-response tool results), and raw tech notes / open
+    // promise text must only reach the one prompt that renders them (the SMS
+    // drafter reads the property directly). Never throws; a failed field is
+    // null/[].
+    // Read only while GATE_SMS_REAL_ANSWERS is on: the SMS drafter is the one
+    // renderer, and a dark feature must not add queries to every context build.
+    let visitLoops = emptyVisitLoops();
+    // ...and only for the SMS drafting call sites that opt in (includeVisitLoops):
+    // email replies, briefs and assistant snapshots never read it.
+    if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+      try {
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
+      } catch (err) {
+        logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
+        visitLoops = emptyVisitLoops();
+      }
+    }
+    Object.defineProperty(context, 'visitLoops', { value: visitLoops, enumerable: false, writable: true, configurable: true });
+    return context;
   }
 
   // Last few phone calls that produced an AI summary (call-recording-processor
@@ -1490,7 +1530,7 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false } = {}) {
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1500,6 +1540,20 @@ class ContextAggregator {
         // v10: 60-day window, 4 calls — customers reference calls older than
         // a month ("when we talked last month about the ants…").
         .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
+        // Optional upper bound (the review-ask writer scopes calls to a visit)
+        // applied before the limit below, so later calls can't crowd it out.
+        .modify((qb) => { if (before) qb.where('created_at', '<', before); })
+        // Optional caller identity (the review-ask writer: the recipient's own
+        // number only), applied before the limit and the transcript pick, so
+        // another household contact's calls can't crowd theirs out.
+        .modify((qb) => {
+          const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+          if (!phone) return;
+          if (digits.length !== 10) { qb.whereRaw('1 = 0'); return; }
+          qb.where((w) => w
+            .where((x) => x.whereRaw("direction ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]))
+            .orWhere((x) => x.whereRaw("coalesce(direction, '') NOT ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])));
+        })
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is
@@ -1515,7 +1569,7 @@ class ContextAggregator {
         // SQL throws on any malformed row), and a filtered row must not
         // silently shrink the pick below 4 real calls.
         .limit(10)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status');
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status', 'from_phone', 'to_phone');
       const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
       // v10: the NEWEST call also carries its transcript (owner directive:
       // the drafter should see what was actually said, not only the
@@ -1700,6 +1754,7 @@ class ContextAggregator {
 module.exports = new ContextAggregator();
 module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
 module.exports.redactAccessCodes = redactAccessCodes;
+module.exports.COMBINATION_NOUN = COMBINATION_NOUN;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;

@@ -56,6 +56,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
     chain.first = async () => table === 'customer_properties' ? selected : query.max ? { max: 3 } : filtered()[0];
     chain.then = (resolve, reject) => Promise.resolve(filtered()).then(resolve, reject);
     chain.update = async (patch) => { query.patch = patch; return result.length; };
+    chain.del = async () => { query.deleted = true; return 0; };
     return chain;
   });
   conn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -77,6 +78,17 @@ test.each(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'cancelle
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ trx: conn, critical: true }));
 });
 
+test('a visit that moves to another property drops its trace; one already there keeps it (Codex #5538)', async () => {
+  const rows = [row, { ...row, id: 'row-b', recurring_parent_id: row.id, is_recurring: false, property_id: property.id }];
+  const conn = connection({ rows });
+  const plan = await planAppointmentAddress(conn, row.id, property.id);
+  await applyAppointmentAddress(conn, plan, 'admin-a');
+  const traces = conn.calls.filter((call) => call.table === 'treatment_zone_maps');
+  expect(traces).toHaveLength(1);
+  expect(traces[0].filters).toContainEqual(['whereIn', 'scheduled_service_id', [row.id]]);
+  expect(traces[0].deleted).toBe(true);
+});
+
 test('rejects an unavailable or foreign property before any write', async () => {
   const conn = connection({ selected: undefined });
   // Explicit null represents the owner-filtered lookup finding no row.
@@ -92,7 +104,7 @@ test('concurrent property or status changes refuse the stale plan', async () => 
   const plan = await planAppointmentAddress(connection(), row.id, property.id);
   const changed = connection({ rows: [{ ...row, property_id: 'another' }] });
   await expect(applyAppointmentAddress(changed, plan, 'admin-a')).rejects.toMatchObject({ statusCode: 409 });
-  expect(changed.calls.some((call) => call.patch)).toBe(false);
+  expect(changed.calls.some((call) => call.patch || call.deleted)).toBe(false);
 });
 
 test('grouped stops retain membership and get a unique destination identity', async () => {

@@ -113,6 +113,7 @@ const {
   resolvePrepayChargeMethod,
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,
+  resolvePrepayRecoveryAuthorization,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
   verifyRecurringCardIntentUnderLock,
@@ -469,6 +470,43 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     test('a null/undefined result (an unresolved fence, or the catch path): neither settled nor delivered nor credit-covered', () => {
       expect(classifyDeliveryOutcome(null)).toEqual({ settled: false, delivered: false, creditCovered: false });
       expect(classifyDeliveryOutcome(undefined)).toEqual({ settled: false, delivered: false, creditCovered: false });
+    });
+  });
+
+  // codex #5434 r1 P1 (pre-push hook r3): a stranded prepay job recovers
+  // under the authorization the customer actually gave — the consent text
+  // version the accept attested rides the job.
+  describe('resolvePrepayRecoveryAuthorization', () => {
+    const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+    const JOB = { stripe_payment_method_id: 'pm_job', authorized_at: '2026-09-30T20:00:00.000Z', created_at: '2026-09-30T20:00:01.000Z' };
+
+    it('a job attesting the CURRENT version may (re)record the prepay authorization from the current copy', async () => {
+      await expect(resolvePrepayRecoveryAuthorization({ ...JOB, consent_text_version: CONSENT_VERSION }, 'cust-1')).resolves.toEqual({ recordable: true, version: CONSENT_VERSION });
+      expect(mockHasConsentSnapshotForVariant).not.toHaveBeenCalled();
+    });
+
+    it("a job attesting an OLDER version proceeds only on the customer's own row recorded under THAT version — never a current-version record", async () => {
+      mockHasConsentSnapshotForVariant.mockResolvedValueOnce(true);
+      await expect(resolvePrepayRecoveryAuthorization({ ...JOB, consent_text_version: 'v11_2026-08-25' }, 'cust-1')).resolves.toEqual({ recordable: false, version: 'v11_2026-08-25' });
+      expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_job', expect.objectContaining({
+        source: 'estimate_accept', variant: 'prepay_card', version: 'v11_2026-08-25', since: new Date('2026-09-30T20:00:00.000Z'),
+      }));
+    });
+
+    it('a job written before versions were persisted looks the row up under ANY version', async () => {
+      mockHasConsentSnapshotForVariant.mockResolvedValueOnce(true);
+      await expect(resolvePrepayRecoveryAuthorization({ ...JOB }, 'cust-1')).resolves.toEqual({ recordable: false, version: null });
+      expect(mockHasConsentSnapshotForVariant).toHaveBeenCalledWith('cust-1', 'pm_job', expect.objectContaining({ source: 'estimate_accept', variant: 'prepay_card', anyVersion: true }));
+      expect(mockHasConsentSnapshotForVariant.mock.calls[0][2]).not.toHaveProperty('version');
+    });
+
+    it.each([
+      ['an older version', 'v11_2026-08-25'],
+      ['no version', undefined],
+    ])('%s with NO authorization row throws into the pay-link fallback (nothing recorded)', async (_name, consent_text_version) => {
+      mockHasConsentSnapshotForVariant.mockResolvedValueOnce(false);
+      await expect(resolvePrepayRecoveryAuthorization({ ...JOB, consent_text_version }, 'cust-1')).rejects.toThrow(/no longer current and no authorization row exists/);
+      expect(mockRecordConsent).not.toHaveBeenCalled();
     });
   });
 

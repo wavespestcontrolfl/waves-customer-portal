@@ -115,10 +115,15 @@ function normalizeReplyForComparison(value) {
 async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
-    const decision = await db('agent_decisions as ad')
-      .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-      .leftJoin('customers as c', 'ad.customer_id', 'c.id')
-      .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
+    // A scheduling card whose gate was rolled back is not sendable either
+    // (GATE_SMS_SCHEDULING_SUGGEST); it reads as no pending decision.
+    const decision = await require('../services/sms-suggest-mode').excludeGatedSchedulingSuggestions(
+      db('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+        .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' }),
+      'ad',
+    )
       .select(
         'ad.id',
         'ad.customer_id',
@@ -1099,6 +1104,8 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
+      // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
         providerPreSendCheck: (() => {
@@ -1106,6 +1113,7 @@ router.post('/sms', async (req, res, next) => {
           return checks.composeProviderPreSendChecks(
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
           );
         })(),
       } : {}),
@@ -2214,6 +2222,8 @@ router.get('/agent-draft', async (req, res, next) => {
     // pending house-voice cards must stop surfacing too — not just stop
     // being created.
     if (!isEnabled('smsSuggestMode')) q = q.whereNot('ad.workflow', SUGGEST_WORKFLOW);
+    // Same for scheduling cards when GATE_SMS_SCHEDULING_SUGGEST is rolled back.
+    q = require('../services/sms-suggest-mode').excludeGatedSchedulingSuggestions(q, 'ad');
 
     q = q
       .select(

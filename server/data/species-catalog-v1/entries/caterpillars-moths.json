@@ -1558,7 +1558,6 @@
       12
     ],
     "peak_months": [
-      3,
       4,
       5,
       8,
@@ -1584,12 +1583,13 @@
     },
     "legacy_slugs": [],
     "sources": [
-      "https://ask.ifas.ufl.edu/in165"
+      "https://ask.ifas.ufl.edu/in165",
+      "https://ask.ifas.ufl.edu/publication/CG098"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "618dd625684893a74183e8db68469984a7df5d61aff15adb69264118ad4ebf2b"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "89542da31e6f4e1e1c16a0b7e37436eeb6bb1845764cc3db503f868e75317304"
     },
     "role": "plant_pest",
     "risk": "low",

@@ -24,6 +24,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import BestTimeHint from './BestTimeHint';
+import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import SeriesMoveNotice from './SeriesMoveNotice';
 import {
   SERIES_ACK_REQUIRED,
@@ -116,7 +117,10 @@ export default function RescheduleConfirmModal({
   // window is fixed by the drop, so the chips carry no onPick (cancel and
   // re-drop to take a suggestion). If the drop IS a best time, its chip
   // shows as selected.
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
+  // availability strip (days around the landing date) instead.
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+    summary: true,
     arrivalWindows: true,
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     serviceId: serviceId != null ? serviceId : undefined,
@@ -266,7 +270,16 @@ export default function RescheduleConfirmModal({
             </p>
           )}
 
-          <SlotConflictNotice conflicts={conflicts} />
+          <SlotConflictNotice
+            // The strip states the route problem itself; the
+            // double-booking notice (no `warning`) always stays.
+            conflicts={stripCoversRouteWarning(availability, { currentDate: toDate, currentStart: toStart })
+              ? (conflicts || []).filter((conflict) => !conflict.warning)
+              : conflicts}
+          />
+          {/* Display-only like the hint: the drop fixes the window, so the
+              chips carry no onPick (cancel and re-drop to take one). */}
+          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} />
           <BestTimeHint bestTimes={bestTimes} picked={picked} bestInRange={bestInRange} currentStart={toStart} currentDate={toDate} />
         </div>
 

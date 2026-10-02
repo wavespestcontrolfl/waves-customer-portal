@@ -251,6 +251,11 @@ function recapServiceIdentity(svc, profile) {
     // schedule row (the tech Fast Complete sheet) can confirm this is
     // still the visit type it was opened for.
     serviceKey: profile?.serviceKey || null,
+    // A free callback booked under a regular service key: the Fast Complete
+    // report flow treats it as the re-service it is (no pay link, no review
+    // ask), so that flow echoes it back and a visit the office changed to or
+    // from a callback meanwhile is refused (recapVisitIdentityChanged).
+    isCallback: svc.is_callback === true,
   };
 }
 
@@ -442,6 +447,9 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
+  // Whether it is a free callback decides the pay link and the review ask
+  // the client sends, so a change to it is a changed visit.
+  if ('isCallback' in expected && (expected.isCallback === true) !== (locked.is_callback === true)) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};
@@ -572,7 +580,10 @@ async function submitRecap({
         'customer_id', 'property_id',
         // Stamped visit address + coords feed the report identity snapshot.
         'service_address_line1', 'service_address_line2', 'service_address_city',
-        'service_address_state', 'service_address_zip', 'lat', 'lng');
+        'service_address_state', 'service_address_zip', 'lat', 'lng',
+        // The customer's booking words freeze onto the record here too
+        // (reservice-report-card.js), same as the /complete path.
+        'customer_request', 'customer_request_source', 'customer_request_pests');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -891,6 +902,15 @@ async function submitRecap({
         // completion-time identity and replaces it (pre-push codex P1).
         if (existing.status !== COMPLETED_STATUS) {
           missing.reportIdentitySnapshot = reportIdentitySnapshot;
+          // The booking words freeze with the completion, fill-if-absent,
+          // and only when THIS recap performs the completion transition
+          // (the locked scheduled row was not already completed): a recap
+          // re-submit on history never freezes today's booking words.
+          const frozenRequest = recapPriorCompleted ? null
+            : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+          if (frozenRequest && !Object.prototype.hasOwnProperty.call(existingData, 'reserviceRequest')) {
+            missing.reserviceRequest = frozenRequest;
+          }
         }
         if (Object.keys(missing).length) {
           mergedServiceData = JSON.stringify({ ...existingData, ...missing });
@@ -985,7 +1005,19 @@ async function submitRecap({
         ...(closeoutSnap && serviceRecordCols.structured_notes
           ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
           : {}),
-        service_data: JSON.stringify({ ...frozenTraceIdentity, reportIdentitySnapshot }),
+        service_data: JSON.stringify({
+          ...frozenTraceIdentity,
+          reportIdentitySnapshot,
+          // The customer's booking words, frozen with the completion like
+          // the /complete path (reservice-report-card.js).
+          // Only when this recap performs the completion: recreating a record
+          // for a visit already completed never freezes today's words.
+          ...(() => {
+            const frozenRequest = recapPriorCompleted ? null
+              : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+            return frozenRequest ? { reserviceRequest: frozenRequest } : {};
+          })(),
+        }),
         ...staffRatingFields,
         ...smsClaim,
         // completion_supplies_owed: this recap performs the completion

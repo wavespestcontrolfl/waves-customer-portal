@@ -191,6 +191,13 @@ const DEFAULTS = Object.freeze({
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
+  // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
+  // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
+  GEMINI_PHOTO_ID_PLANT: 'gemini-3.6-flash',
+  // App Photo ID pest engine (owner 2026-10-01, "lets just use Gemini"): on
+  // the owner's chinch bug photo 3.6 Flash named it 4/4 in ~1.7 s through
+  // the engine; 3.8 Flash gave chinch, seed bug and carpenter ant.
+  GEMINI_PHOTO_ID_PEST: 'gemini-3.6-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
   OPENAI_EMBEDDING: 'text-embedding-3-small',
@@ -311,6 +318,8 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
+const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
+const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
 // experimental third leg drafts with it so Gemini can be ranked against the
@@ -419,6 +428,7 @@ const MODEL_CATALOG = {
   'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.6-flash': { label: 'Gemini 3.6 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
   'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
@@ -582,6 +592,24 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
   }),
+  photoIdPestV2: Object.freeze({
+    name: 'photoIdPestV2',
+    // The customer app's Photo ID pest engine (photo-id-v2/pest-engine.js)
+    // only. Owner 2026-10-01: Gemini's one read answers; OpenAI stands in
+    // only when Gemini returns nothing. photoIdVision above keeps the v1
+    // surfaces (website funnel, SMS triage, admin) on 3.8 Flash.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
+  photoIdPlantV2: Object.freeze({
+    name: 'photoIdPlantV2',
+    // The customer app's lawn and tree/shrub/palm Photo ID (plant-engine.js
+    // with ladder 'gemini_only') only. Owner 2026-10-02: Gemini's one read
+    // answers; OpenAI stands in only when Gemini returns nothing usable.
+    // plantIdVision below keeps visit prep on its full ladder.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -684,6 +712,8 @@ module.exports = {
   EMBEDDING_DIMS,
   SMS_SONNET,
   GEMINI_VISION_BEST,
+  GEMINI_PHOTO_ID_PEST,
+  GEMINI_PHOTO_ID_PLANT,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,
   GEMINI_IMAGE_PRO,

@@ -53,6 +53,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { createTrackedShortLink } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
+const { estimateGreetingFirstToken } = require('../utils/greeting-first-name');
 // The shared pre-send guard stack. The SAME gate re-runs at approval time in
 // routes/admin-drafts.js, so every suppression this queue applies at draft
 // time automatically has its twin when the owner clicks approve.
@@ -381,7 +382,8 @@ async function runQueue(now = new Date()) {
       });
 
       const body = DRAFT_TEMPLATE
-        .replace('{first_name}', firstNameOf(est.customer_name))
+        // Shared greeting rule: a linked customer with no first name gets 'there', not the surname.
+        .replace('{first_name}', firstNameOf(await estimateGreetingFirstToken(db, est)))
         .replace('{estimate_url}', shortUrl);
 
       const ageHours = Math.max(1, Math.round((nowMs - new Date(c.clicked_at).getTime()) / 3600000));
