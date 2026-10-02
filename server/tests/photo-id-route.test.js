@@ -1343,7 +1343,7 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
       expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
       expect(mockIdentifyPestV2).toHaveBeenCalledWith(expect.arrayContaining([
         expect.objectContaining({ mimeType: 'image/jpeg' }),
-      ]));
+      ]), { ladder: 'gemini_only' }); // owner 2026-10-01: the app reads Gemini alone
       // v1 fields — same shape as today, unchanged by the client for a
       // v2-unaware caller.
       expect(body.id).toBeDefined();

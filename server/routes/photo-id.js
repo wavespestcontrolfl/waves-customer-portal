@@ -474,7 +474,8 @@ async function handlePest(req, res, {
     // permanent misconfiguration (no_route) behind what looks like a normal
     // v1 response, and would double the paid-vision spend on every transient
     // miss (v1 call AFTER the v2 call already ran).
-    const v2Result = await identifyPestV2(photoInputs);
+    // Owner 2026-10-01: the customer app answers from Gemini's one read.
+    const v2Result = await identifyPestV2(photoInputs, { ladder: 'gemini_only' });
     if (!v2Result.ok) {
       return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
     }
