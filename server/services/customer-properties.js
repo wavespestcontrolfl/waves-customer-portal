@@ -62,6 +62,16 @@ const STREET_SUFFIX_CANON = {
   blvd: 'boulevard', boulevard: 'boulevard', cir: 'circle', circle: 'circle',
   pl: 'place', place: 'place', ter: 'terrace', terrace: 'terrace', way: 'way',
   trl: 'trail', trail: 'trail', pkwy: 'parkway', parkway: 'parkway', hwy: 'highway', highway: 'highway',
+  // USPS forms added 2026-10-01: a call re-recorded a "... Gln" signup address
+  // as "... Glen" and minted a second property for one house. Changing this
+  // map changes stored keys: migration 20261001200000 recomputes them.
+  gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
+  xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
+  rdg: 'ridge', ridge: 'ridge', crk: 'creek', creek: 'creek', holw: 'hollow', hollow: 'hollow',
+  sq: 'square', square: 'square', bnd: 'bend', bend: 'bend', aly: 'alley', alley: 'alley',
+  vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
+  plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
+  mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
 };
 const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
@@ -89,18 +99,25 @@ const stripUnitDesignators = (s) => String(s || '')
   .trim();
 
 /**
- * Normalized key for the FULL service address — street + unit + city + ZIP — so
- * "100 Main St, Bradenton" and "100 Main St, Sarasota" are DISTINCT, and so are
- * two units at one street ("100 Main Unit A" vs "Unit B"). Suffix-canonical
- * ("123 Main St" == "123 Main Street") and ZIP+4-insensitive. Stored in the
- * customer_properties.address_key column and uniquely indexed, so the DB
- * uniqueness uses the SAME normalization as this helper (no JS/SQL drift).
+ * Normalized key for the FULL service address — street + unit + locality — so
+ * two units at one street ("100 Main Unit A" vs "Unit B") stay DISTINCT.
+ * Suffix-canonical ("123 Main St" == "123 Main Street", "Gln" == "Glen") and
+ * ZIP+4-insensitive. Only the STREET words are suffix-mapped; the unit keeps
+ * unitKey's normalization, so a unit "PT" is never rewritten.
+ *
+ * Locality is the 5-digit ZIP when there is one, else the city: one ZIP
+ * carries several mailing names (Parrish / Duette 34219, Bradenton /
+ * Lakewood Ranch 34211), so the same house arrives under either, while
+ * "100 Main St, Bradenton" vs "100 Main St, Sarasota" with no ZIP stay
+ * distinct. Stored in customer_properties.address_key and uniquely indexed,
+ * so the DB uniqueness uses this same normalization (no JS/SQL drift); any
+ * change here needs a migration that recomputes the stored keys.
  */
 function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  // Strip unit designators across the COMBINED street + unit so an embedded unit
-  // ("100 Main St Apt 4") keys the same as the split form ("100 Main St" + "Apt 4").
-  const streetUnit = stripUnitDesignators([address_line1, address_line2].filter(Boolean).join(' '));
-  return canonicalizeAddress([streetUnit, city, normalizeZip(zip)].filter(Boolean).join(' ')).replace(/[^a-z0-9]/g, '');
+  const street = streetKey(address_line1);
+  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(address_line1);
+  const locality = normalizeZip(zip) || normStreet(city);
+  return `${street}${unit}${locality}`;
 }
 
 /**
@@ -130,78 +147,12 @@ function normalizeOccupancy(v) {
   return OCCUPANCY_TYPES.includes(v) ? v : 'unknown';
 }
 
-// USPS suffixes addressKey does not expand. Kept OUT of STREET_SUFFIX_CANON:
-// that map feeds the stored, uniquely indexed address_key and the saved
-// service-area key, so widening it would orphan existing keys. Used only by
-// the duplicate check below (ops 2026-10-01: a call re-recorded a "... Gln"
-// signup address as "... Glen", a second property for one house).
-const PREMISES_SUFFIX_CANON = {
-  gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
-  xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
-  rdg: 'ridge', ridge: 'ridge', crk: 'creek', creek: 'creek', holw: 'hollow', hollow: 'hollow',
-  sq: 'square', square: 'square', bnd: 'bend', bend: 'bend', aly: 'alley', alley: 'alley',
-  vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
-  plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
-  mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
-};
-
-/**
- * Same-house street + unit key for the duplicate check, suffix-canonical with
- * the extra USPS forms above. Only the STREET words are suffix-mapped; the
- * unit keeps its own normalization (unitKey), so a unit "PT" or "Cove" is
- * never rewritten. Locality (ZIP or city) is compared by samePremisesRows.
- */
-function premisesStreetUnitKey({ address_line1, address_line2 } = {}) {
-  const street = canonicalizeAddress(stripTrailingUnit(address_line1))
-    .split(' ').map((w) => PREMISES_SUFFIX_CANON[w] || w).join('')
-    .replace(/[^a-z0-9]/g, '');
-  const unit = unitKey(address_line2) || streetEmbeddedUnitKey(address_line1);
-  return street ? `${street}|${unit}` : '';
-}
-
-const normCity = (c) => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Same locality: both ZIPs present → the ZIPs decide, and the city is left out
-// on purpose (one ZIP carries several mailing names: Parrish / Duette 34219,
-// Bradenton / Lakewood Ranch 34211). Exactly one ZIP missing → the cities
-// must match. No ZIP on either side → only the exact full key counts.
-function sameLocality(a, b) {
-  const za = normalizeZip(a.zip);
-  const zb = normalizeZip(b.zip);
-  if (za && zb) return za === zb;
-  if (za || zb) return !!normCity(a.city) && normCity(a.city) === normCity(b.city);
-  return false;
-}
-
-/**
- * Rows in `existingProps` that are the same house as `candidate`: the exact
- * full-address-key matches when there are any, else the same street + unit
- * (suffix forms above) in the same locality (sameLocality). Callers
- * resolving the row recordCallProperty declined to insert use this, so they
- * see exactly what the dedupe matched; a caller that needs one row keeps its
- * own ambiguity guard on the length (pure).
- */
-function samePremisesRows(existingProps, candidate = {}) {
-  const key = addressKey(candidate);
-  if (!key) return [];
-  const rows = existingProps || [];
-  const exact = rows.filter((p) => addressKey(p) === key);
-  if (exact.length) return exact;
-  const premises = premisesStreetUnitKey(candidate);
-  if (!premises) return [];
-  return rows.filter((p) => sameLocality(p, candidate) && premisesStreetUnitKey(p) === premises);
-}
-
-/** The first same-house row (see samePremisesRows), or null (pure). */
-function findSamePremises(existingProps, candidate = {}) {
-  return samePremisesRows(existingProps, candidate)[0] || null;
-}
-
 /** True when `candidate` has a street and its full address isn't already in `existingProps` (pure). */
 function isNewAddress(existingProps, candidate = {}) {
   if (!String(candidate.address_line1 || '').trim()) return false;
-  if (!addressKey(candidate)) return false;
-  return !findSamePremises(existingProps, candidate);
+  const key = addressKey(candidate);
+  if (!key) return false;
+  return !(existingProps || []).some((p) => addressKey(p) === key);
 }
 
 /** Active properties for a customer, primary first. */
@@ -1155,8 +1106,6 @@ module.exports = {
   defaultOccupancyForContactRole,
   defaultRelationshipForContactRole,
   isNewAddress,
-  findSamePremises,
-  samePremisesRows,
   completePrimaryFromCall,
   syncPrimaryAddress,
   syncPrimaryCoordsFromCustomer,

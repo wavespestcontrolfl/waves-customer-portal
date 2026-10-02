@@ -1,4 +1,4 @@
-const { normStreet, addressKey, findSamePremises, samePremisesRows, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
+const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -122,27 +122,16 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([{ address_line1: '100 Main St', city: 'Parrish', zip: '34219' }], { address_line1: '100 Main St', city: 'Bradenton', zip: '34211' })).toBe(true);
   });
 
-  test('findSamePremises returns the row the duplicate check matched, so a declined insert still resolves', () => {
-    const exact = { id: 'a', address_line1: '500 Demo Ln', city: 'Venice', zip: '34285' };
-    const glen = { id: 'b', address_line1: '200 Example Gln', city: 'Duette', zip: '34219' };
-    expect(findSamePremises([exact, glen], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toBe(glen);
-    expect(findSamePremises([exact, glen], { address_line1: '500 Demo Lane', city: 'Venice', zip: '34285' })).toBe(exact);
-    expect(findSamePremises([exact, glen], { address_line1: '200 Example Glen', city: 'Parrish' })).toBeNull();
-    expect(findSamePremises([], { address_line1: '' })).toBeNull();
-    // an exact key match wins over a same-house-only one
-    const exactGlen = { id: 'c', address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' };
-    expect(samePremisesRows([glen, exactGlen], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toEqual([exactGlen]);
-  });
-
-  test('same-house match: a missing ZIP on one side falls back to the city; unit ids are never suffix-mapped', () => {
-    const noZip = { id: 'n', address_line1: '600 Sample Cv', city: 'Venice', zip: null };
-    expect(findSamePremises([noZip], { address_line1: '600 Sample Cove', city: 'Venice', zip: '34285' })).toBe(noZip);
-    expect(findSamePremises([noZip], { address_line1: '600 Sample Cove', city: 'Nokomis', zip: '34275' })).toBeNull();
-    expect(findSamePremises([{ address_line1: '600 Sample Cv', city: 'Venice', zip: '34285' }], { address_line1: '600 Sample Cove', city: 'Venice' })).not.toBeNull();
-    expect(findSamePremises([{ address_line1: '600 Sample Cv' }], { address_line1: '600 Sample Cove' })).toBeNull();
+  test('addressKey: ZIP is the locality when present, else the city; unit ids are never suffix-mapped', () => {
+    // one ZIP, two mailing names → one key; no ZIP → the city decides
+    expect(addressKey({ address_line1: '400 Test Creek Ct', city: 'Duette', zip: '34219' }))
+      .toBe(addressKey({ address_line1: '400 Test Creek Court', city: 'Parrish', zip: '34219-1234' }));
+    expect(addressKey({ address_line1: '100 Main St', city: 'Bradenton' }))
+      .not.toBe(addressKey({ address_line1: '100 Main St', city: 'Sarasota' }));
     // "Pt" is a street suffix (Point), not a unit: units PT and POINT stay distinct
     expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit PT', zip: '34219' }], { address_line1: '700 Demo Glen', address_line2: 'Unit Point', zip: '34219' })).toBe(true);
     expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit 4', zip: '34219' }], { address_line1: '700 Demo Glen Apt 4', zip: '34219' })).toBe(false);
+    expect(addressKey({ address_line1: '700 Demo Pt', zip: '34219' })).toBe(addressKey({ address_line1: '700 Demo Point', zip: '34219' }));
   });
 });
 
