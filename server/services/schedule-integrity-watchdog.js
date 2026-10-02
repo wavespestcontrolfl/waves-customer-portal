@@ -517,6 +517,63 @@ async function churnedLiveWorkAlerts(todayET) {
   }
 }
 
+// The long explanation of each prepay-coverage issue: the bell's `detail`.
+const PREPAY_ISSUE_DETAIL = {
+  annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with a missing or conflicting stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
+  manual_series_stamp_missing: 'A recorded manual series allocation or matching family payment stamps indicate coverage for this visit, but it has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+  manual_series_stamp_conflict: 'This visit has a different payment stamp from a manual payment recorded across its recurring family. Reconcile the payments and the original allocation before billing.',
+};
+// The one-sentence why of each issue (docs/admin-notifications.md: 110 characters).
+const PREPAY_ISSUE_WHY = {
+  annual_coverage_unverified: 'The annual-prepay stamp cannot be verified; reconcile it before billing',
+  manual_series_stamp_missing: 'A series payment covers it but the visit has no allocation; reconcile before billing',
+  manual_series_stamp_conflict: 'Its payment stamp differs from the series payment on record; reconcile before billing',
+};
+
+// customer id -> name for the batch of coverage findings. Best effort by design.
+async function prepayCustomerNames(customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean).map(String))];
+  const names = new Map();
+  if (!ids.length) return names;
+  try {
+    const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
+    for (const r of rows || []) names.set(String(r.id), require('./admin-alert-names').fullName(r));
+  } catch (err) {
+    logger.warn(`[schedule-integrity] prepay-coverage customer names unavailable: ${err.message}`);
+  }
+  return names;
+}
+
+// One coverage finding's bell copy under docs/admin-notifications.md: the customer and the
+// visit date in the headline, the issue in the why, the visit itself behind the link. A rule
+// violation (an odd name) never costs the alert: it falls back to the plain wording.
+function prepayCoverageCopy(row, issue, customerName) {
+  const names = require('./admin-alert-names');
+  const dayWords = names.shortDateET(new Date(`${row.service_date}T12:00:00Z`));
+  const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(row.service_date)}&appointment=${encodeURIComponent(row.id)}`;
+  const detail = PREPAY_ISSUE_DETAIL[issue];
+  const plain = { title: `Prepaid coverage needs review for ${customerName || 'a customer'}${dayWords ? ` on ${dayWords}` : ''}`,
+    why: detail, link, metadata: {} };
+  try {
+    const composed = require('./admin-alert-compose').composeAdminAlert({
+      area: 'Schedule',
+      action: names.fitAction('Schedule', customerName || 'a customer', dayWords
+        ? [(n) => `check ${n}'s prepaid visit on ${dayWords}`, (n) => `check ${n}'s prepaid visit`]
+        : [(n) => `check ${n}'s prepaid visit`]),
+      why: PREPAY_ISSUE_WHY[issue] ? `${PREPAY_ISSUE_WHY[issue]}.` : 'Prepaid coverage for this visit needs a review before billing.',
+      severity: 'needs-you',
+      link,
+      subject: { type: 'visit', id: row.id },
+      doneWhen: 'coverage_reconciled',
+      who: 'person',
+    });
+    return { title: composed.headline, why: composed.why, link: composed.link, detail, metadata: composed.metadata };
+  } catch (err) {
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    return { ...plain, detail };
+  }
+}
+
 async function runInner({ now = new Date() } = {}) {
   const todayET = etDateString(now);
 
@@ -646,21 +703,23 @@ async function runInner({ now = new Date() } = {}) {
   }));
 
   // Preserve the morning lawn-email class before adding coverage-review volume.
+  // Owner audit 2026-10-01: the bell names the customer and the visit date and opens that
+  // visit, not the dispatch landing page. The names are read once for the whole batch; a
+  // failed read leaves the bell with a generic customer rather than losing it.
+  const prepayNames = await prepayCustomerNames(prepayGaps.map(({ row }) => row.customer_id));
   alerts.push(...prepayGaps.map(({ row, issue }) => {
     const evidenceKey = createHash('sha256').update(JSON.stringify([
       row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.prepaid_at, row.annual_prepay_term_id,
       row.manual_series_payment_evidence, row.manual_series_allocation_evidence,
       row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
     ])).digest('hex').slice(0, 20);
+    const copy = prepayCoverageCopy(row, issue, prepayNames.get(String(row.customer_id)));
     return [
       `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
-      `Prepaid coverage needs review for ${row.service_date}`,
-      {
-        annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with a missing or conflicting stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
-        manual_series_stamp_missing: 'A recorded manual series allocation or matching family payment stamps indicate coverage for this visit, but it has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
-        manual_series_stamp_conflict: 'This visit has a different payment stamp from a manual payment recorded across its recurring family. Reconcile the payments and the original allocation before billing.',
-      }[issue],
-      { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
+      copy.title,
+      copy.why,
+      { scheduled_service_id: row.id, customer_id: row.customer_id, issue, ...copy.metadata },
+      { link: copy.link, detail: copy.detail },
     ];
   }));
 
@@ -747,7 +806,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
     return true;
   };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
     // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
     // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
     // site-level tag these money-loss pages would return a suppressed
@@ -758,6 +817,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     // that raced across overlapping ticks and could double-ring.
     const alertOpts = {
       link,
+      ...(detail ? { detail } : {}),
       bell: true,
       dedupeKey,
       ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
@@ -1054,6 +1114,7 @@ module.exports = {
   hasOutOfBandPrepaidStamp,
   hasAnnualPrepaidStamp,
   seriesRootId,
+  _prepayCoverageCopy: prepayCoverageCopy,
   _unpricedSeriesBells: unpricedSeriesBells,
   _completedUnpricedSince: completedUnpricedSince,
   _unpricedSeriesAlerts: unpricedSeriesAlerts,

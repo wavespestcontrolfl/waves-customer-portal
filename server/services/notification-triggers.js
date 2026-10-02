@@ -610,11 +610,22 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'urgent',
     group: 'Payments',
-    build: (p) => ({
-      title: 'Payment failed',
-      body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}${p.reason ? ' — ' + p.reason : ''}`,
-      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
-    }),
+    // Owner audit 2026-10-01: the headline names WHO ("Billing — Dana Example's $85.00
+    // payment failed"), the body says why the processor refused, and the link opens the
+    // invoice, else the customer, never the revenue list. A customer with no name on file
+    // reaches here as the word "customer" (or a bare phone number, masked downstream).
+    build: (p) => {
+      const names = require('./admin-alert-names');
+      const amount = `$${Number(p.amount || 0).toFixed(2)}`;
+      const named = p.customerName && p.customerName !== 'customer' ? p.customerName : 'a customer';
+      const reason = String(p.reason || '').replace(/\s+/g, ' ').trim();
+      return {
+        title: `Billing — ${names.fitAction('Billing', named, [(n) => `${n}'s ${amount} payment failed`])}`,
+        body: require('./admin-alert-compose').cutAtWord(reason || 'The processor gave no reason.', 110),
+        link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}`
+          : (p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/revenue'),
+      };
+    },
   },
   bill_payment_error: {
     label: 'Bill payment checkout error',

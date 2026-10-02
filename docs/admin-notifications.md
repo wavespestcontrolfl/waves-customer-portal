@@ -45,6 +45,17 @@ Examples:
 | Comms — call Mona Refay back | Promised on a 3:22 PM call; an hour has passed with no contact. |
 | System — Venice review sync silent 3 days | No new reviews fetched since Sat; Google shows 2. |
 
+**Say who and what** (owner audit 2026-10-01). A bell is read before anything is opened, so
+the customer's name (or the sender's) belongs in the headline and the words behind the alert
+belong in the why: a text, an email, a promise we made, the failed amount, the visit date.
+"Comms — send Albert Clark the estimate" with "“Swarming termites mobile home tenting free
+estimate” (Sep 29) — no estimate sent yet." works; "An SMS request needs follow-up" does not.
+Quote the customer, redacted the way every bell body is (`redactSensitiveText`, so a phone
+number or street address is masked), cut to the 110 characters at a word, and keep the whole
+quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
+alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other

@@ -15293,7 +15293,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
       // link carries ?estimateId= so the deep link lands on this estimate,
       // the same shape estimate_hot_view already uses (estimate-hot-view-alert.js).
-      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: `/admin/estimates?estimateId=${estimate.id}`, bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      // Raised through the admin-alert rule (docs/admin-notifications.md): the headline names who
+      // accepted what, the why is the next step, and the full billing state rides in the detail.
+      await require('../services/admin-alert-compose').raiseAdminAlert('estimate', {
+        area: 'Estimates',
+        action: notificationPayload.adminAction,
+        why: notificationPayload.adminWhy,
+        severity: 'needs-you',
+        link: `/admin/estimates?estimateId=${estimate.id}`,
+        subject: { type: 'estimate', id: estimate.id },
+        doneWhen: 'estimate_followed_up',
+        who: 'person',
+      }, { icon: '\u2705', bell: true, detail: notificationPayload.adminBody, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',
@@ -20633,7 +20644,39 @@ async function fireBundleQuoteRequestedNotification({ estimate, suggestedService
   });
 }
 
-function buildAcceptNotificationPayload({
+// Owner audit 2026-10-01: the admin bell says WHO and WHAT so it is actionable unopened.
+// `adminAction` completes "Estimates — <action>" ("John Cowley accepted Silver $104.98/mo"),
+// `adminWhy` is the plain next step, and `adminBody` (the full state of billing) rides in the
+// bell's detail. adminTitle stays as the long-form title for any reader of the payload.
+// Where the accepted price differs from the price first sent, the why labels it "originally quoted".
+function buildAcceptNotificationPayload(args = {}) {
+  const copy = buildAcceptNotificationCopy(args);
+  const {
+    customerName = '', waveguardTier = 'Bronze', monthlyTotal = 0, proposedMonthlyTotal = null,
+    serviceLabel = 'One-time service', treatAsOneTime = false, billByInvoice = false, billingTerm = 'standard',
+    annualPrepayAmount = null, invoiceKind = null, payerBilled = false, invoiceSettledByCredit = false,
+  } = args;
+  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
+  const commercial = !treatAsOneTime && String(waveguardTier || '').trim().toLowerCase() === 'commercial';
+  const plans = [];
+  if (invoiceKind === 'annual_prepay_deferred') plans.push('the termite plan');
+  else if (treatAsOneTime) plans.push(require('../services/admin-alert-names').tidyName(serviceLabel));
+  else if (commercial) plans.push(`commercial ${monthlyText}`, 'a commercial plan');
+  else if (billingTerm === 'prepay_annual' && !payerBilled && !invoiceSettledByCredit && !billByInvoice) {
+    plans.push(`${waveguardTier} annual prepay${annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : ''}`, `${waveguardTier} annual prepay`);
+  } else plans.push(`${waveguardTier} ${monthlyText}`, `${waveguardTier}`);
+  const names = require('../services/admin-alert-names');
+  const adminAction = names.fitAction('Estimates', customerName || 'A customer', plans.map((plan) => (name) => `${name} accepted ${plan}`));
+  // Only a recurring plan carries a monthly price to compare.
+  const quoted = proposedNote && !treatAsOneTime && invoiceKind !== 'annual_prepay_deferred' && billingTerm !== 'prepay_annual'
+    ? `; originally quoted ${fmtMoney(proposedMonthlyTotal)}/mo` : '';
+  const { cutAtWord, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+  const next = copy.adminNext || 'Open the estimate';
+  const adminWhy = `${next}${quoted}.`.length <= MAX_WHY_CHARS ? `${next}${quoted}.` : cutAtWord(`${next}.`, MAX_WHY_CHARS);
+  return { ...copy, adminAction, adminWhy };
+}
+
+function buildAcceptNotificationCopy({
   customerName = '',
   waveguardTier = 'Bronze',
   monthlyTotal = 0,
@@ -20697,6 +20740,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted — signature pending: ${customerName}`,
       adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
+      adminNext: 'Waiting on their signature; nothing is billed yet',
       customerTitle: 'Next step: sign your plan agreement',
       // Codex #4819 r6: signing starts the plan and its billing; the
       // 12-month coverage year begins on the installation date.
@@ -20732,6 +20776,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
+        adminNext: "Next: send the invoice to the payer's billing contact",
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
         customerLink: '/?tab=billing',
@@ -20740,6 +20785,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${adminPlanLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+      adminNext: 'The invoice went to the payer; nothing to do',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
       customerLink: '/?tab=billing',
@@ -20780,6 +20826,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${adminPlanText} approved — the invoice was ${adminReasonText}; no pay link was sent.`,
+      adminNext: 'The invoice is already settled; nothing to bill',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. ${customerReasonText}`,
       customerLink: '/?tab=billing',
@@ -20794,6 +20841,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${planLabel}${proposedNote} approved.${invoicePayUrl ? ' Invoice pay link sent.' : ' Office to confirm details + schedule the recurring visits.'}`,
+      adminNext: invoicePayUrl ? 'Pay link sent; next: schedule the recurring visits' : 'Next: confirm the details and schedule the recurring visits',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${planLabel} is approved. A Waves team member will confirm the details and schedule your service.`,
       customerLink: '/?tab=billing',
@@ -20806,6 +20854,7 @@ function buildAcceptNotificationPayload({
         return {
           adminTitle: `One-time estimate accepted: ${customerName}`,
           adminBody: `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
+          adminNext: 'Next: send the invoice yourself',
           customerTitle: 'Estimate accepted',
           customerBody: `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
           customerLink: invoicePayUrl || '/?tab=billing',
@@ -20814,6 +20863,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `One-time estimate accepted: ${customerName}`,
         adminBody: `${serviceLabel} approved. Invoice pay link is being sent.`,
+        adminNext: 'The pay link is going out; nothing to do',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${serviceLabel} estimate is approved. Use the invoice pay link if you want to pay now, or pay later.`,
         customerLink: invoicePayUrl || '/?tab=billing',
@@ -20823,6 +20873,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice was not sent automatically; office follow-up needed.`,
+        adminNext: 'Next: send the invoice yourself',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
         customerLink: invoicePayUrl || '/?tab=billing',
@@ -20831,6 +20882,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice pay link is being sent.`,
+      adminNext: 'The pay link is going out; nothing to do',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -20849,6 +20901,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `One-time estimate accepted: ${customerName}`,
       adminBody,
+      adminNext: reservationCommitted ? 'The appointment is confirmed; nothing to do' : (bookingUrl ? 'Booking link sent; wait for them to pick a time' : 'Next: schedule the appointment'),
       customerTitle: 'One-time service approved',
       customerBody,
       customerLink: bookingUrl || '/?tab=schedule',
@@ -20868,6 +20921,7 @@ function buildAcceptNotificationPayload({
         return {
           adminTitle: `Estimate accepted: ${customerName}`,
           adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — fully covered by account credit, no card charge.`,
+          adminNext: 'Paid by account credit; nothing to do',
           customerTitle: 'Estimate accepted',
           customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay was fully covered by your account credit — nothing was charged.`,
           customerLink: '/?tab=billing',
@@ -20876,6 +20930,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved and paid — card on file auto-charged.`,
+        adminNext: 'Paid by card on file; nothing to do',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay payment went through. Your receipt is on the way.`,
         customerLink: '/?tab=billing',
@@ -20885,6 +20940,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — bank payment processing on the saved method.`,
+        adminNext: 'The bank payment is processing; nothing to do',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and your annual prepay bank payment is processing. We'll confirm when it completes.`,
         customerLink: '/?tab=billing',
@@ -20897,6 +20953,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — payment outcome pending reconciliation; NO pay link sent.`,
+        adminNext: 'Payment is being confirmed; do not send a pay link',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved and we're confirming your annual prepay payment. We'll follow up shortly.`,
         customerLink: '/?tab=billing',
@@ -20911,6 +20968,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — auto-charge deferred to the recovery sweep (not yet attempted); NO pay link sent.`,
+        adminNext: 'The auto-charge retries on its own; do not send a pay link',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. We're finishing up your annual prepay payment on our side — no action is needed, and we'll follow up shortly.`,
         customerLink: '/?tab=billing',
@@ -20920,6 +20978,7 @@ function buildAcceptNotificationPayload({
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
         adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. Invoice follow-up needed.`,
+        adminNext: 'Next: send the annual prepay invoice',
         customerTitle: 'Estimate accepted',
         customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.`,
         customerLink: '/?tab=billing',
@@ -20929,6 +20988,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. ${sentText}`,
+      adminNext: invoiceLinkDelivered ? 'Pay link sent; nothing to do' : 'Invoice created; the pay link is optional',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -20942,6 +21002,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Payment method saved; setup fee stamped on the first visit and billed with it. No invoice or pay link sent.`,
+      adminNext: 'The setup fee bills with the first visit; nothing to do',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your setup fee is billed with your first visit.`,
       customerLink: '/?tab=billing',
@@ -20953,6 +21014,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. ${sentText}`,
+      adminNext: invoiceLinkDelivered ? 'Pay link sent; nothing to do' : 'Invoice created; the pay link is optional',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
@@ -20963,6 +21025,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay off: card kept on file, not enrolled, no auto-charge, pay link goes out after the first visit.`,
+      adminNext: 'The pay link goes out after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. We'll send you a link to pay after your first visit.`,
       customerLink: '/?tab=billing',
@@ -20972,6 +21035,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer, Auto Pay paused: card kept on file, no auto-charge, pay link goes out after the first visit.`,
+      adminNext: 'The pay link goes out after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today. Your Auto Pay is paused, so we'll send you a link to pay after your first visit.`,
       customerLink: '/?tab=billing',
@@ -20981,6 +21045,7 @@ function buildAcceptNotificationPayload({
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Existing customer on the card rail: no pay link sent, billed after the first visit.`,
+      adminNext: 'Billed after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
       customerLink: '/?tab=billing',
@@ -20990,6 +21055,7 @@ function buildAcceptNotificationPayload({
   return {
     adminTitle: `Estimate accepted: ${customerName}`,
     adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Invoice follow-up needed.`,
+    adminNext: 'Next: send the invoice and check the first visit is booked',
     customerTitle: 'Estimate accepted',
     customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Our team will follow up with the invoice details.`,
     customerLink: '/?tab=billing',
