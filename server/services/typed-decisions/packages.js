@@ -119,11 +119,34 @@ const CALL_GATE_CHECKS = {
   },
 };
 
+// Evidence for GATE_SMS_SPAM_CLASSIFIER (Clef second wave, idea 8): a text
+// from an UNKNOWN sender (the same messages its screen sees) recorded beside
+// the screen's regex marker (`rules`) and, when the classifier ran, its own
+// model verdict (`production`). Wording follows sms-solicitation-classifier's
+// prompt so the model and the gate judge the same thing. Same state shape as
+// the other SMS packages (an unknown sender's previous Waves text is usually
+// none), so the review route and the labeling tools need nothing new.
+const SMS_SOLICITATION = {
+  id: 'sms_solicitation.v1',
+  capability: 'sms_solicitation',
+  version: 1,
+  description: 'Is a text from an unknown sender a business pitching something to Waves (a solicitation)?',
+  stateShape: ['previous_waves_text', 'customer_text'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    is_solicitation: noul('Is the sender a business pitching something TO Waves (lead generation, marketing or ads, review tools, software, an AI receptionist, staffing, financing, insurance, or a contractor offering services or a partnership)?', {
+      true: 'A pitch, offer or sales outreach aimed at Waves as a business.',
+      false: 'Someone asking Waves for service, a quote, pricing or an appointment (even a business or property manager), a question about a job or bill, a wrong number, or a personal message.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
+  [SMS_SOLICITATION.id]: SMS_SOLICITATION,
 });
 
 function packageFor(id) {

@@ -1050,6 +1050,26 @@ router.post('/sms', async (req, res) => {
       });
     }
 
+    // Unknown-sender typed shadow (sms_solicitation.v1, GATE_TYPED_DECISIONS,
+    // dark): evidence for GATE_SMS_SPAM_CLASSIFIER before it is flipped. The
+    // same texts its screen above would see (not complianceEligible: no known
+    // relationship or outbound history and not the AI line; no reaction; no
+    // media), whatever that gate's mode, recorded beside the screen's regex
+    // marker and, when it ran, its own verdict. After the response; changes
+    // nothing.
+    if (Body && !smsReaction && inboundMedia.length === 0 && !complianceEligible && smsLogEntry?.id) {
+      res.once('finish', () => {
+        void Promise.resolve().then(() => require('../services/typed-decisions/sms-shadow').shadowUnknownSenderSms({
+          smsLogId: smsLogEntry.id,
+          body: Body,
+          verdict: solicitation,
+          fromPhone: From,
+          toPhone: To,
+          receivedAt: smsLogEntry.created_at,
+        })).catch((err) => logger.warn(`[typed-decisions] unknown-sender sms shadow failed: ${err.message}`));
+      });
+    }
+
     // Check for pending reschedule reply FIRST
     if (customer && numberConfig.type === 'location') {
       try {
