@@ -198,28 +198,34 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
   const liveNow = (occ) => occ.date === today || (occ.date === yesterday && crossesIntoNow({ window_start: occ.startHms }, nowMin));
+  // Every applicable alert, newest first; a confirmed delay outranks a tracking
+  // gap (a gap is not a must-answer loop, so it must never hide a real delay).
+  const applicable = [];
   for (const row of alerts || []) {
     if (!preArrival(row)) continue;
     const payload = parseJson(row.payload);
     const occ = alertOccurrence(payload, row);
     if (!occ || !liveNow(occ)) continue;
-    return {
-      type: row.type,
-      severity: row.severity || null,
-      // no-show-detector stage 1 (45 min into an open window, no departure) is a
-      // tracking gap, not confirmed lateness; its stage 2 (30 min after the promised
-      // window ended, no arrival — departed or not) IS a delay. No minutes either
-      // way: payload.delay_minutes is frozen at insert and measured from the
-      // internal job block, never the customer's promised window.
-      missingTracking: payload?.evidence === 'missing_tracking' && Number(payload?.stage) !== 2,
-      visitId: String(row.id),
-      windowStart: occ.startHms,
-      scheduledDate: occ.date,
-      visitType: row.service_type || null,
-      windowDisplay: windowLabel({ ...row, window_start: occ.startHms }, deriveWindow),
-    };
+    applicable.push({ row, payload, occ, gap: payload?.evidence === 'missing_tracking' && Number(payload?.stage) !== 2 });
   }
-  return null;
+  const chosen = applicable.find((a) => !a.gap) || applicable[0];
+  if (!chosen) return null;
+  const { row, occ } = chosen;
+  return {
+    type: row.type,
+    severity: row.severity || null,
+    // no-show-detector stage 1 (45 min into an open window, no departure) is a
+    // tracking gap, not confirmed lateness; its stage 2 (30 min after the promised
+    // window ended, no arrival — departed or not) IS a delay. No minutes either
+    // way: payload.delay_minutes is frozen at insert and measured from the
+    // internal job block, never the customer's promised window.
+    missingTracking: chosen.gap,
+    visitId: String(row.id),
+    windowStart: occ.startHms,
+    scheduledDate: occ.date,
+    visitType: row.service_type || null,
+    windowDisplay: windowLabel({ ...row, window_start: occ.startHms }, deriveWindow),
+  };
 }
 
 // One physical stop = the same tech, day, customer and window start (the sibling

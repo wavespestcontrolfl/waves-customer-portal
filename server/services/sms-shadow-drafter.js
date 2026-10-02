@@ -4540,16 +4540,20 @@ function visitLoopMissedLine(missed) {
   return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
-function visitLoopItemLines(items, label, trailing) {
+// timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
+// SMS timing comes only from LABEL FACTS, so a promise text stating one is withheld.
+// A customer's own request ("asked whether the sprinklers need to be off") is not a
+// timing claim of ours and keeps the standard banned-copy check, so the ask stays visible.
+function visitLoopItemLines(items, label, trailing, { timingGuard = false } = {}) {
   const lines = [];
   for (const item of (Array.isArray(items) ? items : []).slice(0, 5)) {
     if (!item || typeof item !== 'object') continue;
     const kind = visitLoopText(item.kind, 40);
     // model-extracted free text: banned customer copy ("pet-safe", fixed re-entry
-    // times, ...) never enters the facts — the shared compliance guard decides,
-    // fail closed, as for every other untrusted fact section
+    // times, ...) never enters the facts — the shared compliance guard decides, fail
+    // closed (in its timing mode for our own promises)
     const raw = visitLoopText(item.description, 120);
-    const description = raw && hasBannedCustomerCopy(raw) ? 'details withheld (restricted wording)' : raw;
+    const description = raw && hasBannedCustomerCopy(raw, timingGuard ? { rainTimeGuard: true } : {}) ? 'details withheld (restricted wording)' : raw;
     if (!kind && !description) continue;
     lines.push(`- ${label}: ${[kind, description].filter(Boolean).join(' — ')}${trailing(item)}`);
   }
@@ -4623,7 +4627,7 @@ function renderVisitLoopsSection(visitLoops) {
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);
       return since ? ` (since ${since})` : '';
-    }),
+    }, { timingGuard: true }),
     ...visitLoopItemLines(v.customerWaiting, 'THEY ARE WAITING ON US FOR', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);
       return since ? ` (since ${since})` : '';

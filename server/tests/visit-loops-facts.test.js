@@ -151,6 +151,15 @@ describe('lateAlert', () => {
     }
   });
 
+  test('a confirmed delay outranks a newer tracking gap on another visit', async () => {
+    const gap = alertRow({ payload: { evidence: 'missing_tracking', stage: 1, promised_window: { start_at: '2026-10-01T18:00:00.000Z' } } }, { id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' });
+    const delay = alertRow({ payload: STAMP });
+    // newest first: the gap is newer, the delay older
+    expect((await run([gap, delay])).lateAlert).toMatchObject({ visitId: 'visit-1', missingTracking: false });
+    // only a gap: it still shows, as a gap
+    expect((await run([gap])).lateAlert).toMatchObject({ visitId: 'visit-2', missingTracking: true });
+  });
+
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
     expect((await run(alertRow({ payload }))).lateAlert).toEqual({ type: 'tech_late', severity: 'warn', missingTracking: true, ...which });
