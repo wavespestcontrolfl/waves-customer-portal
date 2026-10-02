@@ -93,6 +93,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_RESERVICE_REPORT_CARD=true (re-service report card: on a pest/lawn callback report whose reserviceReport block composed, the payload carries `reserviceReportCard` — a "You told us" section from the customer's booking words FROZEN onto service_data.reserviceRequest at completion (scrubbed with the report writer's customer-words scrub; picker/text = quoted, call/office = never quoted), a "What we did" summary (pests from product targets, where from areas_serviced, activity from the technician's tapped rating, the safety line only with a recorded wet application; performed visits only) and the "Still seeing X? Tell us" topic for the existing portal Schedule link, on the web report and the PDF (-rcd1 cache key). Read at call time by services/service-report/reservice-report-card.js, exact 'true', and only ever alongside GATE_RESERVICE_REPORT_COPY; off = payload, page and PDF key byte-identical to before. Kill switch: unset.)
  *   GATE_RESERVICE_DETAILS_REQUIRED=true (re-service picker's "What are you seeing?" box becomes required: any text counts, a pest chip alone does not replace it; GET /api/public/reservice/:token carries detailsRequired:true, the picker keeps Book disabled until the box has text, and POST answers 400 DETAILS_REQUIRED for a blank box. Read at call time via reserviceDetailsRequiredLive(), exact 'true'. Off = optional box, GET payload byte-identical. Sends nothing to a customer. Kill switch: unset.)
+ *   GATE_RESERVICE_PHOTOS=true (re-service photos, optional: after a /reservice/:token booking the success card offers the visit-prep photo form for the visit just booked — the commit response carries prepPhotos {visitId, photosRemaining} and POST /api/public/reservice/:token/visits/:visitId/photos stores through services/visit-prep.js (entry 'reservice_page'), so the Visit Brief, office feed item, tech alert and photo reads apply unchanged. Needs GATE_VISIT_PREP_PHOTOS too; read at call time via reservicePhotosLive(), exact 'true'. Off = commit response byte-identical and the upload route 404s. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
@@ -1386,6 +1387,16 @@ const gates = {
   // Kill switch: unset GATE_RESERVICE_DETAILS_REQUIRED — the box goes back
   // to optional and the GET payload drops the key (byte-identical).
   reserviceDetailsRequired: process.env.GATE_RESERVICE_DETAILS_REQUIRED === 'true',
+
+  // Re-service photos (owner 2026-10-02: optional). On, AND
+  // GATE_VISIT_PREP_PHOTOS live, the /reservice/:token success card offers
+  // the visit-prep photo form for the visit just booked, posting to
+  // POST /api/public/reservice/:token/visits/:visitId/photos (visit-prep.js
+  // storage, Visit Brief, office feed item and tech alert unchanged). Read
+  // at CALL time via reservicePhotosLive(); this entry is for logGateStatus
+  // only. Kill switch: unset GATE_RESERVICE_PHOTOS — the commit response
+  // drops prepPhotos and the upload route 404s.
+  reservicePhotos: process.env.GATE_RESERVICE_PHOTOS === 'true',
 
   // Office-booked re-service "Customer's words" (2026-10-01):
   // the New Appointment modal, on a pest/lawn re-service, offers the
@@ -4317,6 +4328,13 @@ function reserviceDetailsRequiredLive() {
   return process.env.GATE_RESERVICE_DETAILS_REQUIRED === 'true';
 }
 
+// GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
+// (server/routes/reservice-public.js). Strict 'true', and only alongside
+// GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
+function reservicePhotosLive() {
+  return process.env.GATE_RESERVICE_PHOTOS === 'true' && visitPrepPhotosLive();
+}
+
 // GATE_RESERVICE_RANK_AFTER_NEW read at CALL time — the one canonical
 // reader buildBookingAvailability's reservice rank-profile branch uses
 // (server/routes/booking.js). The `reserviceRankAfterNew` gates-map entry
@@ -5077,3 +5095,4 @@ module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
+module.exports.reservicePhotosLive = reservicePhotosLive;

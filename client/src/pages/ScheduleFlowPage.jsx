@@ -39,6 +39,7 @@ import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import SchedulePicker, { sameSlot } from '../components/booking/SchedulePicker';
+import VisitPrepPhotoForm from '../components/visit-prep/VisitPrepPhotoForm';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -785,22 +786,52 @@ function AlreadyBookedCard({ lane }) {
   );
 }
 
+// Posts VisitPrepPhotoForm's FormData to the re-service photo route for the
+// visit just booked (GATE_RESERVICE_PHOTOS). Same error shape as
+// AppointmentPage's submitVisitPrepPhotos so the form maps it the same way.
+async function submitReservicePhotos(token, visitId, formData) {
+  const res = await fetch(`${API_BASE}/public/reservice/${token}/visits/${visitId}/photos`, {
+    method: 'POST',
+    body: formData,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.ok && body?.ok) return body;
+  const err = new Error(body?.error || "We couldn't send that just now.");
+  err.status = res.status;
+  err.code = body?.code || null;
+  throw err;
+}
+
 function ReserviceSuccessCard({ result }) {
+  const { token } = useParams();
+  const prepPhotos = result.prepPhotos;
   return (
-    <Card>
-      <CardTitle>You&apos;re all set</CardTitle>
-      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
-        Your free <strong style={{ color: S.text }}>{result.serviceType || 're-service'}</strong> visit is
-        scheduled for <strong style={{ color: S.text }}>{formatDateLabel(result.date)}</strong>, arrival window{' '}
-        <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
-        {' '}We&apos;ll text you a confirmation shortly.
-      </div>
-      {result.rescheduleUrl ? (
-        <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
-          Need a different time? Reschedule it
-        </a>
+    <>
+      <Card>
+        <CardTitle>You&apos;re all set</CardTitle>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
+          Your free <strong style={{ color: S.text }}>{result.serviceType || 're-service'}</strong> visit is
+          scheduled for <strong style={{ color: S.text }}>{formatDateLabel(result.date)}</strong>, arrival window{' '}
+          <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
+          {' '}We&apos;ll text you a confirmation shortly.
+        </div>
+        {result.rescheduleUrl ? (
+          <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+            Need a different time? Reschedule it
+          </a>
+        ) : null}
+      </Card>
+      {/* GATE_RESERVICE_PHOTOS: key absent (gate off) renders nothing — the
+          success card is unchanged. Photos are optional. */}
+      {prepPhotos?.visitId ? (
+        <Card data-testid="reservice-photos-card">
+          <VisitPrepPhotoForm
+            photosRemaining={prepPhotos.photosRemaining}
+            onSubmit={(formData) => submitReservicePhotos(token, prepPhotos.visitId, formData)}
+          />
+        </Card>
       ) : null}
-    </Card>
+    </>
   );
 }
 

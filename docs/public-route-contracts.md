@@ -4614,6 +4614,31 @@ payload and the existing no-pests `customer_notes` fallbacks are
 byte-identical to before this gate existed. The columns themselves are
 additive and stamped from the details box regardless of this gate — only
 the pest-chip normalization is gated.
+Required details box (GATE_RESERVICE_DETAILS_REQUIRED, owner 2026-10-02:
+any text counts, a pest chip alone does not replace it): with the gate live,
+GET's `base` payload carries `detailsRequired: true` (bookable lanes only)
+and POST answers `400 { code: 'DETAILS_REQUIRED' }` for a missing, empty or
+whitespace-only `details` before any booking work. Gate off: the key is
+omitted and POST is byte-identical.
+Re-service photos (GATE_RESERVICE_PHOTOS, honoured only while
+GATE_VISIT_PREP_PHOTOS is also live): a successful POST's response carries
+an optional `prepPhotos: { visitId, photosRemaining }` for the visit just
+booked (omitted when the gate is off or the visit is not visit-prep
+eligible). `POST /:token/visits/:visitId/photos` (multipart: up to 3
+`photos`, optional `note`) attaches them through `services/visit-prep.js`'s
+`createVisitPrepSubmission` (entry `reservice_page`, topic = the visit's
+pest/lawn lane) — the same caps, dedupe, storage, Visit Brief, office feed
+item and tech alert as the appointment page's `POST /:token/photos`. The
+visit must be the token customer's own pest/lawn re-service callback (the
+`openReserviceCallbacks` row predicate) and pass visit-prep eligibility with
+the recurring-plan rule waived for re-service callbacks; the locked recheck
+re-proves it on the write's transaction with the customer row FOR SHARE
+(still holding this `reservice_token`) and the visit FOR UPDATE, and refuses
+a visit whose `property_id` moved. Every refusal — malformed token or visit
+id, gate off, a non-multipart body (answered by
+`reservicePhotosPreParserGuard` ahead of the shared body parsers), another
+customer's or a non-re-service visit, an ineligible visit — is the generic
+404. Sends nothing to a customer.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

@@ -6,6 +6,12 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
 
+// The photo form's canvas pipeline has its own suite; stub it here so a
+// picked photo is "encoded" immediately under jsdom.
+vi.mock('../utils/imageCompression', () => ({
+  encodeJpegFile: vi.fn(async (file) => new File(['jpeg-bytes'], 'bug.jpg', { type: 'image/jpeg' })),
+}));
+
 // PublicStateCard and BrandCard come through for real: they are leaf
 // presentational components, and these suites assert on the terminal-state
 // markup they produce. Everything heavier stays stubbed.
@@ -562,5 +568,56 @@ describe('ReservicePage required details (GATE_RESERVICE_DETAILS_REQUIRED)', () 
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
     expect(screen.getByLabelText(/Tell us a little more/)).toBeRequired();
     expect(screen.getByRole('button', { name: /Tell us what you.re seeing above/ })).toBeDisabled();
+  });
+});
+
+// Optional photos (GATE_RESERVICE_PHOTOS, owner 2026-10-02): the commit
+// response's prepPhotos offer shows the visit-prep photo form for the visit
+// just booked; no key = the success card alone.
+describe('ReservicePage photos (GATE_RESERVICE_PHOTOS)', () => {
+  const VISIT_ID = '11111111-2222-4333-8444-555555555555';
+  const BOOKED = {
+    success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+    date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+    startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+  };
+
+  async function book(fetchMock) {
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    return fetchMock;
+  }
+
+  it('no offer: the success card renders without the photo form', async () => {
+    await book(stubFetch({ post: jsonResponse(BOOKED) }));
+    expect(screen.queryByTestId('reservice-photos-card')).not.toBeInTheDocument();
+  });
+
+  it('with an offer: photos post multipart to the re-service visit route', async () => {
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/photos')) {
+        return Promise.resolve(jsonResponse({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } }, 201));
+      }
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ ...BOOKED, prepPhotos: { visitId: VISIT_ID, photosRemaining: 6 } }));
+      return Promise.resolve(jsonResponse(bookablePayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await book(fetchMock);
+    expect(screen.getByTestId('reservice-photos-card')).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), {
+      target: { files: [new File(['photo'], 'bug.jpg', { type: 'image/jpeg' })] },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/photos'))).toBe(true));
+    const [url, opts] = fetchMock.mock.calls.find(([u]) => String(u).includes('/photos'));
+    expect(String(url)).toBe(`/api/public/reservice/deadbeef/visits/${VISIT_ID}/photos`);
+    expect(opts.method).toBe('POST');
+    expect(opts.body).toBeInstanceOf(FormData);
+    expect(opts.body.getAll('photos')).toHaveLength(1);
   });
 });

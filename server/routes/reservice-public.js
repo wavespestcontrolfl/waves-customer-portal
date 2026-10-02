@@ -73,6 +73,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
   reserviceSelfServeEnabled,
+  laneForCallbackRow,
   reserviceLanesForCustomer,
   openReserviceCallbacks,
   reserviceLaneAvailability,
@@ -87,6 +88,12 @@ const {
 // blank-box refusal. Off = byte-identical to before this gate existed.
 function detailsRequired() {
   return require('../config/feature-gates').reserviceDetailsRequiredLive();
+}
+
+// GATE_RESERVICE_PHOTOS (+ GATE_VISIT_PREP_PHOTOS): the commit response's
+// prepPhotos key and the photo upload route below. Off = byte-identical.
+function photosEnabled() {
+  return require('../config/feature-gates').reservicePhotosLive();
 }
 
 // GATE_RESERVICE_PEST_CHIPS (nested inside reserviceSelfServe — see
@@ -667,11 +674,15 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // reschedule_token (column DEFAULT) — hand the link back so the success
     // card offers "need to move it?" without waiting for the SMS.
     let rescheduleUrl = null;
+    let prepPhotos = null;
     try {
       const serviceRow = await db('scheduled_services')
         .where({ self_booking_id: result.body?.booking?.id })
-        .first('reschedule_token');
+        .first('id', 'reschedule_token');
       if (serviceRow?.reschedule_token) rescheduleUrl = `/reschedule/${serviceRow.reschedule_token}`;
+      // GATE_RESERVICE_PHOTOS: offer the photo form for the visit just
+      // booked. Advisory only — the upload route re-proves everything.
+      if (serviceRow?.id && photosEnabled()) prepPhotos = await reservicePhotoOffer(serviceRow.id, customer);
     } catch (err) {
       logger.warn(`[reservice-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
     }
@@ -687,11 +698,178 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       endLabel: slot.end_label,
       confirmationCode: result.body?.confirmationCode || null,
       rescheduleUrl,
+      // Gate off or ineligible: key omitted (byte-identical).
+      ...(prepPhotos ? { prepPhotos } : {}),
     });
   } catch (err) {
     next(err);
   }
 });
+
+// ── Re-service photos (GATE_RESERVICE_PHOTOS) ──────────────────────────────
+// Optional photos for the re-service visit the customer just booked (owner
+// 2026-10-02). Storage, caps, dedupe, the tech Visit Brief, the office feed
+// item and the tech alert are visit-prep's own (services/visit-prep.js via
+// appointment-public.js's exported eligibility/lock/multer/notify helpers —
+// the same reuse schedule.js's app route makes); this route only adds the
+// identity rule for this surface: the reservice token's customer owns the
+// visit, and the visit is a pest/lawn re-service callback. Every refusal is
+// the generic 404 an unknown token gets.
+const VISIT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PHOTOS_PATH_RE = /^\/([^/]+)\/visits\/([^/]+)\/photos\/?$/i;
+
+// Mounted by server/index.js on /api/public/reservice AHEAD of the shared
+// body parsers (the appointment route's visitPrepPreParserGuard precedent:
+// a malformed JSON body to a dark or malformed photos path must get the
+// generic 404, never a parser's 400/413), and again as the route's first step.
+function reservicePhotosPreParserGuard(req, res, next) {
+  const match = PHOTOS_PATH_RE.exec(req.path || '');
+  if (!match) return next();
+  if (!TOKEN_RE.test(match[1]) || !VISIT_ID_RE.test(match[2]) || !reserviceSelfServeEnabled()
+    || !photosEnabled() || !req.is('multipart/form-data')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+}
+
+const PHOTO_VISIT_COLUMNS = [
+  's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
+  's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
+  's.recurring_parent_id', 's.recurring_pattern', 's.visit_id',
+  's.source_action', 's.customer_confirmed', 's.property_id', 's.is_callback',
+  'sv.service_key',
+];
+
+// The customer's own pest/lawn re-service callback, by id — the same row
+// predicate openReserviceCallbacks uses (is_callback or a re-service catalog
+// key, lane pest or lawn). Status and date are visit-prep eligibility's.
+async function loadReservicePhotoVisit(visitId, customerId, conn = db) {
+  const row = await conn('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.id', visitId)
+    .where('s.customer_id', customerId)
+    .first(...PHOTO_VISIT_COLUMNS);
+  if (!row) return null;
+  const { RE_SERVICE_SERVICE_KEYS } = require('../services/re-service');
+  const isCallback = row.is_callback === true || RE_SERVICE_SERVICE_KEYS.has(row.service_key);
+  const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
+  return isCallback && Object.prototype.hasOwnProperty.call(RESERVICE_LANES, lane) ? row : null;
+}
+
+async function eligibleReservicePhotoVisit(visitId, customer) {
+  const row = await loadReservicePhotoVisit(visitId, customer.id);
+  if (!row) return null;
+  const svc = { ...row, customer_active: customer.active === true };
+  const eligibility = await require('./appointment-public').deriveVisitPrepEligibility(svc, { reserviceCallback: true });
+  return eligibility.eligible ? svc : null;
+}
+
+// The commit response's offer: { visitId, photosRemaining } or null.
+async function reservicePhotoOffer(visitId, customer) {
+  const svc = await eligibleReservicePhotoVisit(visitId, customer);
+  if (!svc) return null;
+  const summary = await require('../services/visit-prep').visitPrepSummary(svc);
+  return summary.photosRemaining > 0 ? { visitId: svc.id, photosRemaining: summary.photosRemaining } : null;
+}
+
+// Locked recheck on the write's own transaction (visit-prep.js file header:
+// never the global pool). Same lock order as appointment-public.js /
+// schedule.js: the customer FOR SHARE (still holding THIS reservice token),
+// then the visit FOR UPDATE, then a fresh reload, then the shared
+// member-lock + eligibility core.
+async function reloadReservicePhotoVisit(token, visitId, customerId, propertyId, trx) {
+  const customer = await trx('customers')
+    .where({ id: customerId, reservice_token: token })
+    .whereNull('deleted_at')
+    .forShare()
+    .first('id', 'active');
+  if (!customer) return null;
+  await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
+  const row = await loadReservicePhotoVisit(visitId, customerId, trx);
+  if (!row || String(row.property_id || '') !== String(propertyId || '')) return null;
+  return require('./appointment-public').reloadEligibleVisitPrepRowCore(
+    { ...row, customer_active: customer.active === true },
+    trx,
+    { reserviceCallback: true },
+  );
+}
+
+const photosLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again in a minute.' },
+});
+
+router.post(
+  '/:token/visits/:visitId/photos',
+  reservicePhotosPreParserGuard,
+  photosLimiter,
+  // Identity + eligibility BEFORE multer buffers a byte (advisory; the
+  // write re-proves it under the stop lock).
+  async (req, res, next) => {
+    try {
+      const customer = await loadByToken(req.params.token);
+      if (!customer) return res.status(404).json({ error: 'Not found' });
+      const svc = await eligibleReservicePhotoVisit(req.params.visitId, customer);
+      if (!svc) return res.status(404).json({ error: 'Not found' });
+      req.visitPrepSvc = svc;
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  },
+  (req, res, next) => {
+    const appointmentPublic = require('./appointment-public');
+    const { VISIT_PREP_LIMITS } = require('../services/visit-prep');
+    appointmentPublic.visitPrepUpload.array('photos', VISIT_PREP_LIMITS.photosPerSubmission)(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Each photo must be 5 MB or smaller.' });
+      }
+      return res.status(400).json({ error: 'Could not read the uploaded photos.' });
+    });
+  },
+  async (req, res, next) => {
+    const { token } = req.params;
+    const svc = req.visitPrepSvc;
+    // The re-service lane is the topic (pest/lawn are visit-prep TOPICS).
+    const topic = laneForCallbackRow({ serviceKey: svc.service_key, serviceType: svc.service_type });
+    try {
+      const result = await require('../services/visit-prep').createVisitPrepSubmission({
+        svc,
+        files: req.files || [],
+        note: req.body?.note,
+        topic,
+        locationOnProperty: req.body?.locationOnProperty,
+        entry: 'reservice_page',
+        recheck: (trx) => reloadReservicePhotoVisit(token, svc.id, svc.customer_id, svc.property_id || null, trx),
+      });
+      if (result.created) {
+        const appointmentPublic = require('./appointment-public');
+        Promise.resolve()
+          .then(() => appointmentPublic.notifyOfficeVisitPrepSubmission(result.svc, topic))
+          .catch((err) => logger.error(`[reservice-public] visit-prep office item failed for ${result.svc?.id}: ${err.message}`));
+      }
+      return res.status(result.created ? 201 : 200).json({
+        ok: true,
+        prepPhotos: {
+          eligible: true,
+          photoCount: result.summary.photoCount,
+          photosRemaining: result.summary.photosRemaining,
+          photosAdded: result.stored,
+        },
+      });
+    } catch (err) {
+      if (err && err.visitPrep) {
+        if (err.statusCode === 404) return res.status(404).json({ error: 'Not found' });
+        return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      }
+      return next(err);
+    }
+  },
+);
 
 router._test = {
   TOKEN_RE,
@@ -703,6 +881,9 @@ router._test = {
   buildAvailabilityForCustomer,
   reserviceLocationReviewRequired,
   serviceLocationFingerprint,
+  loadReservicePhotoVisit,
+  reloadReservicePhotoVisit,
 };
 
 module.exports = router;
+module.exports.reservicePhotosPreParserGuard = reservicePhotosPreParserGuard;

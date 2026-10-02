@@ -33,6 +33,22 @@ jest.mock('../config/feature-gates', () => ({
   bookArrivalGraceLive: jest.fn(() => false),
   // GATE_RESERVICE_DETAILS_REQUIRED canonical reader, driven by gateState.
   reserviceDetailsRequiredLive: jest.fn(() => gateState.reserviceDetailsRequired === true),
+  // GATE_RESERVICE_PHOTOS canonical reader (already ANDed with
+  // GATE_VISIT_PREP_PHOTOS in the real module), driven by gateState.
+  reservicePhotosLive: jest.fn(() => gateState.reservicePhotos === true),
+}));
+
+// Re-service photos reuse appointment-public.js's visit-prep helpers and
+// visit-prep.js's summary; both are stubbed here (this file tests the
+// re-service identity rule and wiring, visit-prep has its own suites).
+jest.mock('../routes/appointment-public', () => ({
+  deriveVisitPrepEligibility: jest.fn(async () => ({ eligible: true, reason: null })),
+  reloadEligibleVisitPrepRowCore: jest.fn(async (svc) => svc),
+  notifyOfficeVisitPrepSubmission: jest.fn(async () => {}),
+}));
+jest.mock('../services/visit-prep', () => ({
+  VISIT_PREP_LIMITS: { photosPerSubmission: 3 },
+  visitPrepSummary: jest.fn(async () => ({ photoCount: 0, photosRemaining: 6, submissionCount: 0 })),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
@@ -50,7 +66,7 @@ jest.mock('../models/db', () => {
       'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
       'whereRaw', 'andWhere', 'orWhere', 'orWhereIn', 'orWhereRaw', 'orderBy',
       'orderByRaw', 'limit', 'offset', 'select', 'join', 'leftJoin', 'groupBy',
-      'count', 'modify',
+      'count', 'modify', 'forShare', 'forUpdate',
     ];
     for (const m of passthrough) q[m] = () => q;
     q.where = (key, value) => {
@@ -695,6 +711,128 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       gateState.reserviceDetailsRequired = true;
       const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });
       expect(arg.customer_notes).toBe('Re-service request: ants');
+    });
+  });
+
+  // GATE_RESERVICE_PHOTOS (owner 2026-10-02: photos optional).
+  describe('GATE_RESERVICE_PHOTOS', () => {
+    const VISIT_ID = '11111111-2222-4333-8444-555555555555';
+    const CALLBACK_ROW = {
+      id: VISIT_ID, customer_id: CUST_ID, status: 'confirmed', is_callback: true,
+      service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', property_id: 'prop-1',
+    };
+    const appointmentPublic = require('../routes/appointment-public');
+
+    afterEach(() => {
+      delete gateState.reservicePhotos;
+      delete firstResults['scheduled_services as s'];
+      delete firstResults.scheduled_services;
+      appointmentPublic.deriveVisitPrepEligibility.mockClear();
+      appointmentPublic.reloadEligibleVisitPrepRowCore.mockClear();
+    });
+
+    async function commit() {
+      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue({
+        ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123' },
+      });
+      try {
+        return (await callHandler(postHandler(), {
+          params: { token: 'a'.repeat(64) },
+          body: { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' },
+        })).json.mock.calls[0][0];
+      } finally {
+        csb.mockRestore();
+      }
+    }
+
+    test('gate off: the commit response carries no prepPhotos key', async () => {
+      firstResults.scheduled_services = { id: VISIT_ID, reschedule_token: 'b'.repeat(64) };
+      firstResults['scheduled_services as s'] = CALLBACK_ROW;
+      const payload = await commit();
+      expect(payload.success).toBe(true);
+      expect(payload).not.toHaveProperty('prepPhotos');
+      expect(appointmentPublic.deriveVisitPrepEligibility).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the commit response offers photos for the visit just booked', async () => {
+      gateState.reservicePhotos = true;
+      firstResults.scheduled_services = { id: VISIT_ID, reschedule_token: 'b'.repeat(64) };
+      firstResults['scheduled_services as s'] = CALLBACK_ROW;
+      const payload = await commit();
+      expect(payload.prepPhotos).toEqual({ visitId: VISIT_ID, photosRemaining: 6 });
+      expect(appointmentPublic.deriveVisitPrepEligibility)
+        .toHaveBeenCalledWith(expect.objectContaining({ id: VISIT_ID, customer_active: true }), { reserviceCallback: true });
+    });
+
+    test('gate on: an ineligible visit gets no offer, and the booking still succeeds', async () => {
+      gateState.reservicePhotos = true;
+      firstResults.scheduled_services = { id: VISIT_ID, reschedule_token: 'b'.repeat(64) };
+      firstResults['scheduled_services as s'] = CALLBACK_ROW;
+      appointmentPublic.deriveVisitPrepEligibility.mockResolvedValueOnce({ eligible: false, reason: 'not_upcoming' });
+      const payload = await commit();
+      expect(payload.success).toBe(true);
+      expect(payload).not.toHaveProperty('prepPhotos');
+    });
+
+    test('only a pest/lawn re-service callback qualifies', async () => {
+      const { loadReservicePhotoVisit } = reservicePublicRouter._test;
+      firstResults['scheduled_services as s'] = CALLBACK_ROW;
+      expect(await loadReservicePhotoVisit(VISIT_ID, CUST_ID)).toEqual(CALLBACK_ROW);
+      firstResults['scheduled_services as s'] = { ...CALLBACK_ROW, is_callback: false, service_key: 'pest_quarterly', service_type: 'General Pest Control' };
+      expect(await loadReservicePhotoVisit(VISIT_ID, CUST_ID)).toBeNull();
+      firstResults['scheduled_services as s'] = { ...CALLBACK_ROW, service_key: null, service_type: 'Rodent Follow-Up' };
+      expect(await loadReservicePhotoVisit(VISIT_ID, CUST_ID)).toBeNull();
+      delete firstResults['scheduled_services as s'];
+      expect(await loadReservicePhotoVisit(VISIT_ID, CUST_ID)).toBeNull();
+    });
+
+    test('locked recheck: token customer, unchanged property, then the shared core with the waiver', async () => {
+      const { reloadReservicePhotoVisit } = reservicePublicRouter._test;
+      const trx = require('../models/db');
+      firstResults['scheduled_services as s'] = CALLBACK_ROW;
+      expect(await reloadReservicePhotoVisit('a'.repeat(64), VISIT_ID, CUST_ID, 'prop-1', trx))
+        .toEqual(expect.objectContaining({ id: VISIT_ID, customer_active: true }));
+      expect(appointmentPublic.reloadEligibleVisitPrepRowCore).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: VISIT_ID }), trx, { reserviceCallback: true },
+      );
+      // The visit moved to another property since the pre-check.
+      expect(await reloadReservicePhotoVisit('a'.repeat(64), VISIT_ID, CUST_ID, 'prop-2', trx)).toBeNull();
+      // The token's customer row is gone (token rotated / customer deleted).
+      const saved = firstResults.customers;
+      firstResults.customers = null;
+      try {
+        expect(await reloadReservicePhotoVisit('a'.repeat(64), VISIT_ID, CUST_ID, 'prop-1', trx)).toBeNull();
+      } finally {
+        firstResults.customers = saved;
+      }
+    });
+
+    test.each([
+      ['gate off', { gate: false }],
+      ['a non-multipart body', { multipart: false }],
+      ['a malformed visit id', { path: `/${'a'.repeat(64)}/visits/not-a-uuid/photos` }],
+      ['a malformed token', { path: `/bad/visits/${VISIT_ID}/photos` }],
+    ])('pre-parser guard: %s is the generic 404', (_label, opts) => {
+      gateState.reservicePhotos = opts.gate !== false;
+      const { reservicePhotosPreParserGuard } = require('../routes/reservice-public');
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+      const next = jest.fn();
+      reservicePhotosPreParserGuard({
+        path: opts.path || `/${'a'.repeat(64)}/visits/${VISIT_ID}/photos`,
+        is: () => opts.multipart !== false,
+      }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(404);
+    });
+
+    test('pre-parser guard: a valid multipart upload, and every other path, pass through', () => {
+      gateState.reservicePhotos = true;
+      const { reservicePhotosPreParserGuard } = require('../routes/reservice-public');
+      for (const path of [`/${'a'.repeat(64)}/visits/${VISIT_ID}/photos`, `/${'a'.repeat(64)}`, `/${'a'.repeat(64)}/find-slots`]) {
+        const next = jest.fn();
+        reservicePhotosPreParserGuard({ path, is: () => path.endsWith('/photos') }, {}, next);
+        expect(next).toHaveBeenCalled();
+      }
     });
   });
 });
