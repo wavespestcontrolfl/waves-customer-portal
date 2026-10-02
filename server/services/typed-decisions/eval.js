@@ -96,7 +96,13 @@ const parse = (value) => {
   try { return JSON.parse(value); } catch { return null; }
 };
 
-const providerOf = (row) => row.provider || 'typesafe'; // rows from before the column are Jev's
+// provider is NOT NULL since migration 20261002010000 and every reader selects
+// it, so a row without one is malformed input, never a legacy row: refuse it
+// rather than score its evidence as Jev's (Codex r5, #5555).
+const providerOf = (row) => {
+  if (typeof row.provider !== 'string' || !row.provider) throw new Error('decision_reviews row without a provider');
+  return row.provider;
+};
 const groupKey = (row) => `${row.capability}|${row.package_id}|${providerOf(row)}|${row.question_id}|${row.served_model || ''}`;
 
 // The question's type from the registered package; a package that has since

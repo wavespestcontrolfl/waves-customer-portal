@@ -150,9 +150,9 @@ describe('scoreRows — tiers from the representative set only', () => {
     const caps = scoreRows([...rows(70, { provider: 'typesafe', model: 'jev-1.13.0', p: 0.95 }), ...rows(10, { provider: 'cloudflare', model: 'clef-flash', p: 0.95 })], []);
     expect(caps.map((c) => [c.provider, c.servedModel, c.tier])).toEqual([['cloudflare', 'clef-flash', 0], ['typesafe', 'jev-1.13.0', 2]]);
     expect(caps.every((c) => c.questions[0].provider === c.provider)).toBe(true);
-    // a row from before the provider column is Jev's
-    const [legacy] = scoreRows([{ ...row(), provider: undefined }], []);
-    expect(legacy.provider).toBe('typesafe');
+    // provider is NOT NULL and every reader selects it: a row without one is refused, never scored as Jev's
+    expect(() => scoreRows([{ ...row(), provider: undefined }], [])).toThrow(/without a provider/);
+    expect(() => scoreRows([{ ...row(), provider: '' }], [])).toThrow(/without a provider/);
   });
 
   test('a newly pinned model version earns its tier on its own labels (§9: per capability, per version)', () => {
