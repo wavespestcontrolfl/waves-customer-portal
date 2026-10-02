@@ -1458,10 +1458,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     // A deferred job whose first visit no longer stands goes back to wait for
     // the next release pass (GitHub Codex #5567 r13): release cleared, no
     // charge, no pay link.
-    const requeueDeferred = () => resolve('awaiting_first_visit', {
+    const requeueDeferred = (extra = {}) => resolve('awaiting_first_visit', {
       resolved_at: null, resolved_by: null, claim_token: null, claimed_at: null,
       released_at: null, released_for_visit_id: null,
       payer_scope_scheduled_service_id: job.scheduled_service_id || null,
+      ...extra,
     });
     const alertUncollected = async (title, body) => require('./notification-service').notifyAdmin(
       'billing', title, body,
@@ -1744,12 +1745,18 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // that started after it, sends the job back to wait for the next
       // release pass — never a charge, never a pay link.
       if (deferredToFirstVisit) {
-        const releasedVisit = job.released_for_visit_id
-          ? await db('scheduled_services').where({ id: job.released_for_visit_id }).first('status')
-          : null;
-        const visitStands = !job.released_for_visit_id || String(releasedVisit?.status || '') === 'completed';
         const PafRelease = require('./paf-prepay-release');
-        if (!visitStands || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
+        // Released with NO visit = the year settled before any visit; reaching
+        // the charge means that payment came back (a returned debit). Never a
+        // charge before a performed visit, and no automatic re-debit after it
+        // (owner R2): back to wait, marked returned, so the visit's release
+        // goes to the pay link (pre-push audit P0).
+        if (!job.released_for_visit_id) {
+          await requeueDeferred({ charge_returned: true });
+          continue;
+        }
+        if (!(await PafRelease.visitStillPerformed(job.released_for_visit_id))
+          || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
           await requeueDeferred();
           continue;
         }

@@ -625,6 +625,16 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
     });
 
+    it('a visit reopened and closed again as inspection only no longer counts as performed (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('service_records').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
+        service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
+        structured_notes: JSON.stringify({ visitOutcome: 'inspection_only' }), created_at: new Date(Date.now() + 1000) });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
     it('an abandoned closeout attempt past the stale window never blocks the release (Codex r15)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -805,6 +815,25 @@ postgres('annual prepay charged after the first visit', () => {
       expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
 
+    it('a released first visit re-closed as declined before the charge sends the job back to wait (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('service_records').insert({ id: randomUUID(), customer_id: f.customerId, scheduled_service_id: f.parentId,
+        service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
+        structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), created_at: new Date(Date.now() + 1000) });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
+    it('a year settled before any visit whose payment came back is never charged before a visit (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', released_for_visit_id: null } });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', charge_returned: true });
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -866,6 +895,11 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a returned bank debit goes to the pay link and the office alert, never a re-debit', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'processing' } });
+      // Released by the performed first visit, then charged by bank debit.
+      await perform(f.parentId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
       // The payment-failed webhook reopened the invoice.
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
       await sweep();

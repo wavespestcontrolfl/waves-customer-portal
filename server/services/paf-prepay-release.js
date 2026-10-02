@@ -93,6 +93,14 @@ async function performedVisitCandidates(estimateId, customerId) {
     .where((q) => q.where('s.source_estimate_id', estimateId).orWhere('p.source_estimate_id', estimateId))
     .where('s.status', 'completed')
     .where('r.status', 'completed')
+    // The visit's CURRENT closeout only: a fresh closeout writes a new record,
+    // so a visit reopened and closed again (inspection only, declined) is
+    // judged by that, never an older performed record (pre-push audit P0).
+    .whereRaw(`r.id = (
+      SELECT r2.id FROM service_records r2
+      WHERE r2.scheduled_service_id = s.id
+      ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1
+    )`)
     .whereRaw("COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])", [NOT_PERFORMED_OUTCOMES])
     // A quiet backfill closeout (backdated, every charge and send suppressed)
     // never releases a charge (waves-billing: backfill suppresses every money
@@ -130,6 +138,20 @@ async function planHasUnfinishedCompletion(estimateId, customerId) {
     .where('a.updated_at', '>=', staleCutoff)
     .first('a.id');
   return !!row;
+}
+
+// The released visit still stands as performed: completed, and its CURRENT
+// closeout record is a performed, non-backfill one (pre-push audit P0). The
+// sweep re-checks this before charging a job released earlier.
+async function visitStillPerformed(visitId) {
+  if (!visitId) return false;
+  const visit = await db('scheduled_services').where({ id: visitId }).first('status');
+  if (String(visit?.status || '') !== 'completed') return false;
+  const record = await db('service_records').where({ scheduled_service_id: visitId })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
+  if (!record || String(record.status || '') !== 'completed') return false;
+  const notes = parseData(record.structured_notes) || {};
+  return !NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) && String(notes.backfill || '') !== 'true';
 }
 
 async function releaseOne(row, now) {
@@ -582,6 +604,7 @@ module.exports = {
   AWAITING,
   planHasUnfinishedCompletion,
   firstChargeCompletionFacts,
+  visitStillPerformed,
   STALE_DAYS,
   releaseDeferredPrepayCharges,
   reconcileAlerts,
