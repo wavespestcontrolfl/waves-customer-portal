@@ -277,7 +277,7 @@ describe('visitLoopStatus', () => {
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull(); // facts without the section
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
-      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00::' });
+      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00:::assigned' });
     // the section was rendered with nothing time-sensitive: a null signature is still
     // persisted, so a delay / passed window / miss that appears while the card waits refuses
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toEqual({ signature: null });

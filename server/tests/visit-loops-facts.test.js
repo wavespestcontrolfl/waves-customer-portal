@@ -12,8 +12,9 @@ jest.mock('../services/sms-operational-actions', () => ({ smsCommitmentsEnabled:
 jest.mock('../services/no-show-detector', () => ({
   ...jest.requireActual('../services/no-show-detector'),
   loadPromiseEvents: jest.fn(async () => []),
+  promisedVisitIds: jest.fn(async () => []),
 }));
-const { loadPromiseEvents } = require('../services/no-show-detector');
+const { loadPromiseEvents, promisedVisitIds } = require('../services/no-show-detector');
 
 const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
@@ -123,6 +124,8 @@ describe('loadVisitLoops basics', () => {
     expect(visitStatusSignature({ lateAlert: { ...late, missingTracking: true } })).not.toBe(base);
     expect(visitStatusSignature({ lateAlert: { ...late, windowDisplay: '9:00 AM–11:00 AM' } })).toBe(base);
     expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', type: 'Lawn' } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', type: 'Pest' } }));
+    // unassigned after drafting: the reply's "checking with the tech" is stale
+    expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', assigned: true } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00', assigned: false } }));
     expect(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '09:00:00' } })).not.toBe(visitStatusSignature({ pastWindow: { visitId: 'v1', windowStart: '10:00:00' } }));
     expect(visitStatusSignature({})).toBeNull();
   });
@@ -375,6 +378,15 @@ describe('pastWindow', () => {
     ]);
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-1' });
     expect(loadPromiseEvents.mock.calls[1][1]).toEqual(['visit-1']);
+  });
+
+  test('a visit moved far out of the date scan is recalled by its promise (the detector\'s promisedVisitIds)', async () => {
+    const recalledQuery = (ops) => hasOp(ops, 'whereIn', (a) => a[0] === 'id');
+    const conn = fakeConn({ scheduled_services: (ops) => (recalledQuery(ops)
+      ? [todayRow({ status: 'confirmed', scheduled_date: '2027-03-01' })] : []) });
+    promisedVisitIds.mockResolvedValueOnce(['visit-1']);
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' }]);
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow).toMatchObject({ visitId: 'visit-1', scheduledDate: '2026-10-01' });
   });
 
   test('a promise whose window is UNKNOWN (a newer notice superseded it, start_at null) is never "passed"', async () => {

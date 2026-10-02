@@ -303,12 +303,23 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
   const today = etDateString(now);
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
-  const rows = ((await conn('scheduled_services')
-    .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', yesterday).where('scheduled_date', '<=', etDateString(addETDays(now, 60)))
-    .whereIn('status', NOT_STARTED_STATUSES)
-    .select('id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_end',
-      'window_display', 'time_window', 'service_type')) || [])
+  const COLUMNS = ['id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_end',
+    'window_display', 'time_window', 'service_type'];
+  // by schedule date, plus the detector's promise recall (promisedVisitIds: visits
+  // whose promised window is in the last 48h, wherever the row was moved since)
+  const promisedIds = await require('./no-show-detector').promisedVisitIds(conn, { now });
+  const [scanned, recalled] = await Promise.all([
+    conn('scheduled_services')
+      .where({ customer_id: customerId })
+      .where('scheduled_date', '>=', yesterday).where('scheduled_date', '<=', etDateString(addETDays(now, 60)))
+      .whereIn('status', NOT_STARTED_STATUSES)
+      .select(...COLUMNS),
+    (promisedIds || []).length
+      ? conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', promisedIds)
+        .whereIn('status', NOT_STARTED_STATUSES).select(...COLUMNS)
+      : [],
+  ]);
+  const rows = [...new Map([...(scanned || []), ...(recalled || [])].map((r) => [String(r.id), r])).values()]
     // not started (tracker unset or 'scheduled'), plus the service-record,
     // street-level-hold and sibling checks below
     .filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
@@ -522,7 +533,7 @@ function visitStatusSignature(visitLoops) {
   const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
-    v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}`,
+    v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}:${v.pastWindow.assigned === false ? 'unassigned' : 'assigned'}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }
