@@ -234,6 +234,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect(etDateString(new Date(invoice.due_date))).toBe(day(0));
     });
 
+    it('reaches a performed job behind a full page of jobs still waiting', async () => {
+      const waiting = [];
+      for (let i = 0; i < 3; i += 1) waiting.push(await deferredAccept());
+      const performed = await deferredAccept();
+      await perform(performed.parentId, performed.customerId);
+      const summary = await require('../services/paf-prepay-release').releaseDeferredPrepayCharges({ pageSize: 2 });
+      expect(summary).toMatchObject({ scanned: 4, released: 1 });
+      expect((await jobOf(performed)).status).toBe('pending');
+      for (const f of waiting) expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+    });
+
     it('releases on a performed child visit of the series', async () => {
       const f = await deferredAccept();
       await perform(f.childId, f.customerId);

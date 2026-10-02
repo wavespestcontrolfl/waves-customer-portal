@@ -146,32 +146,39 @@ async function releaseOne(row, now) {
   return null;
 }
 
-async function releaseDeferredPrepayCharges({ limit = 200, now = new Date() } = {}) {
+// Every awaiting job is visited on each pass, page by page (keyset on id):
+// jobs that stay waiting (no visit yet) never crowd a newer performed one out.
+async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() } = {}) {
   const summary = { scanned: 0, released: 0, cancelled: 0, staleAlerted: 0 };
-  let rows = [];
-  try {
-    rows = await db('estimates')
-      .where({ status: 'accepted' })
-      .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = ?", [AWAITING])
-      .orderByRaw("COALESCE(((estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'authorized_at')::timestamptz, 'epoch'::timestamptz) asc")
-      .limit(limit)
-      .select('id', 'estimate_data');
-  } catch (err) {
-    logger.warn(`[paf-prepay] awaiting-job scan failed: ${err.message}`);
-    return summary;
-  }
-  summary.scanned = rows.length;
-  for (const row of rows) {
+  let afterId = null;
+  for (;;) {
+    let rows = [];
     try {
-      const outcome = await releaseOne(row, now);
-      if (outcome === 'released') summary.released += 1;
-      else if (outcome === 'cancelled') summary.cancelled += 1;
-      else if (outcome === 'stale_alerted') summary.staleAlerted += 1;
+      rows = await db('estimates')
+        .where({ status: 'accepted' })
+        .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'status' = ?", [AWAITING])
+        .modify((q) => { if (afterId) q.where('id', '>', afterId); })
+        .orderBy('id', 'asc')
+        .limit(pageSize)
+        .select('id', 'estimate_data');
     } catch (err) {
-      logger.warn(`[paf-prepay] release check failed for estimate ${row.id}: ${err.message}`);
+      logger.warn(`[paf-prepay] awaiting-job scan failed: ${err.message}`);
+      return summary;
     }
+    summary.scanned += rows.length;
+    for (const row of rows) {
+      try {
+        const outcome = await releaseOne(row, now);
+        if (outcome === 'released') summary.released += 1;
+        else if (outcome === 'cancelled') summary.cancelled += 1;
+        else if (outcome === 'stale_alerted') summary.staleAlerted += 1;
+      } catch (err) {
+        logger.warn(`[paf-prepay] release check failed for estimate ${row.id}: ${err.message}`);
+      }
+    }
+    if (rows.length < pageSize) return summary;
+    afterId = rows[rows.length - 1].id;
   }
-  return summary;
 }
 
 module.exports = {

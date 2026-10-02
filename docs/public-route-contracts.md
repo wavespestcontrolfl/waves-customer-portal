@@ -1583,6 +1583,37 @@ sent to the customer. The accept notification (customer account feed) says
 nothing is charged today and the fee bills with the first visit. No message is sent
 because of these fields.
 
+Pay after the first visit, annual prepay (PR-D, `GATE_PAF_PREPAY`; live only when
+`GATE_PAY_AFTER_FIRST_VISIT`, `GATE_PAF_PREPAY`, `RECURRING_CARD_ON_FILE` and
+`GATE_PREPAY_CARD_AND_CHARGE` are all on; owner rulings 2026-09-30 / 2026-10-01). It changes
+only the in-lane annual-prepay accept on `PUT /api/estimates/:token/accept` (card rail, not
+the termite sign-before-pay park). (1) The `402 { code: 'PREPAY_CHARGE_QUOTE', quote }`
+round-trip is unchanged except that `quote` gains `chargedAfterFirstVisit: true` and
+`consentVariant: 'after_visit_prepay'` (both present only when the charge is deferred): the
+exact cents and method are still bound, but the card is charged AFTER the first performed
+visit for that total or less (account credit may lower it, never raise it). (2) The resubmit
+must carry, besides the existing `prepayChargeAcknowledgedTotalCents` /
+`prepayChargeAcknowledgedMethodKey` / `prepayChargeConsentAccepted`, the new request field
+`prepayChargeConsentVariant: 'after_visit_prepay'` attesting the tab rendered the
+after-visit authorization; without it the accept re-quotes (402) and commits nothing. A
+charge-now accept (gate off) that sends `prepayChargeConsentVariant: 'after_visit_prepay'` is
+also re-quoted, so the after-visit text is never recorded for a charge at approval; a
+gate-off tab that sends no variant is unchanged. (3) A deferred accept charges nothing and
+sends no pay link: the success payload carries `prepayChargeStatus: 'after_first_visit'`,
+`invoiceSettled: true`, `nextStep: 'confirmed'`, `invoiceMode: false`, no `invoicePayUrl`,
+and `prepayChargedTotal` = the acknowledged total (the amount to be charged after the visit,
+not an amount already charged). The accept records the `after_visit_prepay` consent
+(`v12_2026-09-30`) and persists `estimates.estimate_data.prepayAutoChargeJob` with
+`status: 'awaiting_first_visit'` and `deferred_to_first_visit: true`. (4) A retry of that
+already-accepted estimate (`alreadyAccepted: true`) while the job still waits rebuilds the
+same posture (`prepayChargeStatus: 'after_first_visit'`, no `/pay/` link, `invoiceMode:
+false`); once released it reads as the existing `pending`/`claimed` sweep posture. A year
+the in-transaction account credit already covered settles exactly as before (no deferral).
+The accept notification (customer account feed) says nothing is charged today and the
+annual prepay is charged to the card on file after the first visit. No message is sent
+because of these fields. Client copy and the attestation ship in PR-E; until then a
+deferred accept re-quotes, so the gate must not be flipped before it.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
