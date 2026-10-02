@@ -3,9 +3,10 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
 import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
+  AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
   CARD_CONSENT_TEXT as CLIENT_CARD_CONSENT_TEXT,
   CONSENT_VERSION as CLIENT_CONSENT_VERSION,
 } from '../../lib/paymentMethodConsentText';
@@ -17,6 +18,65 @@ import serverConsent from '../../../../server/services/payment-method-consent-te
 import stripePricing from '../../../../server/services/stripe-pricing';
 
 afterEach(() => cleanup());
+
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the monthly-tier (setup-only)
+// shape — a WaveGuard setup row and NO first-visit amount (billingFrequencyKey
+// 'monthly') — says the setup fee is billed with the first visit, and only
+// when the server flag is on. Everything else keeps today's invoice copy.
+describe('PaymentPreferenceButtons setup fee billed with the first visit', () => {
+  const monthlyTier = { billingFrequencyKey: 'monthly', monthly: 45 };
+  const quarterlyWithVisit = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const setupFee = { amount: 99, service: 'waveguard_setup' };
+
+  it('flag on + setup-only shape: no invoice total, nothing-due-today copy', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={setupFee}
+        selectedFrequency={monthlyTier}
+        prepayCardCapture
+        setupFeeAfterFirstVisit
+      />,
+    );
+    expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/setup fee is billed with your first visit/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/we will send the setup invoice/i)).not.toBeInTheDocument();
+  });
+
+  it('flag off: today\'s setup invoice copy and Invoice total row are unchanged', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={setupFee}
+        selectedFrequency={monthlyTier}
+        prepayCardCapture
+      />,
+    );
+    expect(screen.getByText('Invoice total')).toBeInTheDocument();
+    expect(screen.getByText(/we will send the setup invoice after confirmation/i)).toBeInTheDocument();
+    expect(screen.queryByText(/setup fee is billed with your first visit/i)).not.toBeInTheDocument();
+  });
+
+  it('shape predicate: a first-visit amount, a bait-station row, one-time or invoice mode never qualify', () => {
+    const base = { enabled: true, serviceMode: 'recurring', setupFee, selectedFrequency: monthlyTier };
+    expect(setupFeeBilledWithFirstVisit(base)).toBe(true);
+    expect(setupFeeBilledWithFirstVisit({ ...base, enabled: false })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, selectedFrequency: quarterlyWithVisit })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, extraInvoiceRows: [{ label: 'Bait Station Setup', amount: 99 }] })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, serviceMode: 'one_time' })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, invoiceMode: true })).toBe(false);
+    expect(setupFeeBilledWithFirstVisit({ ...base, setupFee: null })).toBe(false);
+  });
+
+  it('client after-visit card consent mirrors the server variant text (snapshot of record)', () => {
+    expect(CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT).toBe(serverConsent.AFTER_VISIT_CARD_CONSENT_TEXT);
+    expect(CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT).toMatch(/one-time setup fee/);
+  });
+});
 
 describe('PaymentPreferenceButtons', () => {
   it('offers annual prepay when the service mix is eligible without a setupFee', () => {

@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import InlineAutoPayCapture from './InlineAutoPayCapture';
+import { AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 
 afterEach(() => cleanup());
 
@@ -355,5 +356,52 @@ describe('InlineAutoPayCapture afterVisit consent', () => {
     await act(async () => { getByText('View full terms').click(); });
     expect(queryByText(/after my first service visit is completed/)).toBeNull();
     expect(termsText(container)).toContain('By checking this box');
+  });
+});
+
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): the monthly-tier setup fee is
+// billed WITH the first visit, so the capture says so and the card consent the
+// customer ticks (and the accept records as `after_visit_card`) is the
+// after-first-visit variant — never the base "after each completed service" text.
+describe('InlineAutoPayCapture afterVisitSetup (setup fee billed with the first visit)', () => {
+  it('names the first visit + one-time setup fee and shows the after_visit_card consent text', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} afterVisitSetup />,
+    );
+    await flush();
+    expect(getByText(/After your first visit is completed, your card is charged for that visit and your one-time setup fee/)).toBeInTheDocument();
+    expect(getByText(/charge this card after my first visit is completed \(that visit plus my one-time setup fee\)/)).toBeInTheDocument();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(AFTER_VISIT_CARD_CONSENT_TEXT)).toBeInTheDocument();
+    expect(queryByText(CARD_CONSENT_TEXT)).toBeNull();
+  });
+
+  it('a checked box is cleared when the rendered authorization switches to the setup-fee variant', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByRole, rerender } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    await act(async () => { getByRole('checkbox').click(); });
+    expect(getByRole('checkbox')).toBeChecked();
+    rerender(<InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} afterVisitSetup />);
+    await flush();
+    expect(getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it('default (flag absent): today\'s copy and base consent text', async () => {
+    const { StripeCtor } = makeStripeStub();
+    const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+    const { getByText, queryByText } = render(
+      <InlineAutoPayCapture intent={{ ...INTENT }} loadStripeSdk={loadStripeSdk} />,
+    );
+    await flush();
+    expect(getByText(/charge this card after each completed service/)).toBeInTheDocument();
+    expect(queryByText(/one-time setup fee/)).toBeNull();
+    await act(async () => { getByText('View full terms').click(); });
+    expect(getByText(CARD_CONSENT_TEXT)).toBeInTheDocument();
   });
 });
