@@ -44,7 +44,7 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, DECISION_PROVIDERS } = require('../services/typed-decisions/packages');
 
 // The row must name a registered package AND carry that package's CURRENT
 // content hash: a syntactically valid digest for different question wording
@@ -147,10 +147,10 @@ function rowToCase(row, capability = null) {
   const label = structuredLabel(row.label);
   if (label && row.label && row.label.verdict === 'jev_wrong' && inDomain(question, row.label.correct_value)) label.correct_value = row.label.correct_value;
   // Which provider's answer this case holds: a closed registry value, never a
-  // stored string. A row from before the column reads as the default; a value
-  // outside the registry is not exported at all (it can never be relabeled as
-  // another provider's answer).
-  const provider = row.provider == null ? DEFAULT_DECISION_PROVIDER : (DECISION_PROVIDERS.includes(row.provider) ? row.provider : null);
+  // stored string. provider is NOT NULL and selected here, so a row without one
+  // is malformed and is not exported, like a value outside the registry (it can
+  // never be relabeled as another provider's answer; Codex r7, #5555).
+  const provider = DECISION_PROVIDERS.includes(row.provider) ? row.provider : null;
   if (!provider) return null;
   return {
     provider,

@@ -15,7 +15,9 @@
  * out: label, label_status, labeled_by and labeled_at are never touched, and a
  * labeled row keeps the answers its label was given against. sampled_for moves
  * WITH the answers (a re-run that turns an agreement into a disagreement puts
- * the row in the queue, and the reverse takes it out); its random-audit draw is
+ * the row in the queue; the reverse takes it out only on a coordinated write,
+ * one that carries every sibling provider's answers, so a write for one
+ * provider alone never un-samples a stored disagreement); its random-audit draw is
  * a stable hash of the row's key, drawn before the disagreement check, so
  * re-running never re-rolls it and the audit stays a population sample.
  *
@@ -171,6 +173,19 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
  * Gate off, a failed answer or a bad subject returns early with no write.
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
+// What a re-record writes over an unlabeled row. Every answer column follows
+// the new write; sampled_for does too ONLY when the write is coordinated, that
+// is, it carries the other providers' answers for this subject, so the queue
+// verdict was computed with complete sibling results. A write for one provider
+// alone (its sibling failed, or there is only one) keeps a stored disagreement:
+// recomputing it without the sibling would clear the pair's review and leave
+// the other provider's row in the queue by itself (Codex r7, #5555).
+function mergeSet(conn, coordinated) {
+  const set = Object.fromEntries(MERGE_COLUMNS.map((column) => [column, conn.raw(`EXCLUDED.${column}`)]));
+  if (!coordinated) set.sampled_for = conn.raw(`COALESCE(EXCLUDED.sampled_for, ${TABLE}.sampled_for)`);
+  return set;
+}
+
 async function recordDecisions({ capability, pkg, provider, subjectType, subjectId, result, baselines = {}, siblingAnswers = {}, subjectHash = null, random = null, conn = db } = {}) {
   if (!typedDecisionsLive()) return { recorded: 0, skipped: 'gate_off' };
   if (!pkg || !pkg.questions) return { recorded: 0, skipped: 'no_package' };
@@ -186,7 +201,7 @@ async function recordDecisions({ capability, pkg, provider, subjectType, subject
   await conn(TABLE)
     .insert(rows)
     .onConflict(CONFLICT_KEY)
-    .merge(MERGE_COLUMNS)
+    .merge(mergeSet(conn, Object.keys(siblingAnswers || {}).length > 0))
     .where(`${TABLE}.label_status`, 'unreviewed')
     // A held-out row is a frozen measurement: never re-answered.
     .whereRaw(`${TABLE}.sampled_for IS DISTINCT FROM 'heldout'`);

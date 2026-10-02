@@ -3,6 +3,7 @@ const { PACKAGES, packageHash } = require('../services/typed-decisions/packages'
 const CALL_JUDGE_HASH = packageHash(PACKAGES['call_judge.v2']);
 
 const ROW = {
+  provider: 'typesafe',
   id: 'ignored-id',
   capability: 'call_judge',
   package_id: 'call_judge.v2',
@@ -47,7 +48,8 @@ describe('rowToCase', () => {
 
   test('provider is a closed registry value: a second provider exports as itself, a stored string outside the registry is not exported', () => {
     expect(rowToCase({ ...ROW, provider: 'cloudflare' }).provider).toBe('cloudflare');
-    expect(rowToCase({ ...ROW, provider: null }).provider).toBe('typesafe'); // a row from before the column
+    expect(rowToCase({ ...ROW, provider: null })).toBeNull(); // provider is NOT NULL: a row without one is malformed, never Jev's by default
+    expect(rowToCase({ ...ROW, provider: undefined })).toBeNull();
     expect(rowToCase({ ...ROW, provider: 'Jane Doe at 123 Main' })).toBeNull();
     expect(COLUMNS).toContain('provider');
   });

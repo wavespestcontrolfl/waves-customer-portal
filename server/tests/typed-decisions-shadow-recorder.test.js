@@ -107,9 +107,12 @@ describe('recordDecisions', () => {
     await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
-    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
-    expect(MERGE_COLUMNS).toEqual(calls.merge);
-    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at', 'outcome_evidence']) expect(calls.merge).not.toContain(forbidden);
+    expect(Object.keys(calls.merge)).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
+    expect(MERGE_COLUMNS).toEqual(Object.keys(calls.merge));
+    expect(calls.merge.jev_answer.sql).toBe('EXCLUDED.jev_answer');
+    // a write for one provider alone (no sibling answers) never un-samples a stored disagreement
+    expect(calls.merge.sampled_for.sql).toBe('COALESCE(EXCLUDED.sampled_for, decision_reviews.sampled_for)');
+    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at', 'outcome_evidence']) expect(Object.keys(calls.merge)).not.toContain(forbidden);
     expect(calls.whereRaw).toMatch(/sampled_for IS DISTINCT FROM 'heldout'/);
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });
@@ -201,6 +204,15 @@ describe('provider (one row per provider per subject and question; Codex r1 on #
 });
 
 describe('review cohort is paired across provider siblings (Codex r1 on #5555)', () => {
+  test('a coordinated write (sibling answers present) lets sampled_for follow the new verdict; a write for one provider alone keeps a stored disagreement (Codex r7, #5555)', async () => {
+    const paired = stubConn();
+    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result: { ok: true, packageHash: packageHash(packageFor('sms_courtesy.v1')), servedModel: 'jev-1.13.0', answers: { is_courtesy_only: noul(0.9) } }, siblingAnswers: { is_courtesy_only: noul(0.9) }, random: () => 0.99, conn: paired.conn });
+    expect(paired.calls.merge.sampled_for.sql).toBe('EXCLUDED.sampled_for');
+    const alone = stubConn();
+    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result: { ok: true, packageHash: packageHash(packageFor('sms_courtesy.v1')), servedModel: 'jev-1.13.0', answers: { is_courtesy_only: noul(0.9) } }, random: () => 0.99, conn: alone.conn });
+    expect(alone.calls.merge.sampled_for.sql).toBe('COALESCE(EXCLUDED.sampled_for, decision_reviews.sampled_for)');
+  });
+
   const sms = packageFor('sms_courtesy.v1');
   const result = (p, servedModel) => ({ ok: true, packageHash: packageHash(sms), servedModel, answers: { is_courtesy_only: noul(p) } });
   const record = async ({ provider, p, sibling, baselines, draw = 0.99 }) => {
