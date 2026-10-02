@@ -291,6 +291,11 @@ postgres('combined-booking check through the real conversion', () => {
       const childOf = async (est) => (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
       await trx('scheduled_services').where({ id: (await childOf(near)).id }).update({ technician_id: null, scheduled_date: tomorrow });
       await trx('scheduled_services').where({ id: (await childOf(far)).id }).update({ technician_id: null, scheduled_date: '2099-06-01' });
+      // A visit completed today with no technician recorded is finished work: not a candidate.
+      const done = await acceptedEstimate(trx, lines);
+      await repair(trx, done);
+      await trx('scheduled_services').where({ id: (await childOf(done)).id })
+        .update({ technician_id: null, status: 'completed', scheduled_date: etDateString(new Date()) });
       expect(await runCombinedBookingCheck({ conn: trx, urgentOnly: true })).toMatchObject({ candidates: 1, problems: 1 });
       expect(await alertsOf(trx, near.estimateId)).toHaveLength(1);
       expect(await alertsOf(trx, far.estimateId)).toHaveLength(0);

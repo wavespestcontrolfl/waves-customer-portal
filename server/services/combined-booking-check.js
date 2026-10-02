@@ -74,7 +74,11 @@ const ROUTING_HORIZON_DAYS = 14;
 const addDaysET = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
 
 const CANCELLED = new Set(['cancelled', 'canceled']);
-const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
+// Finished or parked visits are not judged: the shared terminal set
+// (completed, cancelled, rescheduled, skipped, no_show) plus the alternate
+// spelling of cancelled.
+const { TERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
+const NOT_LIVE = new Set([...TERMINAL_SCHEDULED_SERVICE_STATUSES, 'canceled']);
 
 const FAMILY_LABELS = {
   pest_control: 'Pest',

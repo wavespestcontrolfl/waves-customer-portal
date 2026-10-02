@@ -78,6 +78,11 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
   });
 
+  test('a completed visit is finished work, never a repair alert, even with no technician recorded', () => {
+    const lawn = lawnRows({ parentOverrides: { ...untimed, status: 'completed' } });
+    expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
+  });
+
   test('cancelled, rescheduled, callback, follow-up and booster rows are not judged', () => {
     const lawn = lawnRows().map((row, i) => {
       if (i === 1) return { ...row, ...untimed, status: 'cancelled' };
