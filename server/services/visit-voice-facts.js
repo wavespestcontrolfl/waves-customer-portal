@@ -160,7 +160,17 @@ const FUTURE_BEFORE_RE = /\b(?:\w+'ll|will|won'?t|shall|going\s+to|gonna|plan(?:
 const FUTURE_CLAUSE_RE = /\b(?:tomorrow|next\s+(?:time|visit|service|month|week|quarter|year))\b/;
 function notDoneYet(text, at) {
   const { from, to } = clauseBounds(text, at);
-  return FUTURE_BEFORE_RE.test(text.slice(from, at)) || FUTURE_CLAUSE_RE.test(text.slice(from, to));
+  if (FUTURE_BEFORE_RE.test(text.slice(from, at))) return true;
+  // A time said for later ("tomorrow", "next visit") is the nearest action's
+  // in its clause, never another's: in "sprayed outside for ants and will
+  // treat inside next visit" only the treating inside waits (pre-push P1 on
+  // #5538).
+  const actions = governingWords(text, from, to).filter((w) => w.kind === 'treatment' && w.at !== at);
+  return [...text.slice(from, to).matchAll(new RegExp(FUTURE_CLAUSE_RE.source, 'g'))].some((m) => {
+    const timeAt = from + m.index;
+    const [low, high] = timeAt > at ? [at, timeAt] : [timeAt, at];
+    return !actions.some((w) => w.at > low && w.at < high);
+  });
 }
 function areaAssertion(area) {
   return (quote) => {

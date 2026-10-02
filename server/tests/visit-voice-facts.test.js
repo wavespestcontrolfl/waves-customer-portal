@@ -601,6 +601,14 @@ describe('validateVoiceFacts', () => {
     expect(placeIn(trimmed, 'Inside')).toBe('unclear');
     expect(placeIn(trimmed, 'Garage')).toBe('none');
     expect(trimmed).toMatchObject({ spray: null, unclearSpray: true });
+    // A time said for later is its own action's, never another's in the
+    // clause (pre-push P1 on #5538).
+    const mixed = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }],
+      spray: { method: 'not_said', quote: '' },
+    }, 'Sprayed outside for ants and will treat inside next visit.');
+    expect(mixed).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [], pests: [{ name: 'ants' }], unclearPests: [], unclearSpray: false });
     // Nor when the reading itself quotes the plan.
     const planned = validateVoiceFacts({
       areas: [{ area: 'inside', quote: 'Will spray inside next time' }],
