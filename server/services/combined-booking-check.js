@@ -299,11 +299,15 @@ function checkPrices(dated, families, prices) {
 // primary only when no adjustment is needed (an adjustment across service and
 // add-ons cannot be apportioned). With no primary stamp, estimated_price is
 // the service only when there are no add-ons. null when it cannot be read:
-// those cases, or any line / appointment discount.
+// those cases, any line / appointment discount, or an authoritative $0
+// (billing-lane.js hasAuthoritativeZeroPrice: a fully discounted application
+// frozen at $0, or a stamped $0 under GATE_STAMPED_ZERO_FREE), which invoicing
+// bills at $0 on purpose: a discount like the others, never guessed at.
 function billedServicePrice(row) {
+  const { hasAuthoritativeZeroPrice } = require('./billing-lane');
   const discounted = row.line_discount_id || Number(row.line_discount_amount) > 0 || Number(row.line_discount_dollars) > 0
     || row.discount_id || Number(row.discount_amount) > 0 || Number(row.discount_dollars) > 0;
-  if (discounted) return null;
+  if (discounted || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) return null;
   const estimated = Number(row.estimated_price);
   const addons = Number(row.addon_total) || 0;
   if (row.primary_line_price == null || row.primary_line_price === '') return addons > 0 ? null : estimated;

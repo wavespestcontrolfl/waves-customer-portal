@@ -264,6 +264,12 @@ describe('visit prices', () => {
     // No add-ons, primary $100 above a $90 visit price: invoicing adjusts down to $90, so it bills $90.
     const adjustedDown = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100 } : row));
     expect(texts(verdictFor(priced(pestRows(), 150), adjustedDown))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // A stamped $0 beside a positive primary is a fully discounted visit billed $0 on purpose:
+    // skipped like any discount. A never-priced visit (null) with a primary is checked on the primary.
+    const frozenFree = priced(lawnRows(), 0).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100 } : row));
+    expect(verdictFor(priced(pestRows(), 150), frozenFree).ok).toBe(true);
+    const neverPriced = priced(lawnRows(), null).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), neverPriced))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
     // With add-ons and an adjustment needed, the service share cannot be read: skipped.
     const ambiguous = priced(lawnRows(), 150).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100, addon_total: 75 } : row));
     expect(verdictFor(priced(pestRows(), 150), ambiguous).ok).toBe(true);
