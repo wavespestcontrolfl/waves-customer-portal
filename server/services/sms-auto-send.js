@@ -336,7 +336,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
       visitLoopStatus: visitLoopStatus || null,
       // what the unanswered-text lane's provider-boundary check reads
-      unanswered: unanswered ? { suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId } : null,
+      unanswered: unanswered ? { suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId, factsAt: unanswered.factsAt || null } : null,
     };
   });
 }

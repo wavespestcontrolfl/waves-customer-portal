@@ -301,6 +301,22 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a reschedule after the claim is caught at the provider boundary and the card returns', async () => {
+    const s = await waitingSuggestion();
+    sendCustomerMessage.mockImplementation(async (input) => {
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, scheduled_date: '2026-10-09', service_type: 'Pest Control',
+        updated_at: at('2026-10-06T17:59:30Z'),
+      });
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.visit_changed).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+  });
+
   test('closing time between the claim and the provider call holds the send and the card returns', async () => {
     const s = await waitingSuggestion();
     sendCustomerMessage.mockImplementation(async (input) => {

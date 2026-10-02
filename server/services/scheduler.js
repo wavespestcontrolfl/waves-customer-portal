@@ -4182,7 +4182,8 @@ function initScheduledJobs() {
       const result = await unanswered.processUnansweredReplyCandidates();
       if (result?.attempted) logger.info(`[sms-unanswered] sweep: ${result.sent} sent of ${result.attempted} attempted`);
     } catch (err) {
-      logger.warn(`[sms-unanswered] sweep failed: ${err.message}`);
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[sms-unanswered] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
     } finally {
       unansweredSweepRunning = false;
     }

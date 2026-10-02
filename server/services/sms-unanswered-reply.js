@@ -65,6 +65,12 @@ const ORDINARY_INTENTS = Object.freeze([
 // person decided anything, so it is never a graduation outcome or a correction.
 const ANSWERED_STATUS = 'auto_answered';
 
+// Never err.message: knex errors can carry the SQL with bound values (the
+// customer's text, the reply, the phone number).
+function errLabel(err) {
+  return [err?.name || 'Error', err?.code].filter(Boolean).join(' ');
+}
+
 function unansweredReplyLive() {
   return require('../config/feature-gates').smsUnansweredReplyLive();
 }
@@ -194,13 +200,19 @@ async function readinessRefusal({ row, meta, snapshot }) {
   });
   if (!backstop.clear) return { reason: 'backstop_not_clear' };
 
-  const factsAt = factsReadAt(row, snapshot);
-  const changedVisit = await db('scheduled_services')
-    .where({ customer_id: row.customer_id })
-    .where('updated_at', '>', factsAt)
-    .first('id');
-  if (changedVisit) return { reason: 'visit_changed' };
+  if (await visitChangedSince(db, { customerId: row.customer_id, factsAt: factsReadAt(row, snapshot) })) {
+    return { reason: 'visit_changed' };
+  }
   return { reason: null };
+}
+
+/** Did any of the customer's visits change after the reply's facts were read? */
+async function visitChangedSince(dbh, { customerId, factsAt }) {
+  if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return true; // fail closed
+  return Boolean(await dbh('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('updated_at', '>', factsAt)
+    .first('id'));
 }
 
 /** Did anyone call this customer, or the customer call in, since the text? */
@@ -250,7 +262,7 @@ function handoffCheck(claim) {
     // The executor's sends are conversational, so the shared validator never
     // defers them: a sweep that started at 7:58 PM must not deliver at 8:01.
     if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
-    const { threadLast10, customerId, smsLogId } = claim.unanswered;
+    const { threadLast10, customerId, smsLogId, factsAt } = claim.unanswered;
     const newerInbound = await dbi('sms_log')
       .where({ direction: 'inbound' })
       .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
@@ -267,6 +279,10 @@ function handoffCheck(claim) {
     if (newerInbound) return { ok: false, code: 'newer_inbound', reason: 'newer_inbound' };
     if (await callSinceInbound(dbi, { threadLast10, customerId, smsLogId })) {
       return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
+    }
+    // A reschedule during the claim or provider preparation makes the reply stale.
+    if (await visitChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null })) {
+      return { ok: false, code: 'visit_changed', reason: 'visit_changed' };
     }
     return { ok: true };
   };
@@ -348,7 +364,7 @@ async function attemptCandidate({ row, meta, snapshot }) {
     techNames: snapshot.tech_names || null,
     visitLoopCommitmentIds: snapshot.visit_loop_commitment_ids || null,
     visitLoopStatus: snapshot.visit_loop_status || null,
-    unanswered: { suggestionId: row.decision_id, waitOpenMinutes: WAIT_OPEN_MINUTES },
+    unanswered: { suggestionId: row.decision_id, waitOpenMinutes: WAIT_OPEN_MINUTES, factsAt: factsReadAt(row, snapshot) },
   });
   if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
   const result = await autoSend.dispatchClaimedSend({
@@ -364,7 +380,7 @@ async function attemptCandidate({ row, meta, snapshot }) {
       await settleAnsweredSuggestions({ decisionId: claim.decisionId });
     } catch (err) {
       // The customer has been answered; the next sweep labels the card.
-      logger.warn(`[sms-unanswered] answered-card label failed (decision ${claim.decisionId}): ${err.message}`);
+      logger.warn(`[sms-unanswered] answered-card label failed (decision ${claim.decisionId}): ${errLabel(err)}`);
     }
   }
   return result;
@@ -385,7 +401,7 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
   try {
     await settleAnsweredSuggestions({ now });
   } catch (err) {
-    logger.warn(`[sms-unanswered] answered-card repair failed: ${err.message}`);
+    logger.warn(`[sms-unanswered] answered-card repair failed: ${errLabel(err)}`);
   }
 
   const sla = require('./followup-sla-watcher');
@@ -403,7 +419,7 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
       try {
         calendar = await sla.loadSlaCalendar(db, new Date(rows[0].inbound_created_at), now);
       } catch (err) {
-        logger.warn(`[sms-unanswered] office calendar unreadable (${err.message}); nothing sent this run`);
+        logger.warn(`[sms-unanswered] office calendar unreadable (${errLabel(err)}); nothing sent this run`);
         return { ...totals, reason: 'calendar_unavailable' };
       }
     }
@@ -443,7 +459,7 @@ async function sweepPage({ rows, now, calendar, sla, refuse, seenInbounds, total
       }
     } catch (err) {
       refuse('error');
-      logger.warn(`[sms-unanswered] candidate failed (suggestion ${row.decision_id}): ${err.message}`);
+      logger.warn(`[sms-unanswered] candidate failed (suggestion ${row.decision_id}): ${errLabel(err)}`);
     }
   }
 }
@@ -460,6 +476,7 @@ module.exports = {
   candidateRefusal,
   readinessRefusal,
   callSinceInbound,
+  visitChangedSince,
   claimGuard,
   handoffCheck,
   settleAnsweredSuggestions,
