@@ -4027,6 +4027,25 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
       .toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_prepay', paymentMethodId: 'pm-row-1' }));
   });
 
+  test('a year minted to a third-party payer never waits for a first visit: the normal job routes it to the payer', async () => {
+    EstimateConverter.convertEstimate.mockImplementation(async () => {
+      const total = db.__state.quotedBase;
+      db.__state.tables.invoices.push({ id: 'inv-prepay-1', token: 'prepaytok', total: String(total), credit_applied: 0, status: 'draft', payer_id: 'payer-1', customer_id: 'cust-1' });
+      return { customerId: 'cust-1', tier: 'Bronze', draftInvoiceId: 'inv-prepay-1', draftInvoiceAmount: total, draftInvoicePayUrl: '/pay/prepaytok', firstScheduledServiceId: 'ss-prepay-hold' };
+    });
+    const quote = await quoteOf();
+    const res = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true,
+      prepayChargeConsentVariant: 'after_visit_prepay',
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.prepayChargeStatus).not.toBe('after_first_visit');
+    expect(jobOf()).not.toHaveProperty('deferred_to_first_visit');
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('with the item gate off the accept still charges at approval under the charge-now authorization', async () => {
     delete process.env.GATE_PAF_PREPAY;
     const quote = await quoteOf();

@@ -9359,10 +9359,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // UNVERIFIABLE, never "uncovered" — billing the visit here would sit
     // beside the year's charge. Same not-finalized posture as the setup-fee
     // check above; the retry decides.
+    // The decision is stamped on the visit the first time it is made
+    // (paf_held_term_id, owner ruling 2026-10-02 "stamp + narrow"): a resumed
+    // closeout, the release, the cancelled-year alert and the first-visit
+    // text all read that stamp, never the live hold, which the year's charge
+    // and activation end.
     let deferredPrepayCovered = false;
     if (!visitIsPayerBilled && !svc.prepaid_method) {
       try {
-        deferredPrepayCovered = await AnnualPrepayRenewals.pafDeferredPrepayCoversVisit(svc, db, { throwOnError: true });
+        if (svc.paf_held_term_id) {
+          deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
+        } else {
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true });
+          if (heldTerm) {
+            await db('scheduled_services').where({ id: svc.id }).whereNull('paf_held_term_id')
+              .update({ paf_held_term_id: heldTerm.id });
+            svc.paf_held_term_id = heldTerm.id;
+            deferredPrepayCovered = true;
+          }
+        }
       } catch (lookupErr) {
         logger.error(`[dispatch] deferred annual-prepay check FAILED for ${svc.id} — closeout NOT finalized: ${lookupErr.message}`);
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, lookupErr);

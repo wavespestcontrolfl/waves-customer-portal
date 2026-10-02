@@ -13574,8 +13574,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // booking. Carries the BOUND method + the exact acknowledged cents —
       // recovery may charge only these; anything else falls back to
       // pay-link delivery + an office alert.
-      const prepayDeferredToFirstVisitResult = !!prepayChargePlan?.afterFirstVisit
+      let prepayDeferredToFirstVisitResult = !!prepayChargePlan?.afterFirstVisit
         && invoiceKindResult === 'annual_prepay' && !!invoiceIdResult && !prepayCoveredInTrxResult;
+      // A year billed to a third-party payer never waits for a first visit
+      // (owner ruling 2026-10-02, "stamp + narrow"): the minted invoice's
+      // payer, or a payer the customer or visit resolves to now, keeps the
+      // normal job, whose post-commit flow routes the bill to that payer.
+      // An unreadable payer also keeps the normal job (it fails closed there).
+      if (prepayDeferredToFirstVisitResult) {
+        try {
+          const mintedPayer = await trx('invoices').where({ id: invoiceIdResult }).first('payer_id', 'customer_id');
+          const livePayer = mintedPayer?.payer_id ? null : await require('../services/payer').resolveForInvoice({
+            database: trx,
+            customerId: mintedPayer?.customer_id || null,
+            scheduledServiceId: recurringCardScopeSsId || annualPrepayConversionResult?.firstScheduledServiceId || null,
+            throwOnError: true,
+          });
+          if (mintedPayer?.payer_id || livePayer?.payerId) prepayDeferredToFirstVisitResult = false;
+        } catch (payerErr) {
+          logger.warn(`[estimate-accept] payer check failed for deferred prepay on estimate ${estimate.id} — keeping the normal job: ${payerErr.message}`);
+          prepayDeferredToFirstVisitResult = false;
+        }
+      }
       if (prepayChargePlan && invoiceKindResult === 'annual_prepay' && invoiceIdResult) {
         // Atomic JSON-path write (pre-push Codex P0 r5) — never a full
         // estimate_data rewrite that could erase a concurrent writer's keys.

@@ -154,7 +154,12 @@ postgres('annual prepay charged after the first visit', () => {
     return f;
   }
 
+  // Closeout as completion does it: a visit the waiting year holds is stamped
+  // with that term (paf_held_term_id) before it is marked done.
   async function perform(visitId, customerId, outcome = 'completed', notes = {}) {
+    const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
+    const heldTerm = await require('../services/annual-prepay-renewals').pafDeferredHoldingTerm(visitRow, trx, { throwOnError: true });
+    if (heldTerm) await trx('scheduled_services').where({ id: visitId }).update({ paf_held_term_id: heldTerm.id });
     await trx('scheduled_services').where({ id: visitId }).update({ status: 'completed', completed_at: new Date() });
     await trx('service_records').insert({ id: randomUUID(), customer_id: customerId, scheduled_service_id: visitId,
       service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
@@ -266,7 +271,7 @@ postgres('annual prepay charged after the first visit', () => {
     await trx('scheduled_services').where({ id: f.parentId })
       .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
     const renewals = require('../services/annual-prepay-renewals');
-    const spy = jest.spyOn(renewals, 'pafDeferredPrepayCoversVisit').mockRejectedValueOnce(new Error('synthetic read failure'));
+    const spy = jest.spyOn(renewals, 'pafDeferredHoldingTerm').mockRejectedValueOnce(new Error('synthetic read failure'));
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     const result = await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
       actor: { techRole: 'admin', technicianId: techId, technician: null },
@@ -275,6 +280,29 @@ postgres('annual prepay charged after the first visit', () => {
     expect(result.body.code).toBe('deferred_prepay_lookup_failed');
     expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
     spy.mockRestore();
+  });
+
+  it('completion stamps the held visit, and a closeout resumed after the year is paid stays covered (owner ruling: stamp + narrow)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBe(f.termId);
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
+    // The year is paid and activated: the live hold ends, the stamp still covers.
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid' });
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'active' });
+    expect(await covers(f.parentId)).toBe(true);
+    // A year voided after the fact no longer covers the stamped visit.
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+    expect(await covers(f.parentId)).toBe(false);
   });
 
   describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
@@ -321,6 +349,7 @@ postgres('annual prepay charged after the first visit', () => {
       const f = await deferredAccept();
       const facts = async (id) => require('../services/paf-prepay-release')
         .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
       expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
       await perform(f.parentId, f.customerId);
       expect(await facts(f.childId)).toBeNull();
@@ -330,11 +359,15 @@ postgres('annual prepay charged after the first visit', () => {
       const facts = async (id) => require('../services/paf-prepay-release')
         .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
       const f = await deferredAccept();
+      await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
       expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
       expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
       expect(await facts(f.childId)).toBeNull();
       const paid = await deferredAccept({ invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: paid.parentId }).update({ paf_held_term_id: paid.termId });
       expect(await facts(paid.parentId)).toBeNull();
+      const unstamped = await deferredAccept();
+      expect(await facts(unstamped.parentId)).toBeNull();
     });
 
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
@@ -504,6 +537,16 @@ postgres('annual prepay charged after the first visit', () => {
       expect((await jobOf(f)).status).toBe('awaiting_first_visit');
       await trx('service_completion_attempts').where({ id: attemptId }).update({ status: 'succeeded' });
       expect(await release()).toMatchObject({ released: 1 });
+    });
+
+    it('a dead year never sends the office a visit already paid another way (Codex r10)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ prepaid_method: 'cash', prepaid_amount: 120 });
+      await perform(f.parentId, f.customerId);
+      expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_before_visit', reason: 'invoice_void' });
     });
 
     it('a dead year never sends the office a visit it did not hold (a service the term does not cover)', async () => {
