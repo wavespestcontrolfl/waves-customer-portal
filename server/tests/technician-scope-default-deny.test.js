@@ -92,6 +92,9 @@ describe('matcher', () => {
     ['POST', '/api/admin/timesheets/dispute', true],
     ['GET', '/api/admin/auth/me', true],
     ['GET', '/api/admin/feature-flags', true],
+    ['GET', '/api/admin/drafts', false],
+    ['GET', '/api/admin/drafts/stats', true], // matches the single-draft shape; the router's requireAdmin still wins
+    ['GET', '/api/admin/drafts/11111111-2222-4333-8444-555555555555', true],
     ['POST', '/api/stripe/terminal/handoff', true],
     ['POST', '/api/admin/consultations/11111111-2222-4333-8444-555555555555/outcome', true],
     ['GET', '/api/admin/consultations/stats', false],
@@ -162,6 +165,12 @@ describe('gate ON', () => {
       expect(await (await call(base, tokenFor('tech-1'), 'GET', '/api/admin/schedule/week')).json()).toEqual({ ok: 'week' });
       expect(await (await call(base, tokenFor('tech-1'), 'GET', '/api/admin/call-recordings/commitments/open')).json()).toEqual({ ok: 'promises' });
     });
+  });
+
+  test('a non-admin role other than technician is also denied (default-deny, not keyed on one role)', async () => {
+    const res = { status: jest.fn(function (c) { this.code = c; return this; }), json: jest.fn(function (b) { this.body = b; return this; }) };
+    expect(scope.enforceTechnicianScope({ techRole: 'csr', method: 'GET', baseUrl: '/api/admin/kb', path: '/x/verify' }, res)).toBe(true);
+    expect(res.code).toBe(403);
   });
 
   test('an admin is never affected', async () => {

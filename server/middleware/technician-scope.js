@@ -59,6 +59,10 @@ const TECHNICIAN_ALLOW_LIST = [
   // Consultation outcome on a visit (the router pins it to the assigned tech).
   { bucket: 'own-visits', methods: ['GET', 'HEAD', 'POST'], pattern: /^\/api\/admin\/consultations\/[^/]+\/outcome$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/customers(\/.*)?$/ },
+  // Intelligence Bar: the router hard-pins a technician token to the isolated
+  // tech context (admin-intelligence-bar.js ~2605) and executes tools under
+  // that role/context scope, so every route may be reached; the scoping is
+  // the router's.
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/intelligence-bar(\/.*)?$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/(services|technicians|discounts)$/ },
   // Not on the list: estimate reads (schedule-source returns lead PII and
@@ -94,7 +98,9 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|schedule-sms|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts(\/.*)?$/ },
+  // The single-draft read the SMS tab uses (the router scopes it to the
+  // technician's customers); list and stats are admin-only in the router.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts\/[^/]+$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/.*)?$/ },
 
   // Promises and reschedule proposals (the Promises tab, the field cards).
@@ -177,7 +183,9 @@ function shadowLogOnce(key) {
 // Middleware step. Call AFTER req.techRole is set. Admins pass untouched.
 // Returns true when it responded (denied), false to continue.
 function enforceTechnicianScope(req, res) {
-  if (req.techRole !== 'technician') return false;
+  // Every non-admin staff role is scoped. adminAuthenticate admits only admin
+  // and technician today; a future role is denied by default, not skipped.
+  if (req.techRole === 'admin') return false;
   const method = String(req.method || 'GET').toUpperCase();
   const fullPath = normalizePath(req);
   if (technicianMayReach(method, fullPath)) return false;
