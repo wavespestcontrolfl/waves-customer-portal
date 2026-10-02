@@ -1176,7 +1176,9 @@ export default function TechHomePage({ section = 'today' }) {
             routedPropertyId: 'propertyId' in fastCompleteService ? fastCompleteService.propertyId : undefined,
             routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
             // The row's service, so the report flow (any open pest visit) can
-            // tell an office edit to another service from the one tapped.
+            // tell an office edit to another service from the one tapped: its
+            // stored label (the schedule's serviceType is cleaned up) and key.
+            routedServiceType: fastCompleteService.serviceTypeRaw ?? null,
             routedServiceKey: fastCompleteService.completionProfile?.serviceKey || null,
             // GATE_FAST_COMPLETE_RECAP rides the same schedule row: only an
             // exact true turns the customer recap on (see the sheet). Absent

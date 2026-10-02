@@ -122,10 +122,18 @@ describe('the visit the tech tapped', () => {
     expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
   });
 
-  test('the same service key under a new name is a changed visit too (the header shows the tapped name)', async () => {
+  test('the same service key under a new stored name is a changed visit too', async () => {
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Monthly Pest Control' } });
-    render(<FastCompleteSheet service={{ ...SERVICE, routedServiceKey: 'pest_general_quarterly' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    render(<FastCompleteSheet service={{ ...SERVICE, routedServiceType: 'Quarterly Pest Control', routedServiceKey: 'pest_general_quarterly' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
     expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+  });
+
+  test('a row whose name the schedule cleaned up opens: the stored name is what is compared (codex r7)', async () => {
+    const stored = 'Pest Control Service - 1 hour - $117';
+    const request = makeRequest({ service: { ...REGULAR, serviceType: stored } });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Control Service', routedServiceType: stored, routedServiceKey: 'pest_general_quarterly' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'Generate AI report' })).toBeTruthy();
+    expect(screen.queryByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeNull();
   });
 });
 
@@ -340,6 +348,23 @@ describe('generate and read', () => {
     // The visit step offers to write again rather than go back to the old report.
     expect(screen.getByRole('button', { name: 'Write it again' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
+  });
+
+  test('a rate typed for spot spraying is not recorded under a perimeter the note turned out to say (codex r7)', async () => {
+    const request = makeRequest({
+      facts: { ...FACTS, spray: 'perimeter' },
+      trace: { enabled: true, treatmentZone: { linear_ft: 150, capture_mode: 'perimeter' } },
+    });
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    fireEvent.change(screen.getByLabelText('Taurus SC rate'), { target: { value: '0.5' } });
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const taurus = request.bodies('/complete')[0].products.find((product) => product.productId === 'taurus');
+    expect(taurus.applicationMethod).toBe('perimeter_spray');
+    expect(taurus.rate).not.toBe(0.5);
   });
 
   test('a rate the tech changes after the report makes it stale', async () => {

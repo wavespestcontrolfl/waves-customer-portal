@@ -151,6 +151,8 @@ const ACTIVITY_LEVELS = [
 // be the service the tech tapped (the header shows the schedule's): an office
 // edit that changed the service since the schedule loaded is a changed visit.
 function serviceChangedSinceSchedule(visit, service) {
+  // The row's stored label, as the context reports it (the schedule shows a
+  // cleaned-up one).
   const changedType = service?.routedServiceType && visit?.serviceType
     && String(service.routedServiceType).trim() !== String(visit.serviceType).trim();
   const changedKey = service?.routedServiceKey && visit?.serviceKey && service.routedServiceKey !== visit.serviceKey;
@@ -229,7 +231,10 @@ function rowRate(row, sprayMethod) {
   const rateUnit = labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '';
   const prefill = !row.added && Number(resolved.rate) > 0 && rateUnit ? String(Number(resolved.rate)) : '';
   const max = prefillRateCeiling(resolved, row.product);
-  return { rate: row.rateInput ?? prefill, rateUnit, max };
+  // A rate typed for one way of spraying doesn't carry to another (its unit
+  // is that way's): the report flow's way can change with the note's read.
+  const typed = row.rateInput != null && (row.rateMethod == null || row.rateMethod === rowMethod(row, sprayMethod));
+  return { rate: typed ? row.rateInput : prefill, rateUnit, max };
 }
 
 // The first requirement the application record still needs, in screen order
@@ -331,7 +336,9 @@ function sheetVisitIdentity(visit, reportFlow) {
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceKey, reportFlow }) {
+function useFastCompleteContext({
+  base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow,
+}) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -360,7 +367,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
           loading: false,
           loadError: '',
           blockedReason: blockedReasonFor(data, {
-            routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow, routedServiceType: serviceType, routedServiceKey,
+            routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow, routedServiceType, routedServiceKey,
           }),
           visit,
           products,
@@ -385,7 +392,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceKey, reportFlow]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow]);
   // The stock on hand the server has now, for a product restocked while the
   // sheet is open; nothing else is re-read. Resolves to the fresh catalog
   // rows by id.
@@ -444,6 +451,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedScheduledDate: service?.routedScheduledDate,
     routedPropertyId: service?.routedPropertyId,
     routedAddress: service?.routedAddress,
+    routedServiceType: service?.routedServiceType,
     routedServiceKey: service?.routedServiceKey,
     reportFlow,
   });
@@ -718,7 +726,7 @@ function writerSignature(form, rows, promiseMarks, photos) {
   return JSON.stringify({
     note: form.note.trim(),
     products: rows.filter((row) => row.active)
-      .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null])
+      .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
       .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
     rating: form.rating,
@@ -1333,7 +1341,12 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
         />
       )}
       {editAmounts && rows.filter((row) => row.active).map((row) => (
-        <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => updateRow(row.productId, patch)} />
+        <AmountRow
+          key={row.productId}
+          row={row}
+          rate={rowRate(row, method)}
+          onChange={(patch) => updateRow(row.productId, 'rateInput' in patch ? { ...patch, rateMethod: rowMethod(row, method) } : patch)}
+        />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
