@@ -19301,6 +19301,10 @@ const CallRecordingProcessor = {
                           return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
                         });
                     } else {
+                      // No new ask: the phone may already have said YES (an
+                      // earlier call), so no YES will arrive for this booking —
+                      // the caller's demotion is applied now if it never was.
+                      await require('./recipient-optin').demoteCallerForConfirmedOnSite(customerId, phoneKey, svc.id);
                       await markOptinAsk(entry, 'not_sent:no_new_ask');
                     }
                   } catch (askErr) {
