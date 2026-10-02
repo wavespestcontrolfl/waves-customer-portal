@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002138000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002139000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -31,8 +31,9 @@ jest.setTimeout(60000);
     const ids = {
       corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(), parkedSend: randomUUID(), trainingEdited: randomUUID(), trainingOnCorrected: randomUUID(), trainingSameReply: randomUUID(), trainingMatchesJudgment: randomUUID(), trainingDecision: randomUUID(), humanReplySms: randomUUID(),
       labelWrong: randomUUID(), labelRight: randomUUID(),
-      revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(),
-      humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(),
+      revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(), shadowDraft5: randomUUID(),
+      humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(), humanBetterSwept: randomUUID(),
+      sweptIgnored: randomUUID(), autoIgnored: randomUUID(), recoveredIgnored: randomUUID(), recoveredSend: randomUUID(), autoSend: randomUUID(),
       profileRejected: randomUUID(), profilePending: randomUUID(),
     };
     const reviewer = randomUUID();
@@ -67,7 +68,7 @@ jest.setTimeout(60000);
       id, status: 'shadow', drafter: 'house_voice', intent: 'general', draft_response: `Draft ${id.slice(0, 4)}`,
       prompt_version: 'house_voice_v12_real_answers3_cfl', model: 'gpt-5.6-terra',
     });
-    await trx('message_drafts').insert([ids.revised, ids.rejectedByPerson, ids.rejectedBySystem, ids.rejectedByGuard, ids.revisedArray, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4].map(draft));
+    await trx('message_drafts').insert([ids.revised, ids.rejectedByPerson, ids.rejectedBySystem, ids.rejectedByGuard, ids.revisedArray, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.shadowDraft5].map(draft));
     // The review endpoints stamp flags.review_verdict with the status they set (migration 20261002110000 requires it).
     await trx('message_drafts').where({ id: ids.revised }).update({ status: 'revised', revised_response: 'We can come Tuesday at 2 PM.', approved_by: reviewer, approved_at: at(8), flags: JSON.stringify({ review_verdict: 'revised' }) });
     await trx('message_drafts').where({ id: ids.rejectedByPerson }).update({ status: 'rejected', approved_by: reviewer, approved_at: at(7), flags: JSON.stringify({ review_verdict: 'rejected' }) });
@@ -94,6 +95,7 @@ jest.setTimeout(60000);
       judgment(ids.equivalent, 'equivalent', ids.shadowDraft2),
       judgment(ids.humanBetterAlreadyCorrected, 'human_better', ids.shadowDraft3),
       judgment(ids.humanBetterNoSend, 'human_better', ids.shadowDraft4),
+      { ...judgment(ids.humanBetterSwept, 'human_better', ids.shadowDraft5), judged_at: at(4.9) },
     ]);
     // The judged draft's Agent Review decision was corrected by a person: one correction, shown as the decision.
     await trx('agent_decisions').insert([
@@ -111,6 +113,20 @@ jest.setTimeout(60000);
       id: ids.settlingSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
       message_body: 'Tuesday at 2 is fine. See you then.', metadata: JSON.stringify({ agent_decision_id: ids.linkedCorrected }), created_at: at(4.6),
     });
+    await trx('agent_decisions').insert([
+      // the after-send sweep's ignored: committed while the send was in flight, never on screen, no linked send
+      decision(ids.sweptIgnored, 'ignored', { entity_type: 'message_draft', entity_id: ids.shadowDraft5, correction_note: 'A staff reply to this thread was sent.', reviewed_at: at(4.8) }),
+      // auto-send parked it: a machine reply, not a person's
+      decision(ids.autoIgnored, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'auto', reviewed_at: at(9.6) }),
+      // scheduled-send recovery stamps 'Admin' at recovery time; the parked send names the real sender and time
+      decision(ids.recoveredIgnored, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'Admin', reviewed_at: at(1) }),
+    ]);
+    await trx('sms_log').insert([
+      { id: ids.autoSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
+        message_body: 'Thanks, we will see you Thursday.', metadata: JSON.stringify({ parked_decision_ids: [ids.autoIgnored] }), created_at: at(9.6) },
+      { id: ids.recoveredSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
+        message_body: 'Friday morning works, see you then.', metadata: JSON.stringify({ parked_decision_ids: [ids.recoveredIgnored] }), admin_user_id: reviewer, created_at: at(9.7) },
+    ]);
 
     const profile = (id, status, version) => ({
       id, version, profile_text: `Profile ${id.slice(0, 4)}`, status, model: 'claude-opus-5-5', schema_version: 'v2',
@@ -138,8 +154,8 @@ jest.setTimeout(60000);
     const byId = Object.fromEntries(rows.map((r) => [r.source_id, r]));
 
     expect(rows.map((r) => `${r.source}:${r.kind}`)).toEqual([
-      'agent_decision:dismissed', 'agent_decision:corrected', 'agent_decision:ignored', 'typed_review:label_wrong',
-      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected', 'reply_training:edited', 'reply_training:edited', 'reply_training:edited',
+      'agent_decision:dismissed', 'agent_decision:corrected', 'agent_decision:ignored', 'agent_decision:ignored', 'typed_review:label_wrong',
+      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected', 'reply_training:edited', 'reply_training:edited', 'reply_training:edited',
     ]);
     // the person's own text, not the canned note: the settling send first, the judgment's human text when no send is on record, the note last
     expect(byId[ids.linkedCorrected]).toMatchObject({ source: 'agent_decision', kind: 'corrected', human_text: 'Tuesday at 2 is fine. See you then.' });
@@ -148,6 +164,13 @@ jest.setTimeout(60000);
     // a reply sent instead of the suggestion reaches the ignored decision through the parked link
     expect(byId[ids.ignored]).toMatchObject({ kind: 'ignored', human_text: 'We will be there Thursday morning.' });
     expect(byId[ids.ignored].detail.correction_note).toBe('A staff reply to this thread was sent.');
+    // provenance is the displayed send's: its time, and its sender when it names one (else the review stamp)
+    expect(byId[ids.ignored]).toMatchObject({ corrected_by: 'office@test', corrected_at: at(9.8) });
+    expect(byId[ids.recoveredIgnored]).toMatchObject({ kind: 'ignored', human_text: 'Friday morning works, see you then.', corrected_by: reviewer, corrected_at: at(9.7) });
+    expect(byId[ids.linkedCorrected].corrected_at).toEqual(at(4.6));
+    expect(byId[ids.linkedCorrectedNoSend].corrected_at).toEqual(at(4.4));
+    // a swept suggestion is not the person's correction, so the judge's verdict on its draft is what shows
+    expect(byId[ids.humanBetterSwept]).toMatchObject({ source: 'shadow_judgment', kind: 'human_better', ai_text: `Draft ${ids.shadowDraft5.slice(0, 4)}` });
     // reply training: the draft beside the person's reply, the verdict as the kind, no version or model known
     expect(byId[ids.trainingEdited]).toMatchObject({ source: 'reply_training', kind: 'edited', surface: 'sms', topic: 'scheduling', ai_text: `Draft ${ids.trainingEdited.slice(0, 4)}`, human_text: 'Thursday at 9 works, see you then.', version: 'house_voice_v12_real_answers3_cfl', model: 'claude-sonnet-5-5', corrected_by: 'office@test' });
     // a rewrite saved beside a separately corrected decision is its own correction
@@ -156,7 +179,7 @@ jest.setTimeout(60000);
     expect(byId[ids.linkedCorrected].human_text).toBe('Tuesday at 2 is fine. See you then.');
     expect(byId[ids.trainingMatchesJudgment]).toMatchObject({ source: 'reply_training', human_text: 'Yes, Tuesday works. See you then.' });
     expect(byId[ids.trainingEdited].detail).toMatchObject({ source_agent_decision_id: ids.trainingDecision, review_note: 'Named the day', capture_reason: 'agent_review_reply_verdict' });
-    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.trainingSameReply, ids.trainingDecision]) {
+    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.sweptIgnored, ids.autoIgnored, ids.trainingSameReply, ids.trainingDecision]) {
       expect(byId[absent]).toBeUndefined();
     }
     expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
