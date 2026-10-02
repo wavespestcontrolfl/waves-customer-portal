@@ -414,6 +414,20 @@ describe('runTranslationTrial', () => {
     expect(row).toMatchObject({ verdict: 'held', hold_reason: 'duration_changed_in_translation' });
   });
 
+  test('a named date whose weekday or month changes in the read-back holds the trial', async () => {
+    const reply = 'Thanks! Your next visit is Tuesday, Oct 14 at 2 PM.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su próxima visita es el jueves 14 de noviembre a las 14:00.', back: 'Thanks! Your next visit is Thursday, Nov 14 at 2 PM.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'date_name_changed_in_translation' });
+  });
+
+  test('the same named date written out in full in the read-back passes; "may" as a verb is not a month', async () => {
+    const reply = 'Thanks! Your next visit is Tue, Oct 14 at 2 PM. You may see a few ants.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su próxima visita es el martes 14 de octubre a las 14:00. Puede ver algunas hormigas.', back: 'Thanks! Your next visit is Tuesday, October 14 at 2 PM. You may see some ants.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+  });
+
   test('trial drafting is metered on the translation lane', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });

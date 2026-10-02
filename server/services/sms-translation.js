@@ -643,6 +643,21 @@ function durationFaults(englishReply, backTranslation) {
   return { missing: diffCounts(en, back), added: diffCounts(back, en) };
 }
 
+// A named date keeps its weekday and month: "Tuesday, Oct 14" is not "Thursday, Nov 14". Read off the English
+// read-back like durations. Capitalized names only ("march" and "sun" are words); "May" only beside a number.
+const WEEKDAYS = ['Monday|Mon', 'Tuesday|Tues|Tue', 'Wednesday|Wed', 'Thursday|Thurs|Thur|Thu', 'Friday|Fri', 'Saturday|Sat', 'Sunday|Sun'];
+const MONTHS = ['January|Jan', 'February|Feb', 'March|Mar', 'April|Apr', 'May', 'June|Jun', 'July|Jul', 'August|Aug', 'September|Sept|Sep', 'October|Oct', 'November|Nov', 'December|Dec'];
+function calendarTokens(text) {
+  const str = asciiDigits(text);
+  const out = [];
+  WEEKDAYS.forEach((names, i) => { for (const _ of str.matchAll(new RegExp(`\\b(?:${names})\\b\\.?`, 'g'))) out.push(`day:${i}`); });
+  MONTHS.forEach((names, i) => {
+    const re = names === 'May' ? /\bMay\b(?=\.?\s*\d)|(?<=\d(?:st|nd|rd|th)?\s+(?:of\s+)?)May\b/g : new RegExp(`\\b(?:${names})\\b`, 'g');
+    for (const _ of str.matchAll(re)) out.push(`month:${i + 1}`);
+  });
+  return out;
+}
+
 function translationAddedFault(englishReply, backTranslation, context) {
   const before = bannedCopyCounts(englishReply);
   if (bannedCopyCounts(backTranslation).some((n, i) => n > before[i])) return 'banned_copy';
@@ -757,6 +772,10 @@ async function translateAndCheck({ englishReply, language, languageCode, context
   if (backFault) return { stop: `back_translation_${backFault}`, fields, checks: { token_parity: parity } };
   const durations = durationFaults(englishReply, back.text);
   if (durations.missing.length || durations.added.length) return { stop: 'duration_changed_in_translation', fields, checks: { token_parity: parity, durations } };
+  const enCal = calendarTokens(englishReply);
+  const backCal = calendarTokens(back.text);
+  const calendar = { missing: diffCounts(enCal, backCal), added: diffCounts(backCal, enCal) };
+  if (calendar.missing.length || calendar.added.length) return { stop: 'date_name_changed_in_translation', fields, checks: { token_parity: parity, calendar } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
   if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };
