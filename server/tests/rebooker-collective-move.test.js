@@ -1598,4 +1598,49 @@ describe('caller wiring (source)', () => {
     expect(commit).toBeGreaterThan(destructure);
     expect(commit).toBeLessThan(notice);
   });
+
+  test('carried visit partners are covered by the series notice: synced, closed and re-armed with the occurrences; the text quotes the stop start', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const effects = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(effects).toContain('const reminderOccurrences = [...occurrences, ...carriedPartners];');
+    // Recorded time, the sync loop, and the close / re-arm scope all read the
+    // combined list — a partner left out of any of them keeps a reminder the
+    // series notice already covered, or loses one it did not.
+    expect(effects).toContain('const recordedReminderTimeById = new Map(reminderOccurrences.map(');
+    expect(effects).toContain('for (const occurrence of reminderOccurrences) {');
+    expect(effects).toContain('const ownedOccurrences = () => reminderOccurrences.filter(');
+    expect(effects).toContain('const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart');
+    // The quoted stop start is rechecked before the send and again at the
+    // provider handoff (a partner moved or detached since makes it obsolete).
+    expect(effects).toContain('!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))');
+    expect(effects).toContain('return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)');
+    // The partner plans' maintenance locks join the sweep's own, in one
+    // sorted pass (two sweeps carrying each other's plans cannot deadlock).
+    const reb = read('../services/rebooker.js');
+    // Partner plans are try-locked (the sweep already holds stop locks; a
+    // blocking wait could deadlock with that plan's maintenance writer).
+    const tryLock = reb.slice(reb.indexOf('async function tryLockPartnerPlans('));
+    expect(tryLock).toContain("'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked'");
+    expect(reb).toContain('await tryLockPartnerPlans(trx, carryPartners0, parentId);');
+    // The edit modal commit never carries.
+    expect(read('../routes/admin-schedule.js')).toContain('carryVisit: false,');
+    // A carried partner's own landing window is checked against "already
+    // passed today", like the anchor's, before its write.
+    const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));
+    expect(fence).toContain('sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)');
+    // Carried partners run the same legacy-activation seam as the anchor.
+    expect(reb).toContain("await activateLegacyOutboundReviewRowIfNeeded(db, partner.id, 'rebooker-reschedule-series');");
+    // Quick Move never carries: rain-out's unit-mover fallback owns grouped stops.
+    expect(reb).toContain("if (options.sourceSurface === 'quick_move') return false;");
+    // Staff allowlist: automatic/customer initiators never carry.
+    expect(reb).toContain("const SERIES_CARRY_STAFF_INITIATORS = new Set(['admin', 'tech']);");
+    // The edit modal commits field edits before the series move: under the
+    // gate it refuses a sweep that would carry any grouped stop, up front.
+    const sched = read('../routes/admin-schedule.js');
+    const planner = sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), sched.indexOf("router.put('/:id/update-details'"));
+    expect(planner.indexOf('await refuseCarriedStopInEditMove(ackedIds);')).toBeGreaterThan(planner.indexOf('ackedIds = preview.occurrenceIds.map(String);'));
+    expect(sched).toContain("if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;");
+    // Partners are not follow-ups (synced notify-off, never closed).
+    expect(read('../services/rebooker.js')).not.toMatch(/\.\.\.carriedMembers\.map\(/);
+  });
 });

@@ -393,7 +393,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     }
     // Mirrors the lawn guard above for the pest-line rain block (codex P0
     // 2026-09-28): a still-OPEN 7-day window is not yet reproducible, so
-    // storing it under the stable '-pex1' key would serve the "no rain
+    // storing it under the stable '-pex2' key would serve the "no rain
     // block" bytes forever even after the window settles and a later render
     // would include it. Wait for the window to close; no amount of retrying
     // resolves it any sooner.

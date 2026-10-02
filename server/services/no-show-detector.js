@@ -550,7 +550,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where((qb) => qb.whereRaw("fb.metadata->>'provider_sid' IS NULL").orWhereNull('fbs.id')
         .orWhereIn('fbs.status', DELIVERED_SMS_STATUSES))
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -585,7 +585,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // limits) could abort the whole tick (codex P2 round 11). The GIN index
       // still serves each generated element.
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'a.sent_at'),
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at'),
   ];
   const results = [];
   if (conn.isTransaction) {
@@ -771,6 +771,22 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
 // raise an alert on the very date the customer was told the series moved
 // (codex P1 round 7). series_moves.rows carries only occurrences the move
 // actually moved; genuinely preserved ones are recorded separately.
+// A grouped partner carried WITH the anchor occurrence
+// (GATE_SERIES_MOVE_CARRIES_VISIT) is part of the stop the text quoted: the
+// series notice quotes the stop's landed start (the anchor occurrence's
+// visitWindowStart), so that partner gets that KNOWN start, not an unknown
+// window. Partners of later occurrences stay unknown like any sibling.
+function anchorStopStartAt(move) {
+  let result = move.result;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { return null; }
+  }
+  const occ = (result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(move.anchor_service_id || ''));
+  if (!occ?.visitWindowStart || !occ.date) return null;
+  const at = parseETDateTime(`${String(occ.date).slice(0, 10)}T${String(occ.visitWindowStart).slice(0, 5)}`);
+  return Number.isFinite(at.getTime()) ? at.toISOString() : null;
+}
+
 function seriesSupersessions(rows = [], candidates = new Set()) {
   // One row per DELIVERED recipient of the move's text (a fan-out to two
   // appointment contacts writes two audit rows), so keep the earliest
@@ -785,7 +801,9 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
       const key = `${visitId}:${move.id}`;
       const prior = earliest.get(key);
       if (prior && instant(prior.communicated_at) <= instant(move.sent_at)) continue;
-      earliest.set(key, { visit_id: visitId, start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
+      const anchorStopPartner = occurrence.partner === true
+        && String(occurrence.forOccurrenceId || '') === String(move.anchor_service_id || '');
+      earliest.set(key, { visit_id: visitId, start_at: anchorStopPartner ? anchorStopStartAt(move) : null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
     }
   }
   return [...earliest.values()];
@@ -1161,6 +1179,11 @@ async function promisedVisitIds(conn, { now }) {
   ].filter(Boolean).map(String))];
 }
 
+// Subquery builder for `s`: the visit is a live, uncleared street-level address hold (street-level-hold.js).
+function unclearedHold() {
+  require('./street-level-hold').heldVisitSubquery(this, 's');
+}
+
 async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
   // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISED WINDOW: a
@@ -1175,6 +1198,8 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     .where((qb) => qb
       .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
       .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
+    // An uncleared street-level address hold was never dispatched: no no-show for it.
+    .whereNotExists(unclearedHold)
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   // A recalled row that is NOT live still names a stop: the grouped reminder
   // is linked to whichever member won the send claim, and that member may
@@ -1190,6 +1215,7 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
       .whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)
       .whereNotIn('s.id', rows.map((r) => r.id))
+      .whereNotExists(unclearedHold)
       .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
     : [];
   const liveRows = [...rows, ...stranded]
@@ -1309,9 +1335,11 @@ async function alreadyHasOpenAlert(trx, { jobId, type, key }) {
 // technician_id, so a stale tracking notice stayed visible to a now
 // office-only user who cannot act on it (codex P2, pre-push audit on
 // 04ecfd821).
-function noticeStillCurrent({ live, visit, notice, recipientTech }) {
+// `held`: the visit is a live street-level address hold — never dispatched, so no technician notice about it is
+// current (the one place the reconcile decides this; the dismissal below is the existing automatic one).
+function noticeStillCurrent({ live, visit, notice, recipientTech, held = false }) {
   const sameRecipient = !!(live && visit?.technician_id === notice?.technician_id);
-  return sameRecipient && isAssignable(recipientTech)
+  return !held && sameRecipient && isAssignable(recipientTech)
     && live.stage === notice?.payload?.stage
     && live.promised_window.start_at === notice?.payload?.promised_window?.start_at;
 }
@@ -1572,6 +1600,9 @@ async function sweep(conn, { now = new Date() } = {}) {
       const at = new Date();
       const { visit, live } = await lockedStop(trx, card.id, { now: at });
       if (!enabled() || !visit) return null;
+      // lockedStop holds the visit's row lock FOR UPDATE (the promoter's own lock): a street-level hold
+      // promoted after the candidate scan is seen here, atomically, and gets no card or notice.
+      if (await require('./street-level-hold').isStreetLevelHoldVisit(card.id, trx)) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
@@ -1665,7 +1696,10 @@ async function sweep(conn, { now = new Date() } = {}) {
     // any other mismatch already dismisses the notice.
     const recipientTech = sameRecipient ? await trx('technicians').where({ id: visit.technician_id })
       .first('id', 'employment_status', 'field_dispatchable') : null;
-    if (!noticeStillCurrent({ live, visit, notice, recipientTech })) {
+    // A visit promoted to a street-level hold after its notice was raised: lockedStop holds the stop's row lock,
+    // so this read is atomic with it. Only asked when the notice would otherwise stay current.
+    const held = !!(visitId && sameRecipient && await require('./street-level-hold').isStreetLevelHoldVisit(visitId, trx));
+    if (!noticeStillCurrent({ live, visit, notice, recipientTech, held })) {
       // Stamped as an AUTOMATIC dismissal (never a tech's own Got-it tap —
       // routes/tech-notifications.js's /dismiss and /confirm-start never
       // touch payload), so recordTrackingNotice can revive this same row

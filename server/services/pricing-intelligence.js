@@ -11,6 +11,7 @@
 const db = require('../models/db');
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const logger = require('./logger');
+const { scopeToProspects } = require('./lead-statuses');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 
 // WaveGuard tier discounts — sourced from pricing-engine/constants
@@ -320,7 +321,7 @@ class PricingIntelligence {
     // Stage 1: Attraction — lead gen & first service
     // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
     const totalCustomers = await db('customers').where('active', true).whereNull('deleted_at').count('id as cnt').first();
-    const totalLeads = await db('leads').whereNull('deleted_at').count('id as cnt').first().catch(() => ({ cnt: 0 }));
+    const totalLeads = await db('leads').whereNull('deleted_at').modify(scopeToProspects).count('id as cnt').first().catch(() => ({ cnt: 0 }));
     const totalEstimates = await db('estimates').count('id as cnt').first();
     const acceptedEstimates = await db('estimates').where('status', 'accepted').count('id as cnt').first();
 

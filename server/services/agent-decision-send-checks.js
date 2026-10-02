@@ -121,10 +121,22 @@ function isEtaInfrastructureFailure(reason) {
 // The open-loop recheck's unreadable read (PR #5499) is infrastructure too: the
 // composer keeps the card for a retry instead of superseding it.
 function blockReasonIsEtaInfrastructure(blockReason) {
-  if (String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)') return true;
   const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
 }
+// LABEL FACTS (Codex #5416 r31 P2): a label recheck that could not READ the latest visit says nothing about the message
+// either - the attempt is refused, but the decision is not retired as stale.
+const LABEL_RECHECK_INFRASTRUCTURE_REASONS = new Set(['label_facts_recheck_failed']);
+const isLabelRecheckInfrastructureFailure = (reason) => LABEL_RECHECK_INFRASTRUCTURE_REASONS.has(reason);
+function blockReasonIsLabelInfrastructure(blockReason) {
+  const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
+}
+// OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
+const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason)
+  || blockReasonIsLabelInfrastructure(blockReason) || blockReasonIsOpenLoopsInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -227,7 +239,7 @@ function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, te
 // A recheck that could not READ the visit rides the bounded retry rail; every other refusal is terminal.
 function labelFactsBoundaryVerdict(reason) {
   if (reason == null) return { ok: true };
-  const retryable = reason === 'label_facts_recheck_failed';
+  const retryable = isLabelRecheckInfrastructureFailure(reason);
   return {
     ok: false,
     code: retryable ? 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' : 'LABEL_FACTS_STALE_AT_BOUNDARY',
@@ -533,4 +545,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

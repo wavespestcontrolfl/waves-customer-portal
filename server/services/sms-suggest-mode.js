@@ -321,21 +321,50 @@ async function listIntentModes() {
   return db('sms_intent_modes').orderBy('intent', 'asc');
 }
 
-async function setIntentMode({ intent, mode, actor, reason }) {
+/**
+ * The ladder is climbed one rung at a time: auto_send is written only over a
+ * stored 'suggest' mode (Codex r2 on #5531). Judge-graded readiness evidence
+ * accrues while an intent is still in shadow, and evaluateAutoSendEligibility
+ * deliberately evaluates the suggest → auto_send rung without reading the
+ * stored mode, so without this check a direct API caller could promote a
+ * well-judged shadow intent straight to autonomous sending. The fixed-copy
+ * gratitude lane is the one documented exception: it never suggests and
+ * qualifies from shadow through its own non-delivery exam.
+ */
+function autoSendRequiresSuggest(intent) {
+  return intent !== require('./sms-gratitude').GRATITUDE_INTENT;
+}
+
+async function setIntentMode({ intent, mode, actor, reason, dbi = db }) {
   const check = validateModeChange(intent, mode);
   if (!check.ok) {
     const err = new Error(check.error);
     err.statusCode = 400;
     throw err;
   }
-  const [row] = await db('sms_intent_modes')
-    .insert({
-      intent: check.intent,
-      mode,
-      updated_by: actor || 'admin',
-      reason: reason || null,
-      updated_at: new Date(),
-    })
+  const patch = {
+    mode,
+    updated_by: actor || 'admin',
+    reason: reason || null,
+    updated_at: new Date(),
+  };
+  if (mode === AUTO_SEND_MODE && autoSendRequiresSuggest(check.intent)) {
+    // Conditional update: the row must exist AND sit at 'suggest'. An intent
+    // with no row is shadow by definition, so there is no insert path here —
+    // the update either lands on the suggest row or touches nothing.
+    const [row] = await dbi('sms_intent_modes')
+      .where({ intent: check.intent, mode: 'suggest' })
+      .update(patch)
+      .returning('*');
+    if (!row) {
+      const err = new Error('auto_send is earned from suggest — promote this intent to suggest first');
+      err.statusCode = 409;
+      throw err;
+    }
+    return row;
+  }
+  const [row] = await dbi('sms_intent_modes')
+    .insert({ intent: check.intent, ...patch })
     .onConflict('intent')
     .merge(['mode', 'updated_by', 'reason', 'updated_at'])
     .returning('*');
@@ -1284,6 +1313,7 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
 module.exports = {
   VALID_MODES,
   AUTO_SEND_MODE,
+  autoSendRequiresSuggest,
   ESCALATION_INTENTS,
   SUGGESTED_STATUS,
   SUGGEST_WORKFLOW,

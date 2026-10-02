@@ -2322,6 +2322,60 @@ function predictMemberWindows({ members, primaryId, visitWindowStart, requestedS
 }
 
 /**
+ * Retarget an OPEN visit's stop INSIDE the caller's transaction: date, the
+ * window union of its live members, stop key + seq, an optional technician,
+ * and (when `resetLifecycle`) the tracker lifecycle — the in-transaction twin
+ * of moveVisitAsUnit's step-3 parent retarget, for a writer that has ALREADY
+ * written every live member's row in this same transaction
+ * (rebooker.rescheduleSeries under GATE_SERIES_MOVE_CARRIES_VISIT). The
+ * caller holds the `visit.stop` advisory lock for BOTH the old and the new
+ * base key (`lockedKeys`, sorted acquisition); a visit whose key is not among
+ * them was re-keyed while the caller waited and aborts. Returns
+ * { visitId, oldKey, newKey, windowStart } (windowStart = the stop's landed
+ * start, the earliest live member's).
+ */
+async function retargetVisitStopInTx(t, { visitId, newDateStr, technicianId, resetLifecycle = false, lockedKeys = null }) {
+  const visit = await t('service_visits').where({ id: visitId }).first();
+  if (!visit || String(visit.status) !== 'open') {
+    throw Object.assign(new Error('Cannot move this stop: the visit is being finalized — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open' });
+  }
+  if (lockedKeys && !lockedKeys.has(visit.stop_base_key)) {
+    throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently; reload and try again'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
+  }
+  const newKey = stopBaseKey({ propertyId: visit.property_id, customerId: visit.customer_id, scheduledDate: newDateStr });
+  const members = await t('scheduled_services').where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('window_start', 'window_end');
+  // The landed windows must still be ONE stop (a shortened anchor that keeps
+  // its start can leave a later partner disconnected; the seam would then
+  // split the visit after commit). Refuse inside the transaction instead.
+  if (!windowedMembersConnected(members)) {
+    throw Object.assign(new Error('Cannot move this stop: the new time no longer overlaps a grouped service at this stop — pick a window that covers both, or separate the services first'), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', isOperational: true });
+  }
+  const starts = members.map((m) => m.window_start).filter(Boolean).sort();
+  const ends = members.map((m) => m.window_end).filter(Boolean).sort();
+  const patch = {
+    scheduled_date: newDateStr,
+    window_start: starts[0] || null,
+    window_end: ends[ends.length - 1] || null,
+  };
+  if (newKey !== visit.stop_base_key) {
+    patch.stop_base_key = newKey;
+    patch.stop_seq = await nextStopSeq(t, newKey);
+  }
+  if (technicianId !== undefined) patch.technician_id = technicianId || null;
+  if (resetLifecycle) {
+    // The members' lifecycle was rewound by the writer; the visit's follows,
+    // and the day's tracker one-shots re-arm (moveVisitAsUnit step 3).
+    patch.en_route_at = null;
+    patch.arrived_at = null;
+    await t('visit_effects').where({ visit_id: visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
+  }
+  await t('service_visits').where({ id: visitId }).update(patch);
+  return { visitId, oldKey: visit.stop_base_key, newKey, windowStart: patch.window_start };
+}
+
+/**
  * Move a grouped row's WHOLE visit as one unit (R3): called by
  * SmartRebooker.reschedule / rescheduleSeries before their own work for a
  * row that carries a visit_id and no visitPolicy:'single'. "Just this
@@ -2456,6 +2510,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           throw Object.assign(new Error('This appointment includes more than one service — please call or text us to move it and we will take care of it.'), { statusCode: 409, code: 'VISIT_CUSTOMER_MOVE_UNSUPPORTED', isOperational: true });
         }
         if (options.primaryViaSeries) {
+          // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01): the
+          // series writer carries every grouped partner itself, in its own
+          // transaction (rebooker.rescheduleSeries) — decline here so the
+          // frozen / completion-claim refusals above stay this mover's, and
+          // the sweep takes the visit.
+          if (options.seriesCarriesVisit === true) return null;
           throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
         }
         // The same refusal for IMPLICIT widening (local codex audit): with the
@@ -2466,6 +2526,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // ships.
         if (primary.is_recurring === true && options.seriesPolicy !== 'single'
           && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true' && newDateStr !== dateOnly(primary.scheduled_date)) {
+          // Same carry gate as above: the choke point re-enters the series
+          // writer, which takes the visit with it.
+          if (options.seriesCarriesVisit === true) return null;
           throw Object.assign(new Error('This service is grouped with another at the same stop — move this visit only (not the series), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
         }
         for (const m of members) {
@@ -3410,6 +3473,12 @@ module.exports = {
   assertRowMovableAlone,
   fanOutLiveTransition,
   moveVisitAsUnit,
+  // In-transaction parent retarget + the member-window planner, for the
+  // series writer's partner carry (GATE_SERIES_MOVE_CARRIES_VISIT).
+  retargetVisitStopInTx,
+  planMemberTargets,
+  UNIT_MOVE_STATUSES,
+  UNIT_MOVE_LIVE_STATUSES,
   // Read-only: moveVisitAsUnit's own member-window derivation, for
   // auto-dispatch's SLOT_TAKEN pre-filter.
   predictMemberWindows,

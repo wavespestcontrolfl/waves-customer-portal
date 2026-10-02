@@ -72,6 +72,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'update_lead_contact',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',
 ]);

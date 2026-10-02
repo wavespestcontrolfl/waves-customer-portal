@@ -34,7 +34,7 @@ const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
 const { labelFactsSendBlockReason } = require('../services/sms-label-facts');
-const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, scheduledLabelFactsBlock, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, scheduledLabelFactsBlock, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, blockReasonIsRecheckInfrastructure, blockReasonIsLabelInfrastructure } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -440,7 +440,7 @@ describe('infrastructure failures are retryable at every wrapper, never permanen
   });
   test('the Agent Review route does not retire a card over an unreadable recheck (source pin)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-communications.js'), 'utf8');
-    expect(src).toContain('blockReasonIsEtaInfrastructure(blockReason)');
+    expect(src).toContain('blockReasonIsRecheckInfrastructure(blockReason)'); // live ETA or label facts (follow-up to #5416)
   });
 });
 
@@ -527,6 +527,23 @@ describe('LABEL FACTS at the provider boundary (Codex #5416 P1)', () => {
     expect(read('../services/scheduler.js')).toContain('labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body })');
     expect(read('../routes/admin-communications.js')).toContain('checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody })');
     expect(read('../services/sms-auto-send.js')).toContain('labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply })');
+  });
+});
+
+describe('follow-up (#5416 r31 P2): an unreadable label recheck keeps the decision retryable on every early path', () => {
+  test('only the read failure is infrastructure; every other label refusal is a verdict', () => {
+    expect(blockReasonIsLabelInfrastructure('label timing no longer current (label_facts_recheck_failed)')).toBe(true);
+    expect(blockReasonIsRecheckInfrastructure('label timing no longer current (label_facts_recheck_failed)')).toBe(true);
+    for (const r of ['label_facts_visit_changed', 'label_facts_changed', 'label_facts_unauthorized_claim', 'label_facts_no_longer_current']) {
+      expect(blockReasonIsRecheckInfrastructure(`label timing no longer current (${r})`)).toBe(false);
+    }
+    expect(blockReasonIsRecheckInfrastructure('live ETA unsendable (eta_recheck_failed)')).toBe(true);
+    expect(blockReasonIsRecheckInfrastructure(null)).toBe(false);
+  });
+  test('the composer route and the scheduler consult it before retiring the decision', () => {
+    const read = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    expect(read('../routes/admin-communications.js')).toContain("blockReasonIsRecheckInfrastructure(blockReason)) {\n        await require('../services/sms-suggest-mode').supersedeStaleDecision");
+    expect(read('../services/scheduler.js')).toContain("if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {");
   });
 });
 
@@ -695,9 +712,10 @@ describe('open-loop commitments recheck', () => {
     });
 
     test('an unreadable recheck reads as infrastructure, so the composer keeps the card', () => {
-      const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
-      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
-      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
+      const { blockReasonIsRecheckInfrastructure, blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
+      expect(blockReasonIsRecheckInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
+      expect(blockReasonIsRecheckInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
+      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(false); // not a live-ETA reason
     });
 
     test('the provider-boundary form rebuilds from the in-memory status for the claim\'s customer', async () => {

@@ -37,7 +37,7 @@ const NUDGE_AFTER_DAYS = 3;
 const NUDGE_WINDOW_DAYS = 10;
 const NUDGE_CATEGORIES = ['customer_request', 'scheduling', 'complaint', 'lead_inquiry'];
 // Mirrors email-actions / spam-blocker (CLOSED_STATUSES in leads-tools).
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 /** True when we know this sender: customer, live lead, vendor, or partner. */
 async function isKnownSender(fromAddress) {

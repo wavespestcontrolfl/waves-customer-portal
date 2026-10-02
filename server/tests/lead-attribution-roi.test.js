@@ -114,7 +114,10 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     // into every COUNT subquery, so the client-derived source conversion
     // rate agrees with the ROI (codex r16 P2).
     const { PROSPECT_SCOPE_SQL, WON_DESCENDANT_SQL } = require('../services/lead-statuses');
-    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`);
+    // 'handled' (a /book preferred-time request its own booking closed) is neither
+    // won nor lost, so it is out of the prospect denominator with the other
+    // non-engaged statuses: the conversion rate never counts it.
+    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate', 'handled') AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`);
     // The mirror from the root's side: an OPEN root with a live won repeat of
     // the same opportunity in its ancestry is that deal already counted — a
     // repeat's win settles onto the root's funnel row and leaves the root's
@@ -142,7 +145,7 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     const aliased = [];
     const qb = { whereNotIn: (...a) => { aliased.push(['whereNotIn', ...a]); return qb; }, whereRaw: (...a) => { aliased.push(['whereRaw', ...a]); return qb; } };
     scopeToProspects(qb, 'l');
-    expect(aliased[0]).toEqual(['whereNotIn', 'l.status', expect.arrayContaining(['duplicate', 'spam', 'cancelled'])]);
+    expect(aliased[0]).toEqual(['whereNotIn', 'l.status', expect.arrayContaining(['duplicate', 'spam', 'cancelled', 'handled'])]);
     expect(aliased[1][1]).toMatch(/^\(l\.status IS DISTINCT FROM 'won' OR NOT EXISTS/);
     expect(aliased[1][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email)\b/);
     expect(aliased[1][1]).toMatch(/FROM chain JOIN leads p ON/); // the inner walk still names the table
