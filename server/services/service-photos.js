@@ -9,6 +9,7 @@ const {
   latestPhotoChainEntry,
 } = require('./service-report/photo-chain');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
+const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 
 const SERVICE_PHOTO_PREFIX = 'service-photos/';
 const STAGED_SERVICE_PHOTO_PREFIX = 'service-photo-staging/';
@@ -200,6 +201,9 @@ async function uploadServicePhotoBuffer({
     'state_badge',
     'zone_id',
     'captured_at',
+    // Hashed into the chain payload (photo-chain.js), so the hash computed
+    // here must see the value the validator will read back.
+    'ai_tags',
     'image_sha256',
     'hash_sha256',
     'prev_hash_sha256',
@@ -444,6 +448,17 @@ async function promoteStagedPhotosForCompletedVisit({ scheduledServiceId, knex =
   return { serviceRecordId: serviceRecord.id, photos };
 }
 
+// A Fast Complete slot key rides in ai_tags as { slot }, merged over any
+// object tags the caller sent. Only a known key is stored; anything else is
+// dropped, and the tags are left exactly as sent.
+function withPhotoSlot(aiTags, slot) {
+  const known = normalizeTreeShrubPhotoSlot(slot);
+  if (!known) return aiTags;
+  const parsed = parseJsonOrNull(aiTags);
+  const base = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  return { ...base, slot: known };
+}
+
 async function uploadServicePhotoDataUrls({
   serviceRecordId,
   photos = [],
@@ -471,7 +486,7 @@ async function uploadServicePhotoDataUrls({
         capturedAt: photo.capturedAt,
         device: photo.device,
         appVersion: photo.appVersion,
-        aiTags: photo.aiTags,
+        aiTags: withPhotoSlot(photo.aiTags, photo.slot),
         annotation: photo.annotation,
         knex,
       });
