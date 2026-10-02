@@ -172,7 +172,8 @@ router.get('/', async (req, res) => {
           count(*) AS live,
           bool_or(status = 'needs_confirm') AS needs_confirm,
           bool_or(status = 'active' AND COALESCE(last_confirmed_at, created_at) < ?) AS stale,
-          count(code) > 1 AS conflict
+          -- neighborhoodHasCodeConflict's rule: 2+ live codes, at least one unconfirmed.
+          count(code) > 1 AND bool_or(code IS NOT NULL AND status = 'needs_confirm') AS conflict
         FROM neighborhood_access WHERE status <> 'retired' GROUP BY neighborhood_id
       ) f ON f.neighborhood_id = n.id
       WHERE ${where}
@@ -193,7 +194,11 @@ router.get('/', async (req, res) => {
 
     const neighborhoods = page.map((n) => {
       const rows = byNeighborhood.get(n.id);
-      const conflicted = rows.filter((r) => r.code && r.status !== 'retired').length > 1;
+      // The service's conflict rule (neighborhoodHasCodeConflict): two or more
+      // live codes with at least one unconfirmed. Two codes the office has
+      // confirmed are two real gates, not a conflict.
+      const liveCodes = rows.filter((r) => r.code && r.status !== 'retired');
+      const conflicted = liveCodes.length > 1 && liveCodes.some((r) => r.status === 'needs_confirm');
       return {
         id: n.id,
         name: n.name,

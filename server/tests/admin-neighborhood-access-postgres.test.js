@@ -159,14 +159,18 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await list('?q=nothing-here')).body).toMatchObject({ neighborhoods: [], total: 0 });
   });
 
-  test('list: needs_confirm filter = needs_confirm entry, two live codes, or a stale active entry', async () => {
+  test('list: needs_confirm filter = needs_confirm entry, a code conflict (2+ live, one unconfirmed), or a stale active entry', async () => {
     const clean = await neighborhood('Ivy Clean');
     await entry(clean, { code: '1010' });
     const flagged = await neighborhood('Juniper Flagged');
     await entry(flagged, { code: '2020', status: 'needs_confirm', last_confirmed_at: null });
     const conflict = await neighborhood('Kestrel Conflict');
     await entry(conflict, { code: '3030' });
-    await entry(conflict, { code: '4040', gate_label: 'Back gate' });
+    await entry(conflict, { code: '4040', gate_label: 'Back gate', status: 'needs_confirm' });
+    // Two codes the office confirmed are two real gates, not a conflict.
+    const twoGates = await neighborhood('Olive Two Gates');
+    await entry(twoGates, { code: '8080' });
+    await entry(twoGates, { code: '9090', gate_label: 'Back gate' });
     const stale = await neighborhood('Laurel Stale');
     await entry(stale, { code: '5050', last_confirmed_at: MONTHS_AGO(7) });
     const staleByCreated = await neighborhood('Magnolia Never');
@@ -185,6 +189,9 @@ postgres('admin neighborhood gate-code routes', () => {
     const k = byName(all, 'Kestrel Conflict');
     expect(k.hasConflict).toBe(true);
     expect(k.entries.every((e) => e.conflict)).toBe(true);
+    const o = byName(all, 'Olive Two Gates');
+    expect(o.hasConflict).toBe(false);
+    expect(o.entries.some((e) => e.conflict)).toBe(false);
   });
 
   test('list: paginates', async () => {
