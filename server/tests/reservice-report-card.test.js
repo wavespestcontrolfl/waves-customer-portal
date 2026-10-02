@@ -386,6 +386,11 @@ describe('PDF cache key component', () => {
 });
 
 describe('completion wiring', () => {
+  test('the locked visit row is read with every column (the freeze needs is_callback + the three request columns)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(src).toContain("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+  });
+
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
