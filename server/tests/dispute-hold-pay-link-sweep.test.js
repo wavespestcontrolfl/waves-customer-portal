@@ -291,6 +291,7 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
       'services/annual-prepay-renewals.js', // card-expiry exemption: a charge lane
       'services/completion-balance-sweep.js', // off-session charge sweep
       'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
+      'services/paf-prepay-release.js', // deferred prepay charge release; the first-visit text predicts that charge lane's own hold refusal
       'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
       'services/termite-annual-signature-charge.js', // signature charge
     ]);

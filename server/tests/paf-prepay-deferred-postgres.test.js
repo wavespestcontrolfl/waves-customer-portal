@@ -349,6 +349,116 @@ postgres('annual prepay charged after the first visit', () => {
     expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
   });
 
+  describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
+    async function completeWithText(f, visitId, visitOutcome = 'completed') {
+      const techId = randomUUID();
+      const catalogId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+      await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+      await trx('scheduled_services').where({ id: visitId })
+        .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+      const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
+      send.mockClear();
+      send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      await completeScheduledService({ serviceId: visitId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: techId, technician: null },
+        body: { customerRecap: 'done', visitOutcome, products: [], areasTreated: [], sendCompletionSms: true, requestReview: false } });
+      return send.mock.calls.map((c) => c[0]?.body || '').join('\n');
+    }
+
+    it('the visit that releases the year says it is being charged now', async () => {
+      const f = await deferredAccept();
+      const text = await completeWithText(f, f.parentId);
+      expect(text).toMatch(/Your Waves annual plan payment of \$480\.00 is being charged to your card on file now - receipt to follow\./);
+      expect(text).not.toMatch(/nothing due today/);
+    });
+
+    it('account credit that lowers the charge makes the amount a ceiling (R1)', async () => {
+      const f = await deferredAccept();
+      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 100 });
+      const text = await completeWithText(f, f.parentId);
+      expect(text).toMatch(/payment of up to \$480\.00 is being charged/);
+    });
+
+    it('account credit that covers the year keeps the "nothing due" text', async () => {
+      const f = await deferredAccept();
+      await trx('customers').where({ id: f.customerId }).update({ auto_apply_account_credit: true, account_credits: 1000 });
+      const text = await completeWithText(f, f.parentId);
+      expect(text).not.toMatch(/being charged/);
+      expect(text).toMatch(/nothing (is )?due today/);
+    });
+
+    it('a second held visit done before the release pass keeps the regular text', async () => {
+      const f = await deferredAccept();
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
+      await perform(f.parentId, f.customerId);
+      expect(await facts(f.childId)).toBeNull();
+    });
+
+    it('the announcement is reserved for one visit, and a year already paid gets none (Codex r9)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      expect(await facts(f.childId)).toBeNull();
+      const paid = await deferredAccept({ invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: paid.parentId }).update({ paf_held_term_id: paid.termId });
+      expect(await facts(paid.parentId)).toBeNull();
+      const unstamped = await deferredAccept();
+      expect(await facts(unstamped.parentId)).toBeNull();
+    });
+
+    it('credit already applied to the year bill makes the amount a ceiling, even with no balance left (Codex r12)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('invoices').where({ id: f.invoiceId }).update({ credit_applied: 50 });
+      expect(await facts(f.parentId)).toMatchObject({ amount: 'up to $480.00' });
+    });
+
+    it('a legacy bank alias reads as a saved bank account (Codex r13)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('payment_methods').where({ id: f.pmId }).update({ method_type: 'bank_account' });
+      expect(await facts(f.parentId)).toMatchObject({ methodLine: 'saved bank account' });
+    });
+
+    it('a different Auto Pay method than the bound one keeps the regular text (Codex r15)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const otherPm = randomUUID();
+      await trx('payment_methods').insert({ id: otherPm, customer_id: f.customerId, stripe_payment_method_id: `pm_${otherPm.slice(0, 8)}`, method_type: 'card', last_four: '1111' });
+      await trx('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: otherPm });
+      expect(await facts(f.parentId)).toBeNull();
+    });
+
+    it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
+      const removed = await deferredAccept();
+      await trx('payment_methods').where({ id: removed.pmId }).del();
+      expect(await completeWithText(removed, removed.parentId)).not.toMatch(/being charged/);
+      const optedOut = await deferredAccept();
+      await trx('autopay_log').insert({ customer_id: optedOut.customerId, event_type: 'autopay_disabled', created_at: new Date() });
+      expect(await completeWithText(optedOut, optedOut.parentId)).not.toMatch(/being charged/);
+    });
+
+    it('a later visit of a year already released keeps the regular text', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending' } });
+      const text = await completeWithText(f, f.childId);
+      expect(text).not.toMatch(/being charged/);
+    });
+  });
+
   describe('releasing the charge after the first performed visit', () => {
     it('leaves the job waiting while no visit is performed, and for an inspection-only visit', async () => {
       const f = await deferredAccept();
