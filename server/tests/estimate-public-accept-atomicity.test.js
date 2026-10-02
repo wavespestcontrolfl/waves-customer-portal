@@ -431,6 +431,11 @@ async function putAccept(token, body = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks keeps queued *Once values: a test whose accept is refused
+  // before conversion would otherwise hand its queued conversion to the next
+  // test. convertEstimate has no default implementation, so a reset only
+  // drops that leftover queue.
+  EstimateConverter.convertEstimate.mockReset();
   InvoiceService.create.mockImplementation(async () => ({
     id: 'inv-1', token: 'invtok1', total: 159, applied_deposit_credit: 0,
   }));
@@ -3266,7 +3271,13 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   // A capture-required policy sends the captured SetupIntent with the accept.
   const accept = async (token, body = {}) => {
     const policy = await policySpy.getMockImplementation()?.();
-    return putAccept(token, policy?.required === true ? { recurringCardSetupIntentId: 'seti_paf_default', ...body } : body);
+    // A capture tab attests the consent text version it rendered (#5434's
+    // bundle-level fence); a per-capture attestation in `body` supersedes it.
+    return putAccept(token, policy?.required === true ? {
+      recurringCardSetupIntentId: 'seti_paf_default',
+      consentTextVersion: require('../services/payment-method-consent-text').CONSENT_VERSION,
+      ...body,
+    } : body);
   };
   // A tab showing the promise attests it, and its capture rendered the
   // after_visit_card authorization for a card (the accept's one collection
