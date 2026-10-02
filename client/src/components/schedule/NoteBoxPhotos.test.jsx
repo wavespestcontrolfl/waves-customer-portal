@@ -1,0 +1,87 @@
+// @vitest-environment jsdom
+// Photos in the notes box (GATE_NOTE_BOX_PHOTOS): an open description always
+// belongs to the photo it was opened for, and dictated words land only in
+// the editor session that started the mic (pre-push P1 ×2 on the PR).
+import React, { useState } from 'react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const dictation = { listening: false, supported: true, uploading: false, toggle: vi.fn(), cancel: vi.fn() };
+let transcript = null;
+vi.mock('../../hooks/useSpeechDictation', () => ({
+  default: (onTranscript) => {
+    transcript = onTranscript;
+    return dictation;
+  },
+}));
+const { default: NoteBoxPhotos } = await import('./NoteBoxPhotos');
+
+const palette = { text: '#111', muted: '#737373', border: '#E5E5E5', card: '#FFF', danger: '#C2410C', onDanger: '#FFF' };
+const start = [
+  { name: 'a.jpg', data: 'data:a', caption: 'First photo' },
+  { name: 'b.jpg', data: 'data:b', caption: '' },
+  { name: 'c.jpg', data: 'data:c', caption: 'Third photo' },
+];
+
+function Harness() {
+  const [photos, setPhotos] = useState(start);
+  return (
+    <>
+      <NoteBoxPhotos
+        photos={photos}
+        max={5}
+        disabled={false}
+        palette={palette}
+        dictationServiceId="svc-1"
+        onAdd={() => {}}
+        onRemove={(index) => setPhotos((prev) => prev.filter((_, i) => i !== index))}
+        onCaption={(index, caption) => setPhotos((prev) => prev.map((p, i) => (i === index ? { ...p, caption } : p)))}
+        summary=""
+      />
+      <output data-testid="captions">{photos.map((p) => `${p.name}:${p.caption}`).join('|')}</output>
+    </>
+  );
+}
+
+beforeEach(() => {
+  dictation.listening = false;
+  dictation.toggle.mockReset();
+  dictation.cancel.mockReset();
+  dictation.toggle.mockImplementation(() => { dictation.listening = !dictation.listening; });
+});
+afterEach(cleanup);
+
+describe('NoteBoxPhotos', () => {
+  it('removing another photo closes the open description instead of saving onto the photo that shifted into its place', () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Gap under the garage door' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    expect(screen.queryByLabelText(/Description for photo/)).toBeNull();
+    expect(screen.getByTestId('captions').textContent).toBe('b.jpg:|c.jpg:Third photo');
+  });
+
+  it('words from a dictation that started for one photo never land on another', () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Describe by voice' }));
+    expect(dictation.toggle).toHaveBeenCalledTimes(1);
+    // Moving to photo 2 ends photo 1's session: the recording stops.
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    expect(dictation.toggle).toHaveBeenCalledTimes(2);
+    expect(dictation.cancel).toHaveBeenCalled();
+    // The upload's words arrive late, for photo 1: dropped.
+    act(() => transcript('trap by the AC chase'));
+    expect(screen.getByLabelText('Description for photo 2').value).toBe('');
+  });
+
+  it('words from the open session land in its description', () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Describe by voice' }));
+    act(() => transcript('gap under the garage door'));
+    expect(screen.getByLabelText('Description for photo 2').value).toBe('gap under the garage door');
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(screen.getByTestId('captions').textContent).toBe('a.jpg:First photo|b.jpg:gap under the garage door|c.jpg:Third photo');
+  });
+});

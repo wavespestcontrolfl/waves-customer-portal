@@ -5,7 +5,7 @@
 // notes and prints under the photo on the customer's report. The AI photo
 // read ("Describe with AI") and its summary live here too, so the separate
 // photo section goes away.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Camera, Mic, MicOff } from 'lucide-react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 
@@ -30,17 +30,35 @@ export default function NoteBoxPhotos({
 }) {
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState('');
+  // A dictation belongs to the editor session that started it: words that
+  // arrive after that editor closed, or moved to another photo (an upload
+  // transcribes after the mic stops), are dropped, never written onto the
+  // wrong photo.
+  const sessionRef = useRef(0);
+  const dictatingForRef = useRef(null);
   const dictation = useSpeechDictation(
-    (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
+    (text) => {
+      if (dictatingForRef.current !== sessionRef.current) return;
+      setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS));
+    },
     { uploadServiceId: dictationServiceId },
   );
+  // Ends the session's dictation: a recording stops (its clip's words are
+  // then dropped), and speech results still in flight are discarded.
+  const endSession = () => {
+    sessionRef.current += 1;
+    dictatingForRef.current = null;
+    if (dictation.listening) dictation.toggle();
+    dictation.cancel?.();
+  };
   const open = (index) => {
     if (disabled) return;
+    endSession();
     setEditing(index);
     setDraft(photos[index]?.caption || '');
   };
   const close = () => {
-    if (dictation.listening) dictation.cancel?.();
+    endSession();
     setEditing(null);
     setDraft('');
   };
@@ -97,7 +115,9 @@ export default function NoteBoxPhotos({
               <button
                 type="button"
                 onClick={() => {
-                  if (editing === index) close();
+                  // Removing any photo shifts the ones after it, so an open
+                  // editor closes rather than save onto the wrong photo.
+                  if (editing != null) close();
                   onRemove(index);
                 }}
                 disabled={disabled}
@@ -157,7 +177,10 @@ export default function NoteBoxPhotos({
               {dictation.supported && (
                 <button
                   type="button"
-                  onClick={dictation.toggle}
+                  onClick={(event) => {
+                    if (!dictation.listening) dictatingForRef.current = sessionRef.current;
+                    dictation.toggle(event);
+                  }}
                   disabled={dictation.uploading}
                   aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
                   style={{
