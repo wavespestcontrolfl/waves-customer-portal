@@ -769,6 +769,10 @@ async function readVoiceFacts(note) {
 module.exports = {
   readVoiceFacts,
   validateVoiceFacts,
+  // Shared with the lane reader (visit-lane-facts.js): the same note limit
+  // and the same word-for-word quote rule.
+  matchText,
+  groundedQuote,
   VOICE_FACTS_VERSION,
   VOICE_FACTS_SCHEMA,
   AREA_LABELS,
