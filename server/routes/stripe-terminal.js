@@ -239,6 +239,12 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
     let handoffCreditResult = null;
     const ownershipHeld = await db.transaction(async (trx) => {
+      // Billing lock order (invoice → customer → visit), the order the credit
+      // apply and saved-card collection take, so a concurrent collection
+      // cannot deadlock against this ownership check (pre-push P1). The
+      // credit apply below re-locks the same rows within this transaction.
+      await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
+      if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
       handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
       return true;

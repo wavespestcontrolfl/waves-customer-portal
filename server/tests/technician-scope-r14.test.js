@@ -377,3 +377,17 @@ describe('codex #5568 r16', () => {
     });
   });
 });
+
+describe('handoff lock order (pre-push P1)', () => {
+  test('invoice then customer are locked before the visit ownership check', () => {
+    const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
+    const trxAt = s.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
+    const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');", trxAt);
+    const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", trxAt);
+    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', trxAt);
+    expect(trxAt).toBeGreaterThan(-1);
+    expect(inv).toBeGreaterThan(trxAt);
+    expect(cust).toBeGreaterThan(inv);
+    expect(visit).toBeGreaterThan(cust);
+  });
+});
