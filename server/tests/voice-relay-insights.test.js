@@ -143,6 +143,17 @@ describe('buildTurnTimeline', () => {
     expect(turns[2].heardGapMs).toBe(1000);
   });
 
+  test('a second agent audio start in the same turn that lands mid-utterance still counts as talking over the caller', () => {
+    const turns = buildTurnTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1500, 'first_token_received'), ev(1600, 'start_of_agent_speech'), // "let me check"
+      ev(2500, 'end_of_agent_speech'),
+      ev(3000, 'start_of_customer_speech'), // caller adds something
+      ev(4000, 'first_token_received'), ev(4100, 'start_of_agent_speech'), // the result, over them
+    ]);
+    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 600, agentOverCaller: true });
+  });
+
   test('a reply with no agent audio before the call ends is no_audio_event; no reply is silent', () => {
     expect(buildTurnTimeline([ev(0, 'prompt_sent'), ev(900, 'first_token_received')])[0].outcome).toBe('no_audio_event');
     expect(buildTurnTimeline([ev(0, 'prompt_sent')])[0].outcome).toBe('silent');

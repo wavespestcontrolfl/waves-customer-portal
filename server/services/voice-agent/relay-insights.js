@@ -167,6 +167,10 @@ const TIMELINE_HANDLERS = {
       t.ttsMs = st.pendingTtsMs;
       t.agentOverCaller = st.customerSpeaking;
       t.outcome = 'spoke';
+    } else if (t && t.outcome === 'spoke' && st.customerSpeaking) {
+      // A later start in the same turn (an acknowledgement, then the result)
+      // can still talk over the caller.
+      t.agentOverCaller = true;
     }
     st.pendingTtsMs = null;
     st.agentSpeaking = true;
