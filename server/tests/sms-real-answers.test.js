@@ -5311,3 +5311,19 @@ test('an unmodeled invoice history withholds the aggregate balance from the allo
     expect(facts).toContain('never state an account balance');
   } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
 });
+
+// Codex round-59 P2: an owed figure must come from the source its wording names
+test('a dues figure cannot stand in for the balance / total; each wording binds its own source', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const agg = require('../services/context-aggregator');
+  const spy = jest.spyOn(agg, 'authorizedDuesCents').mockReturnValue([5000]);
+  try {
+    const ctx = { billing: { outstandingBalance: 120, recentPayments: [], openInvoice: { amountDue: 120 } } };
+    expect(drafter.remainderAmountsUngrounded('The total is $50.00.', ctx)).toBe(true);
+    expect(drafter.remainderAmountsUngrounded('Your balance is $50.00.', ctx)).toBe(true);
+    expect(drafter.remainderAmountsUngrounded('Your monthly plan is $50.00.', ctx)).toBe(false);
+    expect(drafter.remainderAmountsUngrounded('The total is $120.00.', ctx)).toBe(false);
+    expect(drafter.remainderAmountsUngrounded('Your invoice is $50.00.', ctx)).toBe(true);
+    expect(drafter.remainderAmountsUngrounded('Your invoice is $120.00.', ctx)).toBe(false);
+  } finally { spy.mockRestore(); }
+});

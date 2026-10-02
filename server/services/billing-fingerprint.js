@@ -39,7 +39,8 @@ async function billingFingerprint(customerId, dbh = db) {
   try {
     const res = await dbh.raw(BILLING_FINGERPRINT_SQL, Array(BILLING_FINGERPRINT_PARAMS).fill(customerId));
     const row = (res && (res.rows || (Array.isArray(res) ? res : [])))[0];
-    return typeof row?.fingerprint === 'string' ? row.fingerprint : null;
+    // + the ET calendar day (Codex round-59 P2): card expiry / monthly eligibility can flip at ET midnight with no row changing
+    return typeof row?.fingerprint === 'string' ? `${row.fingerprint}@${require('../utils/datetime-et').etDateString()}` : null;
   } catch {
     return null;
   }

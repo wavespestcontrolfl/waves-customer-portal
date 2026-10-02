@@ -975,3 +975,10 @@ test.each(['Zelle isn\u2019t available for your invoice', 'We don\u2019t take ca
   expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
   expect(r.hasAffirmativeZelleMention(b)).toBe(false);
 });
+
+// Codex round-59 P2: an exception aimed at Zelle denies it
+test.each(['We accept cards except Zelle.', 'We take anything other than Zelle.'])('an exception-led Zelle clause is a denial: %s', (b) => {
+  const r = require('../services/sms-amount-recheck');
+  expect(r.hasNegativeZelleAvailabilityClaim(b)).toBe(true);
+  expect(r.hasAffirmativeZelleMention(b)).toBe(false);
+});

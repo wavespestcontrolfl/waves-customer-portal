@@ -656,3 +656,23 @@ test('a disputed row in the window suppresses "we don\'t see a payment since"', 
   expect(kinds(billing({ recentPayments: [row()] }))).toContain('no_payment_since');
   expect(kinds(billing({ recentPayments: [row(), row({ id: 'd', amount: 50, status: 'disputed', payment_date: '2026-09-20' })] }))).not.toContain('no_payment_since');
 });
+
+// Codex round-59 P2: a receipt verb aimed at a tender; copies must answer the record the customer named
+test.each(['We banked your check.', 'We banked your cash.'])('held: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'Did you get my check?' })).toBe(true);
+});
+describe('a copied sentence must answer the record the customer named', () => {
+  const INV2 = 'Invoice WPC-2026-0002 for $95.00 is paid.';
+  const INV1 = 'Invoice WPC-2026-0001 for $80.00 is paid.';
+  const PAY95 = 'We received your $95.00 card payment on Sep 12, 2026.';
+  test('another invoice than the one named is off target; the named one is not', () => {
+    expect(c.checkPaymentStatusReply({ reply: INV2, sentences: [INV1, INV2], inboundText: 'Is invoice WPC-2026-0001 paid?' }).ok).toBe(false);
+    expect(c.checkPaymentStatusReply({ reply: INV1, sentences: [INV1, INV2], inboundText: 'Is invoice WPC-2026-0001 paid?' }).ok).toBe(true);
+    expect(c.checkPaymentStatusReply({ reply: INV1, sentences: [INV1, INV2], inboundText: 'Is invoice #0001 paid?' }).ok).toBe(true);
+  });
+  test('a payment of another amount than the one named is off target; no named record => any copy', () => {
+    expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my $120 payment go through?' }).ok).toBe(false);
+    expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my $95 payment go through?' }).ok).toBe(true);
+    expect(c.checkPaymentStatusReply({ reply: PAY95, sentences: [PAY95], inboundText: 'Did my payment go through?' }).ok).toBe(true);
+  });
+});

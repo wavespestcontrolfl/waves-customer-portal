@@ -689,7 +689,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
   test('a judged body: fingerprint before the recheck; unchanged at the boundary => ok, on the HANDOFF connection, repeatable', async () => {
     db.raw = jest.fn(async () => ({ rows: [{ fingerprint: 'fp-1' }] }));
     const fp = await billingFingerprintForSend({ decision, outgoingBody: decision.suggested_message });
-    expect(fp).toBe('fp-1');
+    expect(fp).toBe(`fp-1@${require('../utils/datetime-et').etDateString()}`);
     const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: fp }, getBody: () => decision.suggested_message });
     expect(typeof check.afterMarker).toBe('function');
     const dbi = dbiWith('fp-1');
@@ -697,7 +697,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
     expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(12).fill('c1'));
   });
   test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
-    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: 'fp-1' }, getBody: () => decision.suggested_message });
+    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}` }, getBody: () => decision.suggested_message });
     await expect(check.afterMarker({ dbi: dbiWith('fp-2') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
     await expect(check({ dbi: dbiWith(new Error('db down')) })).resolves.toMatchObject({ ok: false, retryable: true });
     const none = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: null }, getBody: () => decision.suggested_message });

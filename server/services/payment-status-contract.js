@@ -373,7 +373,7 @@ const STATUS_ALTERNATIVES = [
   // (Codex round-52 P2: cash, and a received / collected / picked-up cash or check, are receipts too)
   '(?:have|has|had|got|gotten|received|collected|picked up)\\s+(?:your|the)\\s+(?:payments?|funds|money|transfer|deposit|che(?:ck|que)s?|zelle|ach|cash)', '(?:got|have|has)\\s+(?:it|that|this|them)',
   // (Codex round-58 P2: a receipt verb aimed at a pronoun - "We banked it", "we processed that", "it's been deposited")
-  '(?:banked|deposited|cashed|processed|posted|applied|recorded|logged|collected|received|ran|run|cleared|settled)\\s+(?:it|that|this|them)\\b',
+  '(?:banked|deposited|cashed|processed|posted|applied|recorded|logged|collected|received|ran|run|cleared|settled)\\s+(?:it|that|this|them|(?:your|the|that|this)\\s+(?:cash|che(?:ck|que)s?|zelle|ach|venmo|paypal|wire|e-?check|money|funds))\\b',
   "(?:it|that|this|they)(?:'s|’s|\\s+(?:is|was|were|are|has|have))\\s+(?:been\\s+)?(?:banked|deposited|cashed|processed|posted|applied|recorded|logged|collected|received|cleared|settled)\\b",
   "(?:don'?t|do not|can'?t|cannot|haven'?t|have not|hasn'?t|has not|didn'?t|did not|not)\\s+(?:\\w+\\s+){0,2}?(?:see|seen|find|found|show|showing|reflect\\w*|there)",
   'no record', 'missing', 'showing', 'shows?', 'reflect(?:ed|s|ing)?', 'recorded', 'logged', 'visible',
@@ -470,13 +470,38 @@ function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scope
  * The contract for one reply against the sentences it may copy: { ok, copied (texts), remainder }.
  * ok = after the complete verbatim copies are removed, nothing left asserts a payment status.
  */
+// Codex round-59 P2: a copied sentence must ANSWER the record the customer named. When the inbound names an invoice (full number or
+// tail), every copied invoice sentence must be about one of those invoices; when it names a dollar amount, every copied payment sentence
+// must carry one of those amounts. A true sentence about a DIFFERENT record is off target (held), never an answer.
+const INBOUND_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
+const amountCentsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
+function copiesOffTarget(copied, inboundText) {
+  const inbound = String(inboundText || '');
+  if (!inbound || !copied.length) return false;
+  const { invoiceNumbersNamed } = require('./zelle-target-invoice');
+  const named = invoiceNumbersNamed(inbound);
+  const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
+  const namedTails = new Set([...named.tail.map(stripZeros), ...named.full.map((f) => stripZeros(f.split('-').pop()))]);
+  const amounts = new Set((inbound.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf));
+  return copied.some((sentence) => {
+    const t = String(sentence);
+    const inv = /^Invoice\s+(\S+?)\s/.exec(t);
+    if (inv && (named.full.length || named.tail.length)) {
+      const num = inv[1].toUpperCase();
+      return !(named.full.includes(num) || namedTails.has(stripZeros(num.split('-').pop())));
+    }
+    if (!inv && amounts.size && /\bpayment\b/i.test(t)) return !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
+    return false;
+  });
+}
+
 function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
   const remainder = withoutCopies(text, copied);
-  return { ok: !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped }), copied, remainder };
+  return { ok: !copiesOffTarget(copied, inboundText) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped }), copied, remainder };
 }
 
 // ---- Auto-send: a payment-scoped reply may carry nothing but verbatim copies and inert text ---------------------------------------
@@ -530,6 +555,7 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
 }
 
 module.exports = {
+  copiesOffTarget,
   paymentDayKey,
   isUnmodeledInvoice: unmodeledStatus,
   SECTION_HEADER,

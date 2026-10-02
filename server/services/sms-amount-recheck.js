@@ -101,7 +101,12 @@ function zelleClauses(body) {
     ZELLE_WORD_RE.test(sentence) && ZELLE_LIST_NEGATION_RE.test(sentence) ? [sentence] : sentence.split(CLAUSE_SPLIT_RE)
   ));
 }
-const isNegatedZelleClause = (clause) => { const t = normApostrophes(clause); return ZELLE_NEGATION_RE.test(t) || ZELLE_LIST_NEGATION_RE.test(t); };
+// Codex round-59 P2: an exception aimed at Zelle ("We accept cards except Zelle", "anything other than Zelle") denies it
+const ZELLE_EXCEPTION_RE = /\b(?:except|excluding|other\s+than|besides|but\s+not|apart\s+from)\s+(?:for\s+)?(?:(?:via|by|through|with|using)\s+)?zelle\b/i;
+const isNegatedZelleClause = (clause) => {
+  const t = normApostrophes(clause);
+  return ZELLE_NEGATION_RE.test(t) || ZELLE_LIST_NEGATION_RE.test(t) || ZELLE_EXCEPTION_RE.test(t);
+};
 // "not for invoice #0002", "except invoice 0002", "no longer for that bill" - a negated clause with no subject of its own
 const ZELLE_ELLIPTICAL_NEGATION_RE = /^\s*(?:(?:but|and|though)\s+)?(?:not|no\s+longer|never|except|excluding)\b/i;
 
@@ -392,6 +397,8 @@ async function paymentStatusSendBlockReason({ customerId, body, snapshot = null,
   // the draft was written from a payment-scoped thread (snapshot.scoped): the reply is judged as payment-scoped even when its own
   // words and the latest message are not
   if (paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped: snapshot?.scoped === true || authorized.length > 0 })) return 'payment_status_unauthorized';
+  // a copied sentence about a different record than the one the customer named answers nothing (Codex round-59 P2)
+  if (paymentStatus.copiesOffTarget(copied, inboundText)) return 'payment_status_unauthorized';
   // The AUTONOMOUS rung does not trust the detector alone: a payment-scoped reply auto-sends only as verbatim copies plus inert text.
   if (autoSend) {
     const scopeBlock = paymentStatus.autoSendScopeBlock({ reply: text, inboundText, snapshot });

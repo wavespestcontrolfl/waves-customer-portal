@@ -4046,6 +4046,20 @@ function offerSpanInText(text, day, window) {
 // grounded v12 answer). true when the reply carries an amount the facts
 // block did not authorize, or price grammar the extractor cannot verify.
 // Language that states what is OWED or charged on an ongoing basis.
+const OWED_DUES_RE = /\b(?:dues|membership|plan|monthly|per month|a month|each month)\b|\/\s?mo(?:nth)?\b/i;
+const OWED_INVOICE_RE = /\b(?:invoice[sd]?|bill)\b/i;
+const OWED_BALANCE_RE = /\b(?:balance|total|owe[sd]?|outstanding|amount due)\b/i;
+// The owed figures by SOURCE (the real-answers remainder guard binds each to its wording); same plan / cut-history rules as the pool.
+function owedAmountSources(context) {
+  const billing = context?.billing || {};
+  const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
+  const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
+  const onPlan = billing.hasActivePaymentPlan === true;
+  const balance = finiteSet([billing.outstandingBalance > 0 && !onPlan && billing.hasUnmodeledInvoice !== true ? centsOf(billing.outstandingBalance) : NaN]);
+  // every listed open invoice's amount due; with no invoice amount known at all, the balance stands in (one-invoice accounts)
+  const invoice = finiteSet(onPlan ? [] : [billing.openInvoice?.amountDue, ...(billing.openInvoices || []).map((inv) => inv?.amountDue)].map(centsOf));
+  return { balance, invoice: invoice.size ? invoice : balance, dues: finiteSet(require('./context-aggregator').authorizedDuesCents(context)) };
+}
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
 // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
 // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
@@ -4090,11 +4104,17 @@ function remainderAmountsUngrounded(remainder, context) {
   const amounts = amountCentsIn(text);
   if (suggestMode.hasPriceQuote(text) && amounts.length === 0) return true;
   const { owed } = billingAmountCents(context, { planAware: true });
+  const sources = owedAmountSources(context);
   for (const clause of text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/)) {
     const masked = String(clause || '').replace(AMOUNT_MASK_RE, ' AMT ');
     if (suggestMode.hasPriceQuote(masked)) return true;
     const found = amountCentsIn(clause);
-    if (found.length && (!AMOUNT_OWED_RE.test(masked) || found.some((a) => !owed.has(a)))) return true;
+    if (!found.length) continue;
+    if (!AMOUNT_OWED_RE.test(masked)) return true;
+    // Codex round-59 P2: a figure must come from the source its wording names - dues / monthly wording => the dues figures, invoice
+    // wording => the open invoice, balance / total / owed wording => the account balance; only wording that names none uses the pool
+    const allowed = OWED_DUES_RE.test(masked) ? sources.dues : OWED_INVOICE_RE.test(masked) ? sources.invoice : OWED_BALANCE_RE.test(masked) ? sources.balance : owed;
+    if (found.some((a) => !allowed.has(a))) return true;
   }
   return false;
 }

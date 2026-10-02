@@ -9,6 +9,8 @@ jest.mock('../services/sms-amount-recheck', () => ({
   zelleInvoiceStillEligible: (...a) => mockEligible(...a),
 }));
 const { billingFingerprint, billingUnchangedProviderPreSendCheck, BILLING_FINGERPRINT_SQL } = require('../services/billing-fingerprint');
+// billingFingerprint appends the ET calendar day (Codex round-59 P2): a SAVED fingerprint carries it, the raw row hash does not
+const FP = `abc@${require('../utils/datetime-et').etDateString()}`;
 
 describe('billingFingerprint', () => {
   // Codex round-55 P1: WHOLE ROWS, not column lists - every billing table the recheck can read is hashed row by row in full, so a
@@ -26,7 +28,7 @@ describe('billingFingerprint', () => {
   });
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
-    expect(await billingFingerprint('c1', dbh)).toBe('abc');
+    expect(await billingFingerprint('c1', dbh)).toBe(FP);
     expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(12).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
@@ -37,7 +39,7 @@ describe('billingFingerprint', () => {
 describe('billingUnchangedProviderPreSendCheck', () => {
   const dbiWith = (fp) => ({ raw: async () => ({ rows: [{ fingerprint: fp }] }) });
   test('unchanged => ok; changed / unreadable / never taken => retryable refusal; repeatable after the marker', async () => {
-    const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc' });
+    const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP });
     expect(check.afterMarker).toBe(check);
     await expect(check({ dbi: dbiWith('abc') })).resolves.toEqual({ ok: true });
     await expect(check({ dbi: dbiWith('xyz') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
@@ -49,7 +51,7 @@ describe('billingUnchangedProviderPreSendCheck', () => {
 // Owner ruling 2026-10-01 ("rerun full check"): a Zelle offer / denial reruns the SAME eligibility the full recheck ran, at the boundary
 describe('Zelle at the provider boundary: the full recheck\'s own checks run again', () => {
   const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
-  const run = (over) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', ...over });
+  const run = (over) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, ...over });
   beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
   afterEach(() => { mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); delete process.env.ZELLE_RECIPIENT; });
   test('an offer: still eligible => ok (on the invoice the recheck resolved, through the handoff connection)', async () => {
@@ -91,7 +93,7 @@ describe('Zelle at the provider boundary: the full recheck\'s own checks run aga
 // Codex round-53: retry fields drive the failed-payment balance; a denial approved with Zelle off is rechecked when it is set up
 describe('a denial that stood because Zelle was not set up', () => {
   const dbiWith = () => { const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] }); return dbi; };
-  const denial = (zelleDenial) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleDenial, getBody: () => "We don't accept Zelle." });
+  const denial = (zelleDenial) => billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelleDenial, getBody: () => "We don't accept Zelle." });
   afterEach(() => { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); });
   test('still not set up => ok; set up during the send => refused (retryable)', async () => {
     delete process.env.ZELLE_RECIPIENT;
@@ -115,9 +117,16 @@ test('the fingerprint is read after the Zelle checks', async () => {
   mockEligible.mockImplementation(async () => { order.push('zelle'); return { eligible: true }; });
   const dbi = jest.fn();
   dbi.raw = async () => { order.push('fingerprint'); return { rows: [{ fingerprint: 'abc' }] }; };
-  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc', zelleInvoiceId: 'inv-1', getBody: () => 'We received your $120.00 card payment on Sep 12, 2026. You can Zelle us at pay@example.com.' });
+  const check = billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP, zelleInvoiceId: 'inv-1', getBody: () => 'We received your $120.00 card payment on Sep 12, 2026. You can Zelle us at pay@example.com.' });
   try {
     await expect(check({ dbi })).resolves.toEqual({ ok: true });
     expect(order).toEqual(['zelle', 'fingerprint']);
   } finally { delete process.env.ZELLE_RECIPIENT; mockEligible.mockReset(); mockEligible.mockResolvedValue({ eligible: true }); }
+});
+
+// Codex round-59 P2: crossing ET midnight between the recheck and the provider call refuses (card expiry / monthly eligibility)
+test('a fingerprint saved on a previous ET day is refused at the boundary', async () => {
+  const dbi = jest.fn(); dbi.raw = async () => ({ rows: [{ fingerprint: 'abc' }] });
+  await expect(billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: 'abc@2000-01-01' })({ dbi })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
+  await expect(billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: FP })({ dbi })).resolves.toEqual({ ok: true });
 });
