@@ -93,4 +93,4 @@ function buildTreatmentSummary(treatment) {
   return out;
 }
 
-module.exports = { buildTreatmentSummary, METHOD_PHRASES };
+module.exports = { buildTreatmentSummary, isSupportProduct, METHOD_PHRASES };

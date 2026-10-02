@@ -17,6 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -3175,10 +3176,21 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
+  // GATE_LAWN_VISIT_MEMORY: hand the caller the prior visit and this visit's
+  // memory date through an out-param, never through the payload (the public
+  // lawnAssessment must not gain a key, and the prior's record id is internal).
+  // The prior comes only from the property-scoped history: with
+  // GATE_LAWN_PROPERTY_HISTORY off the history is customer-wide, which cannot
+  // prove "same home" (a moved customer's old lawn would read as "last
+  // visit"), so there is no prior then.
+  if (visitMemoryOut && typeof visitMemoryOut === 'object') {
+    visitMemoryOut.serviceDate = ymd(assessment.visit_date || assessment.service_date);
+    visitMemoryOut.priorVisit = propertyHistoryEnabled ? selectPriorVisit(historyRows, assessment.id) : null;
+  }
   const initialRow = historyRows[0] || assessment;
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
@@ -4098,11 +4110,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     throw new PinnedAssessmentUnavailable(opts.pinnedLawnAssessmentId);
   }
   const lawnEligibleVisitIds = lawnHistory?.eligibleVisitIds;
+  // GATE_LAWN_VISIT_MEMORY (P12), read once at call time. Off = nothing below
+  // runs: no reads, no writes, no new payload key.
+  const visitMemoryLive = serviceLine === 'lawn' && typeof featureGates.lawnVisitMemoryLive === 'function' && featureGates.lawnVisitMemoryLive();
+  const visitMemoryOut = {};
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     propertyHistoryEnabled, lawnHistory,
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
     // undefined = unpinned (live snapshot); null = the signature saw none.
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
+    ...(visitMemoryLive ? { visitMemoryOut } : {}),
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
@@ -5344,6 +5361,30 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
+      // GATE_LAWN_VISIT_MEMORY (P12): freeze this visit's treatment memory
+      // (first writer wins) from the deterministic pre-narrative reportV2 and
+      // carry the PRIOR visit's frozen entry as sinceLast. Computed here, attached
+      // after the narrative overlay so no rewrite can touch it. Failure only
+      // marks the render uncacheable; it never breaks the report.
+      let visitMemorySinceLast;
+      if (reportV2 && visitMemoryLive) {
+        try {
+          const outcome = await resolveVisitMemoryForRender({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            customerId: service.customer_id,
+            reportV2,
+            assessmentId: lawnAssessment.assessmentId,
+            serviceDate: visitMemoryOut.serviceDate,
+            priorVisit: visitMemoryOut.priorVisit || null,
+            knex,
+          });
+          visitMemorySinceLast = outcome.sinceLast;
+          if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
+        } catch {
+          lawnAssessment.weekWeatherUncacheable = true;
+        }
+      }
       // AI "What we applied today" narrative — same contract as the T&S path
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
@@ -5489,6 +5530,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
         }
       }
+      // Only a built block is attached: no prior (or a prior with no frozen
+      // memory) leaves the key off rather than carrying a null.
+      if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = visitMemorySinceLast;
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
