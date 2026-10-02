@@ -108,8 +108,10 @@ async function translateInbound(inbound) {
   const language = typeof j.language === 'string' ? j.language.trim().slice(0, 60) : '';
   const languageCode = typeof j.language_code === 'string' ? j.language_code.trim().toLowerCase().slice(0, 12) : '';
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
-  if (!english || !language) return { ok: false, reason: 'inbound_translation_empty' };
-  return { ok: true, isEnglish: false, english, language, languageCode, model: out.model };
+  if (!english) return { ok: false, reason: 'inbound_translation_empty' };
+  const code = languageCodeOf(languageCode);
+  if (!code || !LANGUAGE_NAMES[code]) return { ok: false, reason: 'language_not_supported' };
+  return { ok: true, isEnglish: false, english, language: LANGUAGE_NAMES[code], languageCode: code, model: out.model };
 }
 
 async function translateReply({ englishReply, language }) {
@@ -139,6 +141,18 @@ async function backTranslate({ translated }) {
   const languageCode = languageCodeOf(out.json.language_code);
   return text ? { ok: true, text, languageCode, model: out.model } : { ok: false, reason: 'back_translation_empty' };
 }
+
+// The language named in every prompt comes from this server-owned table,
+// never from a model's free text (a customer's message could make the
+// classifier "name" a language that carries an instruction).
+const LANGUAGE_NAMES = Object.freeze({
+  es: 'Spanish', pt: 'Portuguese', fr: 'French', ht: 'Haitian Creole', de: 'German', it: 'Italian', ru: 'Russian',
+  uk: 'Ukrainian', pl: 'Polish', ro: 'Romanian', hu: 'Hungarian', cs: 'Czech', sk: 'Slovak', nl: 'Dutch', sv: 'Swedish',
+  no: 'Norwegian', da: 'Danish', fi: 'Finnish', el: 'Greek', tr: 'Turkish', ar: 'Arabic', he: 'Hebrew', fa: 'Persian',
+  hi: 'Hindi', ur: 'Urdu', bn: 'Bengali', pa: 'Punjabi', gu: 'Gujarati', ta: 'Tamil', te: 'Telugu', zh: 'Chinese',
+  ja: 'Japanese', ko: 'Korean', vi: 'Vietnamese', th: 'Thai', tl: 'Tagalog', id: 'Indonesian', ms: 'Malay',
+  sq: 'Albanian', sr: 'Serbian', hr: 'Croatian', bs: 'Bosnian', bg: 'Bulgarian', lt: 'Lithuanian', lv: 'Latvian', et: 'Estonian',
+});
 
 // "es", "es-MX", "PT_br" -> "es" / "pt"; anything else -> null
 function languageCodeOf(value) {
@@ -318,30 +332,39 @@ async function recordTrial(row) {
   }
 }
 
-// The copy rules: the deterministic comms-lint verdict (draftShadowReply's
-// options) and the drafter's banned-customer-copy guard (pet-safe claims,
-// fixed re-entry times). Run on the English reply and on the back-translation.
-function copyFault(text, context = null, { ignoreRules = [] } = {}) {
-  if (require('./sms-shadow-drafter').hasBannedCustomerCopy(text)) return 'banned_copy';
+function lintFailures(text, context = null) {
   const billingLane = context?.customer?.billingLane;
-  const lint = require('./comms-lint').lintComms(text, {
+  return require('./comms-lint').lintComms(text, {
     channel: 'sms',
     audience: 'customer',
     stopExpected: false,
     monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
     billingMode: billingLane?.mode,
-  });
-  return lint.failures.some((f) => !ignoreRules.includes(f.rule)) ? 'failed_comms_lint' : null;
+  }).failures.map((f) => f.rule);
 }
 
 // The checks draftShadowReply runs on a converged draft before it may leave
 // the shadow lane: a copied redaction placeholder, an amount the billing facts
-// do not hold, and the copy rules above.
+// do not hold, and the comms-lint verdict (same options). Banned product-safety
+// copy is the drafter's own loop's (validateComplianceCopy, LABEL FACTS aware),
+// so it is not re-judged here without that provenance.
 function postDraftFault(englishReply, context) {
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
   if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
-  const fault = copyFault(englishReply, context);
-  return fault ? `reply_${fault}` : null;
+  return lintFailures(englishReply, context).length ? 'reply_failed_comms_lint' : null;
+}
+
+// What the translation ADDED, read back in English: banned product-safety copy
+// or a comms-lint rule the approved English reply did not trip (a "pet-safe"
+// the translator wrote in). Judged as a difference, so an approved LABEL FACTS
+// timing the English carried is never held for being carried over. The SMS
+// length rule is the translated text's own (checked above), not its read-back's.
+function translationAddedFault(englishReply, backTranslation) {
+  const { hasBannedCustomerCopy } = require('./sms-shadow-drafter');
+  if (hasBannedCustomerCopy(backTranslation) && !hasBannedCustomerCopy(englishReply)) return 'banned_copy';
+  const before = new Set(lintFailures(englishReply));
+  const added = lintFailures(backTranslation).filter((r) => r !== 'sms-segment-limit' && !before.has(r));
+  return added.length ? 'failed_comms_lint' : null;
 }
 
 // Steps 1-2: the customer's text in English, then the English draft.
@@ -360,7 +383,8 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!inboundMeaning.same) return { stop: 'meaning_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity, inbound_meaning: { differences: inboundMeaning.differences } } };
 
   const ContextAggregator = require('./context-aggregator');
-  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
+  // same opt-in as the live drafter (draftShadowReply): the live ETA rides the real-answers gate
+  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const thread = await translateThread(liveContext, inboundMessage, inbound.english);
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
   const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
@@ -389,7 +413,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
   const fault = postDraftFault(englishReply, liveContext);
   if (fault) return { stop: fault, fields, checks };
-  return { englishReply, language: inbound.language, languageCode: languageCodeOf(inbound.languageCode), fields, checks };
+  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, fields, checks };
 }
 
 // Steps 3-4: translate, then check the exact stored text.
@@ -412,9 +436,7 @@ async function translateAndCheck({ englishReply, language, languageCode }) {
   if (back.text.length > 2 * MAX_TEXT) return { stop: 'back_translation_too_long', fields, checks: { token_parity: parity } };
   // the translation must be in the customer's language, not merely "not English" (Spanish asked, Portuguese written)
   if (!languageCode || back.languageCode !== languageCode) return { stop: 'translation_in_other_language', fields, checks: { token_parity: parity, language: { asked: languageCode, written: back.languageCode } } };
-  // the copy rules run on what the translation actually says, read back in English (its length is
-  // not the SMS's: the translated text is what would send, and the English reply passed the segment rule)
-  const backFault = copyFault(back.text, null, { ignoreRules: ['sms-segment-limit'] });
+  const backFault = translationAddedFault(englishReply, back.text);
   if (backFault) return { stop: `back_translation_${backFault}`, fields, checks: { token_parity: parity } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
