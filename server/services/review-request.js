@@ -4780,7 +4780,9 @@ const ReviewService = {
           // A tech-voice draft speaks as a technician about a visit type: it is
           // reused only while the row's attribution still matches the visit.
           const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
-            && (prior.service_type || null) === (serviceType || null));
+            && (prior.service_type || null) === (serviceType || null)
+            && (prior.service_record_id || null) === (serviceRecordId || null)
+            && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
           const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
               { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
@@ -4851,7 +4853,9 @@ const ReviewService = {
             : !priorTechVoice;
           // Same re-check for an older personalized email intro.
           const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
-            && (prior.service_type || null) === (serviceType || null));
+            && (prior.service_type || null) === (serviceType || null)
+            && (prior.service_record_id || null) === (serviceRecordId || null)
+            && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
           const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
               { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null);

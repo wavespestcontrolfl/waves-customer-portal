@@ -5555,7 +5555,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     mockDraftTechVoice.mockResolvedValue(fresh);
     const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       // A real row records the visit it was drafted about.
-      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey, service_type: 'pest control', technician_id: null }],
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey, service_type: 'pest control', technician_id: null, service_record_id: `sr-${id}`, service_date: new Date() }],
       service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       review_sequences: [{
         id: `seq-${id}`, customer_id: id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
@@ -5577,6 +5577,15 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect((await ReviewService.processReviewSequences()).sent).toBe(1);
     expect(mockDraftTechVoice).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me this morning');
+
+    // #5524 r22: same day, but the anchored visit date changed since: never reused.
+    mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
+    mock = fixture('tvd-5', new Date());
+    mock.__state.rows.review_requests.find((r) => r.id === 'rr-tvd-5').service_date = new Date(Date.now() - 3 * 86400000);
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
 
     // #5524 r20: same day, but the visit's technician changed since: never reused.
     mockSendCustomerMessage.mockClear();
