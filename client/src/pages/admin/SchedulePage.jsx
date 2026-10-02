@@ -16761,7 +16761,13 @@ export function CompletionPanel({
         body: JSON.stringify({ note }),
       }).catch(() => null)
       : null;
-    if (heard?.status !== "read") return;
+    if (heard?.status !== "read") {
+      // A read that answered nothing usable leaves no group unclear: the asks
+      // always reflect the latest Generate (the typed fill's rule, #5632).
+      // Words beside values still standing stay.
+      setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      return;
+    }
     // A value fills only an unpicked group and only beside what is chosen:
     // the tap's own rules decide a clash (reconcile drops a value the new
     // one excludes; the selected actions refuse a value), and a clash is
@@ -17619,6 +17625,11 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
+    // A person's tick is theirs: the words the lane fill heard for this place
+    // go with it.
+    setLaneHeard((prev) => (prev?.areas?.some((entry) => entry.area === area)
+      ? { ...prev, areas: prev.areas.filter((entry) => entry.area !== area) }
+      : prev));
   }
   async function handlePhotoSelect(e) {
     // Photo count is a generation input (payload photoCount) — the set is
@@ -19127,6 +19138,12 @@ export function CompletionPanel({
         .trim());
     }
     setSelectedObservationLabels(reconciled);
+    // A person's pick is theirs: the edited group's heard words go, and so do
+    // those of a value the pick reconciled away, even when the filled value
+    // is picked again later (Codex P2 r3 on #5632, the typed fill's rule).
+    setLaneHeard((prev) => (prev
+      ? { ...prev, findings: prev.findings.filter((entry) => entry.group !== group?.key && reconciled.includes(entry.value)) }
+      : prev));
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
