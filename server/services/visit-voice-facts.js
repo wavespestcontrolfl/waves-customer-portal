@@ -95,13 +95,28 @@ const VOICE_FACTS_SCHEMA = {
 // A denial ("no roaches", "did not treat inside", "didn't spray") anywhere
 // in the clause around a quote in the note, not only in the span the model
 // quoted: a fact the note denies never stands, whatever was quoted. Checked
-// in code; the prompt asks for it, the code makes sure.
+// in code; the prompt asks for it, the code makes sure. A clause ends at
+// punctuation or a turn of the sentence ("no activity inside but sprayed the
+// kitchen baseboards" is two clauses).
 const NEGATION_RE = /\b(no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t)\b/;
-const CLAUSE_BREAK = /[.,;!?\n]/;
+const CLAUSE_BREAK_RE = /[.,;!?]|\b(?:but|however|although|though|except)\b/g;
 // A short denial clause right after ("checked for spiders, none found"),
 // never a clause about something else ("sprayed the perimeter, no activity
 // seen" still sprayed the perimeter).
 const TRAILING_DENIAL_RE = /^\s*(no|none|not|nothing|never)(\s+(found|seen|present|there|today|anywhere|at all)){0,2}\s*(?:[.,;!?]|$)/;
+
+// The clause around [from, to) in the note: from the last break before it to
+// the first break after it.
+function clauseAround(note, from, to) {
+  let start = 0;
+  let end = note.length;
+  CLAUSE_BREAK_RE.lastIndex = 0;
+  for (let match = CLAUSE_BREAK_RE.exec(note); match; match = CLAUSE_BREAK_RE.exec(note)) {
+    if (match.index + match[0].length <= from) start = match.index + match[0].length;
+    else if (match.index >= to) { end = match.index; break; }
+  }
+  return { text: note.slice(start, end), end };
+}
 
 // Whether the note denies what a quote says: every place the quote appears
 // sits in a clause with a denial, or right before a short denial clause.
@@ -109,12 +124,9 @@ function deniedInNote(quote, note) {
   let at = note.indexOf(quote);
   if (at < 0) return true;
   while (at >= 0) {
-    let start = at;
-    while (start > 0 && !CLAUSE_BREAK.test(note[start - 1])) start -= 1;
-    let end = at + quote.length;
-    while (end < note.length && !CLAUSE_BREAK.test(note[end])) end += 1;
-    const denied = NEGATION_RE.test(note.slice(start, end))
-      || (note[end] === ',' && TRAILING_DENIAL_RE.test(note.slice(end + 1)));
+    const clause = clauseAround(note, at, at + quote.length);
+    const denied = NEGATION_RE.test(clause.text)
+      || (note[clause.end] === ',' && TRAILING_DENIAL_RE.test(note.slice(clause.end + 1)));
     if (!denied) return false;
     at = note.indexOf(quote, at + 1);
   }
@@ -175,15 +187,20 @@ function pestName(name, quote) {
 function validateVoiceFacts(json, note) {
   const grounding = matchText(note);
   const areaQuotes = new Map();
+  const deniedAreas = new Set();
   for (const entry of Array.isArray(json?.areas) ? json.areas : []) {
     const area = AREA_LABELS[entry?.area] ? entry.area : null;
     const quote = area ? groundedQuote(entry?.quote, grounding) : null;
-    // "Did not treat inside" is not an area: the sheet shows what was heard,
-    // so a missed one is said again, never recorded from a denial.
-    if (quote && !deniedInNote(quote, grounding) && !areaQuotes.has(area)) areaQuotes.set(area, quote);
+    if (!quote) continue;
+    // Heard, but the note's clause denies it: never recorded, and never
+    // silently dropped either, since a missed indoor treatment loses the
+    // customer's indoor wait. The sheet holds until the tech says it plainly.
+    if (deniedInNote(quote, grounding)) deniedAreas.add(area);
+    else if (!areaQuotes.has(area)) areaQuotes.set(area, quote);
   }
   const areas = AREA_ORDER.filter((area) => areaQuotes.has(area))
     .map((area) => ({ area: AREA_LABELS[area], quote: areaQuotes.get(area) }));
+  const unclearAreas = AREA_ORDER.filter((area) => deniedAreas.has(area) && !areaQuotes.has(area)).map((area) => AREA_LABELS[area]);
   const pests = [];
   for (const entry of Array.isArray(json?.pests) ? json.pests : []) {
     const quote = groundedQuote(entry?.quote, grounding);
@@ -194,20 +211,20 @@ function validateVoiceFacts(json, note) {
   // How the sprays went down: only a grounded, unnegated quote says it.
   const sprayQuote = ['perimeter', 'spot'].includes(json?.spray?.method) ? groundedQuote(json.spray.quote, grounding) : null;
   const spray = sprayQuote && !deniedInNote(sprayQuote, grounding) ? { method: json.spray.method, quote: sprayQuote } : null;
-  return { areas, pests, spray };
+  return { areas, unclearAreas, pests, spray };
 }
 
 /**
  * Reads where product went down, the pests named and how the sprays went
- * down from the technician's note. Returns { status, areas, pests, spray,
- * heard } where status is 'read',
+ * down from the technician's note. Returns { status, areas, unclearAreas,
+ * pests, spray, heard } where status is 'read',
  * 'empty_note', 'too_long' or 'failed'; areas and pests are what the sheet records
  * (labels and the technician's words), heard carries each fact's quote.
  * Never throws.
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], pests: [], spray: null, heard: { areas: [], pests: [], spray: null }, version: VOICE_FACTS_VERSION,
+    status, areas: [], unclearAreas: [], pests: [], spray: null, heard: { areas: [], unclearAreas: [], pests: [], spray: null }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
@@ -233,6 +250,8 @@ async function readVoiceFacts(note) {
   return {
     status: 'read',
     areas: heard.areas.map((entry) => entry.area),
+    // Heard, but the note's clause denies it: the sheet asks for it plainly.
+    unclearAreas: heard.unclearAreas,
     pests: heard.pests.map((entry) => entry.name),
     // 'perimeter' | 'spot' | null (not said)
     spray: heard.spray?.method || null,

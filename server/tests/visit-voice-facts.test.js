@@ -86,7 +86,7 @@ describe('validateVoiceFacts', () => {
       areas: [{ area: 'garage', quote: 'treated the garage' }],
       pests: [{ name: 'spiders', quote: 'spiders in the eaves' }],
     }, NOTE);
-    expect(facts).toEqual({ areas: [], pests: [], spray: null });
+    expect(facts).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -153,6 +153,7 @@ describe('validateVoiceFacts', () => {
       spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' },
     }, note);
     expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.unclearAreas).toEqual(['Inside']);
   });
 
   test('a denial in the note stands even when the quote leaves it out', () => {
@@ -162,7 +163,20 @@ describe('validateVoiceFacts', () => {
       pests: [{ name: 'roaches', quote: 'roaches were found' }, { name: 'spiders', quote: 'Checked for spiders' }],
       spray: { method: 'perimeter', quote: 'spray around the outside' },
     }, note);
-    expect(facts).toEqual({ areas: [], pests: [], spray: null });
+    // A denied area is never recorded and never silently dropped: the sheet
+    // asks for it plainly.
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null });
+  });
+
+  test('a turn of the sentence starts a new clause', () => {
+    const note = 'No activity inside but sprayed the kitchen baseboards. Sprayed around the outside of the house.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'sprayed the kitchen baseboards' }, { area: 'outside', quote: 'Sprayed around the outside of the house' }],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside', 'Outside']);
+    expect(facts.unclearAreas).toEqual([]);
   });
 
   test('a denial about something else in the sentence never drops a fact', () => {
@@ -195,8 +209,8 @@ describe('validateVoiceFacts', () => {
   });
 
   test('a malformed answer is no facts', () => {
-    expect(validateVoiceFacts(null, NOTE)).toEqual({ areas: [], pests: [], spray: null });
-    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual({ areas: [], pests: [], spray: null });
+    expect(validateVoiceFacts(null, NOTE)).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
+    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual({ areas: [], unclearAreas: [], pests: [], spray: null });
   });
 });
 
@@ -208,7 +222,7 @@ describe('readVoiceFacts', () => {
       spray: { method: 'perimeter', quote: 'sprayed around the outside of the house' },
     }));
     const facts = await readVoiceFacts(NOTE);
-    expect(facts).toMatchObject({ status: 'read', areas: ['Inside', 'Outside'], pests: ['ghost ants'], spray: 'perimeter' });
+    expect(facts).toMatchObject({ status: 'read', areas: ['Inside', 'Outside'], unclearAreas: [], pests: ['ghost ants'], spray: 'perimeter' });
     expect(facts.heard.areas).toHaveLength(2);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy.name).toBe('fastStructured');

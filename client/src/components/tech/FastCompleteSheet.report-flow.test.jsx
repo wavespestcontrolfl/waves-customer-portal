@@ -257,6 +257,14 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
+  test('a place heard but denied in the note holds the send until it is said plainly', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: ['Inside'], pests: [] } }));
+    await generate();
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: inside');
+    expect(screen.getByText('It isn’t clear whether you treated inside. Say plainly where you treated, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
   test('a note too long to read holds the send and says to shorten it', async () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'too_long', areas: [], pests: [] } }));
     await generate();
@@ -336,6 +344,26 @@ describe('generate and read', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add or view photos' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Done with photos' }));
     expect(await screen.findByRole('button', { name: 'Write it again' })).toBeTruthy();
+  });
+
+  test('a photo read still landing after the manager closes holds the send', async () => {
+    const list = [{ id: 'p1', url: 'https://example.test/p1.jpg', caption: 'Counter edge' }];
+    let releaseRefresh;
+    let reads = 0;
+    const request = makeRequest({
+      photos: () => (reads++ === 0 ? { photos: list } : new Promise((resolve) => { releaseRefresh = () => resolve({ photos: list }); })),
+    });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add or view photos' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Done with photos' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the report' }));
+    // The refresh has not landed: nothing is current, so nothing can go.
+    expect(screen.getByText('Loading photos…')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    releaseRefresh();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
   });
 
   test('Write again on the report asks for a fresh draft of the same visit', async () => {

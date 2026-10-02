@@ -863,8 +863,14 @@ function useReportDraft({ request, base }) {
     const heard = await request(`${base}/voice-facts`, { method: 'POST', body: JSON.stringify({ note }) }).catch(() => null);
     const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
     const facts = heard?.available === true
-      ? { status: heard.status, areas: listOf(heard.areas), pests: listOf(heard.pests), spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null }
-      : { status: 'failed', areas: [], pests: [], spray: null };
+      ? {
+        status: heard.status,
+        areas: listOf(heard.areas),
+        unclearAreas: listOf(heard.unclearAreas),
+        pests: listOf(heard.pests),
+        spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
+      }
+      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null };
     if (sequence !== sequenceRef.current) return;
     const payload = buildPayload(facts);
     let written = null;

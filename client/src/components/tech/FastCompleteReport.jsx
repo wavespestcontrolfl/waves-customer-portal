@@ -92,6 +92,9 @@ export function useVisitPhotos({ serviceId, request, version }) {
   const readSequence = useRef(0);
   useEffect(() => {
     const sequence = ++readSequence.current;
+    // Every read is pending until it lands: a photo added in the manager
+    // must reach the report's freshness check before anything is sent.
+    setState((prev) => (prev.loaded ? { ...prev, loaded: false } : prev));
     request(`/tech/services/${serviceId}/photos`)
       .then((data) => {
         if (sequence === readSequence.current) setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true });
@@ -318,6 +321,11 @@ const FACTS_READ = new Set(['read', 'empty_note']);
 export function factsHold(facts) {
   if (facts?.status === 'too_long') return 'Your note is too long to read where you treated. Shorten it, then write it again.';
   if (!FACTS_READ.has(facts?.status)) return 'Couldn’t read where you treated from your note. Write it again to retry.';
+  // Heard, but the note also denies it: never recorded, never dropped.
+  const unclear = facts.unclearAreas || [];
+  if (unclear.length) {
+    return `It isn’t clear whether you treated ${joinAnd(unclear.map((area) => area.toLowerCase()))}. Say plainly where you treated, then write it again.`;
+  }
   return facts.areas.length ? '' : 'Say where you treated (inside, outside or garage) in your note, then write it again.';
 }
 
@@ -325,8 +333,10 @@ const SPRAY_HEARD = { perimeter: 'perimeter spray', spot: 'spot spraying' };
 
 function HeardLine({ facts }) {
   if (!FACTS_READ.has(facts?.status)) return null;
+  const unclear = facts.unclearAreas || [];
   const heard = [
-    facts.areas.length ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}` : 'where you treated: not heard',
+    facts.areas.length ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}` : (unclear.length ? '' : 'where you treated: not heard'),
+    unclear.length ? `not clear: ${joinAnd(unclear.map((area) => area.toLowerCase()))}` : '',
     SPRAY_HEARD[facts.spray],
     facts.pests.length ? `for ${facts.pests.join(', ')}` : '',
   ].filter(Boolean);
