@@ -357,7 +357,7 @@ function heardInTranscript(heard, normTranscript) {
 const VULGAR = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125 };
 const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
-const FRACTION_WORDS = { half: 0.5, halves: 0.5, quarter: 0.25, quarters: 0.25, third: 1 / 3, thirds: 1 / 3 };
+const FRACTION_WORDS = { half: 0.5, halves: 0.5, quarter: 0.25, quarters: 0.25, third: 1 / 3, thirds: 1 / 3, eighth: 0.125, eighths: 0.125 };
 const UNIT_WORDS = {
   ounce: 'oz', ounces: 'oz', oz: 'oz', floz: 'fl_oz',
   gallon: 'gal', gallons: 'gal', gal: 'gal', gals: 'gal',
@@ -501,7 +501,9 @@ const CARRIER_STOPS = new Set(['in', 'into', 'to', 'with', 'for', 'on', 'and']);
 const SPRAYED_WORDS = new Set(['sprayed', 'spraying', 'spray', 'applied', 'out', 'ran', 'went', 'through']);
 function isCarrierVolume(tokens, start, end, unit) {
   if (unit === 'gal' && (tokens[start - 1] === 'in' || tokens[start - 1] === 'into')) return true;
-  if (unit === 'gal' && (SPRAYED_WORDS.has(tokens[start - 1]) || (isArticle(tokens[start - 1]) && SPRAYED_WORDS.has(tokens[start - 2])))) return true;
+  // "sprayed two gallons", "Sprayed Taurus, two gallons": a spray verb a few words
+  // back (past a product name and a comma) makes the gallons the finished mix
+  if (unit === 'gal') for (let j = start - 1; j >= 0 && start - j <= 4; j -= 1) if (SPRAYED_WORDS.has(tokens[j])) return true;
   if (tokens[end] !== 'of' && unit !== 'gal') return false;
   const from = tokens[end] === 'of' ? end + 1 : end;
   for (let k = 0; k < 3 && !CARRIER_STOPS.has(tokens[from + k]); k += 1) if (CARRIER_WORDS.has(tokens[from + k])) return true;
@@ -1311,8 +1313,9 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
-    const words = norm(text).split(' ').filter((w) => w.length >= 4 && !/^(office|dispatch|note|tell|that)$/.test(w));
-    if (words.length && !words.some((w) => kept.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
+    // kept only when the notes carry ALL of its words (a shared "gate" is not "gate code 1234")
+    const words = norm(text).split(' ').filter((w) => (w.length >= 4 || /\d/.test(w)) && !/^(office|dispatch|note|tell|that|this|with|from)$/.test(w));
+    if (words.length && !words.every((w) => kept.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
   }
   return {
     customerNote: cleanNote(customer.join(' '), CAPS.customerNote),

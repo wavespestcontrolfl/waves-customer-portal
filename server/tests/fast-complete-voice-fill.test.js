@@ -1360,3 +1360,23 @@ describe('Codex #5580 round 9', () => {
     expect(validateFill(answer({ products: [{ ...row(2), heard: 'two ounces of Dismiss 64 oz' }] }), withDismiss, 'Used two ounces of Dismiss 64 oz outside.').products[0].amount).toBe(2);
   });
 });
+
+describe('Codex #5580 round 10', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"one eighth ounce" is 0.125', () => {
+    const t = 'Used one eighth ounce of Taurus.';
+    expect(validateFill(answer({ products: [row(0.125, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(0.125);
+  });
+
+  test.each(['Sprayed Taurus, two gallons.', 'Applied Taurus, two gallons.'])('"%s": the gallons are finished mix', (t) => {
+    expect(validateFill(answer({ products: [row(2, 'gal', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('an office line sharing one word with a kept line still gets its Check', () => {
+    const t = 'Treated outside. Gate was locked. Gate code 1234.';
+    const out = validateFill(answer({ officeNote: 'Gate was locked.' }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Gate code 1234.', reason: 'office_said_not_filled' });
+    expect(out.unclear).not.toContainEqual({ heard: 'Gate was locked.', reason: 'office_said_not_filled' });
+  });
+});
