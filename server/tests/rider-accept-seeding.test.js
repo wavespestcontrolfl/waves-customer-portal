@@ -215,6 +215,21 @@ describe('rider context fall-backs', () => {
     expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
   });
 
+  test('a resumed accept with a saved rider follow-up OFF the lawn plan gets no overrides (no bunched visits)', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    conn.persisted = [...lawnRows(8), { id: 'p0', recurring_parent_id: 'pest', scheduled_date: '2098-04-06', visit_id: null }];
+    expect(await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan)).toBeNull();
+  });
+
+  test('a resumed accept whose saved rider follow-ups are ON the lawn plan keeps riding', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    conn.persisted = [...lawnRows(8), { id: 'p0', recurring_parent_id: 'pest', scheduled_date: '2098-03-30', visit_id: 'v2098-03-30' }];
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
+  });
+
   test('a retried accept whose saved rider dates are NOT lawn dates is not linked', async () => {
     const ctx = RiderAccept.createContext();
     await seedLawn(ctx);

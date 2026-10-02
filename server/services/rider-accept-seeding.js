@@ -152,6 +152,18 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     logger.warn(`[rider-accept] rider ${rider.id} has ${overrideDates.filter((d) => hostSet.has(d)).length}/${wanted} lawn dates to ride (seeding the quarterly walk)`);
     return null;
   }
+  // A resumed accept may already have some rider follow-ups saved; the seeder
+  // keeps them and fills the rest from these overrides. If any saved one is
+  // not on the planned lawn dates, mixing the two would bunch visits (e.g. +84
+  // beside a saved +91) — keep the normal walk instead.
+  const planned = new Set(overrideDates);
+  const saved = (await liveSeriesRows(conn, [rider.id]))
+    .filter((r) => String(r.recurring_parent_id || '') === String(rider.id))
+    .map((r) => dateOnly(r.scheduled_date));
+  if (!saved.every((d) => planned.has(d))) {
+    logger.warn(`[rider-accept] rider ${rider.id} already has saved dates off the lawn plan (seeding the quarterly walk)`);
+    return null;
+  }
   return { overrideDates, hostParentId: lawn.id };
 }
 
