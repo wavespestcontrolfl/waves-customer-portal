@@ -649,3 +649,14 @@ describe('Codex r9 (#5542)', () => {
     expect(where(['Inside', 'Garage', 'Attic'])).toBe('inside, the garage and the attic');
   });
 });
+
+describe('Codex r10 (#5542)', () => {
+  test('a target the shared screen hides never reaches "Treated for"', () => {
+    const out = card(frozenService(null), { products: [{ application_method: 'perimeter_spray', targets: ['pet-safe ants', 'Spiders'] }] });
+    expect(out.whatWeDid.pests).toEqual(['spiders']);
+  });
+  test('lawn slash labels word the "Where" row', () => {
+    const out = card(frozenService(null, { areas_serviced: ['Thin / stressed turf areas', 'Along driveway / sidewalk'], client_pest_rating: null }), { block: { serviceLine: 'lawn', outcome: 'treated' } });
+    expect(out.whatWeDid.where).toBe('the thin turf areas and driveway edges');
+  });
+});

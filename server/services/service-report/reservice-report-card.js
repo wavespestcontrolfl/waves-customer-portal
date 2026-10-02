@@ -223,7 +223,10 @@ function productRows(products) {
     application_method: row?.application_method ?? row?.applicationMethod,
     product_name: row?.product_name ?? row?.productName ?? row?.name,
     product_category: row?.product_category ?? row?.productCategory ?? row?.category,
-    targets: asStringArray(row?.targets),
+    // The shared target screen (social-media.js), the same one the PDF
+    // applies to the product section, so "Treated for" never shows a target
+    // the products list hid (Codex r10).
+    targets: require('../social-media').sanitizeProductTargets(asStringArray(row?.targets)).targets,
   }));
 }
 
@@ -329,11 +332,21 @@ function pestWhereOf(areas) {
 // Lawn closeouts record yard zones ("Front yard", "Back yard", "Side yards",
 // client/src/lib/lawn-completion.js), which the pest phrases (inside /
 // outside / garage) never match. Short plain labels only, once each.
+// The panel's slash labels (shared/legacy-completion-areas.json "lawn"),
+// worded plainly (Codex r10).
+const LAWN_SLASH_AREAS = new Map([
+  ['thin / stressed turf areas', 'thin turf areas'],
+  ['bare / damaged turf areas', 'bare turf areas'],
+  ['along driveway / sidewalk', 'driveway edges'],
+  ['slope / drainage area', 'slope area'],
+]);
+
 function lawnWhereOf(areas) {
   const seen = new Set();
   const labels = [];
   for (const area of areas) {
-    const label = String(area || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const raw = String(area || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const label = LAWN_SLASH_AREAS.get(raw) || raw;
     if (!label || label.length > 40 || !/^[a-z][a-z '&-]*$/.test(label) || seen.has(label)) continue;
     seen.add(label);
     labels.push(label);
