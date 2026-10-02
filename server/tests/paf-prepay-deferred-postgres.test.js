@@ -410,8 +410,10 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await release()).toMatchObject({ released: 0 });
       const job = await jobOf(f);
       expect(job).toMatchObject({ status: 'pending', released_for_visit_id: f.parentId });
-      const invoice = await trx('invoices').where({ id: f.invoiceId }).first('due_date');
-      expect(etDateString(new Date(invoice.due_date))).toBe(day(0));
+      // A DATE column read as text: a Date parsed at the server's midnight
+      // would shift a day under a UTC CI clock.
+      const invoice = await trx('invoices').where({ id: f.invoiceId }).first(trx.raw('due_date::text as due_date'));
+      expect(invoice.due_date).toBe(day(0));
     });
 
     it('reaches a performed job behind a full page of jobs still waiting', async () => {
