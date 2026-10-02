@@ -926,6 +926,20 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_before_visit' });
     });
 
+    it('a failed-charge year still hands a later held visit to the office when the released one was paid another way (pre-push audit)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
+      await trx('scheduled_services').where({ id: f.childId }).update({ scheduled_date: day(0) });
+      await perform(f.childId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: null, prepaid_method: 'cash', prepaid_amount: 120 });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.childId });
+    });
+
     it('a year closed unpaid after a failed charge hands the held visits to the office', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
       await perform(f.parentId, f.customerId);

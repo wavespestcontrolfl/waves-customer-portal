@@ -159,12 +159,16 @@ async function visitStillPerformed(visitId, heldTermId = null) {
 
 // The released / failed-charge visit, if it is still work the dead year held:
 // performed by its current closeout and still stamped with that year's term.
+// Any other performed visit the year still holds counts too: after a decline
+// later visits stay held, so the released one being paid another way does not
+// mean no work is owed (pre-push audit P1).
 async function stillHeldVisit(estimateId, invoiceId, visitId) {
-  if (!visitId) return null;
   const term = await db('annual_prepay_terms')
-    .where(invoiceId ? { prepay_invoice_id: invoiceId } : { source_estimate_id: estimateId }).first('id')
-    || await db('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('id');
-  return term && await visitStillPerformed(visitId, term.id) ? visitId : null;
+    .where(invoiceId ? { prepay_invoice_id: invoiceId } : { source_estimate_id: estimateId }).first('id', 'customer_id')
+    || await db('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('id', 'customer_id');
+  if (!term) return null;
+  if (visitId && await visitStillPerformed(visitId, term.id)) return visitId;
+  return (await firstPerformedVisit(estimateId, term.customer_id, term.id))?.id || null;
 }
 
 async function releaseOne(row, now) {
