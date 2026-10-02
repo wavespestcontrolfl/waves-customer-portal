@@ -33,7 +33,7 @@ async function seedMoveSet(cast) {
   await cast.optOut(s.ostrander.id);
   // Other visits on the move day.
   s.other = await cast.customer({ first_name: 'Quill', last_name: 'Fennimore', phone: phone(705), address_line1: '3 Fixture Row' });
-  await cast.visit(s.other.id, { scheduled_date: s.friday, window_start: '15:00', window_end: '17:00' });
+  s.otherVisit = await cast.visit(s.other.id, { scheduled_date: s.friday, window_start: '15:00', window_end: '17:00' });
   cast.key('cust-pellham', s.pellham); cast.key('pellham-monday', s.pellhamVisit); cast.key('cust-wexcombe', s.wexcombe); cast.key('ostrander-visit', s.ostranderVisit);
   s.series.forEach((visit, i) => cast.key(`wexcombe-series-${i + 1}`, visit));
   return s;
@@ -49,6 +49,7 @@ const snapshotRows = async (h, ids) => (await h.db('scheduled_services').whereIn
 /** Take one single-visit move to its commit (a card with the gate off, direct with it on) and check the right row, date, window, property, nothing else. */
 async function moveVisit(ctx, h, s, { visit, customer, date, time, prompt, page, sessionId, sessionKey, expectEnd, ids, card }) {
   const before = await snapshotRows(h, ids);
+  const smsBefore = h.providers.sms.mock.calls.length; // measured by delta: the mock is never cleared mid-case, so an automatic move text cannot be erased
   const est = await ctx.establish({ prompt, page: page || { customerId: customer.id }, customer });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionId, sessionKey, rounds: moveRounds(visit.id, date, time) });
   if (card) {
@@ -56,6 +57,8 @@ async function moveVisit(ctx, h, s, { visit, customer, date, time, prompt, page,
     ctx.check(JSON.stringify(mid) === JSON.stringify(before), 'side_effect', 'moved_before_confirm', 'a visit changed before the card was confirmed');
   }
   await ctx.commit(turn, { card, tool: 'reschedule_appointment', label: 'move' });
+  const smsAfterMove = await h.settle();
+  ctx.check(smsAfterMove === smsBefore, 'side_effect', 'move_sent_an_automatic_text', `${smsAfterMove - smsBefore} provider submission(s) by the move itself; the notice is a separate approved step`);
   const row = await rowOf(h, visit.id);
   ctx.check(sameDay(row.scheduled_date, date), 'read_back', 'moved_date_wrong', `date ${row.scheduled_date}, expected ${date}`);
   if (time) {
@@ -70,13 +73,12 @@ async function moveVisit(ctx, h, s, { visit, customer, date, time, prompt, page,
 
 const noticeBody = (date, window) => `Waves: your visit has moved to ${date} (${window}).`;
 async function sendNotice(ctx, h, customer, body, { actor = h.actors.owner, sessionId } = {}) {
-  h.providers.sms.mockClear();
   const turn = await ctx.turn(actor, { prompt: 'Text this customer the new appointment time.', page: { customerId: customer.id }, sessionId, sessionKey: 'notice', rounds: [{ tools: [['send_sms', { customer_id: customer.id, message: body }]] }] });
   return turn;
 }
 
 const CASES = {};
-const allIds = (s) => [s.pellhamVisit.id, s.larkspurVisit.id, s.ostranderVisit.id, s.friLawn.id, s.friPest.id, ...s.series.map((v) => v.id)];
+const allIds = (s) => [s.pellhamVisit.id, s.larkspurVisit.id, s.ostranderVisit.id, s.friLawn.id, s.friPest.id, s.otherVisit.id, ...s.series.map((v) => v.id)];
 
 // Template-notice cases (not_runnable): the move is probed, then a notice is sent as a plain text card.
 async function moveThenNotice(ctx, h, cast, c) {
@@ -91,17 +93,19 @@ async function moveThenNotice(ctx, h, cast, c) {
 /** The notice as a plain text on its own card: one card, one confirm, one provider submission carrying the approved text. */
 async function confirmedNotice(ctx, h, customer, body, sessionId) {
   const auditBefore = (await sendState(h, ctx.cast)).audit_rows;
+  const smsBefore = h.providers.sms.mock.calls.length;
   const notice = await sendNotice(ctx, h, customer, body, { sessionId });
   ctx.check(notice.cards.length === 1, 'proposal', 'no_card_for_notice', `cards ${notice.cards.length}`);
   if (notice.card) {
     const sent = await h.confirm(h.actors.owner, notice.card);
     ctx.check(sent.status === 200 && sent.body && sent.body.success === true, 'confirm', 'notice_confirm_failed', `confirm ${sent.status} ${JSON.stringify(sent.body).slice(0, 200)}`);
-    const count = await h.settle({ expect: 1 });
-    ctx.check(count === 1, 'side_effect', 'notice_send_count_wrong', `${count} provider submissions`);
+    const count = (await h.settle({ expect: smsBefore + 1 })) - smsBefore;
+    ctx.check(count === 1, 'side_effect', 'notice_send_count_wrong', `${count} provider submissions for the notice`);
     const after = await sendState(h, ctx.cast);
     ctx.check(after.audit_rows - auditBefore === 1, 'side_effect', 'notice_audit_row_count_wrong', `${after.audit_rows - auditBefore} accepted messaging audit rows for one approved notice`);
     ctx.check(after.sendgrid_provider === 0 && after.gmail_provider === 0, 'side_effect', 'notice_sent_an_email', `SendGrid ${after.sendgrid_provider}, Gmail ${after.gmail_provider} for a text notice`);
-    const call = h.providers.sms.mock.calls[0] && h.providers.sms.mock.calls[0][0];
+    const lastCall = h.providers.sms.mock.calls[h.providers.sms.mock.calls.length - 1];
+    const call = lastCall && lastCall[0];
     ctx.check(call && String(call.body) === body, 'read_back', 'notice_text_not_the_approved_text', `sent ${call && call.body}`);
   }
   return notice;
@@ -129,7 +133,6 @@ CASES['W6-dev-03'] = async (ctx, h, cast, c) => {
   // actually Thursday: a second move with its own receipt and a notice that names the final date, sent once.
   const second = await moveVisit(ctx, h, s, { visit: s.pellhamVisit, customer: s.pellham, date: s.thursday, time: '10:00 AM', prompt: c.corrections[0].request, ids, sessionId: turn.sessionId, expectEnd: '12:00', card: false });
   ctx.check(second.turn.body.taskId !== turn.body.taskId, 'receipt', 'correction_without_own_receipt', 'the second move shares the first move\'s task and receipt');
-  h.providers.sms.mockClear();
   await confirmedNotice(ctx, h, s.pellham, noticeBody(s.thursday, '10:00-12:00'), turn.sessionId);
   ctx.markCompleted();
 };
@@ -154,7 +157,6 @@ CASES['W6-dev-05'] = async (ctx, h, cast, c) => {
   const s = await seedMoveSet(cast);
   const ids = allIds(s);
   const target = s.series[1];
-  h.providers.sms.mockClear();
   const after0 = await moveVisit(ctx, h, s, { visit: target, customer: s.wexcombe, date: s.friday, time: '9:00 AM', prompt: c.request, page: { appointmentId: target.id, customerId: s.wexcombe.id }, ids, expectEnd: '11:00', card: c.expected.card });
   void after0;
   const series = await h.db('scheduled_services').whereIn('id', s.series.map((v) => v.id)).select('id', 'is_recurring', 'recurring_pattern', 'recurring_parent_id');
@@ -176,7 +178,6 @@ CASES['W6-dev-06'] = async (ctx, h, cast, c) => {
   const after = await snapshotRows(h, ids);
   const moved = ids.filter((id) => after[id] !== before[id]);
   ctx.check(moved.length === 4 || moved.length === 0, 'domain_rule', 'series_partially_moved', `${moved.length} of the 4 series visits changed`);
-  h.providers.sms.mockClear();
   await confirmedNotice(ctx, h, s.wexcombe, noticeBody(s.friday, '9:00-11:00'), turn.sessionId);
   ctx.markCompleted();
 };
@@ -215,7 +216,6 @@ CASES['W6-dev-07'] = async (ctx, h, cast, c) => {
 CASES['W6-dev-08'] = async (ctx, h, cast, c) => {
   const s = await seedMoveSet(cast);
   const ids = allIds(s);
-  h.providers.sms.mockClear();
   const out = await moveVisit(ctx, h, s, { visit: s.pellhamVisit, customer: s.pellham, date: s.friday, time: '10:00 AM', prompt: c.request, ids, expectEnd: '12:00', card: c.expected.card });
   void out;
   ctx.markCompleted();

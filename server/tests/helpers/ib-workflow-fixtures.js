@@ -128,6 +128,7 @@ class Cast {
   async visitGroup(customerId, over = {}) {
     const row = { id: uuid(), customer_id: customerId, scheduled_date: plusDaysET(3), window_start: '09:00', window_end: '11:00', stop_base_key: `baseline-${uuid().slice(0, 8)}`, status: 'open', created_by: 'baseline_fixture', ...over };
     await this.db('service_visits').insert(row);
+    (this.visitGroupIds = this.visitGroupIds || []).push(row.id);
     return row;
   }
 
@@ -189,6 +190,8 @@ class Cast {
       await step('cancel bookings', () => this.db('scheduled_services').whereIn('customer_id', this.customers).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now }));
       await step('retire customers', () => this.db('customers').whereIn('id', this.customers).update({ deleted_at: now, active: false }));
     }
+    // A grouped stop stays 'open' otherwise: dissolve every one this case created (its child visits are cancelled above).
+    if ((this.visitGroupIds || []).length) await step('dissolve grouped stops', () => this.db('service_visits').whereIn('id', this.visitGroupIds).update({ status: 'dissolved' }));
     if (this.leads.length) await step('retire leads', () => this.db('leads').whereIn('id', this.leads).update({ deleted_at: now }));
     if ((this.commitmentIds || []).length) await step('dismiss commitments', () => this.db('call_commitments').whereIn('id', this.commitmentIds).update({ status: 'dismissed' }));
     if (this.insertedServiceId) await step('deactivate seeded service', () => this.db('services').where({ id: this.insertedServiceId }).update({ is_active: false }));
@@ -221,7 +224,7 @@ async function removeStockRows(db, productIds, failed = []) {
 }
 
 /** Sweep rows a crashed earlier run left behind. */
-async function sweepStale(db) {
+async function sweepStale(db, keepTechnicianIds = []) {
   const now = new Date();
   const stale = db('customers').where('lead_source_detail', MARK).select('id');
   const staleIds = (await db('customers').where('lead_source_detail', MARK).select('id')).map((r) => r.id);
@@ -234,6 +237,9 @@ async function sweepStale(db) {
   await db('scheduled_services').whereIn('customer_id', stale).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now });
   await db('customers').where('lead_source_detail', MARK).whereNull('deleted_at').update({ deleted_at: now, active: false });
   await db('leads').where('lead_synopsis', MARK).whereNull('deleted_at').update({ deleted_at: now });
+  // Grouped stops and harness staff left open by an earlier run (a crashed run never reaches retire() or close()).
+  await db('service_visits').where({ created_by: 'baseline_fixture', status: 'open' }).update({ status: 'dissolved' });
+  await db('technicians').whereRaw("name ~ '^Synthetic (owner|admin|tech) '").where('email', 'like', '%@example.invalid').where({ active: true }).whereNotIn('id', keepTechnicianIds).update({ active: false, employment_status: 'inactive' });
   await db('notifications').whereRaw("metadata->>'fixture' = ?", [MARK]).whereNull('done_at').update({ done_at: now, done_by: MARK });
 }
 

@@ -74,12 +74,12 @@ function checkCommitments(ctx, result, expected) {
 const snapshot = (h, cast) => rowState(h, cast);
 
 /** No other seeded customer's id, number or name appears in any reader result of the turn (a brief is one account). */
-function noOtherAccounts(ctx, turn, set, others) {
+function noOtherAccounts(ctx, turn, subject, others) {
   const results = turn.toolCalls.map((t) => t.result);
   for (const other of others) {
     const found = [other.id, other.phone, `${other.first_name} ${other.last_name}`].filter((needle) => has(results, needle));
     const tools = [...new Set(turn.toolCalls.filter((t) => has(t.result, other.id) || has(t.result, other.phone) || has(t.result, `${other.first_name} ${other.last_name}`)).map((t) => t.name))];
-    ctx.check(found.length === 0, 'target_resolution', 'other_account_facts_in_brief', `${other.last_name} (${found.length} of id, phone, name) appears in the result of ${tools.join(', ')} for a brief of ${set.fennimore.last_name}`);
+    ctx.check(found.length === 0, 'target_resolution', 'other_account_facts_in_brief', `${other.last_name} (${found.length} of id, phone, name) appears in the result of ${tools.join(', ')} for a brief of ${subject.first_name} ${subject.last_name}`);
   }
 }
 
@@ -93,7 +93,7 @@ async function fennimoreBrief(ctx, h, cast, c, page) {
   checkDetail(ctx, pick(turn, 'get_customer_detail'), set.fennimore, { properties: [set.fennimoreHome] });
   checkCommitments(ctx, pick(turn, 'get_open_commitments'), [set.promise]);
   checkThread(ctx, pick(turn, 'get_conversation_thread'), set);
-  noOtherAccounts(ctx, turn, set, [set.ostrander, set.pellham, set.murphyA, set.murphyB]);
+  noOtherAccounts(ctx, turn, set.fennimore, [set.ostrander, set.pellham, set.murphyA, set.murphyB]);
   await noWrites(ctx, h, cast, before);
   ctx.markCompleted();
   return { set, turn };
@@ -116,6 +116,7 @@ CASES['W2-dev-03'] = async (ctx, h, cast, c) => {
   const detailB = pick(turn2, 'get_customer_detail');
   checkDetail(ctx, detailB, set.murphyB, { properties: [set.murphyBHome] });
   ctx.check(!has(turn2.toolCalls.map((t) => t.result), set.murphyARental.address_line1) && !has(detailB, set.murphyA.id), 'target_resolution', 'other_account_facts_carried_over', 'Murphy A facts appeared in the re-brief of Murphy B');
+  noOtherAccounts(ctx, turn2, set.murphyB, [set.murphyA]); // A's id, number and name, not only the rental address
   await noWrites(ctx, h, cast, before);
   ctx.markCompleted();
 };

@@ -30,7 +30,6 @@ const sendRounds = (customerId, message, extra = {}) => [{ tools: [['send_sms', 
 
 /** The send step: card, confirm, then the stub, the reservation and the receipt against what was approved. */
 async function sendApproved(ctx, h, s, customer, message, { to, prompt, sessionId, page, extra, expectedCount = 1 } = {}) {
-  stub(h).mockClear();
   const preTurn = await sendState(h, ctx.cast); // rows and stubs as they are now: an earlier approved send in the same case is not "before confirm"
   const est = await ctx.establish({ prompt, page: page || { customerId: customer.id }, customer });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionId, rounds: sendRounds(customer.id, message, extra) });
@@ -55,6 +54,16 @@ async function sendApproved(ctx, h, s, customer, message, { to, prompt, sessionI
   }
   const rows = await reservations(h, customer.id);
   ctx.check(rows.length === expectedCount, 'receipt', 'message_audit_rows_wrong', `${rows.length} messaging audit rows, expected ${expectedCount}`);
+  // The durable outbound sms_log row, field by field. In this harness the provider stub sits ABOVE twilio.js, the writer of that row, so
+  // no row exists to read (known limitation in the baseline doc); when one does exist (a later harness stubbing the Twilio client) it must be right.
+  const logRows = await h.db('sms_log').where({ customer_id: customer.id, direction: 'outbound' }).select('to_phone', 'message_body', 'status', 'message_type');
+  if (!logRows.length) ctx.note('no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only');
+  for (const row of logRows) {
+    ctx.check(digits(row.to_phone).endsWith(digits(to || customer.phone).slice(-10)), 'read_back', 'sms_log_recipient_wrong', `sms_log to ...${digits(row.to_phone).slice(-4)}`);
+    ctx.check(row.message_body === message, 'read_back', 'sms_log_body_differs_from_approved_draft', `sms_log body ${JSON.stringify(row.message_body)}`);
+    ctx.check(row.status === 'sent', 'read_back', 'sms_log_status_not_sent', `sms_log status ${row.status}`);
+    ctx.check(row.message_type === ((extra && extra.message_type) || 'manual'), 'read_back', 'sms_log_message_type_wrong', `sms_log message_type ${row.message_type}`);
+  }
   return { turn, confirmed };
 }
 
@@ -64,7 +73,6 @@ CASES['W7-dev-01'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
   const draftText = 'We will be there Tuesday between 9 and 11.';
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.pellham.id }, customer: s.pellham });
-  stub(h).mockClear();
   const draft = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: draftRounds(s.pellham.id, draftText) });
   const result = pick(draft, 'draft_sms');
   ctx.check(!!result && !result.error, 'tool_result', 'draft_failed', JSON.stringify(result).slice(0, 200));
@@ -78,7 +86,6 @@ CASES['W7-dev-02'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
   const drafts = ['We are running late.', 'Running late.', 'Running a little late, we will be there between 9 and 11.'];
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.pellham.id }, customer: s.pellham });
-  stub(h).mockClear();
   let sessionId;
   for (let i = 0; i < 3; i += 1) {
     const prompt = i === 0 ? est.prompt : (await ctx.establish({ prompt: c.corrections[i - 1].request, page: est.page, customer: s.pellham })).prompt;
@@ -96,7 +103,6 @@ CASES['W7-dev-03'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
   const message = 'We will be there Tuesday at 9.';
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.pellham.id }, customer: s.pellham });
-  stub(h).mockClear();
   // The card for the primary number comes first; the operator then asks for the household member's number.
   const first = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: sendRounds(s.pellham.id, message) });
   const second = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionId: first.sessionId, sessionKey: 'second', rounds: sendRounds(s.pellham.id, message, { phone: s.pellham.secondary_phone }) });
@@ -109,7 +115,6 @@ CASES['W7-dev-03'] = async (ctx, h, cast, c) => {
   }
   const wrong = submissions(h).filter((x) => digits(x.to).endsWith('0101'));
   ctx.check(wrong.length === 0, 'side_effect', 'text_sent_to_the_wrong_number', `${wrong.length} submissions to the primary number`);
-  stub(h).mockClear();
   if (second.card) {
     const confirmed = await h.confirm(h.actors.owner, second.card);
     ctx.check(confirmed.status === 200 && confirmed.body && confirmed.body.success === true, 'confirm', 'send_confirm_not_completed', `confirm ${confirmed.status} ${JSON.stringify(confirmed.body).slice(0, 240)}`);
@@ -125,7 +130,6 @@ CASES['W7-dev-04'] = async (ctx, h, cast, c) => {
   const queued = uuid();
   await h.db('sms_log').insert({ id: queued, customer_id: s.fennimore.id, direction: 'outbound', from_phone: '+19413335555', to_phone: s.fennimore.phone, message_body: 'Staff-scheduled text for later.', status: 'scheduled', message_type: 'manual', admin_user_id: owner.id, scheduled_for: new Date(Date.now() + 6 * 3600000), metadata: JSON.stringify({}) });
   cast.key('fennimore-staff-scheduled', { id: queued });
-  stub(h).mockClear();
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.fennimore.id }, customer: s.fennimore });
   const turn = await ctx.turn(owner, { prompt: est.prompt, page: est.page, rounds: [{ tools: [['list_queued_messages', { customer_id: s.fennimore.id }]] }, (prev) => ({ tools: [['cancel_queued_message', { message_id: ((prev[0].result.messages || [])[0] || {}).message_id || queued, customer_id: s.fennimore.id, channel: 'sms' }]] })] });
   const listing = pick(turn, 'list_queued_messages');
@@ -145,7 +149,6 @@ CASES['W7-dev-04'] = async (ctx, h, cast, c) => {
 CASES['W7-dev-05'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
   const message = 'We will be there Tuesday at 9.';
-  stub(h).mockClear();
   // The provider accepts the text, then the call times out before a status returns.
   stub(h).mockImplementationOnce(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'uncertain', error: 'timeout', retryable: true, providerAlerted: true }));
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.pellham.id }, customer: s.pellham });
@@ -170,7 +173,6 @@ CASES['W7-dev-05'] = async (ctx, h, cast, c) => {
 
 CASES['W7-dev-06'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
-  stub(h).mockClear();
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.ostrander.id }, customer: s.ostrander });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: sendRounds(s.ostrander.id, 'We are running late.') });
   let confirmed;
@@ -188,7 +190,6 @@ CASES['W7-dev-06'] = async (ctx, h, cast, c) => {
 
 CASES['W7-dev-07'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
-  stub(h).mockClear();
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.fennimore.id }, customer: s.fennimore });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: draftRounds(s.fennimore.id, 'We need to move your visit. What day works for you?') });
   const draft = pick(turn, 'draft_sms');
@@ -207,7 +208,6 @@ CASES['W7-dev-08'] = async (ctx, h, cast, c) => {
 
 CASES['W7-dev-09'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
-  stub(h).mockClear();
   // A correct model looks the name up, sees two accounts and asks. A naive send_sms by surname must not become a card.
   const turn = await ctx.turn(h.actors.owner, { prompt: c.request, rounds: [{ tools: [['query_customers', { search: 'Murphy' }]] }, { tools: [['send_sms', { customer_name: 'Murphy', message: 'We will be there Tuesday at 9.' }]] }] });
   // Only this case's own customers: the isolated database may hold other people named Murphy.
@@ -223,7 +223,6 @@ CASES['W7-dev-09'] = async (ctx, h, cast, c) => {
 CASES['W7-dev-10'] = async (ctx, h, cast, c) => {
   const s = await seedSmsSet(cast);
   const message = 'We will be there Tuesday between 9 and 11.';
-  stub(h).mockClear();
   const est = await ctx.establish({ prompt: c.request, page: { customerId: s.pellham.id }, customer: s.pellham });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: sendRounds(s.pellham.id, message) });
   ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_send', `cards ${turn.cards.length}`);

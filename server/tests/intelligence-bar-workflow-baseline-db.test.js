@@ -76,7 +76,7 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     // The Gmail client loads the database, so it is required only after the harness has pointed the environment at the isolated one.
     h.providers.gmail = require('../services/email/gmail-client').sendMessage;
     mockSendgrid.sendOne.mockImplementation(async () => ({ messageId: 'stub-message' }));
-    await sweepStale(h.db);
+    await sweepStale(h.db, Object.values(h.actors).map((a) => a.id)); // the live harness actors are not leftovers
     mockSendViaTwilio.mockImplementation(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'b'.repeat(32)}` }));
   }, 90000);
 
@@ -87,7 +87,13 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     if (update && !only && (!h || missing.length)) {
       process.stdout.write(`\n[baseline] snapshot NOT written: ${!h ? 'the harness did not boot' : `${missing.length} of ${devCases.length} dev cases produced no result (${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ', ...' : ''})`}\n`);
     }
-    if (update && !only && h && !missing.length) {
+    // Infrastructure failures are not baseline: a case exception, a database outage, a contract-check exception or a cleanup failure
+    // becomes a populated `harness` or `contract` failure, and writing it would overwrite the last valid snapshot with noise.
+    const infrastructure = Object.entries(results).filter(([, r]) => [...(r.failures || []), ...((r.probe && r.probe.failures) || [])].some((f) => f.point === 'harness' || f.point === 'contract')).map(([id]) => id);
+    if (update && !only && h && !missing.length && infrastructure.length) {
+      process.stdout.write(`\n[baseline] snapshot NOT written: harness or contract failures in ${infrastructure.slice(0, 5).join(', ')}${infrastructure.length > 5 ? ', ...' : ''}\n`);
+    }
+    if (update && !only && h && !missing.length && !infrastructure.length) {
       const out = { schema_version: 1, cases: {} };
       for (const [id, r] of Object.entries(results)) out.cases[id] = { outcome: r.outcome, ...(r.point ? { point: r.point, code: r.code, failures: codesOf(r.failures) } : {}), ...(r.reasons ? { reasons: r.reasons.map((g) => g.code) } : {}), ...(r.probe ? { probe: r.probe.outcome === 'pass' ? 'pass' : `fail:${r.probe.code}`, probe_failures: codesOf(r.probe.failures) } : {}) };
       fs.writeFileSync(SNAPSHOT, `${JSON.stringify(out, null, 2)}\n`);
@@ -118,7 +124,8 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
         await noSends(ctx, h, cast, { what: 'a case whose manifest says sends 0', codes: { sms: 'guard_sent_a_text', smsRows: 'guard_outbound_row_added', email: 'guard_sent_an_email', emailRows: 'guard_email_row_added' } });
       } else {
         const now = await sendState(h, cast);
-        ctx.check(now.sms_provider <= declared, 'side_effect', 'guard_sent_more_than_declared', `${now.sms_provider} provider submissions, the manifest declares ${declared}`);
+        // Exactly the declared count: fewer is a send that never happened, more is an undisclosed one. (No case clears the stub mid-case.)
+        ctx.check(now.sms_provider === declared, 'side_effect', 'guard_send_count_not_declared', `${now.sms_provider} provider submissions, the manifest declares exactly ${declared}`);
         ctx.check(now.sendgrid_provider === 0 && now.gmail_provider === 0, 'side_effect', 'guard_sent_an_email', `SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider} in a text-only case`);
       }
     }

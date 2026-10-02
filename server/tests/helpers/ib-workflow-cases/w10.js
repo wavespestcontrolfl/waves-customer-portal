@@ -84,12 +84,13 @@ const receiveOpenRequest = (productId, quantity, unit) => [
 const commitStock = (ctx, turn, { card, tool, label }) => ctx.commit(turn, { card, tool, label });
 
 /** A receipt movement against the contract: one movement, type restock (never a set_total), converted into the inventory unit. */
-function checkReceiptMovement(ctx, moves, { quantity, entered }) {
+function checkReceiptMovement(ctx, moves, { quantity, entered, unit = 'fl_oz' }) {
   const restocks = moves.filter((m) => m.movement_type === 'restock');
   ctx.check(restocks.length === 1 && moves.length === 1, 'read_back', 'receipt_movement_count_wrong', `${moves.length} movements (${restocks.length} restock)`);
   const m = restocks[0];
   if (m) {
     ctx.check(Number(m.quantity) === quantity, 'read_back', 'received_quantity_wrong', `movement quantity ${m.quantity} ${m.unit}, expected ${quantity}`);
+    ctx.check(m.unit === unit, 'read_back', 'movement_unit_not_the_inventory_unit', `movement unit ${m.unit}, expected the product's inventory unit ${unit}`);
     const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata) : (m.metadata || {});
     ctx.check(meta.enteredQuantity === entered.quantity && meta.enteredUnit === entered.unit, 'read_back', 'entered_amount_not_recorded', `entered ${meta.enteredQuantity} ${meta.enteredUnit}, expected ${entered.quantity} ${entered.unit}`);
   }
@@ -134,6 +135,7 @@ CASES['W10-dev-02'] = async (ctx, h, cast, c) => {
   await commitStock(ctx, turn, { card: c.expected.card, tool: 'update_restock_request', label: 'request_receive' });
   const request = await reqOf(h, s.taurusReq);
   ctx.check(request.status === 'received', 'read_back', 'request_not_marked_received', `request status ${request.status}`);
+  ctx.check(!!request.closed_at, 'read_back', 'request_close_time_not_stamped', 'receiving the request did not stamp closed_at');
   const moves = await movesOf(h, s.taurus);
   const m = checkReceiptMovement(ctx, moves, { quantity: 2 * GAL, entered: { quantity: 2, unit: 'gal' } });
   const meta = m && (typeof m.metadata === 'string' ? JSON.parse(m.metadata) : m.metadata);
@@ -155,7 +157,10 @@ CASES['W10-dev-03'] = async (ctx, h, cast, c) => {
   await commitStock(ctx, second, { card: c.corrections[0].expected.card, tool: 'adjust_stock', label: 'correction' });
   ctx.check(second.body.taskId !== first.body.taskId, 'receipt', 'correction_without_own_receipt', 'the correction shares the first movement\'s task and receipt');
   const moves = await movesOf(h, s.taurus);
-  ctx.check(moves.length === 2 && Number(moves[0].quantity) === 64 && moves[0].id === (afterFirst[0] || {}).id, 'side_effect', 'first_movement_edited_or_replaced', `movements ${moves.map((m) => m.quantity).join(',')}`);
+  // The complete first movement (quantity, unit, entered amount in its metadata, stock before and after) is untouched.
+  ctx.check(moves.length === 2 && JSON.stringify(moves[0]) === JSON.stringify(afterFirst[0]), 'side_effect', 'first_movement_edited_or_replaced', `movements ${moves.map((m) => m.quantity).join(',')}; the first movement differs from its first read-back`);
+  const supplierOrders = await h.db('vendor_orders').where({ restock_request_id: s.taurusReq.id }).count('* as n').first();
+  ctx.check(Number(supplierOrders.n) === 0, 'side_effect', 'vendor_order_placed_by_correction', `${supplierOrders.n} vendor orders for the request after the correction`);
   ctx.check((await stockOf(h, s.taurus)).onHand === TAURUS_BASE + 2 * GAL, 'read_back', 'on_hand_wrong_after_correction', `on hand ${(await stockOf(h, s.taurus)).onHand}, expected ${TAURUS_BASE + 2 * GAL}`);
   ctx.markCompleted();
 };

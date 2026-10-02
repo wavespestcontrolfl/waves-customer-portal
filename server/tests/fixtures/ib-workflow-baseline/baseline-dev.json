@@ -308,7 +308,7 @@
         "receipt:unknown_outcome_not_recorded",
         "receipt:unknown_outcome_retry_allowed",
         "recovery:resend_before_reconciliation",
-        "side_effect:guard_sent_more_than_declared"
+        "side_effect:guard_send_count_not_declared"
       ]
     },
     "W7-dev-06": {

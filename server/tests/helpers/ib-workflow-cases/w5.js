@@ -70,7 +70,6 @@ async function bookAndConfirm(ctx, h, cast, c, { date, time, extra, start, end, 
   const s = await seedBookSet(cast);
   const page = { customerId: s.pellham.id };
   const est = await ctx.establish({ prompt: prompt || c.request, page, customer: s.pellham });
-  h.providers.sms.mockClear();
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.pellham.id, date, time, extra) });
   checkCard(ctx, turn, { priceText });
   const before = await newRows(h, s.pellham.id, s.existing.id);
@@ -175,7 +174,6 @@ CASES['W5-dev-07'] = async (ctx, h, cast, c) => {
   const date = clockDate(c.call.input.scheduled_date);
   const page = { customerId: s.pellham.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.pellham });
-  h.providers.sms.mockClear();
   const first = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.pellham.id, date, '9:00 AM', { price: 149 }) });
   checkCard(ctx, first, { priceText: '$149' });
   ctx.check((await newRows(h, s.pellham.id, s.existing.id)).length === 0, 'side_effect', 'booked_before_confirm', 'a row exists before confirmation');
@@ -203,7 +201,6 @@ CASES['W5-dev-08'] = async (ctx, h, cast, c) => {
   const date = clockDate(c.call.input.scheduled_date);
   const page = { customerId: s.pellham.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.pellham });
-  h.providers.sms.mockClear();
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.pellham.id, date, '10:00 AM') });
   checkCard(ctx, turn, { priceText: '149' });
   // The catalog price changes after the card is shown and before confirm.
@@ -235,7 +232,6 @@ CASES['W5-dev-09'] = async (ctx, h, cast, c) => {
   const date = clockDate(c.call.input.scheduled_date);
   const page = { customerId: s.pellham.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.pellham });
-  h.providers.sms.mockClear();
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.pellham.id, date, '10:00 AM', { technician_id: tech.id, price: 149 }) });
   checkCard(ctx, turn, {});
   // Another booking takes the Wednesday 10 AM slot after the card is shown.
@@ -256,7 +252,6 @@ CASES['W5-dev-10'] = async (ctx, h, cast, c) => {
   const date = clockDate(c.call.input.scheduled_date);
   const page = { customerId: s.pellham.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.pellham });
-  h.providers.sms.mockClear();
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: bookRounds(s.pellham.id, date, '11:00 AM', { price: 149 }) });
   checkCard(ctx, turn, { priceText: '$149' });
   if (turn.card) {

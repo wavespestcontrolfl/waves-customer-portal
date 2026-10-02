@@ -293,6 +293,8 @@ async function restoreHeld(held) {
   global.fetch = held.realFetch;
   for (const g of held.netGuards) g.lib.request = g.original;
   if (held.server) await new Promise((resolve) => held.server.close(resolve));
+  // The three actors are real technician rows: retire them (a reused database must not accumulate active synthetic staff).
+  if (held.db && held.technicianIds.length) await held.db('technicians').whereIn('id', held.technicianIds).update({ active: false, employment_status: 'inactive' }).catch(() => {});
   if (held.db) await held.db.destroy();
   for (const key of Object.keys(process.env)) if (!(key in held.originalEnv)) delete process.env[key];
   Object.assign(process.env, held.originalEnv);
@@ -304,7 +306,7 @@ async function restoreHeld(held) {
  * and a reused Jest worker must not keep outbound networking disabled or the test environment installed.
  */
 async function bootHarness(options) {
-  const held = { originalEnv: { ...process.env }, realFetch: global.fetch, netGuards: [], server: null, db: null };
+  const held = { originalEnv: { ...process.env }, realFetch: global.fetch, netGuards: [], server: null, db: null, technicianIds: [] };
   try {
     return await initHarness(options, held);
   } catch (err) {
@@ -371,6 +373,7 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
     if (kind === 'admin') row.email = `admin.${id.slice(0, 6)}@example.invalid`;
     if (kind === 'tech') row.email = `tech.${id.slice(0, 6)}@example.invalid`;
     await db('technicians').insert(row);
+    held.technicianIds.push(id);
     const token = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: id }, process.env.JWT_SECRET, { expiresIn: '2h' });
     return { kind, id, token };
   }
