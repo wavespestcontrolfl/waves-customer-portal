@@ -79,6 +79,11 @@ const fixtures = () => ({
   service_products: [
     { id: 'p1', service_record_id: 'svc-card-1', product_name: 'Test Product', application_method: 'perimeter_spray', targets: JSON.stringify(['Ants', 'Spiders']), created_at: '2026-09-30' },
   ],
+  // The record's persisted gauge score: the tech's tap IS the score, and the
+  // card's "Activity seen" word is this row's label (Codex r8).
+  pest_pressure_scores: [
+    { id: 'pps-1', service_record_id: 'svc-card-1', customer_id: 'cust-card', service_line: 'pest', displayed_score: '2.0', calculated_score: '2.0', label_key: 'low', label_name: 'Low' },
+  ],
 });
 
 function on() {
@@ -113,7 +118,7 @@ describe('reservice report card payload', () => {
     const card = data.reserviceReportCard;
     expect(card.youToldUs).toMatchObject({ source: 'picker', quoted: true, text: 'Ants are back in the kitchen.', pests: ['Ants'] });
     expect(card.whatWeDid).toMatchObject({ pests: ['ants', 'spiders'], where: 'inside and outside' });
-    expect(card.whatWeDid.found).toMatchObject({ rating: 2 });
+    expect(card.whatWeDid.found).toEqual({ rating: 2, label: 'Low' });
     expect(card.whatWeDid.safetyLine).toMatch(/kids and pets/);
     expect(card.stillSeeing).toBe('ants or spiders');
   });

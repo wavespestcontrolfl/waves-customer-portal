@@ -24,7 +24,7 @@ const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('./reservice-report');
-const { reserviceReportCardGateOn } = require('./reservice-report-card');
+const { reserviceCardRenderFence } = require('./reservice-report-card');
 const { reportPhotoSetPdfSignature } = require('./photo-set-signature');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
@@ -229,7 +229,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same contract for the re-service block (reservice-report.js): the store
   // key carries the billing outcome the render actually printed.
   let reserviceRenderedSignature = '';
-  let cardGateAtRender = null;
+  let cardFenceAtRender = null;
   // Trend-exclusion key component captured BEFORE the render: a callback
   // inserted or reclassified mid-render would otherwise store the OLD chart
   // under the NEW signature and serve it as current (codex #3623 r5 P1).
@@ -259,10 +259,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    // ONE card-gate snapshot taken before the payload and its signature are
-    // built; the post-render fence compares against it (the browser fetches
-    // its own /data, so a flip anywhere in between skips the store).
-    cardGateAtRender = reserviceReportCardGateOn();
+    // ONE card snapshot (gate + the score row its "Activity seen" word reads)
+    // taken before the payload and its signature are built; the post-render
+    // fence compares against it (the browser fetches its own /data, so a
+    // change anywhere in between skips the store).
+    cardFenceAtRender = await reserviceCardRenderFence(service, knex);
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
@@ -424,8 +425,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
-    if (reserviceReportCardGateOn() !== cardGateAtRender) {
-      logger.warn(`[service-report-pdf] re-service card gate changed during render for ${recordId} — not caching this render`);
+    if (cardFenceAtRender === null || await reserviceCardRenderFence(service, knex) !== cardFenceAtRender) {
+      logger.warn(`[service-report-pdf] re-service card gate or activity label changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
     // A photo the browser could not load rendered as its placeholder, and

@@ -44,12 +44,20 @@ function frozenService(frozen, extra = {}) {
   };
 }
 
+// The record's persisted Pest Pressure score row: a tech rating IS the score.
+const SCALE = ['None', 'Very Low', 'Low', 'Moderate', 'Elevated', 'High'];
+function scoreRowFor(service) {
+  const rating = Number(service?.client_pest_rating);
+  return Number.isInteger(rating) && SCALE[rating] ? { displayed_score: `${rating}.0`, label_name: SCALE[rating] } : null;
+}
+
 function card(service, args = {}) {
   process.env.GATE_RESERVICE_REPORT_CARD = 'true';
   return buildReserviceReportCard(service, {
     block: treatedBlock,
     products: [sprayRow],
     scrub: scrubCustomerText,
+    pestPressureScore: scoreRowFor(service),
     ...args,
   });
 }
@@ -286,14 +294,13 @@ describe('What we did', () => {
     expect(out.whatWeDid.found.rating).toBe(0);
   });
 
-  test('uses the active label set when given', () => {
-    const labels = [
-      { key: 'a', name: 'Clear', min: 0, max: 0.4 },
-      { key: 'b', name: 'Mild', min: 0.5, max: 2.4 },
-      { key: 'c', name: 'Busy', min: 2.5, max: 5 },
-    ];
-    const out = card(frozenService(null, { client_pest_rating: 2 }), { pestPressureLabels: labels });
-    expect(out.whatWeDid.found.label).toBe('Mild');
+  test('prints the gauge’s own persisted label, never a re-resolved one (Codex r8)', () => {
+    const svc = frozenService(null, { client_pest_rating: 2 });
+    expect(card(svc, { pestPressureScore: { displayed_score: '2.0', label_name: 'mild' } }).whatWeDid.found).toEqual({ rating: 2, label: 'Mild' });
+    // No score row, or a score that is not the tap (an override): no word.
+    expect(card(svc, { pestPressureScore: null }).whatWeDid.found).toBeNull();
+    expect(card(svc, { pestPressureScore: { displayed_score: '3.4', label_name: 'Moderate' } }).whatWeDid.found).toBeNull();
+    expect(card(svc, { pestPressureScore: { displayed_score: '2.0', label_name: '' } }).whatWeDid.found).toBeNull();
   });
 
   test('lawn re-service: no activity tap, where reads the recorded yard zone', () => {
@@ -559,7 +566,7 @@ describe('pre-push P1 after r5 (#5542)', () => {
     const block = { serviceLine: 'pest', outcome: 'treated' };
     const payloadLabel = card(svc, { block }).whatWeDid.found.label;
     expect(payloadLabel).toBeTruthy();
-    expect(cardModule.activityLabelFor(svc, block, null)).toBe(payloadLabel);
+    expect(cardModule.activityLabelFor(svc, block, scoreRowFor(svc))).toBe(payloadLabel);
   });
 });
 
@@ -570,11 +577,48 @@ describe('Codex r6 (#5542)', () => {
     expect(hasLiquidApplication([{ application_method: 'spot_treatment', product_name: 'Delta Dust', targets: ['Roaches'] }])).toBe(false);
     expect(hasLiquidApplication([{ application_method: 'spot_treatment', product_name: 'Alpine WSG', targets: ['Roaches'] }])).toBe(true);
   });
-  test('both PDF paths snapshot the card gate BEFORE building the payload and its signature', () => {
+  test('both PDF paths snapshot the card (gate + score row) BEFORE building the payload, and fence on it after', () => {
     const fs = require('fs'); const path = require('path');
     const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
-    expect(route.indexOf('cardGateAtRender = reserviceReportCardGateOn();')).toBeLessThan(route.indexOf("const data = await buildServiceReportV1ResponseData(service, req.params.token, {\n            mode: 'pdf'"));
+    expect(route.indexOf('cardFenceAtRender = await reserviceCardRenderFence(service, db);')).toBeGreaterThan(-1);
+    expect(route.indexOf('cardFenceAtRender = await reserviceCardRenderFence(service, db);')).toBeLessThan(route.indexOf("const data = await buildServiceReportV1ResponseData(service, req.params.token, {\n            mode: 'pdf'"));
+    expect(route).toContain('cardFenceAtRender === null || await reserviceCardRenderFence(service, db) !== cardFenceAtRender');
     const queue = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'pdf-queue.js'), 'utf8');
-    expect(queue.indexOf('cardGateAtRender = reserviceReportCardGateOn();')).toBeLessThan(queue.indexOf('const data = await buildReportV1Data(service, reportToken, knex, {'));
+    expect(queue.indexOf('cardFenceAtRender = await reserviceCardRenderFence(service, knex);')).toBeGreaterThan(-1);
+    expect(queue.indexOf('cardFenceAtRender = await reserviceCardRenderFence(service, knex);')).toBeLessThan(queue.indexOf('const data = await buildReportV1Data(service, reportToken, knex, {'));
+    expect(queue).toContain('cardFenceAtRender === null || await reserviceCardRenderFence(service, knex) !== cardFenceAtRender');
+  });
+});
+
+describe('Codex r8 (#5542)', () => {
+  test('the render fence moves with the gate and with the score row the label reads', async () => {
+    const { reserviceCardRenderFence } = require('../services/service-report/reservice-report-card');
+    const store = require('../services/pest-pressure/store');
+    const spy = jest.spyOn(store, 'loadScoreForServiceRecord');
+    try {
+      delete process.env.GATE_RESERVICE_REPORT_CARD;
+      expect(await reserviceCardRenderFence({ id: 'rec-1' }, {})).toBe('off');
+      process.env.GATE_RESERVICE_REPORT_CARD = 'true';
+      spy.mockResolvedValueOnce({ displayed_score: '2.0', label_name: 'Low' });
+      const before = await reserviceCardRenderFence({ id: 'rec-1' }, {});
+      spy.mockResolvedValueOnce({ displayed_score: '2.0', label_name: 'Mild' });
+      expect(await reserviceCardRenderFence({ id: 'rec-1' }, {})).not.toBe(before);
+      spy.mockRejectedValueOnce(new Error('db down'));
+      expect(await reserviceCardRenderFence({ id: 'rec-1' }, {})).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  test('the cache lookup reads the persisted score row, not the label config', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'reservice-report.js'), 'utf8');
+    expect(src).toContain('loadScoreForServiceRecord(');
+    expect(src).not.toContain('loadActiveConfig(');
+  });
+  test('"a combination of ants and roaches" survives the production scrub; access combinations do not', () => {
+    const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+    expect(words('A combination of ants and roaches is in the kitchen.')).toBe('A combination of ants and roaches is in the kitchen.');
+    expect(words('Ants on the patio. The gate combination is blue.')).toBe('Ants on the patio.');
+    expect(words('Ants on the patio. The combination is 4521.')).toBe('Ants on the patio.');
+    expect(words('Roaches inside. Combination of the lockbox is waves.')).toBe('Roaches inside.');
   });
 });

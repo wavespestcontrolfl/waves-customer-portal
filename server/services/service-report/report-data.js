@@ -6447,7 +6447,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const reserviceReportCardBlock = buildReserviceReportCard(service, {
     block: reserviceReportBlock,
     products,
-    pestPressureLabels: pestPressureConfig?.labels || null,
+    pestPressureScore: pestPressureRow || null,
   });
 
   // The four-section report's "What's next" visit: the next booking on this

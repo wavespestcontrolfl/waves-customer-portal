@@ -49,7 +49,6 @@
 const { whereOf, pestsOf, hasLiquidApplication, SAFETY_LINE } = require('../reservice-fixed-recap');
 const { pestLabels, normalizeRequestPests } = require('../reservice-request');
 const ActivityIndicators = require('./activity-indicators');
-const { activityScaleNames } = require('../pest-pressure/label');
 
 const GATE_ENV = 'GATE_RESERVICE_REPORT_CARD';
 function reserviceReportCardGateOn() {
@@ -225,11 +224,16 @@ function productRows(products) {
   }));
 }
 
-// The technician's own tap, worded on the same scale the gauge uses. An
-// untouched first-visit default and a customer's own rating say nothing about
-// what this visit found, so neither counts. Pest line only (lawn re-services
-// carry no activity tap).
-function foundActivity(service, lane, labels) {
+// The technician's own tap, worded exactly as the gauge beside it: the label
+// PERSISTED on this record's Pest Pressure score row (a tech rating IS the
+// score), never re-resolved from the live label config — a relabel changes
+// neither until that score is recalculated, and a recalculation already
+// clears the cached PDF (pest-pressure/store.js). A score that is not the
+// tap (an override, an older scale) prints no word rather than a second,
+// disagreeing one. An untouched first-visit default and a customer's own
+// rating say nothing about what this visit found, so neither counts. Pest
+// line only (lawn re-services carry no activity tap).
+function foundActivity(service, lane, scoreRow) {
   if (lane !== 'pest') return null;
   if (service?.client_pest_rating == null || service.client_pest_rating === '') return null;
   const rating = Number(service.client_pest_rating);
@@ -239,25 +243,39 @@ function foundActivity(service, lane, labels) {
   // first-visit default (2026-09-24) and its flag column (2026-09-29) carry
   // NULL, and an untouched default must never print as a finding.
   if (service.client_pest_rating_defaulted !== false) return null;
-  const name = activityScaleNames(Array.isArray(labels) ? labels : null)[rating];
+  if (!scoreRow || scoreRow.displayed_score == null || Number(scoreRow.displayed_score) !== rating) return null;
+  const name = typeof scoreRow.label_name === 'string' ? scoreRow.label_name.trim() : '';
   return name ? { rating, label: name.charAt(0).toUpperCase() + name.slice(1) } : null;
 }
 
-// The "Activity seen" label the card would print for this record under the
-// given label set — the PDF cache key carries it (reservice-report.js), so a
-// relabel of the active Pest Pressure bands re-renders a cached document.
+// The "Activity seen" label the card would print for this record given its
+// persisted score row — the PDF cache key carries it (reservice-report.js).
 // Mirrors buildWhatWeDid: performed visits only.
-function activityLabelFor(service, block, labels) {
+function activityLabelFor(service, block, scoreRow) {
   if (!block || block.outcome !== 'treated') return null;
-  return foundActivity(service, block.serviceLine, labels)?.label || null;
+  return foundActivity(service, block.serviceLine, scoreRow)?.label || null;
 }
 
-function buildWhatWeDid(service, block, { products, areas, pestPressureLabels }) {
+// PDF render fence: what the card prints that can change OUTSIDE the record
+// between the server payload and the browser's own /data fetch — the gate,
+// and the score row the "Activity seen" word reads. Snapshot before the
+// payload, compare after the render; null (unreadable) never matches.
+async function reserviceCardRenderFence(service, knex) {
+  if (!reserviceReportCardGateOn()) return 'off';
+  try {
+    const row = await require('../pest-pressure/store').loadScoreForServiceRecord(knex, service?.id);
+    return `on:${row?.displayed_score ?? ''}|${row?.label_name ?? ''}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildWhatWeDid(service, block, { products, areas, pestPressureScore }) {
   if (block.outcome !== 'treated' || NOT_PERFORMED_OUTCOMES.has(block.outcome)) return null;
   const rows = productRows(products);
   const pests = pestsOf(rows);
   const where = block.serviceLine === 'lawn' ? lawnWhereOf(asStringArray(areas)) : whereOf(asStringArray(areas));
-  const found = foundActivity(service, block.serviceLine, pestPressureLabels);
+  const found = foundActivity(service, block.serviceLine, pestPressureScore);
   const safetyLine = hasLiquidApplication(rows) ? SAFETY_LINE : null;
   if (!pests.length && !where && !found && !safetyLine) return null;
   return { pests, where: where || null, found, safetyLine };
@@ -302,11 +320,11 @@ function stillSeeingTopic(lane, whatWeDid, youToldUs) {
  * @param {object|null} args.block   buildReserviceReport's result
  * @param {Array} args.products      service_products rows (targets, application_method)
  * @param {Array|string} args.areas  service_records.areas_serviced
- * @param {Array} [args.pestPressureLabels] the active Pest Pressure label set
+ * @param {object} [args.pestPressureScore] this record's pest_pressure_scores row
  * @param {Function} [args.scrub]    override the customer-words scrub (tests)
  */
 function buildReserviceReportCard(service = {}, {
-  block = null, products = [], areas = null, pestPressureLabels = null, scrub,
+  block = null, products = [], areas = null, pestPressureScore = null, scrub,
 } = {}) {
   if (!reserviceReportCardGateOn()) return null;
   if (!block || typeof block !== 'object') return null;
@@ -315,7 +333,7 @@ function buildReserviceReportCard(service = {}, {
   const whatWeDid = buildWhatWeDid(service, { ...block, serviceLine: lane }, {
     products,
     areas: areas ?? service.areas_serviced,
-    pestPressureLabels,
+    pestPressureScore,
   });
   return {
     version: CARD_VERSION,
@@ -335,4 +353,5 @@ module.exports = {
   readFrozenReserviceRequest,
   buildReserviceReportCard,
   activityLabelFor,
+  reserviceCardRenderFence,
 };

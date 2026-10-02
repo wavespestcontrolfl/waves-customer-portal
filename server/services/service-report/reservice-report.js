@@ -285,11 +285,11 @@ async function reserviceReportPdfSignature(service = {}, { serviceLine = null, k
   const cardIncluded = Boolean(block) && reserviceReportCardGateOn();
   let activityLabel = null;
   if (cardIncluded) {
-    // The ACTIVE label set, as the payload builder reads it: a relabel
-    // changes the printed "Activity seen" word, so it changes the key.
+    // This record's persisted score row, as the payload builder reads it:
+    // the printed "Activity seen" word is that row's label.
     try {
-      const config = await require('../pest-pressure/store').loadActiveConfig(knex || require('../../models/db'));
-      activityLabel = activityLabelFor(service, block, config?.labels || null);
+      const scoreRow = await require('../pest-pressure/store').loadScoreForServiceRecord(knex || require('../../models/db'), service?.id);
+      activityLabel = activityLabelFor(service, block, scoreRow || null);
     } catch { activityLabel = null; }
   }
   return signatureFor(block, cardIncluded, activityLabel);

@@ -54,8 +54,14 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
 // masked. Over-redaction is the safe direction for access text; the keyword
 // words themselves stay legible.
-const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
-const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
+// "A combination of ants and roaches" is a pest complaint, not a credential
+// (Codex #5542 r8): for the word-token passes below, combo / combination
+// followed by "of" counts only when a lock word follows ("the combination of
+// the gate is blue"). The digit passes above still key on the bare word.
+const COMBINATION_NOUN = 'combo|combination(?!\\s+of\\b(?!\\s+(?:the\\s+|my\\s+|our\\s+)?(?:lock\\s*box|padlock|lock|gate|garage|door|shed|safe|keypad)))';
+const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
+const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
+const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
 // Lowercase credentials (Codex r7: "gate code blue", "the gate code is
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
