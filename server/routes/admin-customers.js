@@ -2621,6 +2621,83 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/:id/dunning-schedule/{send-now,pause,resume,release}
+// — staff controls for the customer's open customer-level overdue reminder
+// schedule (dunning consolidation §8; services/customer-dunning/wiring.js).
+// send-now sends the schedule's CURRENT step and only while the live gate
+// covers the customer; a send already in flight is a 409.
+const dunningScheduleControl = (control) => async (req, res, next) => {
+  try {
+    const { controlCustomerSchedule } = require('../services/customer-dunning/wiring');
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : '';
+    const { status, body } = await controlCustomerSchedule(req.params.id, control, {
+      adminId: req.technicianId || null, reason: reason || null,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+};
+router.post('/:id/dunning-schedule/send-now', requireAdmin, dunningScheduleControl('send-now'));
+router.post('/:id/dunning-schedule/pause', requireAdmin, dunningScheduleControl('pause'));
+router.post('/:id/dunning-schedule/resume', requireAdmin, dunningScheduleControl('resume'));
+router.post('/:id/dunning-schedule/release', requireAdmin, dunningScheduleControl('release'));
+
+// GET /api/admin/customers/:id/collection-holds — active collections holds
+// (B10). A dispute hold ("stops_charges") halts every off-session charge and
+// the customer was told billing follow-up is on hold; this is how staff see it.
+router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
+  try {
+    const { listCollectionHolds } = require('../services/collections/collection-hold-admin');
+    res.json({ holds: await listCollectionHolds(req.params.id) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/collection-holds/release — lift the hold after
+// the dispute is resolved. Body { holdId } (the id GET returned) releases
+// exactly that row, only while it is still active for this customer; a stale
+// or mismatched id is a 409 so a release can never lift a different (newer)
+// hold than the one staff were looking at. Audited; every charge lane resumes
+// on its next attempt.
+router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
+  try {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    const holdId = typeof req.body?.holdId === 'string' ? req.body.holdId.trim() : '';
+    if (!holdId) {
+      return res.status(400).json({ error: 'holdId is required', code: 'HOLD_ID_REQUIRED' });
+    }
+    const conflict = () => Object.assign(new Error('This hold changed — reload'), {
+      statusCode: 409, status: 409, isOperational: true, code: 'HOLD_CHANGED',
+    });
+    // A non-uuid id can never match a hold row: stale/foreign, not a server fault.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(holdId)) throw conflict();
+    // The release and its CRITICAL audit row commit together: a failed audit
+    // write rolls the release back and the request errors.
+    const result = await db.transaction(async (trx) => {
+      const released = await releaseCollectionHold(req.params.id, { holdId, trx });
+      if (!released.ok) throw Object.assign(new Error('Could not release the hold'), { statusCode: 500 });
+      if (released.released < 1) throw conflict();
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'customer.collection_hold_released',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { released: released.released, hold_id: holdId, ...(released.fallbackRestored ? { fallback_restored: true } : {}) },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent') || null,
+        critical: true,
+        trx,
+      });
+      return released;
+    });
+    res.json({
+      released: result.released,
+      // The dispute was released but an earlier wrong-number / wrong-party hold on the
+      // same row stays active (all-channel outreach block); Customer 360 says so.
+      ...(result.fallbackRestored ? { fallbackRestored: true, message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.' } : {}),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
 // Lazily backfills a primary property for customers created after the migration.
 // requireAdmin: returns every active property address on the account — a
@@ -2670,7 +2747,11 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') });
+    res.json({
+      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // Read once here so the panel mounts per-row area editors only when on.
+      propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
+    });
   } catch (err) { next(err); }
 });
 
@@ -5632,7 +5713,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // for $0 due.
     if (!chargeInPerson && !settledByDepositCredit) {
       try {
-        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true });
+        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true, holdExempt: 'operator' });
       } catch (err) {
         delivery = { ok: false, error: err.message };
         logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);

@@ -252,6 +252,18 @@ describe('IB search_field_intelligence', () => {
     spy.mockRestore(); hybridSpy.mockRestore(); gateSpy.mockRestore();
   });
 
+  test('a search that finds nothing stays a pure read (no knowledge_queries write)', async () => {
+    const state = useDb({});
+    const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({ claudeopedia: [], wiki: [], bridged: [] });
+
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    const result = await executeTool('search_field_intelligence', { query: 'door sweeps' });
+
+    expect(result.fieldIntelligence).toEqual([]);
+    expect(state.inserts.knowledge_queries).toBeUndefined();
+    spy.mockRestore();
+  });
+
   test('requires a query', async () => {
     useDb({});
     const { executeTool } = require('../services/intelligence-bar/tools');

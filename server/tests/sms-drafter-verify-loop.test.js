@@ -87,6 +87,58 @@ describe('generateGroundedDraft — convergence loop', () => {
     expect(client.calls).toHaveLength(1); // draft only — nothing to verify
   });
 
+  // Codex round-19 P2: an empty reply is not "nothing to check" when a covered re-service offer is OWED.
+  describe('empty reply while an eligible pest report is owed the re-service offer', () => {
+    const { reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const factsBlock = `FACTS\n${reserviceFactLine(['pest'])}\nBILLING:`;
+    const args = (client) => ({ client, context: CTX, inboundMessage: 'the ants are back again', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, factsBlock });
+    const OLD = process.env.GATE_SMS_REAL_ANSWERS;
+    beforeAll(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+    afterAll(() => { if (OLD === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = OLD; });
+
+    test('the empty reply is revised into the offer instead of converging', async () => {
+      const offer = { reply: "So sorry about the ants! I'm sending your free pest re-service booking link now.", intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null };
+      const client = makeClient([
+        { reply: '', intended_actions: [{ type: 'none', note: 'no reply warranted' }], missing_info: null },
+        offer, // the revision (the owed-offer violation skips the verifier)
+        { supported: true, violations: [] },
+      ]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.parsed.reply).toMatch(/free pest re-service booking link/);
+      expect(r.converged).toBe(true);
+    });
+
+    test('empty reply + a model-emitted followup_promised escalate is still owed the offer (Codex round-20 P2)', async () => {
+      const bad = { reply: '', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null };
+      const client = makeClient([bad, bad, bad]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.converged).toBe(false);
+    });
+
+    test('the classified intent never suppresses the owed offer ("the ants came back" is a customer issue / COMPLAINT)', async () => {
+      const empty = { reply: '', intended_actions: [], missing_info: null };
+      for (const intent of ['customer_issue_needs_review', 'COMPLAINT']) {
+        const client = makeClient([empty, empty, empty]);
+        const r = await generateGroundedDraft({ ...args(client), inboundMessage: 'the ants came back', intent: { intent } });
+        expect(r.converged).toBe(false);
+      }
+    });
+
+    test('an empty reply that is never fixed does not converge', async () => {
+      const empty = { reply: '', intended_actions: [], missing_info: null };
+      const client = makeClient([empty, empty, empty]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.converged).toBe(false);
+    });
+
+    test('not owed (lane not in the facts) → the empty reply still converges without a verify call', async () => {
+      const client = makeClient([{ reply: '', intended_actions: [], missing_info: null }]);
+      const r = await generateGroundedDraft({ ...args(client), factsBlock: `FACTS\n${reserviceFactLine([])}\nBILLING:` });
+      expect(r.converged).toBe(true);
+      expect(client.calls).toHaveLength(1);
+    });
+  });
+
   test('a revise error keeps the prior draft, not converged (Codex P2)', async () => {
     // draft → verify(violation) → revise THROWS. Must keep the first draft,
     // not drop the whole sample.
@@ -458,6 +510,38 @@ describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false)
   });
 });
 
+// Codex round-19 P2 (PR #5334): the single-pass branch also runs the
+// deterministic live-ETA guard. The branch is reached only when real answers
+// were NOT applied at prompt-build time, so the test flips the gate on after
+// the prompt is built (inside the model call) to exercise the wiring.
+describe('generateGroundedDraft — single-pass mode runs validateLiveEtaMinutes', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+  beforeEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; process.env.SHADOW_DRAFT_VERIFY = 'false'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY; else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+    jest.resetModules();
+  });
+  const run = async (reply) => {
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const inner = makeClient([{ reply, intended_actions: [], missing_info: null }]);
+    const client = { calls: inner.calls, messages: { create: (a) => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; return inner.messages.create(a); } } };
+    return drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage: 'Where is the tech?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+  };
+  test('a fabricated ETA with no live-ETA fact is NOT converged', async () => {
+    const r = await run('The tech is about 20 minutes away.');
+    expect(r.converged).toBe(false);
+  });
+  test('a reply with no ETA claim still converges', async () => {
+    const r = await run('Thanks so much, we appreciate you!');
+    expect(r.converged).toBe(true);
+  });
+});
+
 // Codex r3: with the LLM verifier OFF nothing can judge whether a quoted
 // window is a confirmation of a booked visit or an undeclared offer, so the
 // single-pass check runs WITHOUT the grounded-elsewhere allowance.
@@ -533,15 +617,24 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     for (const [k, v] of [['GATE_SMS_REAL_ANSWERS', prior.ra], ['GATE_SMS_AGENT_COMPLAINTS', prior.c]]) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
-    jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../services/availability');
+    jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../services/availability'); jest.dontMock('../models/db');
     jest.resetModules();
   });
   function setup(lanes) {
     jest.resetModules();
-    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, reserviceLanesForCustomer: jest.fn(async () => lanes) }));
+    // liveReserviceLaneState (fetchReserviceFactState's underlying live-lane check)
+    // delegates entirely to reservice-scheduler.loadReserviceLaneAvailability
+    // (the ONE shared availability the public re-service page also uses) —
+    // mock that directly rather than modeling a fake customer row through
+    // models/db.
+    jest.doMock('../services/reservice-scheduler', () => ({
+      ...jest.requireActual('../services/reservice-scheduler'),
+      reserviceSelfServeEnabled: () => true,
+      loadReserviceLaneAvailability: jest.fn(async () => ({ eligible: lanes, open: {}, bookable: lanes, verified: true })),
+    }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
     const drafter = require('../services/sms-shadow-drafter');
-    jest.spyOn(drafter, 'fetchReserviceLanes'); // observed only; the real one runs
+    jest.spyOn(drafter, 'fetchReserviceFactState'); // observed only; the real one runs
     return drafter;
   }
   const args = (client) => ({
@@ -551,8 +644,6 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
 
   test('NOT eligible: the offer is caught deterministically, then a revision that escalates instead converges', async () => {
     const drafter = setup([]);
-    const db = require('../models/db');
-    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
     const client = makeClient([
       { reply: 'So sorry — we will come back for a free re-service.', intended_actions: [], missing_info: null },
       { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
@@ -565,8 +656,97 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     expect(client.calls).toHaveLength(3); // draft + revise + verify — the first failure never reached the verifier
     expect(r.parsed.reply).not.toMatch(/free/i);
   });
+
+  // Codex round-1 P2 (c): a free-re-service PROMISE with no send_reservice_link
+  // action is exactly as broken as an ineligible offer — nobody actually
+  // sends the link.
+  test('ELIGIBLE but no send_reservice_link action: caught deterministically, a revision that adds the action converges', async () => {
+    const drafter = setup(['pest']);
+    const client = makeClient([
+      { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [], missing_info: null },
+      { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.factsBlock).toContain('FREE RE-SERVICE: eligible for pest');
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(r.parsed.intended_actions).toEqual([{ type: 'escalate', note: 'send_reservice_link' }]);
+  });
+
+  // Codex round-1 P2 (d): a GENERIC offer with no lane named in the reply
+  // must resolve the reported lane from the inbound text — a lawn-only
+  // entitlement must not cover a customer who reported ants.
+  test('ELIGIBLE for lawn only, but the customer reported ants (pest): a generic offer is caught, a revision naming the right (ineligible) outcome converges', async () => {
+    const drafter = setup(['lawn']);
+    const client = makeClient([
+      // Generic — no lane named — but the inbound reports ants (pest), and
+      // only lawn is eligible.
+      { reply: "Good news — we'll send your free re-service link now.", intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
+      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.factsBlock).toContain('FREE RE-SERVICE: eligible for lawn');
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(r.parsed.reply).not.toMatch(/free/i);
+  });
 });
 
+// Codex round-1 P2 (b): needsOpenTimes must cover the FULL pest-report class
+// the PEST REPORTS bullet names, not just the SAVE_SALE_TEXT_RE subset — a
+// message like "they're back" must still fetch OPEN TIMES so the "not
+// eligible" branch has real times to offer instead of an empty hand-off.
+describe('generateGroundedDraft — pest-report phrasing fetches OPEN TIMES even with no scheduling intent (Codex round-1 P2 (b))', () => {
+  const prior = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  function setupAvailability() {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [
+        { fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] },
+      ] })),
+    }));
+    return require('../services/sms-shadow-drafter');
+  }
+
+  test.each([
+    'the ants are back',
+    'I saw roaches again',
+    // Codex round 2: the enumerated "back"/"again" phrasings missed these —
+    // the structural fix (pest noun + any activity verb, anywhere in the
+    // text) catches them without a new enumerated phrase.
+    'the roaches have returned',
+    'more ants showed up after the treatment',
+  ])('%s → OPEN TIMES is fetched (present in the facts block) though SAVE_SALE_TEXT_RE and schedulingIntent both miss it', async (inboundMessage) => {
+    const drafter = setupAvailability();
+    const client = makeClient([
+      { reply: 'Sorry to hear that! Here is a time that works.', intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, city: 'Venice',
+    });
+    expect(r.factsBlock).toContain('OPEN TIMES (real, bookable slots');
+  });
+});
+
+// The deterministic complaint backstop this test covered (validateComplaintEscalation
+// / hasComplaintSignal / complaintSignals) was removed 2026-09-29: several
+// audit and Codex rounds kept finding new complaint shapes a regex missed
+// (anger, cancel threats, damage attribution, re-service resolution for an
+// already-held complaint) — a non-converging chokepoint. The PEST REPORTS
+// bullet's own prompt precedence (an actual complaint always wins over pest
+// activity wording) is now the only enforcement, backed by every draft being
+// staff-reviewed and escalation intents never auto-sending — see the code
+// comment at the PEST REPORTS bullet in sms-shadow-drafter.js.
 
 // Codex r7 P1: with a category gate on the model answers chemical questions
 // itself, so compliance copy is enforced at publication, not by the prompt.
@@ -589,7 +769,7 @@ describe('generateGroundedDraft — banned compliance copy never converges', () 
     const drafter = require('../services/sms-shadow-drafter');
     const client = makeClient([
       { reply: 'Yes — the treatment is totally pet-safe once we leave.', intended_actions: [], missing_info: null },
-      { reply: 'Keep pets off treated areas until they are dry — it is safe once dry, and your technician will confirm the timing at the visit.', intended_actions: [], missing_info: null },
+      { reply: 'It is safe once dry, and your technician will confirm the timing at the visit.', intended_actions: [], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));
@@ -663,5 +843,53 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
     expect(r.converged).toBe(true);
     expect(r.factsBlock).toContain('FOLLOW-UP SLA RIGHT NOW: by 9 AM tomorrow morning');
     expect(r.factsGeneratedAt.toISOString()).toBe('2026-09-29T00:01:00.000Z');
+  });
+});
+
+// Codex round-30 P2 (PR #5334): a live ETA that expires while the draft/verify
+// calls run is WITHHELD (not converged) — every send seam would reject the card.
+describe('generateGroundedDraft — a live ETA that expired during generation is withheld', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  function setup() {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
+    return require('../services/sms-shadow-drafter');
+  }
+  const ctx = (fixExpiresAtMs) => ({
+    summary: 'Dana — Quarterly Pest, Venice',
+    upcomingServices: [{
+      type: 'Quarterly Pest', date: require('../utils/datetime-et').etDateString(), window: null, tech: 'Sam', status: 'en_route', trackState: 'en_route', isToday: true,
+      liveEta: { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/tok-1' },
+    }],
+    liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', fixExpiresAtMs }],
+  });
+  const run = async (reply, fixExpiresAtMs) => {
+    const drafter = setup();
+    const client = makeClient([
+      { reply, intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    return drafter.generateGroundedDraft({
+      client, context: ctx(fixExpiresAtMs), inboundMessage: 'Where is the tech?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+  };
+  test('control: a still-fresh fix converges', async () => {
+    const r = await run('Your tech is about 12 minutes away.', Date.now() + 120e3);
+    expect(r.converged).toBe(true);
+  });
+  test('the fix expired by publication time: the minutes card is withheld', async () => {
+    const r = await run('Your tech is about 12 minutes away.', Date.now() - 1000);
+    expect(r.converged).toBe(false);
+    expect(r.parsed.reply).toMatch(/12 minutes/); // still returned so the judge can grade the shadow row
+  });
+  test('status-only copy carries no minutes to age: an expired fix does not withhold it', async () => {
+    const r = await run('Your tech is on the way.', Date.now() - 1000);
+    expect(r.converged).toBe(true);
   });
 });

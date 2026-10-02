@@ -4179,7 +4179,7 @@ async function searchFieldIntelligence(input) {
   } catch { /* table may not exist */ }
 
   // Operational corpus hits (hybrid only): services, protocols, product
-  // labels, county fertilizer rules, prep guides, ops rules.
+  // labels, county fertilizer rules, prep guides, ops rules, species catalog.
   const operationalKnowledge = (hybrid?.results || [])
     .filter((r) => r.source !== 'wiki' && r.source !== 'kb')
     .slice(0, 6)
@@ -4207,7 +4207,7 @@ async function searchFieldIntelligence(input) {
     ...(hybrid ? { searchMode: hybrid.usedVector ? 'hybrid' : 'hybrid_fts_only' } : {}),
     bridgedPairs: (bridged || []).length,
     openContradictions,
-    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide/past-resolution matches — cite source + ref; "resolution" entries are how similar past calls/visits were actually handled (PII-redacted, recency-decayed). Cite slugs, state confidence, and surface open contradictions.',
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide/past-resolution/species-catalog matches — cite source + ref; "species" (customer copy) and "species_tech" (tech notes) entries are the owner-approved, UF/IFAS-cited species catalog and win any disagreement with the wiki or knowledge base on what an organism is, its verdict, or its safety; "resolution" entries are how similar past calls/visits were actually handled (PII-redacted, recency-decayed). Cite slugs, state confidence, and surface open contradictions.',
   };
 }
 

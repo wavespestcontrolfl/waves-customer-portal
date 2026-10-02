@@ -332,15 +332,24 @@ router.post('/sync', requireAdmin, async (req, res, next) => {
 
     const campaigns = await getGoogleAds().syncCampaigns();
     const performance = await getGoogleAds().syncDailyPerformance(7);
-    const searchTerms = await getGoogleAds().syncSearchTerms(30);
+    // Search terms throw here so a rolled-back snapshot (e.g. rows for a
+    // campaign missing locally) is reported, not counted as a success.
+    let searchTerms = [];
+    let searchTermsError = null;
+    try {
+      searchTerms = await getGoogleAds().syncSearchTerms(30, { throwOnError: true });
+    } catch (err) {
+      searchTermsError = err.message;
+    }
 
-    res.json({
-      success: true,
+    res.status(searchTermsError ? 502 : 200).json({
+      success: !searchTermsError,
       synced: {
         campaigns: campaigns.length,
         performanceRows: performance.length,
         searchTerms: searchTerms.length,
       },
+      ...(searchTermsError ? { error: `Search terms not synced: ${searchTermsError}` } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -358,6 +367,35 @@ router.post('/sync/meta', requireAdmin, async (req, res, next) => {
       success: true,
       synced: { campaigns: campaigns.length, performanceRows: performance.length },
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/ads/sync-status — last-sync health per ad platform, read from
+// job_health (written by runExclusive around the daily syncs). The PPC
+// dashboard shows it so a dead sync no longer reads as "no data".
+const SYNC_JOBS = [
+  { platform: 'google_ads', job: 'google-ads-sync', configured: () => require('../services/ads/google-ads-config').isConfigured() },
+  { platform: 'facebook', job: 'meta-ads-campaigns', configured: () => getMetaAds().isConfigured() },
+  { platform: 'facebook', job: 'meta-ads-performance', configured: () => getMetaAds().isConfigured() },
+];
+router.get('/sync-status', async (req, res, next) => {
+  try {
+    const rows = await db('job_health').whereIn('job_name', SYNC_JOBS.map((j) => j.job));
+    const byJob = new Map(rows.map((r) => [r.job_name, r]));
+    const syncs = SYNC_JOBS.map(({ platform, job, configured }) => {
+      const r = byJob.get(job);
+      return {
+        platform,
+        job,
+        configured: !!configured(),
+        last_success_at: r?.last_success_at ? new Date(r.last_success_at).toISOString() : null,
+        last_status: r?.last_status || null,
+        // job_health already masks digit runs; keep it short for the UI.
+        last_error: r?.last_error ? String(r.last_error).slice(0, 200) : null,
+        consecutive_failures: Number(r?.consecutive_failures) || 0,
+      };
+    });
+    res.json({ syncs });
   } catch (err) { next(err); }
 });
 
@@ -557,6 +595,11 @@ router.get('/advisor/history', async (req, res, next) => {
 router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
   try {
     const advice = await getCampaignAdvisor().generateDailyAdvice();
+    // The AI was unavailable and today's report was left in place: report the
+    // failure rather than a replacement the client would render.
+    if (advice?.kept_existing_report) {
+      return res.status(503).json({ error: "AI advisor unavailable — today's existing report was kept." });
+    }
     res.json({ report: advice });
   } catch (err) { next(err); }
 });
@@ -584,7 +627,7 @@ async function applyLive(fn, res) {
       res.status(502).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (err.code === 'mode_conflict') {
+    if (err.code === 'mode_conflict' || err.code === 'recent_change') {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
@@ -661,6 +704,12 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
     }
 
+    // Same 7-day no-repeat/no-reversal rule the advisor applies when it
+    // writes the report, rechecked by the budget manager under the campaign
+    // row lock: a change logged after the report (capacity cron, manual edit,
+    // an earlier Apply) makes its one-click recommendation stale.
+    const requireNoChangeSince = new Date(Date.now() - 7 * 86400000);
+
     let result;
     if (isBudgetAction) {
       const amount = toFiniteNumber(value);
@@ -698,7 +747,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
@@ -711,7 +760,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (value === campaign.budget_mode) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     }
 

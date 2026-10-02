@@ -73,6 +73,13 @@ function makeDb(tables) {
           const names = [...sql.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
           return row.processing_status == null || !names.includes(String(row.processing_status));
         }
+        if (sql === require('../services/call-routing-gates').SUPERSEDE_KEPT_CARD_SQL) {
+          // Keeps a street-level address hold's cards (none of these fixtures has one).
+          const payload = typeof row.payload === 'string' ? JSON.parse(row.payload || '{}') : (row.payload || {});
+          const holdCard = row.reason_code === 'outbound_booking_review' && String(payload.street_level_address || '') === 'true';
+          const owedCard = row.reason_code === 'attached_booking_followup_unbooked' && String(payload.skipped_reason || '') === 'street_level_address_confirmed_follow_up_unbooked';
+          return !(holdCard || owedCard);
+        }
         throw new Error(`fake db: unsupported raw clause ${sql}`);
       }
       default: throw new Error(`fake db: unsupported clause ${clause.type}`);

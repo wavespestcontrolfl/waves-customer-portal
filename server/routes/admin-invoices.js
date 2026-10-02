@@ -1200,8 +1200,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           const firstDeliveryOnly = true;
           try {
             entry.sent = existing.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
             // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
             // held outcome onto the SAME { held: true } shape the thrown
             // form already reports below — the shared classifier again.
@@ -1276,8 +1276,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // invoices keep the existing SMS-only immediate send. Freshly
             // created here — always a first delivery.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
             // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
             // held outcome onto the SAME { held: true } shape the thrown
             // form below already reports — the shared classifier again.
@@ -1397,7 +1397,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
       try {
         const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
         firstDeliveryOnly = isFirstDeliveryRow(row);
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
         if (result.ok && (result.settled_zero_due || result.covered_by_credit)) {
           // covered_by_credit is the chokepoint's sibling settled flag
           // (credit consumed, nothing sent): bucketing it as "sent" with
@@ -1737,6 +1737,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         firstDeliveryOnly,
         overridesReviewHold,
         operatorInitiated: true,
+        holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
       });
     } catch (err) {
@@ -1864,7 +1865,9 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
         status: 'scheduled',
         scheduled_send_at: when,
         scheduled_send_attempts: 0,
-        scheduled_send_error: null,
+        // The accepted-Text/pending-Email marker (a Text leg the visit summary text carries)
+        // survives a reschedule: clearing it would text the pay link a second time.
+        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' THEN scheduled_send_error ELSE NULL END"),
         scheduled_request_review: Boolean(requestReview),
         scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
         updated_at: new Date(),
@@ -1909,7 +1912,18 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      { expectedTotal },
+      // Staff ordered this charge explicitly: exempt from the default
+      // collections dispute-hold guard (an operator may override a hold).
+      // The override is recorded at the charge boundary (stripe.js) when a
+      // dispute hold is active, naming this admin.
+      {
+        expectedTotal,
+        operatorOverride: true,
+        overrideTrail: {
+          actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
+          route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+        },
+      },
     );
     res.json({ success: true, ...result });
   } catch (err) {
@@ -3626,8 +3640,14 @@ const followupConfig = require('../config/invoice-followups');
 router.get('/:id/followup', async (req, res, next) => {
   try {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
+    // A customer on combined reminders (customer-dunning/wiring.js): the panel shows the combined step
+    // and invoice count, and send-now must confirm that step (Codex #5503 r2 P1). null otherwise.
+    const customerSchedule = seq
+      ? await require('../services/customer-dunning/wiring').customerScheduleSummary(seq.customer_id)
+      : null;
     res.json({
       sequence: seq || null,
+      customerSchedule,
       // Config-field rename: steps now expose daysAfterSend (PR #106
       // anchored the cadence to invoice.sent_at). daysAfterDue is kept
       // as an alias so any pre-update client still renders a number.
@@ -3688,7 +3708,25 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // Authenticated operator click — "now" means now: the SMS leg is exempt
     // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
     // cron path passes nothing and stays fenced.
-    await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
+    // A customer on combined reminders: the click sends the schedule's current
+    // step, and only with the operator's explicit confirmation of that step
+    // ({ combined: true, scheduleId, stepIndex } — what GET /:id/followup
+    // showed). Without it nothing is sent: 409 COMBINED_CONFIRM_REQUIRED, so a
+    // stale panel can never send the combined step unseen (Codex #5503 r2 P1).
+    const body = req.body || {};
+    const combined = body.combined === true
+      ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
+      : null;
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // Nothing to send (no sequence, a finished one, a paid or void invoice): never a 200 the panel
+    // would read as "Done".
+    if (routed?.reason === 'nothing_to_send') return res.status(409).json({ error: routed.message, code: 'NOT_SENT' });
+    // A customer on a customer-level reminder schedule: the click sent (or
+    // refused to send) the schedule's current step (dunning consolidation §8).
+    if (routed?.routedTo === 'customer_schedule') {
+      const { status, body } = require('../services/customer-dunning/wiring').httpResult(routed);
+      return res.status(status).json(body);
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

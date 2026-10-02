@@ -478,10 +478,10 @@ async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) {
     // Switched off: no standing list may outlive the pager that kept it true.
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+    await NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
       .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
       // Flagged emptied too, so a re-enabled pager posts its list fresh.
-      .update({ read_at: now, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
+      .update({ ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'The follow-up pager was switched off', at: now, keepExisting: true, conn: db }), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
       .catch((err) => logger.warn(`[followup-sla] retiring the list while gated off failed: ${err.message}`));
     return { skipped: true, reason: 'gated_off' };
   }
@@ -546,7 +546,7 @@ async function runInner({ now = new Date() } = {}) {
   let changed = 0;
   const latest = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
+    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body', 'detail', 'link');
   const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
   const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
   // A promise held over this way still drops off when later activity
@@ -583,16 +583,21 @@ async function runInner({ now = new Date() } = {}) {
     const { stripEmoji } = require('../utils/strip-emoji');
     const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
     const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
+    // One miss opens its call; several open the Owed list.
+    const link = onList.length === 1 && onList[0].call_log_id
+      ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
+      : '/admin/communications#tab=owed';
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
       const notif = await NotificationService.notifyAdmin('alert', title, body, {
-        link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
+        link, dedupeKey: key, bell: true, trx,
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
-      await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+      await NotificationService._private.openToCloser(trx('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
         .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-        .whereRaw("metadata->>'dedupeKey' <> ?", [key]).update({ read_at: now });
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key])
+        .update(NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Replaced by a newer missed-follow-up list', at: now, keepExisting: true, conn: trx }));
       alerted = fresh.length;
       return;
     }
@@ -600,12 +605,20 @@ async function runInner({ now = new Date() } = {}) {
     // emptied → read and flagged (a returning miss posts fresh); fewer
     // items or changed details → rewritten in place, read state kept.
     if (!shown.length) return;
+    // The brevity guard's form of this text (one-sentence body, full list in
+    // `detail`), exactly as the fresh post above is stored.
+    const next = NotificationService.normalizeAdminText({ category: 'alert', title, body });
     const patch = ids.length
-      ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
-      : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
-    // Same items, same words: nothing to write (an emptied patch carries no
-    // title, so it never matches).
-    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+      ? { title: next.title, body: next.body, detail: next.detail, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+      : {
+        ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Every listed promise was followed up', at: now, keepExisting: true, conn: trx }),
+        metadata: JSON.stringify({ ...meta, emptied: true }),
+      };
+    // Same items, same words, same link: nothing to write (an emptied patch
+    // carries no title, so it never matches). A post from before the link
+    // followed the list size is rewritten here, quietly.
+    if (patch.title === latest.title && patch.body === latest.body && (patch.detail ?? null) === (latest.detail ?? null) && ids.length === shown.length
+      && patch.link === latest.link) return;
     await trx('notifications').where({ id: latest.id }).update(patch);
   });
   return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };

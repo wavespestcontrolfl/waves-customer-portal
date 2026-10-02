@@ -459,7 +459,7 @@
                 "DeSoto",
                 null
               ],
-              "description": "Service area constraint. If present and not one of these, set triage_flag=out_of_service_area."
+              "description": "County of the service address. Manatee, Sarasota and Charlotte are served; DeSoto may be emitted as a county value but is NOT in the service area (owner ruling 2026-09-30), so a DeSoto address must set triage_flag=out_of_service_area. Any other county also sets out_of_service_area unless it is a served south-Hillsborough town."
             },
             "subdivision_or_community": {
               "type": [
@@ -907,6 +907,27 @@
           ],
           "description": "Total USD price the agent quoted AND the caller accepted for the service being booked. null when no price was quoted/accepted or the amount is uncertain."
         },
+        "price_offered_by_staff": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when a Waves staff member (speaker \"agent\") OFFERED the amount in service_request.quoted_price_usd as Waves' OWN quote for this service: a statement of the price (\"that runs $150\", \"it's $150 a visit\"), never a question about a price (\"did another company quote you $150?\"), never a competitor's or the caller's number, never a hypothetical or a range. Pin the staff's price sentence to /service_request/price_offered_by_staff with speaker \"agent\"; the amount must appear in that quote exactly as spoken, digits or words (\"$149\" or \"one hundred forty-nine dollars\"); never rewrite words as digits. false when the amount was not offered that way; null when no price was discussed."
+        },
+        "price_accepted_by_caller": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the CALLER, in their own words, accepted THAT staff-offered price: agreement with the amount itself (\"yes, that works\", \"okay, $150 is fine\", \"let's do it\"). false when the caller objected, negotiated, asked a question instead, agreed to something else (a time, a different service), or accepted only part of it (\"that works for the price, but ...\" the price part counts only if the rest does not take it back). The acceptance must come AFTER the staff's offer. Pin the caller's acceptance to /service_request/price_accepted_by_caller with speaker \"caller\". null when no price was discussed."
+        },
+        "price_is_final": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): true ONLY when the accepted amount was the LAST price staff stated for this service on the call: with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing, before the call ended (\"actually, correction, it's $250\", \"plus ten dollars for the garage\", \"that is before the trip fee\"). false when staff or the caller changed the price or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed."
+        },
         "quote_requested": {
           "type": [
             "boolean",
@@ -1283,6 +1304,21 @@
             "null"
           ],
           "description": "1.20.0, additive/optional (never `required`): true when the EXISTING appointment's day (moved_appointment_date) was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so moved_appointment_date carries the true absolute date, record only the bare weekday in moved_appointment_words when a weekday was said (otherwise the exact relative phrase, same closed forms), and pin the whole clause holding the relative expression to /scheduling/moved_appointment_relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
+        },
+        "staff_accepted_proposed_slot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.21.0, additive/optional (never `required`): for a booking whose slot was PROPOSED by the caller (one exact day and on-the-hour time in the caller's turn, e.g. \"Can you come Thursday at 2?\"), true ONLY when the very next turn is staff's reply that accepts that whole proposal as stated (\"Sure, that works.\"): not partially (\"that works for the price, but the time is bad\"), not with a change, condition or question, not a refusal. Pin the ENTIRE staff reply turn, verbatim, to /scheduling/staff_accepted_proposed_slot with speaker \"agent\" (also pin it as /scheduling/agent_committed_booking), and pin the caller's proposal turn as /scheduling/confirmed_start_at and /scheduling/caller_accepted_slot with speaker \"caller\". false when the reply did anything else; null when the caller did not propose the slot."
+        },
+        "selected_day_words": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "1.21.0, additive/optional (never `required`): for a NEW booking whose final time turn does not repeat the day (agreed_slot_words.day is null), the verbatim words naming the day the CALLER SELECTED as the final agreed day (\"Thursday\", \"October 24th\", \"tomorrow\"), copied exactly from a CALLER turn and pinned to /scheduling/selected_day_words with speaker \"caller\". Only a day the caller chose or agreed to: never a day the caller rejected, called impossible, or offered as one option among several, and never a relative day (\"next Thursday\"). null when agreed_slot_words.day is set or no day was selected."
         },
         "requested_date_range_start": {
           "type": [

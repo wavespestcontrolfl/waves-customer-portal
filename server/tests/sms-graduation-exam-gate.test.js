@@ -14,7 +14,7 @@ const { evaluateAutoSendEligibility, computeReadiness } = require('../services/s
 // Chainable/thenable fake that satisfies fetchLiveJudgeSignals (incl. its
 // CTE) and fetchSuggestOutcomes — every query resolves to no rows, which is
 // exactly the "no evidence" state the exam blockers must layer onto.
-function makeFakeDb() {
+function makeFakeDb(rows = []) {
   const builder = {};
   const chain = () => builder;
   for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
@@ -24,7 +24,7 @@ function makeFakeDb() {
       return builder;
     };
   }
-  builder.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  builder.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   const dbi = () => builder;
   dbi.raw = (sql) => sql;
   dbi.with = (_name, cb) => {
@@ -101,5 +101,30 @@ describe('computeReadiness — advisory surfaces mirror the executor gate', () =
     const out = await computeReadiness({ intents: intents('shadow'), dbi: makeFakeDb() });
     expect(out.get(INTENT).blockers.join(' ')).not.toMatch(/Sealed exam/);
     expect(sealedEval.evaluateExamGate).not.toHaveBeenCalled();
+  });
+});
+
+describe('computeReadiness — an exam-blocked rung carries no basis (Codex r1 on #5531)', () => {
+  // Every query returns this row: the judge-graded path clears on its own
+  // (80 scored, 0 unsafe, 70 equivalent-or-better vs 6 human-better).
+  const graded = [{ intent: INTENT, judged: 80, unsafe: 0, avg_safety: '9.0', graded_accepted: 70, graded_corrected: 6 }];
+  const suggesting = [{ intent: INTENT, mode: 'suggest', locked: false, suggest: { accepted: 0, corrected: 0, ignored: 0 } }];
+
+  test('exam passes: the judge path earns the rung and names its basis', async () => {
+    process.env.GRAD_REQUIRE_SEALED_EXAM = 'true';
+    sealedEval.evaluateExamGate.mockResolvedValue([]);
+    const g = (await computeReadiness({ intents: suggesting, dbi: makeFakeDb(graded) })).get(INTENT);
+    expect(g.eligibleFor).toBe('auto_send');
+    expect(g.basis).toBe('judge_graded');
+  });
+
+  test('exam blocks: eligible off AND basis cleared, so the card cannot read "earned" beside the exam blocker', async () => {
+    process.env.GRAD_REQUIRE_SEALED_EXAM = 'true';
+    sealedEval.evaluateExamGate.mockResolvedValue(['Sealed exam: no completed openai run for house_voice_v8.']);
+    const g = (await computeReadiness({ intents: suggesting, dbi: makeFakeDb(graded) })).get(INTENT);
+    expect(g.eligible).toBe(false);
+    expect(g.eligibleFor).toBeNull();
+    expect(g.basis).toBeNull();
+    expect(g.blockers.some((b) => /Sealed exam/.test(b))).toBe(true);
   });
 });

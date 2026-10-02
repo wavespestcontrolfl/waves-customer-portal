@@ -30,7 +30,7 @@ const CONTEXT_SERVICE = {
   serviceKey: 'pest_re_service', status: 'confirmed',
 };
 
-function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE, eligible = true, products = CATALOG } = {}) {
+function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE, eligible = true, products = CATALOG, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -45,7 +45,7 @@ function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = 
     }
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/complete')) {
-      return { success: true };
+      return completeResponse;
     }
     return {};
   });
@@ -168,6 +168,11 @@ describe('FastCompleteSheet', () => {
     expect(body.sendCompletionSms).toBe(false);
     expect(body.requestReview).toBe(false);
     expect(body.includePayLink).toBe(false);
+    // Gate off is today's body: no review timing and no client-written recap.
+    expect('reviewTiming' in body).toBe(false);
+    expect('customerRecap' in body).toBe(false);
+    expect('customerRecapMode' in body).toBe(false);
+    expect(screen.queryByTestId('fast-complete-text-result')).toBeNull();
     expect(body.areasServiced).toEqual(['Inside']);
     expect(body.clientPestRating).toBe(3); // moderate -> 3
 
@@ -411,6 +416,20 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
   });
 
+  test('the 4-oz house default at perimeter spray is never flagged over the label', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    // The house default is 4 oz in the tank, not Taurus's 0.2-0.8 fl oz per
+    // gallon label, so there is no label maximum to be over.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('4');
+    expect(screen.queryByText(/label max/)).toBeNull();
+  });
+
   test('an edited rate above the label maximum shows the recap editor\'s warning', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
@@ -529,6 +548,102 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByRole('button', { name: 'Complete re-service' })).toBeTruthy();
     expect(screen.queryByText(/changed since your schedule loaded/)).toBeNull();
   });
+
+  // GATE_FAST_COMPLETE_RECAP (dark): the schedule row's flag reaches the sheet
+  // as service.recapEnabled. On, the body asks for the server's ONE fixed
+  // re-service text (customerRecapMode) with the review ask and pay link off;
+  // the server writes the words, and after Complete the tech sees them.
+  const completeRe = async (service, request = makeRequest()) => {
+    render(<FastCompleteSheet service={service} request={request} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    await waitFor(() => expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true));
+    return JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
+  };
+
+  test('recap gate on: asks for the fixed re-service text, no review ask, no pay link, no client wording', async () => {
+    const body = await completeRe({ ...SERVICE, recapEnabled: true });
+
+    expect(body.sendCompletionSms).toBe(true);
+    expect(body.customerRecapMode).toBe('reservice_fixed');
+    expect(body.requestReview).toBe(false);
+    expect(body.includePayLink).toBe(false);
+    expect('reviewTiming' in body).toBe(false);
+    // The server composes the text from the recorded facts; the client writes none.
+    expect('customerRecap' in body).toBe(false);
+    // The facts that text is built from still ride the body.
+    expect(body.areasServiced).toEqual(['Inside']);
+    expect(body.products.find((p) => p.productId === 'taurus').targets).toEqual(['Ants']);
+    expect(body.products.find((p) => p.productId === 'taurus').applicationMethod).toBe('spot_treatment');
+  });
+
+  test('recap gate on: shows the exact text the server sent after Complete', async () => {
+    const sent = 'Your re-service at 123 Main St is done. We treated inside for ants. Keep kids and pets off treated areas until dry. Details: https://example.test/r/abc';
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: true, body: sent, reason: null } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+
+    expect(await screen.findByText('Re-service complete')).toBeTruthy();
+    expect(screen.getByText('Text sent to the customer:')).toBeTruthy();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toBe(sent);
+  });
+
+  test('recap gate on: the recorded channel decides the wording (app vs text)', async () => {
+    const body = 'Your re-service is done. Details: x.test/r/1';
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: true, channel: 'push', body, reason: null } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+    expect(await screen.findByText("Sent to the customer's app:")).toBeTruthy();
+    expect(screen.queryByText('Text sent to the customer:')).toBeNull();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toBe(body);
+    cleanup();
+    const sms = makeRequest({ completeResponse: { success: true, customerText: { sent: true, channel: 'sms', body, reason: null } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, sms);
+    expect(await screen.findByText('Text sent to the customer:')).toBeTruthy();
+  }, 20000);
+
+  test('recap gate on: says why no text went (no phone, opted out, gate off)', async () => {
+    for (const reason of ['no phone number on file', "the customer can't be texted (opted out or blocked)", 'the customer text is turned off for this visit']) {
+      const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, body: null, reason } } });
+      await completeRe({ ...SERVICE, recapEnabled: true }, request);
+      expect(await screen.findByText(`No text sent: ${reason}.`)).toBeTruthy();
+      expect(screen.queryByTestId('fast-complete-text-body')).toBeNull();
+      cleanup();
+    }
+  }, 30000);
+
+  test('recap gate on: a text held for the send window is shown as queued with its words', async () => {
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, queued: true, body: 'Your re-service is done. Details: https://x.test/r/1', reason: 'held until the morning send window, then it goes out' } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+    expect(await screen.findByText('Message queued: held until the morning send window, then it goes out.')).toBeTruthy();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toContain('Your re-service is done.');
+  });
+
+  test('recap gate on: an unconfirmed delivery is never shown as "No text sent"', async () => {
+    const reason = "it may have gone out, but delivery wasn't confirmed. The office will check, so don't send another";
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, unverified: true, body: 'Your re-service is done. Details: x.test/r/1', reason } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+    expect(await screen.findByText(`Delivery not confirmed: ${reason}.`)).toBeTruthy();
+    expect(screen.queryByText(/^No text sent:/)).toBeNull();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toContain('Your re-service is done.');
+  });
+
+  test('gate off: the done view shows nothing about a customer text', async () => {
+    await completeRe({ ...SERVICE });
+    expect(await screen.findByText('Re-service complete')).toBeTruthy();
+    expect(screen.queryByTestId('fast-complete-text-result')).toBeNull();
+  });
+
+  test('recap flag that is not exactly true leaves today\'s body', async () => {
+    for (const recapEnabled of [false, undefined, 'true', 1]) {
+      const body = await completeRe({ ...SERVICE, recapEnabled });
+      expect([body.sendCompletionSms, body.requestReview, body.includePayLink]).toEqual([false, false, false]);
+      expect('reviewTiming' in body).toBe(false);
+      expect('customerRecapMode' in body).toBe(false);
+      cleanup();
+    }
+  }, 20000);
 
   test('a visit the server no longer allows on the short form is sent to the full form', async () => {
     const request = makeRequest({ eligible: false });

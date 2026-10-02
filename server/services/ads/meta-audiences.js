@@ -32,7 +32,7 @@ const DEFAULT_LEAD_WINDOW_DAYS = 180;
 // admin-agents.js), incl. unresponsive/duplicate.
 const LEAD_CLOSED = [
   'booked', 'converted', 'won', 'customer', 'active_customer',
-  'lost', 'disqualified', 'unqualified', 'spam', 'invalid', 'unresponsive', 'duplicate',
+  'lost', 'disqualified', 'unqualified', 'spam', 'invalid', 'unresponsive', 'duplicate', 'handled',
 ];
 
 function boolEnv(name, defaultValue = false) {

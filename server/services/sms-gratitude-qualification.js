@@ -52,6 +52,9 @@ const SOURCE_FILES = Object.freeze([
   'server/services/context-aggregator.js',
   'server/services/sms-auto-send.js',
   'server/services/sms-shadow-drafter.js',
+  'server/services/sms-company-facts.js',
+  'server/constants/business.js',
+  'server/services/sms-label-facts.js',
   'server/services/sms-draft-verifier.js',
   'server/services/llm/call.js',
   'server/services/llm/deep.js',
@@ -406,4 +409,5 @@ module.exports = {
   runGratitudeQualification,
   evaluateGratitudeQualification,
   WORKFLOW,
+  pinnedSourceFiles,
 };

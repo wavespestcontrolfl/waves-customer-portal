@@ -335,6 +335,53 @@ function resolveReviewLocationId(customer = {}, opts = {}) {
   return resolveReviewLocation(customer, opts).id;
 }
 
+/**
+ * The office that owns a customer's address, for picking their location
+ * line (outbound SMS From). A MAPPED city always wins and resolves exactly
+ * like resolveLocation(city) — so no customer whose city maps today changes
+ * lines. Only a blank/unmapped city falls through: ZIP (canonical
+ * zip-to-city → CITY_TO_LOCATION), then nearest office by geocode, then the
+ * default office.
+ *
+ * Deliberately NOT resolveReviewLocation: its review overrides (Longboat Key
+ * → bradenton) and ZIP_CITY_CONFLICTS would move customers whose city maps
+ * today onto a different line mid-conversation.
+ *
+ * @param {object} customer  { city, zip, latitude, longitude }
+ * @returns {object} a WAVES_LOCATIONS entry (never null)
+ */
+// Farthest a geocode may sit from its nearest office and still pick that
+// office's line. The footprint (south Hillsborough → Boca Grande) is within
+// ~35mi of an office; beyond this the geocode is treated as unusable.
+const SERVICE_GEOCODE_MAX_MILES = 50;
+
+function resolveServiceLocation(customer = {}) {
+  const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
+
+  // The customer's own city first, then the ZIP's city. Full value to
+  // zipToCity — it extracts the 5-digit run itself, so messy legacy values
+  // like 'FL 34219' still resolve (a slice(0, 5) would not).
+  const cityNames = [customer.city, customer.zip && require('../utils/zip-to-city').zipToCity(customer.zip)];
+  for (const name of cityNames) {
+    const hit = byId(CITY_TO_LOCATION[String(name || '').toLowerCase().trim()]);
+    if (hit) return hit;
+  }
+
+  // Same null/blank guard as resolveReviewLocation: Number(null) === 0.
+  // Only a geocode near the service area counts — a (0, 0) sentinel or an
+  // out-of-range pair would otherwise pick an arbitrary "nearest" office.
+  // Bounds match property-coordinates.js coordinatesOf: haversine wraps angles,
+  // so an invalid longitude like -82.4 + 360 would otherwise measure ~0 mi.
+  const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
+  const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+    const hit = nearestLocation(lat, lng);
+    if (hit && haversineMiles({ latitude: lat, longitude: lng }, hit) <= SERVICE_GEOCODE_MAX_MILES) return hit;
+  }
+
+  return WAVES_LOCATIONS[0];
+}
+
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
 // non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
 // arbitrary Google Ads utm_content) from being stored as a customer's city.
@@ -370,6 +417,7 @@ module.exports = {
   gbpTrackingUrlForLocation,
   isGbpUtmCampaign,
   resolveLocation,
+  resolveServiceLocation,
   resolveLocationFromCandidates,
   isOfficeCity,
   nearestLocation,

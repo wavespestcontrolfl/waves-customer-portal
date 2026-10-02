@@ -9,6 +9,12 @@
  * rails); evaluate() rejecting is a denial (fail closed at the guard too).
  */
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
@@ -17,7 +23,8 @@ jest.mock('../services/collections/contact-policy', () => ({
 }));
 
 const ContactPolicy = require('../services/collections/contact-policy');
-const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { collectionsChannelPermitted, collectionsChannelVerdict } = require('../services/collections/rail-guard');
+const CollectionHold = require('../services/collections/collection-hold');
 
 const BASE = { customerId: 'cust-1', channel: 'sms', purpose: 'late_payment' };
 
@@ -189,5 +196,98 @@ describe('detail verdict', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
       .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: reason });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
+  });
+});
+
+describe('collections dispute hold (owner ruling 2026-09-30)', () => {
+  const held = () => CollectionHold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
+  afterEach(() => CollectionHold.messagingHeldByCollectionHold.mockResolvedValue({ held: false }));
+
+  test('an automated rail waits on an active dispute hold, gate off or on, as a non-durable denial', async () => {
+    held();
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(false);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true })).resolves.toEqual({ allowed: false, durable: false, hold: true });
+    await expect(collectionsChannelVerdict({ ...BASE })).resolves.toMatchObject({ permitted: false, hold: true });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(false);
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  // A realistic predicate: a trusted exemption (ignoreDisputeHold) skips a plain DISPUTE row only; a
+  // wrong-number / wrong-party FALLBACK row always holds (Codex #5424 r13).
+  const heldKind = (kind) => CollectionHold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (
+    opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+  afterEach(() => CollectionHold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false }));
+
+  test('the operator "send now" exemption skips ONLY the DISPUTE hold wait (gate off permits; gate on still asks the policy)', async () => {
+    heldKind('dispute');
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    expect(CollectionHold.messagingHeldByCollectionHold).toHaveBeenCalledWith('cust-1', undefined, { ignoreDisputeHold: true });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    expect(ContactPolicy.evaluate).toHaveBeenCalledTimes(1);
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, eligibleInvoiceIds: [], denialReasons: ['flag_do_not_collect'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
+  });
+
+  test('an operator / customer exemption NEVER skips a wrong-number / wrong-party FALLBACK hold, gate off or on', async () => {
+    heldKind('fallback');
+    for (const holdExempt of ['operator', 'customer']) {
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt })).resolves.toBe(false);
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt, detail: true })).resolves.toEqual({ allowed: false, durable: false, hold: true });
+      await expect(collectionsChannelVerdict({ ...BASE, holdExempt })).resolves.toMatchObject({ permitted: false, hold: true });
+    }
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  test('"operator" and "customer" exempt a dispute hold; any other value still waits', async () => {
+    heldKind('dispute');
+    // A send the customer asked for themselves (the voice "text me the link" tool) is not automated
+    // follow-up, so the dispute hold does not stop it; the policy verdict is still consulted.
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(true);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    for (const value of ['system', 'admin', true, '', 'Customer']) {
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: value })).resolves.toBe(false);
+    }
+  });
+
+  test('a trusted exemption tells the policy to ignore ONLY the dispute hold (ignoreDisputeHold); an automated consult never does (round 11 P2)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    for (const holdExempt of ['customer', 'operator']) {
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0][1]).toMatchObject({ ignoreDisputeHold: true });
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelVerdict({ ...BASE, holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0][1]).toMatchObject({ ignoreDisputeHold: true });
+    }
+    for (const holdExempt of [null, undefined, 'system', true, 'Customer']) {
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0]?.[1] || {}).not.toHaveProperty('ignoreDisputeHold');
+    }
+  });
+
+  test('the customer exemption does not lift a policy denial', async () => {
+    held();
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, eligibleInvoiceIds: [], denialReasons: ['flag_do_not_collect'] });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(false);
+  });
+});
+
+describe('invoice-followups passes the operator exemption for "send now" only', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-followups.js'), 'utf8');
+
+  test('the ladder consult forwards holdExempt "operator" only for an operator-initiated touch (automated touches wait)', () => {
+    expect(src).toMatch(/collectionsChannelPermitted\(row\.customer_id, row\.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated \? 'operator' : null\)/);
+    expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
+    // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
+    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated \}\)/);
+    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)? \}\)/);
   });
 });

@@ -127,6 +127,11 @@ jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
 }));
+// The send-time click guard the builder consults (own real suite: review-sequences).
+jest.mock('../services/review-click-guard', () => ({
+  touchSuppressedByClick: jest.fn(async () => false),
+  REVIEW_LINK_CLICKED_REASON: 'This customer already tapped their Google review link, so no further review request is sent.',
+}));
 // The builder runs gate+mint under the review advisory lock — run the body
 // inline; the skipped path is exercised explicitly.
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
@@ -401,6 +406,18 @@ describe('resolveConfirmationEstimate (call-booking confirmation accept line)', 
 });
 
 describe('buildReviewRequestLink', () => {
+  test('a customer who already tapped a tracked review link still gets a fresh Quick Links mint (owner: send anytime)', async () => {
+    mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
+    const guard = require('../services/review-click-guard');
+    guard.touchSuppressedByClick.mockResolvedValue(true);
+    ReviewService.createInline.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/l/rv9', requestId: 'rr-9', token: 'tok' });
+    try {
+      const r = await buildReviewRequestLink('c1');
+      expect(r).toMatchObject({ url: expect.stringContaining('/l/rv9'), requestId: 'rr-9' });
+      expect(guard.touchSuppressedByClick).not.toHaveBeenCalled();
+    } finally { guard.touchSuppressedByClick.mockReset().mockResolvedValue(false); }
+  });
+
   test('already-reviewed customers short-circuit before any mint', async () => {
     mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: true } }) };
     const r = await buildReviewRequestLink('c1');
@@ -416,6 +433,8 @@ describe('buildReviewRequestLink', () => {
       token: 'tok',
     });
     const r = await buildReviewRequestLink('c1');
+    // The staff composer skips the cadence block and 30-day cooldown only.
+    expect(ReviewService.checkUnscheduledAskGates).toHaveBeenCalledWith('c1', { staffComposer: true });
     expect(r.url).toContain('/l/rv123');
     expect(r.requestId).toBe('rr-1');
     expect(r.line).toContain(r.url);
@@ -423,10 +442,10 @@ describe('buildReviewRequestLink', () => {
 
   test('a gate-blocked customer gets the reason, not a mint', async () => {
     mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
-    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'cooldown' });
+    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'at_cap' });
     const r = await buildReviewRequestLink('c1');
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/last 30 days/);
+    expect(r.reason).toMatch(/3 review requests/);
     expect(ReviewService.createInline).not.toHaveBeenCalled();
   });
 

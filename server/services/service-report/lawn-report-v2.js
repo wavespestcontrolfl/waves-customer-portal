@@ -13,10 +13,14 @@
 
 const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
-const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-report-insights');
+const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
+const featureGates = require('../../config/feature-gates');
+const { lawnReportLeadLive } = featureGates;
+const { buildProgramLine } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
+const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
   LEGACY_WATER_IN_COPY,
   aftercareCustomerTask,
@@ -253,6 +257,9 @@ function mapWater(waterContext, waterSnapshot = null) {
 }
 
 const MOW_STATUS = { below: 'too_short', above: 'too_tall', in_range: 'ideal' };
+// How many findings the web findings card renders (LawnInsightCards limit).
+const LEAD_VISIBLE_FINDINGS = 3;
+
 function mapMowing(mowingHeight, grassLabel) {
   if (!mowingHeight) return null;
   const measured = num(mowingHeight.heightIn);
@@ -437,7 +444,15 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
 // Surfaces a real label watering-in note when present; otherwise a safe default that
 // invents no number. Re-entry text comes from the label when available.
-function buildAftercare(applications) {
+//
+// opts.instruction (GATE_LAWN_WATERING_RULE): the visit's resolved watering
+// instruction (lawn-watering-instruction.js). A hold / water-in / hold-then-
+// water-in state is recorded as product_instruction evidence so the ordinary
+// verdict table resolves it (no new verdict, no new flag): hold sets
+// wateringHold, water_in sets creditableWaterIn, and a mixed visit is a hold.
+// State none keeps the neutral aftercare; state null (or no instruction)
+// leaves the legacy fail-closed reading exactly as it was.
+function buildAftercare(applications, opts = {}) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
   let reentry = null;
@@ -454,6 +469,49 @@ function buildAftercare(applications) {
     const productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim();
     if (productNote && !productNotes.includes(productNote)) productNotes.push(productNote);
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
+  }
+  const instruction = opts && opts.instruction;
+  // The instruction is a record of the visit, never re-phased by the clock
+  // (owner ruling 2026-09-30): only the live banner ends at expiresAt.
+  if (instruction && ['hold', 'water_in', 'hold_then_water_in'].includes(instruction.state)
+    && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
+    const holds = instruction.state !== 'water_in';
+    // A water-in credits a full weekly run only when it is at least as deep as
+    // the plan's per-run depth. Shallower, it counts toward the week but the
+    // plan stays whole (no creditableWaterIn). No plan run to reduce: as before.
+    const plan = opts.weekPlan;
+    // Nullish BEFORE coercion: Number(null) is 0 and would credit any water-in.
+    const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
+    const creditsRun = !plan?.title || plan.prescribesRun !== true
+      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
+    return normalizeLawnAftercare({
+      // Every treatment sentence: the PDF and Ask Waves read only this field.
+      watering: instruction.lines.join(' '),
+      reentry,
+      waterInRequired: instruction.state !== 'hold',
+      wateringHold: holds,
+      creditableWaterIn: instruction.state === 'water_in' && creditsRun,
+      // The task line when the water-in is real but earns no plan credit.
+      ...(instruction.state === 'water_in' && !creditsRun ? { waterInTask: instruction.lines[0] } : {}),
+      needsReview: false,
+      neutral: false,
+      evidenceSource: 'product_instruction',
+      ruleSource: instruction.ruleSource || null,
+      // The hero task carries banner lines verbatim (the PDF strips them): the
+      // first line, or both steps of a hold-then-water-in.
+      ...(holds ? {
+        holdTask: instruction.state === 'hold_then_water_in'
+          ? `${instruction.lines[0]} ${instruction.lines[1]}`
+          : instruction.lines[0],
+      } : {}),
+      holdUntil: instruction.holdUntil || null,
+      waterInBy: instruction.waterInBy || null,
+    });
+  }
+  if (instruction && instruction.state === 'none') {
+    return {
+      watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,
+    };
   }
   // Retain the legacy shape until the product-note classifier lands. The
   // normalizer below prevents this requirement boolean from becoming a made-up
@@ -493,9 +551,11 @@ const ISSUE_TOPIC = {
  *   snapshot history, capped at this visit's date
  * @param {object} [input.mowingTrendFallback]  { trend, band } history when THIS visit
  *   has no gauge reading (same shape subset as mowingHeight)
+ * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
+ *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -588,7 +648,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications);
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
@@ -619,9 +679,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
     .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
-  const photoSummary = String(
+  // The stock "No additional observations from the photo review." placeholder
+  // is not a summary: it would print as a visible sentence under the photos
+  // (web strip and PDF), so it collapses to null like an empty summary.
+  const photoSummaryText = String(
     lawnAssessment.observations || lawnAssessment.aiSummary || lawnAssessment.customerSummary || '',
-  ).trim() || null;
+  ).trim();
+  const photoSummary = photoSummaryText && photoSummaryText !== NO_OBSERVATIONS ? photoSummaryText : null;
   const heroPhoto = photoList[0] || null;
 
   const overallScore = num(scores.overallScore);
@@ -651,15 +715,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // earned it: outside this week's plan (visitInPlanWeek === false) it stays
   // in the Aftercare section only, never promoted into the hero action,
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
+  // An uncredited required water-in keeps its own line as the task through
+  // the shared resolver (aftercareCustomerTask).
   const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
   // A credited water-in the water/damp cards phrase generically ("as
   // directed") already carries this same task in different words — the
   // literal-instruction `includes` check below misses that semantic
   // duplicate, so recognize the shared marker too before concatenating both
   // and repeating the watering command twice (codex P2 #5033 r8).
-  const aftercareAlreadyStated = topIssue?.customerAction
-    && (topIssue.customerAction.includes(aftercareTask || '\u0000')
-      || (topIssue.category === 'water' && topIssue.customerAction.includes(CREDITED_WATER_IN_PHRASE)));
+  const aftercareAlreadyStated = issueRestatesAftercare(topIssue, aftercareTask);
   const realCustomerAction = aftercareTask && aftercareAlreadyStated
     ? topIssue.customerAction
     : [aftercareTask, topIssue?.customerAction].filter(Boolean).join(' ') || null;
@@ -668,7 +732,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
   const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
-  const seasonalNote = buildSeasonalNote(lawnAssessment, grassLabel);
+  // GATE_LAWN_EXPECTATIONS (P9): while live, snapshot.seasonalNote is the
+  // month's program line from protocols.json, anchored on the same noon-UTC
+  // visit month the dormancy guard uses (host-timezone safe, stable for a
+  // permanent token). A null line (no honest line for this visit) keeps the old
+  // season note. `seasonalNoteSource` marks the program line so the lead layout
+  // renders it and only it; gate off adds no key (byte-identical payload).
+  // The gate is read defensively: a partial feature-gates mock (or a missing
+  // export) means off, never a crash in a report build. Only recurring lawn
+  // plan visits (`programVisit`, resolved by the caller) get the line.
+  const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
+    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit })
+    : null;
+  const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
 
   const snapshot = {
     overallScore,
@@ -677,12 +753,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     scoreExplanation,
     rootCause,
     seasonalNote,
+    ...(programLine ? { seasonalNoteSource: 'program' } : {}),
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
     treatmentSummary: buildTreatmentSummary(treatment),
     watching: issues.slice(0, 3).map((i) => i.headline), // "main things we're watching"
-    mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,
     customerAction: realCustomerAction,
     // An older assessment's missing moisture cause is not an all-clear.
@@ -724,7 +800,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
-  if (hasCreditableWaterIn(aftercare) && effectiveWaterStatus === 'surplus') {
+  // Scoped to the visit's plan week: a reopened report's water-in never
+  // refers to an unrelated current plan.
+  if (hasCreditableWaterIn(aftercare, water ? water.weekPlan : null) && effectiveWaterStatus === 'surplus') {
     // Beside a plan the wording stays action-neutral — a hot week's RUN plan
     // can follow a historical surplus, and "exception to easing back" would
     // contradict the card (codex gh-r47).
@@ -744,9 +822,24 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // we only drop it from the customer-facing cards.
   const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
 
+  // Lead mode (GATE_LAWN_REPORT_LEAD): an out-of-band mowing reading drops the
+  // gauge's own recommendation only when the mowing finding card is on screen
+  // to say "Raise/Lower the mower one setting". The web findings card shows the
+  // top LEAD_VISIBLE_FINDINGS by priority, so a mowing card ranked below them
+  // keeps the gauge line, or the step would print nowhere (codex P1 pre-push).
+  // The PDF prints every finding's step, so it never loses it.
+  if (lawnReportLeadLive() && mowing && (mowing.status === 'too_short' || mowing.status === 'too_tall')) {
+    const shown = insights
+      .filter(Boolean)
+      .slice()
+      .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+      .slice(0, LEAD_VISIBLE_FINDINGS);
+    if (shown.some((card) => card.category === 'mowing')) mowing.recommendation = null;
+  }
+
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
-    beforeAfter, progression, progressionNote, aftercare, seasonalNote, smsSummary, trends,
+    beforeAfter, progression, progressionNote, aftercare, smsSummary, trends,
   };
 }
 

@@ -65,8 +65,9 @@ const PROMPT_VERSION = 'photo-id-v2-plant-1';
 // Gemini's reasoning shares this budget with the JSON answer, and the plant
 // prompts (three identity slots, a condition index) run longer than the pest
 // ones: at 2048 a lawn read came back cut off in the 2026-09-28 photo eval,
-// which the ladder can only treat as a miss.
-const MAX_OUTPUT_TOKENS = 4096;
+// which the ladder can only treat as a miss. 8192 matches the pest engine
+// after its own 2048 cap cut off a live read (2026-10-01).
+const MAX_OUTPUT_TOKENS = 8192;
 const PRETTY_SURE_MIN = 0.80;
 const LIKELY_MIN = 0.55;
 const LINEAGE_CLIMB_MIN = 0.60;
@@ -184,7 +185,9 @@ function signatureFor(entry) {
       hosts: c.hosts,
       outcome: c.outcome,
       recoveryNote: c.recovery_note,
-      isPestPossibility: false,
+      // A pest-section organism that carries a condition block (it cannot be
+      // confirmed from a photo, e.g. ground pearls) keeps the pest hard cap.
+      isPestPossibility: catalog.sectionOf(entry) === 'pest',
     };
   }
   const differentials = entry.look_alikes.map((la) => ({
@@ -573,6 +576,9 @@ function ownSignatureSettleIt(top) {
   if (sig.confirmableBy === 'photo') return { kind: 'photo', text: sig.signatureText };
   if (sig.confirmableBy === 'field_test' && sig.fieldTests[0]) return fieldTestBlock(sig.fieldTests[0]);
   if (sig.confirmableBy === 'lab') return { kind: 'technician', text: LAB_CONFIRM_TEXT };
+  // Technician-found but arborist-confirmed (Thielaviopsis, shot-hole borers):
+  // name the arborist, never a routine visit (Codex #5433 r3).
+  if (sig.confirmableBy === 'technician' && top.entry.service?.referral === 'arborist') return { kind: 'technician', text: REFERRAL_TEMPLATES.arborist };
   if (sig.confirmableBy === 'technician' || sig.confirmableBy === 'field_test') return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
   return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
 }
@@ -608,7 +614,12 @@ function settleItFor(possibilities, subject) {
 // ── next_step_hint (§6.6) ───────────────────────────────────────────────────
 
 function referralOutcomeCandidateAmong(possibilities) {
-  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && ['no_cure', 'regulated'].includes(p.sig.outcome)) || null;
+  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && (
+    ['no_cure', 'regulated'].includes(p.sig.outcome)
+    // A tree & shrub pest that needs a specialist (shot-hole borers → arborist)
+    // keeps its referral even though its outcome is manageable (Codex #5433 r2).
+    || (p.entry.action === 'specialist' && p.entry.service.line === 'tree_shrub')
+  )) || null;
 }
 /** Contract §6.6: referrals look at the top 2 only, but ANY displayed
  * possibility needing inspection routes `inspection` (herbicide injury
@@ -689,8 +700,8 @@ function plantSafetyFields(entry) {
 // entry to carry a safety line, so it shows only these fixed clauses —
 // never a group's own prose — each chosen when ANY plant under the answered
 // node, reviewed or not, carries that hazard: the node is triaged for its
-// worst member, the pest engine's `unnamedSafetyLineFor` rule (Codex #5186
-// r6 P1). The skin/eye and pet clauses are the pest engine's own wording.
+// worst member, the pest engine's original `unnamedSafetyLineFor` rule
+// (Codex #5186 r6 P1; the pest engine narrowed to named reads 2026-10-01). The skin/eye and pet clauses are the pest engine's own wording.
 const UNNAMED_PLANT_SAFETY_CLAUSES = Object.freeze({
   base: "Until we know exactly which plant this is, don't eat any part of it, and keep kids and pets from chewing on it.",
   swallowed: 'If anyone swallows part of it, call Poison Control at 1-800-222-1222 right away.',

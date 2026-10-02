@@ -150,6 +150,7 @@ const WRITE_TWO_STEP = [
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -165,6 +166,10 @@ const WRITE_TWO_STEP = [
   'add_github_pr_label',
   'request_codex_review',
   'submit_gsc_sitemap',
+  // Feature switches (owner ruling 2026-09-28, Decision 5) — full-access-only,
+  // PREVIEW ONLY: confirmed:true refuses until the commit-path PR.
+  'set_railway_gate',
+  'set_growthbook_feature_environment',
   'cancel_queued_message',
 ];
 
@@ -302,6 +307,8 @@ const READ_ONLY = [
   // gap-report-tools.js: read-only list over agent_gap_reports (rows are
   // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
+  // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
+  'needs_me',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
@@ -563,6 +570,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }],
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],
+    // The seeded lead's first name differs, so the preview reaches the gate
+    // with a real diff to show (an identical value is refused before it).
+    ['leads-tools', 'executeLeadsTool', 'update_lead_contact', { lead_id: 'lead-1', first_name: 'Roadie' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
@@ -614,6 +624,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['cloudflare-ops-tools', 'executeCloudflareOpsTool', 'retry_cloudflare_pages_build', { project_name: 'bradenton-pest-control' }],
     ['ops-tools', 'executeOpsTool', 'redeploy_railway_service', { service_name: 'portal-server' }],
     ['ops-tools', 'executeOpsTool', 'restart_railway_service', { service_name: 'portal-server' }],
+    ['ops-tools', 'executeOpsTool', 'set_railway_gate', { gate_name: 'GATE_STAMPED_ZERO_FREE', value: 'true' }],
+    ['growthbook-tools', 'executeGrowthbookTool', 'set_growthbook_feature_environment', { feature_id: 'synthetic-flag', enabled: true }],
     ['github-ops-tools', 'executeGithubOpsTool', 'rerun_failed_github_checks', { pr_number: 5230 }],
     ['github-ops-tools', 'executeGithubOpsTool', 'add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
     ['github-ops-tools', 'executeGithubOpsTool', 'request_codex_review', { pr_number: 5230 }],
@@ -702,6 +714,30 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
             name: 'production',
             serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'portal-server', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
           },
+        },
+      }],
+    },
+    set_railway_gate: {
+      env: { RAILWAY_TOKEN: 'test-railway-token', RAILWAY_PROJECT_ID: 'proj-1', RAILWAY_ENVIRONMENT_ID: 'env-1', RAILWAY_SERVICE_ID: 'svc-1' },
+      responses: [
+        {
+          data: {
+            environment: {
+              name: 'production',
+              serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'waves-customer-portal', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
+            },
+          },
+        },
+        { data: { variables: { GATE_STAMPED_ZERO_FREE: 'false' } } },
+      ],
+    },
+    set_growthbook_feature_environment: {
+      env: { GROWTHBOOK_API_KEY: 'test-growthbook-key' },
+      responses: [{
+        feature: {
+          id: 'synthetic-flag', archived: false, valueType: 'boolean', defaultValue: 'false',
+          dateUpdated: '2026-01-01T00:00:00Z',
+          environments: { production: { enabled: false, defaultValue: 'false', rules: [] } },
         },
       }],
     },

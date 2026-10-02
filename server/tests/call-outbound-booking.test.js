@@ -437,7 +437,7 @@ describe('voice-agent bookings share the office-review activation path', () => {
     const fn = (table) => {
       const q = {};
       ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
-        'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'leftJoin', 'forUpdate'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' && rows ? rows : []));
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return { ...row };
@@ -515,6 +515,37 @@ describe('voice-agent bookings share the office-review activation path', () => {
     // …and the post-commit activation still ran the rest of the legs.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
     expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  describe('a street-level hold completed through the shared seam (pest-recap / project-completion default to performed)', () => {
+    const setup = (row) => {
+      const trx = makeHandle(row);
+      const db = require('../models/db');
+      const dbHandle = makeHandle(row);
+      db.mockImplementation(dbHandle);
+      db.transaction = dbHandle.transaction;
+      db.fn = dbHandle.fn;
+      db.raw = dbHandle.raw;
+      return { trx };
+    };
+    afterEach(() => jest.restoreAllMocks());
+    test('a performed completion stamps field_confirmed_at in the transition trx and still writes the credit evidence', async () => {
+      jest.spyOn(require('../services/street-level-hold'), 'isStreetLevelHoldVisit').mockResolvedValue(true);
+      const { trx } = setup(voiceRow({ status: 'confirmed', field_confirmed_at: null }));
+      await transitionJobStatus({ jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', trx });
+      expect(trx._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.field_confirmed_at instanceof Date)).toBe(true);
+      expect(InspectionCredit.markBookingForInspectionCredit).toHaveBeenCalledWith(trx, expect.objectContaining({ scheduledServiceId: 'svc-v1' }));
+    });
+    for (const holdCompletionOutcome of ['incomplete', 'customer_declined']) {
+      test(`${holdCompletionOutcome}: nothing stamped, no credit evidence`, async () => {
+        jest.spyOn(require('../services/street-level-hold'), 'isStreetLevelHoldVisit').mockResolvedValue(true);
+        InspectionCredit.markBookingForInspectionCredit.mockClear();
+        const { trx } = setup(voiceRow({ status: 'confirmed', field_confirmed_at: null }));
+        await transitionJobStatus({ jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', holdCompletionOutcome, trx });
+        expect(trx._state.updates.some((u) => u.vals && u.vals.field_confirmed_at)).toBe(false);
+        expect(InspectionCredit.markBookingForInspectionCredit).not.toHaveBeenCalled();
+      });
+    }
   });
 
   test('a pending voice row going straight to en_route activates instead of going half-armed', async () => {
@@ -896,6 +927,36 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       expect(stampOf(db)).toBeUndefined();
     });
 
+    // A concurrent activator (the stranded-activation sweep, a move's lazy activation) can win the guarded
+    // customer_confirmed = false stamp while this call's legs run. Zero rows is then NOT a failure: the legs
+    // are idempotent and the row IS activated — the technician's new-visit card keys on this answer.
+    const zeroRowStamp = (svcRow) => {
+      const base = confirmHookDb({ fallbackLeads: [], svcRow });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.customer_confirmed) return 0;
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      return db;
+    };
+
+    test('a zero-row stamp is activated when a concurrent activator already stamped the row', async () => {
+      const db = zeroRowStamp({ status: 'confirmed', customer_confirmed: true, scheduled_date: '2026-07-14', window_start: '09:00' });
+      expect(await runOfficeConfirmActivation(db, svc, 'test')).toBe(true);
+    });
+
+    test('a zero-row stamp on a row nobody stamped (a rejection landed in the window) is still not activated', async () => {
+      const db = zeroRowStamp({ status: 'confirmed', customer_confirmed: false, scheduled_date: '2026-07-14', window_start: '09:00' });
+      expect(await runOfficeConfirmActivation(db, svc, 'test')).toBe(false);
+    });
+
     test('a stamp write that fails reports false — the sweep still owns the row', async () => {
       const base = confirmHookDb({ fallbackLeads: [] });
       const db = (table) => {
@@ -1173,7 +1234,7 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     const idx = src.indexOf('let fieldConfirmVerified = false');
     expect(idx).toBeGreaterThan(-1);
-    const recheck = src.slice(idx, idx + 4000);
+    const recheck = src.slice(idx, idx + 5200);
     // One verification covers the EXPLICIT technician confirm AND the day-of
     // takeover — the confirm path finds the visit by ID with no ownership
     // predicate, so an unowned tech confirm must fall back to OFFICE-confirm

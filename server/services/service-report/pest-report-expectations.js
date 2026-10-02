@@ -76,6 +76,9 @@ function isEaveApplicationArea(value) {
 // SW Florida rainy season (owner framing: "ants spike when the rains come").
 const RAINY_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]); // Jun–Oct
 
+// Product classes that leave a surface residual (the forecast caveat).
+const RESIDUAL_SPRAY_CLASSES = new Set(['non_repellent', 'pyrethroid']);
+
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 }
@@ -151,7 +154,10 @@ function rainfastClauseText(products) {
 // "attached to the trailing-week fact" case and the "no settled trailing
 // total to attach it to" case below (codex P2 deferred finding c, #5137) so
 // the two can never drift into different wording for the same signal.
-const HEAVY_RAIN_FORECAST_CAVEAT = 'Heavy rain right after a treatment can reduce it — if you\'re seeing activity after a downpour, let us know.';
+// Customer wording below is owner-approved 2026-10-01 (review page
+// SBDx87AvuCeuzeYRzqBJjX, v7): technical, no brand names, never "die" /
+// "kill", the source is "our rain tracker".
+const HEAVY_RAIN_FORECAST_CAVEAT = 'Heavy rain soon after an exterior application can wash off part of the residual before it fully binds to the treated surfaces. If activity picks up after a downpour, text us.';
 
 // The opening rain line: the trailing-week fact (+ optional rainfast/forecast
 // clauses) when a settled week is available, OR — when it is not — the live
@@ -167,14 +173,19 @@ function buildTrailingWeekRainLine({
   // The caveat is a treatment claim: an inspection- or sweep-only visit (no
   // recorded application) never gets it, attached or standalone (codex r2
   // on #5265).
-  const treatmentCaveat = forecastHeavyRain && (products || []).length > 0;
+  // The caveat says a residual can wash off before it binds, so it needs a
+  // residual spray (non-repellent or pyrethroid) recorded outside; a bait or
+  // IGR at an exterior chip forms no surface residual (codex #5523 P2).
+  const treatmentCaveat = forecastHeavyRain && (products || []).some((product) => (
+    RESIDUAL_SPRAY_CLASSES.has(classifyProductExpectation(product)) && hasExteriorApplicationEvidence(product)
+  ));
   if (rainInches == null) return treatmentCaveat ? HEAVY_RAIN_FORECAST_CAVEAT : null;
   const inchesText = formatInches(rainInches);
   let sentence = rainConfidence === 'low'
     // Low-confidence (city-collective fallback) hedges the number rather
     // than stating it as an exact property read.
-    ? `Rain gauges for your area suggest roughly ${inchesText}" over the past week — local totals can vary.`
-    : `It's rained about ${inchesText}" at your property over the past week.`;
+    ? `Our rain tracker recorded roughly ${inchesText}" of rain in your area over the past 7 days.`
+    : `Our rain tracker recorded about ${inchesText}" of rain at your property over the past 7 days.`;
   sentence += rainfastClauseText(products);
   // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
   // Never a claim that rain can't otherwise affect the treatment beyond the
@@ -245,13 +256,15 @@ function buildRainExpectation({
     // colony/trail claim is pest-neutral wording only.
     const perimeterTreatmentEvidence = (products || []).some((product) => {
       const cls = classifyProductExpectation(product);
-      return (cls === 'non_repellent' || cls === 'pyrethroid')
-        && hasExteriorApplicationEvidence(product)
+      // The band line describes a non-repellent's 6-foot perimeter band and
+      // ant-to-ant transfer, so a repellent barrier never earns it.
+      return cls === 'non_repellent'
+        && hasPerimeterBandEvidence(product)
         && hasAntTargetEvidence(product);
     });
     lines.push(perimeterTreatmentEvidence
-      ? 'Heavy rain pushes ants indoors; trails over the next few days usually mean the colony is moving through the treated band.'
-      : 'Heavy rain pushes ants indoors for a few days — if activity is still noticeable after about a week, text us and we\'ll take another look.');
+      ? 'Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.'
+      : 'Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
   }
 
   if (!lines.length) return null;
@@ -326,24 +339,20 @@ function hasAntTargetEvidence(product) {
 //      explicit PRODUCT_EXPECTATION_CLASS map) was also applied
 //      -> combined wording — the eaves claim still rests on the recorded
 //         action, never on the product target alone
-const WEB_ONLY_TEXT = 'We knocked down webs around the eaves and entry points.';
+// "any egg sacs": the records name webs, never egg sacs, so the copy never
+// says egg sacs were there (codex #5523 P2).
+const WEB_ONLY_TEXT = 'We swept webs and any egg sacs from your eaves and entry points.';
 // Same de-web fact, location-neutral — no recorded action placed the work
 // at the eaves (codex P2 round 5).
-const WEB_ONLY_GENERIC_TEXT = 'We knocked down the webs we could reach on the exterior.';
-const WEB_AND_RESIDUAL_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
+const WEB_ONLY_GENERIC_TEXT = 'We swept webs and any egg sacs from the exterior of your home.';
+const WEB_AND_RESIDUAL_TEXT = 'We swept webs and any egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.';
 
-// De-web-only expectation (combo 1): no "the residual we applied" claim —
-// there is no residual to point to. New webs regrowing is just biology, not
-// evidence the sweep "isn't working" (there is no residual to work).
-const WEB_ONLY_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal.';
-const WEB_ONLY_NEXT_STEP = 'If webbing keeps coming back over the next two weeks, text us and we\'ll take another look.';
-
-// Residual-backed expectation (combo 2) — the only case where we can
-// honestly credit a residual for thinning webs out over time.
-const RESIDUAL_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal. '
-  + 'The residual we applied kills spiders that land on treated eaves and entry points, so webbing should '
-  + 'noticeably thin out over about two weeks.';
-const RESIDUAL_NEXT_STEP = 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.';
+// Owner 2026-10-01: webs are not a return-visit item, so the spider card has
+// no "text us" next step, and it never tells the customer new webs are coming.
+const WEB_ONLY_EXPECTATION = 'Removing webs and any egg sacs takes out established harborage and any eggs with them, so spiders lose their foothold on the structure.';
+// Residual-backed expectation (combo 2) — the only case where a residual
+// can be credited for thinning webs out over time.
+const RESIDUAL_EXPECTATION = 'The residual binds to those surfaces, so it eliminates spiders that return to build there. Webbing thins out over the next few weeks.';
 
 function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applications = [] } = {}) {
   const actionHit = (actionLabels || []).some(
@@ -393,13 +402,11 @@ function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applica
 
   const whatWeDid = residualApplied ? WEB_AND_RESIDUAL_TEXT : (eaveNamed ? WEB_ONLY_TEXT : WEB_ONLY_GENERIC_TEXT);
   const expectation = residualApplied ? RESIDUAL_EXPECTATION : WEB_ONLY_EXPECTATION;
-  const nextStep = residualApplied ? RESIDUAL_NEXT_STEP : WEB_ONLY_NEXT_STEP;
 
   return {
     headline: 'Spiders',
     whatWeDid,
     expectation,
-    nextStep,
   };
 }
 
@@ -442,7 +449,11 @@ const PRODUCT_EXPECTATION_CLASS = new Map([
   ['advion evolution cockroach gel bait', 'roach_gel_bait'],
   ['advion cockroach gel bait', 'roach_gel_bait'],
   ['advion ant bait gel', 'ant_bait'],
-  ['advion wdg granular', 'ant_bait'],
+  // The catalog row is a granular bait broadcast by the pound (migration
+  // 20260712100000, report-product-copy.js), and no approved line describes
+  // a granular bait: the ant-bait line says "gel bait" (codex #5523 P1), so
+  // it gets no line, the same fail-closed posture as an unmapped product.
+  ['advion wdg granular', null],
   ['gentrol igr', 'igr'],
   ['tekko pro igr', 'igr'],
   // Surfactant/adjuvant — deliberately maps to no class (documented here so
@@ -456,36 +467,91 @@ function classifyProductExpectation(product = {}) {
   return PRODUCT_EXPECTATION_CLASS.get(name) ?? null;
 }
 
+// The active ingredient each mapped product's EPA label names (labels read
+// 2026-10-01). Customer copy names the active ingredient, never the brand
+// (owner 2026-10-01), so this map is keyed by the same catalog names as
+// PRODUCT_EXPECTATION_CLASS. Onslaught's piperonyl butoxide is a synergist,
+// not the insecticide, so only esfenvalerate is named.
+const PRODUCT_ACTIVE_INGREDIENT = new Map([
+  ['taurus sc', 'fipronil'],
+  ['alpine wsg', 'dinotefuran'],
+  ['atticus talak', 'bifenthrin'],
+  ['atticus talak 7.9 f', 'bifenthrin'],
+  ['demand cs', 'lambda-cyhalothrin'],
+  ['onslaught fastcap', 'esfenvalerate'],
+  ['delta dust', 'deltamethrin'],
+  ['advion evolution cockroach gel bait', 'indoxacarb'],
+  ['advion cockroach gel bait', 'indoxacarb'],
+  ['advion ant bait gel', 'indoxacarb'],
+  ['gentrol igr', '(S)-hydroprene'],
+  ['tekko pro igr', 'pyriproxyfen and novaluron'],
+].map(([name, ai]) => [normalizeProductName(name), ai]));
+
+// Only Tekko Pro's label states a duration on cockroach nymphs (up to 6
+// months); Gentrol's label gives none, so its line drops that sentence.
+const IGR_SIX_MONTH_LABEL = new Set(['tekko pro igr'].map(normalizeProductName));
+
+function activeIngredientPhrase(products) {
+  const names = [...new Set(products
+    .map((product) => PRODUCT_ACTIVE_INGREDIENT.get(normalizeProductName(product?.name)))
+    .filter(Boolean))];
+  if (!names.length) return null;
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+// Owner-approved 2026-10-01 (review page SBDx87AvuCeuzeYRzqBJjX, v7):
+// technical, the active ingredient instead of a brand, "eliminate" never
+// "die"/"kill". Each builder takes the visit's active-ingredient phrase
+// (null when no mapped product names one) and returns the customer line.
 const EXPECTATION_TEXT = {
-  non_repellent: 'Non-repellent products (like what we used) work by transfer — ants may show up more for a '
-    + 'few days as they carry it back to the colony, then drop off over about 1–2 weeks.',
-  // Same class, but no application on this visit was tagged for ants
-  // (codex P1 2026-09-28 round 4) — pest-neutral transfer wording.
-  non_repellent_general: 'Non-repellent products (like what we used) work by transfer — insects that cross the '
-    + 'treated area carry it back to where they nest, so activity can pick up for a few days before dropping '
-    + 'off over about 1–2 weeks.',
-  ant_bait: 'Ants that find the bait carry it back to the colony, so you may see a few more ants near the '
-    + 'placements for a few days before they drop off.',
-  roach_gel_bait: 'With gel bait, dead roaches may show up out in the open for a week or two as the colony '
-    + 'feeds and dies off — that\'s the bait working, not a sign it isn\'t.',
+  // Ant-tagged AND applied outside: the 6-foot perimeter band (owner rule:
+  // a non-repellent sprayed outside is a 6-foot band).
+  non_repellent: (ai, { footage = true } = {}) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'} as a ${footage ? '6-foot ' : ''}perimeter band `
+    + 'around your foundation. Ants can\'t detect it, so foragers walk through the treated zone, pick up the active '
+    + 'ingredient and transfer it to the rest of the colony at the nest. Expect a short spike in ant activity for '
+    + 'several days as the colony is exposed, then a steady decline over the next couple of weeks.',
+  // Same class without both an ant tag and an exterior record — no band,
+  // no ant claim (codex P1 2026-09-28 round 4).
+  non_repellent_general: (ai) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'}. Insects can't `
+    + 'detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their '
+    + 'harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
+  // The closing instruction to the customer is left out of the writer's plain
+  // version: the writer's rule 7 bans aftercare instructions (codex #5523 P2).
+  // No placement claim: the builders read no application area or method,
+  // so the bait and dust lines never say where the product went (codex
+  // #5523 r2).
+  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} for the ants. `
+    + 'Foragers feed on it and share it through the colony before it takes effect. You may see more '
+    + `ants on the placements for a few days.${aftercare ? ' Leave them alone; they\'re carrying the bait back to the nest.' : ''}`,
+  roach_gel_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} for the `
+    + 'roaches. Roaches feed on it and carry it back into '
+    + 'harborage, where the active ingredient eliminates them. Over the next week or two you may see roaches out in '
+    + 'daylight, slowed and disoriented, as the active ingredient takes effect.'
+    + `${aftercare ? ' Don\'t use over-the-counter sprays near the placements; a residual spray contaminates the bait and keeps roaches off it.' : ''}`,
   // Barrier wording — ONLY when the application evidence confirms an
   // exterior/perimeter method or area (see hasExteriorApplicationEvidence).
-  pyrethroid: 'The barrier treatment keeps working after it\'s applied, but a few insects can still wander in '
-    + 'and die near doors and windows for about 10–14 days.',
+  pyrethroid: (ai) => `We applied a residual ${ai ? `${ai} ` : ''}barrier around the outside of your home. `
+    + `${ai && !ai.includes(' and ') ? `${ai[0].toUpperCase()}${ai.slice(1)}` : 'The residual'} binds to the treated `
+    + 'surfaces and eliminates insects on contact as they cross it. Finding a few affected insects near doors and '
+    + 'windows over the next couple of weeks means the barrier is working.',
   // Same product class, but the application's method/area is unknown or not
   // confirmed exterior (owner ruling 2026-09-28, P1 audit round 2): never
-  // claim a barrier is protecting doors/windows without evidence it was
-  // applied there. Still honest about how the product itself works.
-  pyrethroid_unconfirmed: 'This treatment keeps working after it\'s applied, so you may still see a few insects '
-    + 'die off over the next 10–14 days as they come into contact with it.',
-  // Dust formulations (Delta Dust and any other dust in the product map,
-  // owner ruling 2026-09-28, P1 audit round 2) go into cracks, voids, and
-  // gaps — never a surface barrier, so this never uses "barrier" or
-  // "near doors and windows" language.
-  dust: 'Dust products work down inside cracks, voids, and gaps rather than as a visible surface treatment, so '
-    + 'it can take a little longer to notice fewer bugs — it\'s working out of sight.',
-  igr: 'IGR products work on the next generation, so results build gradually over several weeks rather than '
-    + 'overnight.',
+  // claim a barrier without evidence it was applied there.
+  pyrethroid_unconfirmed: (ai) => `We applied ${ai ? `${ai}, a residual insecticide` : 'a residual insecticide'} that `
+    + 'binds to treated surfaces and eliminates insects on contact. Finding a few affected insects over the next '
+    + 'couple of weeks means it\'s working.',
+  // Never a surface barrier (owner ruling 2026-09-28). Delta Dust label: up
+  // to 8 months when left undisturbed. The label duration is left out of the
+  // writer's plain version: a residual period is not a follow-up window, and
+  // the writer takes EXPECTATIONS timeframes as contact windows (codex #5523
+  // r2).
+  dust: (ai, { labelDuration = true } = {}) => `We applied ${ai ? `a ${ai} insecticide dust` : 'an insecticide dust'}. `
+    + 'Dust holds up in cracks and voids where sprays can\'t reach'
+    + `${labelDuration ? ', and it is labeled for up to 8 months of residual control of crawling insects when left undisturbed' : ''}`
+    + '. Results build over the next few weeks.',
+  igr: (ai, { sixMonthLabel = false } = {}) => `We added an insect growth regulator (IGR)${ai ? ` with ${ai}` : ''}. `
+    + 'It stops immature insects from developing into breeding adults and reduces egg hatch, which breaks the '
+    + `breeding cycle.${sixMonthLabel ? ' It is labeled for up to 6 months of activity on cockroach nymphs.' : ''}`,
 };
 
 // Fixed priority when more than 3 classes triggered — cap to ~3 lines.
@@ -516,37 +582,87 @@ function hasExteriorApplicationEvidence(product = {}) {
   return isExteriorApplicationArea(product.applicationArea);
 }
 
-function buildWhatToExpect({ products = [] } = {}) {
-  const classes = new Set();
+// The "6-foot perimeter band around your foundation" wording needs the band
+// itself on record: an explicit perimeter spray, or a perimeter/foundation
+// chip by exact key. Other exterior chips (Lanai, Yard, Eaves / soffit, Bait
+// stations) are spot work, never a band (codex #5523 P2).
+const PERIMETER_BAND_CHIPS = new Set(['Perimeter', 'Exterior perimeter', 'Property perimeter', 'Foundation', 'Foundation perimeter']
+  .map(normalizeAreaChipText));
+
+function hasPerimeterBandEvidence(product = {}) {
+  if (product.methodInferred !== true && String(product.method || '') === 'perimeter_spray') return true;
+  return applicationAreaChips(product.applicationArea).some((chip) => PERIMETER_BAND_CHIPS.has(chip));
+}
+
+// `plain` is the AI report writer's version of the same lines: its owner
+// rules never name an active ingredient or a footage figure and never give
+// aftercare instructions (report-writer-rules.js rules 5 and 7 and its
+// footage screen), so those words are left out and everything else is
+// identical.
+function buildWhatToExpect({ products = [], plain = false } = {}) {
+  const byClass = new Map();
+  const ingredients = (list) => (plain ? null : activeIngredientPhrase(list));
   // Confirmed exterior evidence for ANY qualifying pyrethroid application —
   // one confirmed application is enough to earn the barrier line even if
   // another pyrethroid application this visit has unknown method/area.
   let pyrethroidExteriorConfirmed = false;
-  // Ant-specific non-repellent wording needs an ant-TAGGED non-repellent
-  // application (codex P1 round 4); otherwise the pest-neutral variant.
-  let nonRepellentAntTagged = false;
+  // The 6-foot band line needs ONE non-repellent application that is both
+  // ant-tagged (codex P1 round 4) and recorded outside; otherwise the
+  // general variant.
+  let nonRepellentAntBand = false;
   for (const product of products) {
     const cls = classifyProductExpectation(product);
     if (!cls) continue;
-    classes.add(cls);
+    if (!byClass.has(cls)) byClass.set(cls, []);
+    byClass.get(cls).push(product);
     if (cls === 'pyrethroid' && hasExteriorApplicationEvidence(product)) {
       pyrethroidExteriorConfirmed = true;
     }
-    if (cls === 'non_repellent' && hasAntTargetEvidence(product)) {
-      nonRepellentAntTagged = true;
+    if (cls === 'non_repellent' && hasAntTargetEvidence(product) && hasPerimeterBandEvidence(product)) {
+      nonRepellentAntBand = true;
     }
   }
-  if (!classes.size) return null;
+  if (!byClass.size) return null;
   const lines = EXPECTATION_PRIORITY
-    .filter((cls) => classes.has(cls))
+    .filter((cls) => byClass.has(cls))
     .slice(0, 3)
     .map((cls) => {
-      if (cls === 'pyrethroid' && !pyrethroidExteriorConfirmed) return EXPECTATION_TEXT.pyrethroid_unconfirmed;
-      if (cls === 'non_repellent' && !nonRepellentAntTagged) return EXPECTATION_TEXT.non_repellent_general;
-      return EXPECTATION_TEXT[cls];
+      const classProducts = byClass.get(cls);
+      const ai = ingredients(classProducts);
+      if (cls === 'pyrethroid' && !pyrethroidExteriorConfirmed) return EXPECTATION_TEXT.pyrethroid_unconfirmed(ai);
+      // The barrier sentence places the product outside, so it names only
+      // the products recorded there.
+      if (cls === 'pyrethroid') {
+        return EXPECTATION_TEXT.pyrethroid(ingredients(classProducts.filter(hasExteriorApplicationEvidence)));
+      }
+      if (cls === 'non_repellent' && !nonRepellentAntBand) return EXPECTATION_TEXT.non_repellent_general(ai);
+      // The band sentence places the product outside for ants, so it names
+      // only the applications that earned it.
+      if (cls === 'non_repellent') {
+        return EXPECTATION_TEXT.non_repellent(ingredients(classProducts.filter(
+          (p) => hasAntTargetEvidence(p) && hasPerimeterBandEvidence(p),
+        )), { footage: !plain });
+      }
+      if (cls === 'igr') {
+        // The label's 6-month figure is for cockroach nymphs, so it needs a
+        // Tekko Pro application tagged for roaches (Tekko also covers
+        // fleas, flies and mosquitoes), and never reaches the writer.
+        const sixMonthLabel = !plain && classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name))
+          && Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)));
+        return EXPECTATION_TEXT.igr(ai, { sixMonthLabel });
+      }
+      return EXPECTATION_TEXT[cls](ai, { aftercare: !plain, labelDuration: !plain });
     })
     .filter((line) => validateCustomerCopy(line));
   return lines.length ? { lines } : null;
+}
+
+// The classes behind buildWhatToExpect's lines, in the same priority order
+// and cap. The report writer (GATE_REPORT_WRITER_RULES) turns the longest
+// stated window among them into a reach-out date.
+function whatToExpectClasses({ products = [] } = {}) {
+  const classes = new Set((products || []).map(classifyProductExpectation).filter(Boolean));
+  return EXPECTATION_PRIORITY.filter((cls) => classes.has(cls)).slice(0, 3);
 }
 
 // Canonical product shape for expectations classification
@@ -630,8 +746,10 @@ module.exports = {
   buildRainExpectation,
   buildSpiderExpectation,
   buildWhatToExpect,
+  whatToExpectClasses,
   buildPestExpectations,
   toExpectationProduct,
+  isExteriorApplicationArea,
   formatRainfastMinutes,
   formatInches,
 };

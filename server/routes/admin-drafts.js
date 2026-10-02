@@ -840,7 +840,9 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
-        'customers.nearest_location_id', 'customers.city')
+        'customers.nearest_location_id', 'customers.city',
+        'customers.zip as customer_zip', 'customers.latitude as customer_latitude',
+        'customers.longitude as customer_longitude')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -871,7 +873,10 @@ router.get('/', async (req, res, next) => {
     const smsLogs = smsLogIds.length ? await db('sms_log').whereIn('id', smsLogIds) : [];
     const smsLogById = new Map(smsLogs.map((row) => [String(row.id), row]));
     const resolved = await Promise.all(drafts.map(async (d) => {
-      const customer = d.customer_id ? { id: d.customer_id, phone: d.phone, city: d.city } : null;
+      const customer = d.customer_id ? {
+        id: d.customer_id, phone: d.phone, city: d.city,
+        zip: d.customer_zip, latitude: d.customer_latitude, longitude: d.customer_longitude,
+      } : null;
       const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
       const r = await resolveDraftRecipient(d, preloaded).catch(() => null);
       const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId, customer);
@@ -1105,6 +1110,7 @@ router.put('/:id/revise', async (req, res, next) => {
   try {
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
+    const linkedVisitIds = require('../services/street-level-hold').linkedVisitIdsFrom(req.body?.linkedVisitIds);
     // Same rule as approve — judged before the claim, nothing to release.
     const reviseRefusal = await draftImmediateOnlyLinkRefusal(revisedResponse);
     if (reviseRefusal) return res.status(409).json({ error: reviseRefusal });
@@ -1209,6 +1215,9 @@ router.put('/:id/revise', async (req, res, next) => {
           customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
+          // The visits the revised text's reschedule / appointment links point at (the composer sends them):
+          // the shared send step holds the text while any is a live street-level address hold.
+          ...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),
         },
       });
     } catch (sendErr) {

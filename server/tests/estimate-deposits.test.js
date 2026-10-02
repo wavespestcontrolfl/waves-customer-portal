@@ -426,6 +426,37 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  it('a blank-city customer retry takes the ZIP line under GATE_SMS_LINE_ADDRESS_FALLBACK and replays by customer', async () => {
+    const prevGate = process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+    process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = 'true';
+    try {
+      forceRecordableViaFailOpen();
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      renderSmsTemplate.mockResolvedValue('Deposit received.');
+      sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-07-07T12:00:00.000Z' });
+      mockIsEstimateAcceptActive.mockReturnValue(true);
+      const { handler, state } = statefulWebhookDb({
+        estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+        customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: '', zip: '34285' },
+      });
+      mockDbHandler = handler;
+
+      await handleDepositIntentSucceeded(succeededPi);
+
+      expect(state.smsLogInserts).toHaveLength(1);
+      expect(state.smsLogInserts[0].from_phone).toBe('+19412973337'); // Venice line, not Bradenton
+      expect(JSON.parse(state.smsLogInserts[0].metadata).resolve_from_by_customer).toBe(true);
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+      else process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = prevGate;
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      renderSmsTemplate.mockResolvedValue(null);
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+    }
+  });
+
   it('email-only receipt channel: no SMS, sends the deposit.receipt email instead', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');

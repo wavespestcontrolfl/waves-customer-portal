@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/billing-channel-email', () => ({ sendBillingChannelEmail: jest.fn() }));
@@ -21,6 +22,13 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 // hold reads; the hold itself is covered by
 // send-customer-message-callback-number-hold.test.js and
 // callback-number-hold-boundary.test.js.
+// The messaging-hold read (payment_failure is hold-gated at the send boundary) is covered by the
+// dispute-hold suites; this file's bespoke `db` double cannot answer it, and an unanswerable read
+// fails closed, so here no customer is held.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberBlocksSend: jest.fn(async () => false),
   disclaimedNumberHeldForVisit: jest.fn(async () => false),

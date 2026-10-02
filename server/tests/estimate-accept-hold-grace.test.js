@@ -192,7 +192,9 @@ describe('accept-path wiring (source pins)', () => {
     expect(expiredMappings).toHaveLength(2);
     const unavailableMappings = src.match(/commitErr\.code === 'SLOT_UNAVAILABLE'\) \{\s*\n\s*const err = new Error\('slot no longer available — re-pick a slot'\);\s*\n\s*err\.status = 409;\s*\n\s*err\.code = 'SLOT_UNAVAILABLE';/g) || [];
     expect(unavailableMappings).toHaveLength(2);
-    expect(src).toMatch(/return res\.status\(err\.status\)\.json\(\{ error: err\.message, \.\.\.\(err\.code \? \{ code: err\.code \} : \{\}\) \}\)/);
+    // The 4xx translation forwards the code (later fields, like a 409's
+    // server-side answer, may follow it).
+    expect(src).toMatch(/return res\.status\(err\.status\)\.json\(\{\s*error: err\.message,\s*\.\.\.\(err\.code \? \{ code: err\.code \} : \{\}\),/);
   });
 
   test('only an ACTUALLY lapsed own hold is reported as an expiry — a live hold that failed adoption keeps the linkage message (pre-push audit P1)', () => {

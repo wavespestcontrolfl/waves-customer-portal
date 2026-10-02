@@ -97,6 +97,16 @@ beforeEach(() => {
 });
 
 describe('Action Inbox generators', () => {
+  test('failed-payments-today alert leaves out never-attempted collection-hold deferrals (B10)', async () => {
+    const capture = primeDb({ payments: { count: '2' } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((alert) => alert.id === 'payments_failed_today')).toMatchObject({ count: 2, severity: 'critical' });
+    const holdExclusion = capture.filter((c) => c.table === 'payments' && c.method === 'whereRaw'
+      && /deferred_reason/.test(c.args[0]) && c.args[1]?.[0] === 'collection_hold');
+    expect(holdExclusion.length).toBeGreaterThanOrEqual(1);
+    expect(holdExclusion[0].args[0]).toMatch(/^NOT \(/);
+  });
+
   test('churn alert opens the directory scoped to high and critical risk', async () => {
     db.raw.mockImplementation((sql) => ({
       sql,
@@ -682,8 +692,11 @@ describe('Action Inbox generators', () => {
       leads: () => { throw new Error('boom'); },
       'estimates as e': [{ id: 'est-1', at_stake: '99' }],
     });
-    const { alerts } = await computeDashboardAlertsUncached();
+    const { alerts, failures } = await computeDashboardAlertsUncached();
 
+    // The failed generators are reported, so a reader can tell a missing queue from an empty one.
+    expect(failures.map((f) => f.id)).toEqual(expect.arrayContaining(['leads_awaiting_contact', 'leads_unattributed_7d']));
+    expect(failures.map((f) => f.id)).not.toContain('estimates_expiring');
     expect(alerts.find((a) => a.id === 'leads_awaiting_contact')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'leads_unattributed_7d')).toBeUndefined();
     expect(alerts.find((a) => a.id === 'estimates_expiring')).toBeDefined();
@@ -731,6 +744,14 @@ describe('computeDashboardAlerts memo', () => {
 
 describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks this week"', () => {
   const cardsCalls = (capture) => capture.filter((c) => c.table === 'payment_methods');
+
+  test('a failed expiry query is reported in failures, never read as an empty queue', async () => {
+    getCardExpiryExemptions.mockResolvedValue(exemptions([]));
+    primeDb({ payment_methods: () => { throw new Error('boom'); }, leads: { count: 0 } });
+    const { alerts, failures } = await computeDashboardAlertsUncached();
+    expect(failures.map((f) => f.id)).toContain('cards_expiring_7d');
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toBeUndefined();
+  });
 
   test('asks coverage at the 7-day horizon and excludes covered customers from the count', async () => {
     getCardExpiryExemptions.mockResolvedValue(exemptions(['cust-prepaid']));

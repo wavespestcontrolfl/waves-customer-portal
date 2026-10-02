@@ -1,6 +1,8 @@
 // Customer 360 uses the existing commitment reader and correction route for
-// call promises and SMS follow-up. SMS is explicitly scoped to one customer;
-// it never joins the global call Owed queue.
+// call promises and SMS/email follow-up. The "sms" source is explicitly
+// scoped to one customer and now carries both text and email-sourced rows
+// (comms-promises plan PR 1, coordinator correction #4, 2026-09-29); it
+// never joins the global call Owed queue.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -79,7 +81,12 @@ export default function OwedCommitmentsSummary({ customerId, source = "call" }) 
   return (
     <div className="mb-3 border-hairline rounded-md bg-zinc-50 p-3 space-y-2" data-testid={source === "sms" ? "sms-followup-summary" : "owed-summary"}>
       <div className="text-14 text-ink-tertiary font-medium">
-        {source === "sms" ? "SMS follow-up" : "Owed to this customer"}{rows.length ? ` (${rows.length}${nextOffset !== null ? "+" : ""})` : ""}
+        {/* This collection now carries both channels — email asks/staff
+            promises share the "sms" source with text follow-ups (comms-
+            promises plan PR 1) — so the header and each row's own channel
+            word (below) are read from row.channel, never the panel's source
+            prop, which only chooses WHICH collection to fetch. */}
+        {source === "sms" ? "SMS + email follow-up" : "Owed to this customer"}{rows.length ? ` (${rows.length}${nextOffset !== null ? "+" : ""})` : ""}
       </div>
       {source === "sms" && enabled && <p className="text-14 text-ink-secondary">Mark done after verifying completion. Dismiss requests that no longer apply.</p>}
       {error && <div className="text-14 text-alert-fg" role="alert">{error}</div>}
@@ -90,8 +97,11 @@ export default function OwedCommitmentsSummary({ customerId, source = "call" }) 
             <Badge className="!text-14" tone={row.party === "waves" ? "strong" : "neutral"}>{row.party === "waves" ? "Waves" : "Customer"}</Badge>
             <span className="text-ink-primary min-w-0 break-words">{row.description}</span>
           </div>
+          {/* The office's note on the promise, and what a technician marked
+              still left at a visit (visit-promises.js). */}
+          {row.human_note && <p className="mt-1 text-ink-secondary whitespace-pre-line break-words">{row.human_note}</p>}
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <span className="text-ink-tertiary">{source === "sms" ? "SMS" : "Call"} {fmtWhen(row.sms_started_at || row.call_started_at)}</span>
+            <span className="text-ink-tertiary">{source === "sms" ? (row.channel === "email" ? "Email" : "SMS") : "Call"} {fmtWhen(row.sms_started_at || row.call_started_at)}</span>
             {enabled && (
               <div className="flex gap-2">
                 <Button className="!text-14" size="sm" variant="secondary" disabled={!!busyId || loading} onClick={() => act(row, "fulfill")}>Mark done</Button>

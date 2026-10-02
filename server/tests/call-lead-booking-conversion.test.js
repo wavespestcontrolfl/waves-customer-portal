@@ -164,7 +164,16 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(inner._writes.inserts).toHaveLength(0);
     // The open-status filter is the idempotency/duplicate guard.
     const b = inner._chains.find(chain => chain._table === 'leads');
-    expect(b.whereNotIn).toHaveBeenCalledWith('status', ['won', 'duplicate']);
+    expect(b.whereNotIn).toHaveBeenCalledWith('status', ['won', 'duplicate', 'handled']);
+  });
+
+  test("every terminal-status guard in the conversion carries 'handled' (codex #5477 r3 P2): a request the customer's online booking closed is never reopened or won by a phone booking", () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const start = src.indexOf('async function convertCallLeadOnPhoneBooking');
+    const body = src.slice(start, src.indexOf('\nasync function ', start + 10));
+    const guards = body.match(/whereNotIn\('status', \[[^\]]*\]\)/g) || [];
+    expect(guards).toHaveLength(4);
+    for (const g of guards) expect(g).toContain("'handled'");
   });
 
   test('conversion failure is contained: returns null (transient marker), never throws (booking must still commit)', async () => {
@@ -192,7 +201,9 @@ describe('convertCallLeadOnPhoneBooking', () => {
     // phone can be shared across leads — booking one customer must never
     // steal another customer's lead. The predicate is repeated in the UPDATE
     // so a concurrent claim between read and write can't slip through. The
-    // third leads chain is the post-conversion estimate-link fetch.
+    // third leads chain is the post-conversion estimate-link fetch. (The funnel bridge's
+    // missing-row check for a reopened /book request runs in its own transaction, which
+    // this mock handle does not model.)
     const leadChains = inner._chains.filter((b) => b._table === 'leads');
     expect(leadChains).toHaveLength(3);
     for (const b of leadChains.slice(0, 2)) {
@@ -369,7 +380,7 @@ describe('findReusableCallLead', () => {
     const lead = await findLead(database, { phone: PHONE, customerId: null, workableUnnamedLead: true });
 
     expect(lead).toEqual({ id: 'lead-7' });
-    expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(database._calls.whereNotIn).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate', 'handled']]);
     expect(database._calls.whereNull).toContain('deleted_at');
     expect(database._calls.whereNull).toContain('converted_at');
     // customerId is null on this path — no ownership group.

@@ -268,6 +268,7 @@ function compareSameDayVisits(a, b) {
 }
 const { toE164 } = require("../utils/phone");
 const { runExclusive, wasLockSkipped } = require("../utils/cron-lock");
+const ClickGuard = require("./review-click-guard");
 
 // GBP review links per location — derived from the canonical office map
 // (config/locations.js) so a GBP link change lands everywhere at once instead
@@ -842,6 +843,19 @@ async function reserveSendableReviewSms({ request, to, body }) {
   });
 }
 
+// A pending ask with an ACTIVE send reservation: its sms_log evidence row is
+// still 'sending', so a dispatcher holds (or crashed holding) the provider
+// handoff — it is sendable or retryable and must never be superseded or
+// treated as stoppable. Used as the callback of whereExists / whereNotExists
+// (`this` is the subquery builder); shared by supersedeQueuedAsks,
+// _reservedPendingAsk and so stopFutureAsks.
+function activeSendReservation() {
+  this.select(1).from("sms_log")
+    .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+    .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+    .where("sms_log.status", "sending");
+}
+
 // Queued asks an enrollment replaces. Exported for the PostgreSQL test: the
 // in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
 // unit suite's query mock cannot evaluate.
@@ -864,12 +878,7 @@ function supersedeQueuedAsks(customerId) {
       .whereIn("id", candidates.map((row) => row.id))
       .where({ status: "pending" })
       .whereNull("sms_sent_at")
-      .whereNotExists(function () {
-        this.select(1).from("sms_log")
-          .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
-          .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
-          .where("sms_log.status", "sending");
-      })
+      .whereNotExists(activeSendReservation)
       .update({ status: "suppressed" });
   });
 }
@@ -1023,6 +1032,23 @@ const ReviewService = {
       const pendingResend = existing && manualTrigger
         && String(existing.status || "").toLowerCase() === "pending" && !existing.sms_sent_at;
       if (existing && !pendingResend) {
+        // A manual retry hands the row's review URL back to the caller: after a
+        // tracked tap since the visit it must not (Codex #5367 r8 P2). Both
+        // trigger routes answer this outcome with a 409 and no URL; an
+        // unreadable click state is a 503, never a URL.
+        if (manualTrigger && OUTREACH.isAskTemplate(existing.template_key)) {
+          let clicked;
+          try {
+            clicked = await ClickGuard.askSuppressedByClick(existing);
+          } catch {
+            throw Object.assign(new Error("Could not confirm whether this customer already tapped their review link. Try again shortly."),
+              { statusCode: 503, code: "REVIEW_CLICK_STATE_UNAVAILABLE" });
+          }
+          if (clicked) {
+            existing.sendOutcome = { sent: false, failed: "review_link_clicked", nextAllowedAt: null };
+            return existing;
+          }
+        }
         // Nothing is sent on this path; say what the row's state is so a
         // caller's `sent` is SMS delivery evidence, not the absence of a
         // held outcome (codex #4156 r3 P2). A delivered row carries no
@@ -2021,6 +2047,14 @@ const ReviewService = {
       );
       return;
     }
+    // Send-time guard (services/review-click-guard.js): the customer already
+    // tapped a tracked review link since this ask's visit (or since it was
+    // queued). Every caller holds the review-send lock.
+    if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
+      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
+      logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
+      return { refused: "review_link_clicked" };
+    }
     // A pending automatic ask whose combined-visit summary is parked as
     // uncertain is removed, exactly as the parking operation does; the
     // coordinator re-creates it when the summary settles. A manual ask
@@ -2997,7 +3031,14 @@ const ReviewService = {
     return !!cleared;
   },
 
-  async sendInlineEmailCopy(requestId) {
+  // skipClickGuard: the staff composer's Quick Links ask only (owner ruling:
+  // the Quick Links link is the "send anytime" link, so its email leg is not
+  // suppressed by an earlier tap either). Default false. Deliberately NOT
+  // threaded into findInlineAwaitingEmail / _claimInlineEmailDispatch: their
+  // redirected_at fences are about THIS request's own link. Once the customer
+  // taps the link this ask already texted them, the ask has done its job and
+  // the owed email copy of it is dropped; staff can still start a fresh ask.
+  async sendInlineEmailCopy(requestId, { skipClickGuard = false } = {}) {
     if (!requestId) return { sent: false, reason: "no_request" };
     let request = null;
     // onQueued fires immediately before the provider call: a throw after it
@@ -3011,6 +3052,8 @@ const ReviewService = {
     try {
       request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
+      // Send-time guard: the customer already tapped a tracked review link.
+      if (!skipClickGuard && OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
       const who = await this._inlineEmailRecipient(request);
       if (who.reason) return { sent: false, reason: who.reason };
       const { customer, contact } = who;
@@ -4121,26 +4164,11 @@ const ReviewService = {
       }
     }
 
-    const eligible = await db("review_requests")
-      .whereIn("status", ["sent", "opened"])
-      // A texted ask only (email-only asks never get the text follow-up),
-      // aged from the LATER channel: a Both email retried after the text
+    const eligible = await this._followupPendingBase(db("review_requests"))
+      // Aged from the LATER channel: a Both email retried after the text
       // must not leave the row instantly follow-up eligible (r17 P2).
-      .whereNotNull("sms_sent_at")
       .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [new Date(Date.now() - ASK_SPACING_MS)])
-      .where({ followup_sent: false })
       .whereRaw("(followup_next_attempt_at IS NULL OR followup_next_attempt_at <= ?)", [new Date()])
-      .whereNull("rated_at")
-      // Draft score taps are durable but not final. Do not send the
-      // straight-to-Google reminder when the draft score already tells us the
-      // customer was not a promoter.
-      .where((builder) => builder.whereNull("score").orWhere("score", ">=", 8))
-      .whereNotExists(function () {
-        this.select(1)
-          .from("customers")
-          .whereRaw("customers.id = review_requests.customer_id")
-          .whereNotNull("customers.deleted_at");
-      })
       .orderByRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) ASC")
       .limit(20);
 
@@ -4192,6 +4220,13 @@ const ReviewService = {
               followup_sent: true,
               followup_sent_at: new Date(),
             });
+            suppressed++;
+            return;
+          }
+          // Send-time guard: a tracked click since the visit ends the follow-up.
+          if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
+            await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+            logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=review_link_clicked)`);
             suppressed++;
             return;
           }
@@ -4407,6 +4442,25 @@ const ReviewService = {
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
     if (customer.has_left_google_review) {
       return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+    // Send-time guard (services/review-click-guard.js): the customer already
+    // tapped a tracked review link since this ask's visit. Runs inside the
+    // review-send lock (the sequence runner / sendGatedAsk hold it) so it
+    // cannot race the click's own stop; terminal, so the cadence stops.
+    // A cadence with no visit ids (admin-started) falls back to its own start.
+    let fallbackAnchor = null;
+    if (sequenceId) {
+      // Any cadence: its own start is the fallback whenever its visit row is
+      // gone (a deleted record), not only when it never had one.
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("created_at", "started_at");
+      fallbackAnchor = seq?.created_at || seq?.started_at || null;
+    }
+    // No visit AND no cadence (an operator one-off: Quick Links, admin,
+    // tech-trigger, Intelligence Bar): the customer's newest completed visit.
+    // Asks only: a private no-link check-in is never click-suppressed.
+    if (OUTREACH.isAskTemplate(templateId) && await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor, newestVisitFallback: !sequenceId })) {
+      logger.info(`[review] Touch suppressed (customerId=${customer.id} reason=review_link_clicked)`);
+      return { ok: false, reason: "review_link_clicked", terminal: true };
     }
 
     // Cadence steps carry only serviceRecordId — recover the visit context the
@@ -5432,6 +5486,188 @@ const ReviewService = {
   },
 
   /**
+   * An ACTIVE review cadence owns this customer's asks (its touches can sit
+   * 'deferred' where the queued-row check cannot see them). Only counted while
+   * GATE_REVIEW_SEQUENCES is ON — with the gate off the cadence cron is frozen
+   * and a stranded 'active' row must not lock the customer out forever.
+   * Fail-closed: no .catch, a DB error throws.
+   */
+  async _activeCadenceFor(customerId) {
+    const { isEnabled } = require("../config/feature-gates");
+    if (!isEnabled("reviewSequences")) return false;
+    const activeSeq = await db("review_sequences")
+      .where({ customer_id: customerId, status: "active" }).first();
+    return Boolean(activeSeq);
+  },
+
+  /**
+   * A one-off ask about to text: a composer send mid-flight, or a queued
+   * ('pending', scheduled) ASK row. Independent of cap / cooldown / cadence.
+   * Returns {outcome: 'in_flight'} | {outcome: 'already_queued', nextAllowedAt,
+   * queuedId} | null.
+   */
+  async _pendingOneOffAsk(customerId) {
+    const inFlight = await this._unsentSendingAsk(customerId, { since: new Date(Date.now() - INLINE_CLAIM_STALE_MS) });
+    if (inFlight) return { outcome: "in_flight" };
+    const queued = await this._queuedOneOffAsk(customerId);
+    if (queued) {
+      // queuedId lets create()'s resend path distinguish "THIS row is the
+      // queued one — dispatch it now" from "a different ask is queued".
+      return { outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
+    }
+    return null;
+  },
+
+  /**
+   * A composer send mid-flight: its row is claimed ('sending') and unscheduled,
+   * so neither the queued arm nor the delivered stats see it — yet the ask is
+   * about to text. Block every canonical one-off path for the claim's lifetime
+   * (`since` = the fresh-claim window; a claim older than the stale window is
+   * reconciled by claimInlineForSend, not blocking).
+   */
+  async _unsentSendingAsk(customerId, { since }) {
+    return db("review_requests")
+      .where({ customer_id: customerId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", ">=", since)
+      .first("id");
+  },
+
+  /** A queued ('pending', scheduled) ASK row processScheduled will text. */
+  async _queuedOneOffAsk(customerId) {
+    return db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      .orderBy("scheduled_for", "asc")
+      .first();
+  },
+
+  /**
+   * What a tracked /go click does about the later-ask paths it can reach
+   * (one click, all of them): stops the clicked request's sequence
+   * and every active / deferred cadence of the customer, relabels a cadence
+   * parked for summary recovery so the recovery can no longer resume it (the
+   * one-cadence-per-record rule then refuses a fresh enrollment too),
+   * supersedes queued asks, and marks due Day-3 follow-ups handled. Returns
+   * { stopped, outstanding }; a thrown failure or stopped:false means the caller
+   * keeps the customer on the rate page.
+   */
+  async stopFutureAsks(customerId, { reason = "clicked", lockWaitMs = 2000 } = {}) {
+    // The stop runs under the SAME per-customer lock every dispatcher takes
+    // around a provider handoff (processScheduled, the sequence step runner,
+    // dispatchReviewAsk, sendGatedAsk, create): a click can never interleave
+    // with an in-flight send. Bounded wait; a lock that never frees means we
+    // cannot prove nothing is mid-send, so nothing is claimed stopped.
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      const result = await runExclusive(`review-send:${customerId}`, () => this._stopFutureAsksLocked(customerId, { reason }), { recordHealth: false, waitForSlot: false });
+      if (!wasLockSkipped(result)) return result;
+      if (Date.now() >= deadline) return { stopped: false, outstanding: ["lock_timeout"] };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  },
+
+  /**
+   * The stop itself (caller holds review-send:<customer>). Returns
+   * { stopped, outstanding }: `outstanding` names what could NOT be stopped —
+   * a pending ask whose send reservation is still active (supersedeQueuedAsks
+   * skips it). After the lock is won nothing is mid-send, so what remains is a
+   * stranded reservation the reconciliation owns; the caller fails closed until
+   * it settles.
+   */
+  async _stopFutureAsksLocked(customerId, { reason }) {
+    // Only cadences whose REMAINING steps are all asks stop: one with a later
+    // private no-link check-in stays active (its ask steps are skipped at send
+    // time by the runner), since a click ends asks, not check-ins.
+    const cadences = await db("review_sequences")
+      .where({ customer_id: customerId })
+      .whereIn("status", ["active", "deferred"])
+      .select("id", "plan", "current_step");
+    for (const seq of cadences) {
+      if (this._clickDisposition(seq) === "stop") await this.stopReviewSequence(seq.id, reason);
+    }
+    const Summary = require("./visit-completion-summary");
+    const parked = await db("review_sequences")
+      .where({ customer_id: customerId, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON })
+      .select("id", "plan", "current_step");
+    const parkedAsksOnly = parked.filter((p) => this._clickDisposition(p) === "stop").map((p) => p.id);
+    if (parkedAsksOnly.length) {
+      await db("review_sequences").whereIn("id", parkedAsksOnly).update({ stop_reason: reason, updated_at: new Date() });
+    }
+    await supersedeQueuedAsks(customerId);
+    await this._followupPendingBase(db("review_requests").where({ customer_id: customerId }))
+      .update({ followup_sent: true, followup_sent_at: new Date() });
+    const outstanding = [];
+    if (await this._reservedPendingAsk(customerId)) outstanding.push("reserved_send");
+    return { stopped: outstanding.length === 0, outstanding };
+  },
+
+  /**
+   * What a tracked click means for a cadence, by its REMAINING steps
+   * (current_step on): "stop" when every remaining step is a link-bearing ask;
+   * otherwise a later private check-in keeps it alive — "proceed" when the
+   * current step is itself a check-in (send it), "skip" when it is an ask
+   * (advance past it without sending).
+   */
+  _clickDisposition(seq, plan = null) {
+    let steps = plan;
+    if (!steps) {
+      try { steps = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]"); } catch { steps = []; }
+    }
+    const remaining = steps.slice(Number(seq.current_step) || 0);
+    if (!remaining.some((step) => !OUTREACH.isAskTemplate(step?.templateKey))) return "stop";
+    return OUTREACH.isAskTemplate(remaining[0]?.templateKey) ? "skip" : "proceed";
+  },
+
+  /** A pending ask with an active send reservation (see activeSendReservation). */
+  async _reservedPendingAsk(customerId) {
+    return db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereExists(activeSendReservation)
+      .first("id");
+  },
+
+  /**
+   * Delivered asks whose text follow-up (processFollowups) could still go out:
+   * the base predicate, WITHOUT its timing clauses (a row not yet old enough
+   * will become eligible). Shared by processFollowups and stopFutureAsks.
+   */
+  _followupPendingBase(q) {
+    return q
+      .whereIn("status", ["sent", "opened"])
+      // A texted ask only (email-only asks never get the text follow-up).
+      .whereNotNull("sms_sent_at")
+      .where({ followup_sent: false })
+      .whereNull("rated_at")
+      // Draft score taps are durable but not final. Do not send the
+      // straight-to-Google reminder when the draft score already tells us the
+      // customer was not a promoter.
+      .where((builder) => builder.whereNull("score").orWhere("score", ">=", 8))
+      .whereNotExists(function () {
+        this.select(1)
+          .from("customers")
+          .whereRaw("customers.id = review_requests.customer_id")
+          .whereNotNull("customers.deleted_at");
+      });
+  },
+
+  /**
+   * One cadence per SERVICE RECORD, ever: any sequence for the record (not a
+   * start_failed retry, not a parked/redeeming deferred enrollment) makes a
+   * fresh enrollment refuse.
+   */
+  async _priorSequenceForRecord(serviceRecordId) {
+    return db("review_sequences")
+      .where({ service_record_id: serviceRecordId })
+      .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+      .whereNotIn("status", ["deferred", "redeeming"])
+      .first();
+  },
+
+  /**
    * The shared gate stack for an UNSCHEDULED review ask — used by
    * sendGatedAsk (admin one-off + portal satisfaction) AND by create() for
    * manual triggers (/trigger, /tech-trigger, the intelligence-bar tool), so
@@ -5453,53 +5689,29 @@ const ReviewService = {
    *
    * isAsk=false (private no-link check-ins) bypasses everything by design.
    *
+   * staffComposer=true (the staff Messages composer's Quick Links review link
+   * only; owner ruling "send anytime"): skips the active-cadence block, the
+   * 30-day cooldown and the 3-in-180-day cap. The queued/in-flight checks still
+   * apply. Default false: every other caller is unchanged.
+   *
    * @returns {{allowed: boolean, outcome?: string, nextAllowedAt?: *}}
    */
-  async checkUnscheduledAskGates(customerId, { isAsk = true } = {}) {
+  async checkUnscheduledAskGates(customerId, { isAsk = true, staffComposer = false } = {}) {
     if (!isAsk) return { allowed: true };
-    const { isEnabled } = require("../config/feature-gates");
+    if (!staffComposer && await this._activeCadenceFor(customerId)) return { allowed: false, outcome: "in_cadence" };
 
-    if (isEnabled("reviewSequences")) {
-      // No .catch — this helper's contract is fail-closed, and a swallowed DB
-      // error here would permit a one-off ask while a cadence may already own
-      // the customer (pre-push audit r1). Matches the cap and queued checks.
-      const activeSeq = await db("review_sequences")
-        .where({ customer_id: customerId, status: "active" }).first();
-      if (activeSeq) return { allowed: false, outcome: "in_cadence" };
+    if (!staffComposer) {
+      const thirtyDaysAgo = Date.now() - 30 * 86400000;
+      // No .catch → a DB error throws instead of silently reading as zero asks.
+      const stats = await this.getDeliveredAskStats(customerId);
+      if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
+      if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+        return { allowed: false, outcome: "cooldown" };
+      }
     }
 
-    const thirtyDaysAgo = Date.now() - 30 * 86400000;
-    // No .catch → a DB error throws instead of silently reading as zero asks.
-    const stats = await this.getDeliveredAskStats(customerId);
-    if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
-    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
-      return { allowed: false, outcome: "cooldown" };
-    }
-
-    // A composer send mid-flight: its row is claimed ('sending', fresh
-    // claimed_at) and unscheduled, so neither the queued arm below nor the
-    // delivered stats see it — yet the ask is about to text. Block every
-    // canonical one-off path for the claim's lifetime (a claim older than
-    // the stale window is reconciled by claimInlineForSend, not blocking).
-    const inFlight = await db("review_requests")
-      .where({ customer_id: customerId, status: "sending" })
-      .whereNull("sms_sent_at")
-      .where("claimed_at", ">=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
-      .first("id");
-    if (inFlight) return { allowed: false, outcome: "in_flight" };
-
-    const queued = await db("review_requests")
-      .where({ customer_id: customerId, status: "pending" })
-      .whereNull("sms_sent_at")
-      .whereNotNull("scheduled_for")
-      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
-      .orderBy("scheduled_for", "asc")
-      .first();
-    if (queued) {
-      // queuedId lets create()'s resend path distinguish "THIS row is the
-      // queued one — dispatch it now" from "a different ask is queued".
-      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
-    }
+    const pendingOneOff = await this._pendingOneOffAsk(customerId);
+    if (pendingOneOff) return { allowed: false, ...pendingOneOff };
     return { allowed: true };
   },
 
@@ -5729,6 +5941,12 @@ const ReviewService = {
    * redeemed token, and never mints one (a button render is not an ask).
    */
   async livePortalReviewUrlFor(customerId) {
+    const token = await this._liveReviewToken(customerId);
+    return token ? unshortenedReviewUrl(token) : null;
+  },
+
+  /** The token behind livePortalReviewUrlFor (same predicate), or null. */
+  async _liveReviewToken(customerId) {
     if (!customerId) return null;
     const row = await db("review_requests")
       .where({ customer_id: customerId })
@@ -5757,7 +5975,7 @@ const ReviewService = {
       .orderBy("created_at", "desc")
       .first()
       .catch(() => null);
-    return row?.token ? unshortenedReviewUrl(row.token) : null;
+    return row?.token || null;
   },
 
   /**
@@ -5943,13 +6161,9 @@ const ReviewService = {
     // later) would re-send the identical ask. start_failed rows may retry.
     // Fail CLOSED — a lookup error must not risk a duplicate text.
     if (serviceRecordId) {
-      const priorForRecord = await db("review_sequences")
-        .where({ service_record_id: serviceRecordId })
-        .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
-        // Parked/redeeming deferred enrollments are not deliveries (codex
-        // #3243 r21 P2) — they must not dedupe-block a real enrollment.
-        .whereNotIn("status", ["deferred", "redeeming"])
-        .first();
+      // Parked/redeeming deferred enrollments are not deliveries (codex
+      // #3243 r21 P2) — they must not dedupe-block a real enrollment.
+      const priorForRecord = await this._priorSequenceForRecord(serviceRecordId);
       if (priorForRecord) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
       }
@@ -6306,6 +6520,26 @@ const ReviewService = {
       });
       return { ran: false, stopped: true, reason };
     };
+    // A tracked click ends the link-bearing ASKS only; a private no-link
+    // check-in (resolution_check / satisfaction_confirm) is not a review ask and
+    // still goes out. Returns a runner result, or null to carry on and send the
+    // current step (a check-in).
+    const handleClick = async () => {
+      const disposition = this._clickDisposition(seq, plan);
+      if (disposition === "stop") return stop("clicked");
+      if (disposition === "proceed") return null;
+      // Skip the current ask without sending: advance exactly as after a send
+      // (same schedule), but no touch is counted.
+      const nextStep = seq.current_step + 1;
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        current_step: nextStep,
+        next_run_at,
+        decision: sequenceDecision({ reason: "ask_skipped_review_link_clicked", plannedAt: next_run_at, nextEvalAt: next_run_at }),
+        updated_at: new Date(),
+      });
+      return { ran: true, sent: false, skipped: true, step: seq.current_step };
+    };
     // Parking a sequence behind its summary is resumable, so it must never
     // overwrite a stop an operator recorded while this step was running.
     this._parkSequence = async (sequenceId) => {
@@ -6362,8 +6596,23 @@ const ReviewService = {
       .where((b) => b.whereNotNull("redirected_at").orWhere("google_review_clicked", true))
       .first()
       .catch(() => null);
-    if (clicked) return stop("clicked");
+    if (clicked) {
+      const handled = await handleClick();
+      if (handled) return handled;
+    }
     if (seq.current_step >= plan.length) return stop("completed");
+    // The send-time guard also runs BEFORE the spacing / cap holds for an ask
+    // step, so a click ends (or skips) it now instead of leaving it deferred for
+    // days; sendOutreachTouch re-checks at the provider boundary.
+    if (OUTREACH.isAskTemplate(plan[seq.current_step]?.templateKey)
+      && await ClickGuard.touchSuppressedByClick(seq.customer_id, {
+        serviceRecordId: seq.service_record_id,
+        scheduledServiceId: seq.scheduled_service_id,
+        fallbackAnchor: seq.created_at || seq.started_at || null,
+      })) {
+      const handled = await handleClick();
+      if (handled) return handled;
+    }
     // Same-series exemption set, computed once for the cap check AND the
     // supersession check below (codex #3235 r2+r5+r6 P1s): the visit-1 ask
     // of THIS sequence's own series never supersedes or caps its final
@@ -6637,6 +6886,7 @@ const ReviewService = {
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
+      if (outcome.reason === "review_link_clicked") return (await handleClick()) || stop("clicked");
       return stop("opted_out");
     }
 

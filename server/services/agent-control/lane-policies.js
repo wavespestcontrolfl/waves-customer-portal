@@ -78,6 +78,11 @@ const LANE_RUNTIME = {
   // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
   'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
+  // Email asks + staff promises (PR 1, 2026-09-29) — same shape as the SMS
+  // lane above, minus workflow_id/LONG_BATCH: it does not (yet) join the
+  // Control-center job-health mapping (LANE_RUNTIME's own workflow_id set is
+  // closed and asserted exhaustively by agent-control-run-index.test.js).
+  'email-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
   // customer's texts + completion notes and stores it on review_sequences —
@@ -173,6 +178,9 @@ const LANE_RUNTIME = {
   // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
   plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
+  // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
+  typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
@@ -275,8 +283,6 @@ const LANE_RUNTIME = {
   review_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // M3: GATE_REVIEW_AUTO_REPLY=auto publishes without approval and persists the audit evidence — Codex r9.
   review_reply: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
-  // M3 (Codex r18): review-gate.js returns the generated copy to the customer and persists generated_review_text — no staff step.
-  review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   // read_only: a gate, not a write — screenGeneratedImage returns a pass/fail
@@ -299,6 +305,7 @@ const LANE_RUNTIME = {
   codex_remediation: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   business_name_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
+  photo_subject_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // offline (Codex r16): classifyQueryIntent calls Anthropic only and drops to keyword rules on a miss (seo-diagnosis-tools.js).
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // M3 (Codex r16): the Monday cron runs generateWeeklyReport unattended, persists seo_advisor_reports and texts the owner — same shape as agent_bi.

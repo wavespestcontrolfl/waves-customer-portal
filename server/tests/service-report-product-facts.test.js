@@ -57,6 +57,55 @@ function makeOutlineKnexWithChains(outlineRow) {
 }
 
 describe('service report approved product facts', () => {
+  test('freezes the resolved watering rule with the approved facts; unapproved products get none', () => {
+    const approved = {
+      approved_for_service_report: true,
+      name: 'Celsius WG',
+      category: 'herbicide',
+      product_type: 'pesticide',
+      formulation: 'WG',
+      epa_reg_number: '432-1507',
+      irrigation_required: false,
+      rainfast_minutes: 60,
+    };
+    expect(approvedReportProductFacts(approved).wateringRule)
+      .toMatchObject({ mode: 'hold', hold_hours: 24, source: 'default' });
+    expect(approvedReportProductFacts({
+      ...approved,
+      post_application_watering: { mode: 'hold', hold_hours: 6, source: 'label' },
+    }).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
+    // Unknown stays null (a spray insecticide never derives 'none').
+    expect(approvedReportProductFacts({
+      approved_for_service_report: true, name: 'Talak 7.9 F', category: 'insecticide',
+      product_type: 'pesticide', formulation: 'liquid', epa_reg_number: '91234-145',
+    }).wateringRule).toBeNull();
+    expect(approvedReportProductFacts({ ...approved, approved_for_service_report: false })).toBeNull();
+  });
+
+  test('freezes the label mow hold as an integer 1..14 or null; nothing else is a claim', () => {
+    const approved = {
+      approved_for_service_report: true, name: 'Celsius WG', category: 'herbicide', product_type: 'pesticide',
+      formulation: 'WG', epa_reg_number: '432-1507', irrigation_required: false,
+    };
+    expect(approvedReportProductFacts({ ...approved, mow_hold_days: 2 }).mowHoldDays).toBe(2);
+    expect(approvedReportProductFacts({ ...approved, mow_hold_days: 14 }).mowHoldDays).toBe(14);
+    for (const bad of [null, undefined, 0, -1, 15, 1.5, '2', NaN]) {
+      expect(approvedReportProductFacts({ ...approved, mow_hold_days: bad }).mowHoldDays).toBeNull();
+    }
+    expect(approvedReportProductFacts({ ...approved, mow_hold_days: 2, approved_for_service_report: false })).toBeNull();
+  });
+
+  test('the live catalog read selects mow_hold_days, and the public facts keep it internal-only key by key', async () => {
+    const knex = makeKnex([{
+      id: '11111111-1111-4111-8111-111111111111', approved_for_service_report: true, name: 'Celsius WG', category: 'herbicide',
+      product_type: 'pesticide', formulation: 'WG', epa_reg_number: '432-1507', mow_hold_days: 3,
+    }]);
+    const [product] = await attachApprovedReportProductFacts(knex, [{ product_id: '11111111-1111-4111-8111-111111111111', product_name: 'Celsius WG' }]);
+    expect(product.approved_report_product_facts.mowHoldDays).toBe(3);
+    const selected = knex.mock.results[0].value.select.mock.calls[0];
+    expect(selected).toContain('mow_hold_days');
+  });
+
   test('exposes approved pesticide facts with EPA number and customer copy', () => {
     const facts = approvedReportProductFacts({
       approved_for_service_report: true,

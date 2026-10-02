@@ -6,8 +6,9 @@
  */
 
 jest.mock('../models/db', () => {
-  const q = { where: jest.fn(() => q), update: jest.fn(async () => 1) };
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereRaw: jest.fn(() => q), update: jest.fn(async () => 1), first: jest.fn(async () => undefined) };
   const db = jest.fn(() => q);
+  db.raw = jest.fn((sql) => sql);
   db.__q = q;
   return db;
 });
@@ -36,5 +37,184 @@ describe('markReadAdmin', () => {
     const ok = await NotificationService.markReadAdmin('customer-notif');
     expect(db.__q.where).toHaveBeenCalledWith({ id: 'customer-notif', recipient_type: 'admin' });
     expect(ok).toBe(false);
+  });
+});
+
+describe('markAdminDone', () => {
+  beforeEach(() => {
+    db.__q.update.mockClear();
+    db.__q.update.mockResolvedValue(2);
+    db.__q.whereIn.mockClear();
+    db.__q.whereNull.mockClear();
+    db.__q.whereRaw.mockClear();
+    db.raw.mockClear();
+  });
+
+  test('stamps done and read on admin rows not yet done, with a plain, 200-character resolution', async () => {
+    const count = await NotificationService.markAdminDone(['a', 'a', 'b'], { by: 'claude', resolution: `  Fixed \u{1F600}   in PR  ${'word '.repeat(80)}` });
+    expect(count).toBe(2);
+    expect(db.__q.whereIn).toHaveBeenCalledWith('id', ['a', 'b']);
+    expect(db.__q.where).toHaveBeenCalledWith({ recipient_type: 'admin' });
+    expect(db.__q.whereNull).toHaveBeenCalledWith('done_at');
+    const patch = db.__q.update.mock.calls[0][0];
+    // keepExisting: the first done (a person's own included) and an earlier read stand; an unread row is read at the done instant.
+    expect(patch).toMatchObject({
+      done_at: 'COALESCE(done_at, ?::timestamptz)', done_by: 'claude',
+      resolution: 'COALESCE(resolution, ?)', read_at: 'COALESCE(read_at, ?::timestamptz)',
+    });
+    const bound = Object.fromEntries(db.raw.mock.calls.map(([sql, bindings]) => [sql, bindings]));
+    expect(bound['COALESCE(done_by, ?)']).toBeUndefined(); // done_by is the plain latest closer
+    expect(bound['COALESCE(done_at, ?::timestamptz)'][0]).toBeInstanceOf(Date);
+    expect(bound['COALESCE(read_at, ?::timestamptz)']).toEqual(bound['COALESCE(done_at, ?::timestamptz)']);
+    const resolution = bound['COALESCE(resolution, ?)'][0];
+    expect(resolution).toMatch(/^Fixed in PR word word.*…$/);
+    expect(resolution.length).toBeLessThanOrEqual(200);
+  });
+
+  test('a system close of a row a person already marked done takes done_by (so it is no longer reopenable) but keeps their done time and resolution', () => {
+    const cols = NotificationService._private.doneColumns({ by: 'ops-crons', resolution: 'Check ran clean', keepExisting: true });
+    expect(cols.done_by).toBe('ops-crons');
+    expect(cols.done_at).toBe('COALESCE(done_at, ?::timestamptz)'); // this suite's db.raw mock returns the SQL
+    expect(cols.resolution).toBe('COALESCE(resolution, ?)');
+    // PERSON_DONE_BY_SQL (the reopen gate) does not accept a system component.
+    const re = /done_by ~ '\^\[0-9\]\+\$'/;
+    expect(NotificationService._private.PERSON_DONE_BY_SQL).toMatch(re);
+    expect(NotificationService._private.PERSON_DONE_BY_SQL).not.toMatch(/ops-crons/);
+  });
+
+  test('a workflow close attributed to a person (callback:<id>, sms-commitments:<id>) is not a person Done: no reopen', () => {
+    const { isPersonDoneBy } = NotificationService._private;
+    const uuid = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    expect(isPersonDoneBy(uuid)).toBe(true);
+    expect(isPersonDoneBy(`callback:${uuid}`)).toBe(false);
+    expect(isPersonDoneBy(`sms-commitments:${uuid}`)).toBe(false);
+    expect(isPersonDoneBy(`email-commitments:${uuid}`)).toBe(false);
+  });
+
+  test('expectedVersion fences the update on the md5 content version of the one row', async () => {
+    const version = 'b'.repeat(32);
+    await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });
+    expect(db.__q.whereRaw).toHaveBeenCalledWith(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version]);
+    // A JSON array keeps field boundaries and NULL vs '' distinct (never concat_ws).
+    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toBe('md5(jsonb_build_array(title, body, link, detail, metadata)::text)');
+  });
+
+  test('an Activity-only row (metadata.feed = activity) can be marked done: the done writer never applies the bell-only exclusion', async () => {
+    const version = 'c'.repeat(32);
+    await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });
+    // The version fence is the ONLY raw clause; excludeActivityOnlyFromBell would add a second.
+    expect(db.__q.whereRaw).toHaveBeenCalledTimes(1);
+    expect(db.__q.whereRaw.mock.calls.flat().join(' ')).not.toMatch(/feed/);
+  });
+
+  test('no expectedVersion adds no version fence (Claude and system callers)', async () => {
+    await NotificationService.markAdminDone(['a'], { by: 'claude' });
+    expect(db.__q.whereRaw).not.toHaveBeenCalled();
+  });
+
+  test('expectedVersion with more than one id writes nothing', async () => {
+    expect(await NotificationService.markAdminDone(['a', 'b'], { by: '7', expectedVersion: 'b'.repeat(32) })).toBe(0);
+    expect(db.__q.update).not.toHaveBeenCalled();
+  });
+
+  test('writes nothing without ids or an actor', async () => {
+    expect(await NotificationService.markAdminDone([], { by: 'claude' })).toBe(0);
+    expect(await NotificationService.markAdminDone(['a'], {})).toBe(0);
+    expect(db.__q.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('openToCloser (the system closers\' selection)', () => {
+  // A recording builder: where(fn) runs fn against a second recorder.
+  const record = () => {
+    const calls = [];
+    const inner = { whereNull: (...a) => { calls.push(['whereNull', ...a]); return inner; }, orWhereRaw: (...a) => { calls.push(['orWhereRaw', ...a]); return inner; } };
+    const query = { whereNull: (...a) => { calls.push(['outer.whereNull', ...a]); return query; }, where: (fn) => { calls.push(['where']); fn(inner); return query; } };
+    return { query, calls };
+  };
+  const { openToCloser, isPersonDoneBy, PERSON_DONE_BY_SQL } = NotificationService._private;
+
+  test('a system closer selects rows not done OR done by a person (PERSON_DONE_BY_SQL, NULL done_by is not a person)', () => {
+    const { query, calls } = record();
+    expect(openToCloser(query, 'procurement')).toBe(query);
+    expect(calls).toEqual([
+      ['where'],
+      ['whereNull', 'done_at'],
+      ['orWhereRaw', `COALESCE(${PERSON_DONE_BY_SQL}, false)`],
+    ]);
+  });
+
+  test('a person\'s own close keeps plain done_at IS NULL: a second Done writes nothing', () => {
+    for (const by of ['7', 'claude', '6f1c2b3e-1111-4222-8333-444455556666']) {
+      const { query, calls } = record();
+      openToCloser(query, by);
+      expect(calls).toEqual([['outer.whereNull', 'done_at']]);
+    }
+  });
+
+  test('isPersonDoneBy mirrors PERSON_DONE_BY_SQL: digits, uuid, claude; never a component or empty', () => {
+    expect(['42', 'claude', '6F1C2B3E-1111-4222-8333-444455556666'].map(isPersonDoneBy)).toEqual([true, true, true]);
+    expect(['episodes', 'supersede', 'procurement', '', null, undefined, 'Claude', '12a'].map(isPersonDoneBy)).toEqual([false, false, false, false, false, false, false, false]);
+  });
+});
+
+describe('reopenAdminDone', () => {
+  const TOKEN = '2026-09-30 12:00:00.123456+00';
+  const { PERSON_DONE_BY_SQL } = NotificationService._private;
+  beforeEach(() => {
+    for (const fn of ['where', 'whereNotNull', 'whereRaw', 'update', 'first']) db.__q[fn].mockClear();
+    db.raw.mockClear();
+    db.__q.update.mockResolvedValue(1);
+    db.__q.first.mockResolvedValue(undefined);
+  });
+
+  test('clears the done fields only while done_at still equals the served token and a person closed it', async () => {
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('reopened');
+    expect(db.__q.where).toHaveBeenCalledWith({ id: 'n1', recipient_type: 'admin' });
+    expect(db.__q.whereNotNull).toHaveBeenCalledWith('done_at');
+    expect(db.__q.whereRaw).toHaveBeenCalledWith('done_at = ?::timestamptz', [TOKEN]);
+    expect(db.__q.whereRaw).toHaveBeenCalledWith(PERSON_DONE_BY_SQL);
+    expect(db.__q.update).toHaveBeenCalledWith({ done_at: null, done_by: null, resolution: null });
+  });
+
+  test('without a token nothing is written', async () => {
+    expect(await NotificationService.reopenAdminDone('n1', {})).toBe('changed');
+    expect(await NotificationService.reopenAdminDone('n1')).toBe('changed');
+    expect(db.__q.update).not.toHaveBeenCalled();
+  });
+
+  test('nothing matched: a missing or no-longer-done row is not_found; still done under a newer close is changed; a system close is not_reopenable', async () => {
+    db.__q.update.mockResolvedValue(0);
+    db.__q.first.mockResolvedValueOnce(undefined);
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('not_found');
+    db.__q.first.mockResolvedValueOnce({ done_at: null, fence_ok: null });
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('not_found');
+    db.__q.first.mockResolvedValueOnce({ done_at: new Date(), fence_ok: false });
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('changed');
+    db.__q.first.mockResolvedValueOnce({ done_at: new Date(), fence_ok: true });
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('not_reopenable');
+  });
+
+  test('a person is a technician id (uuid, or plain digits) or claude; system components are not', () => {
+    // The SQL is the one definition; mirror it in JS to pin which done_by values it admits.
+    const re = [...PERSON_DONE_BY_SQL.matchAll(/~\*? '([^']+)'/g)].map((m) => new RegExp(m[1], PERSON_DONE_BY_SQL.includes(`~* '${m[1]}'`) ? 'i' : ''));
+    const isPerson = (by) => by === 'claude' || re.some((r) => r.test(by));
+    for (const by of ['7', '123', '6f1c2d9e-4b7a-4c1e-9a3b-0d5e7f8a9b10', '6F1C2D9E-4B7A-4C1E-9A3B-0D5E7F8A9B10', 'claude']) expect(isPerson(by)).toBe(true);
+    for (const by of ['episodes', 'relevance', 'ops-crons', 'ops-crons:3-clean-runs', 'supersede', 'promise-chaser', 'supplies', 'dispatch', 'backfill', 'collections', 'followup-sla', 'procurement', 'sms-commitments', 'email-commitments', 'cancellation-processor', 'admin-cancellation', '12abc', '']) expect(isPerson(by)).toBe(false);
+  });
+});
+
+describe('getAdminDoneNotifications', () => {
+  test('selects the full-precision done_at token and the reopenable flag, ordered on plain done_at', async () => {
+    const order = [];
+    db.__q.select = jest.fn(() => db.__q);
+    db.__q.orderByRaw = jest.fn((sql) => { order.push(sql); return db.__q; });
+    db.__q.limit = jest.fn(async () => []);
+    db.raw.mockClear();
+    await NotificationService.getAdminDoneNotifications({ role: 'admin' });
+    const raws = db.raw.mock.calls.map(([sql]) => sql);
+    expect(raws).toContain('done_at::text AS done_at_token');
+    expect(raws.some((sql) => /AS reopenable$/.test(sql) && sql.includes('done_by'))).toBe(true);
+    expect(order).toEqual(['done_at DESC, id DESC']);
   });
 });

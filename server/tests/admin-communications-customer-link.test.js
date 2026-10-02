@@ -103,6 +103,17 @@ jest.mock('../services/prep-guide-sender', () => ({
 }));
 // The card funnel's own live-status set — the route narrows its visit pick to it.
 jest.mock('../services/appointment-card-request', () => ({ LIVE_VISIT_STATUSES: ['pending', 'confirmed'] }));
+// The owed review-email retry runs under the review-send lock; `held` lets a
+// test see the lock around the send.
+jest.mock('../utils/cron-lock', () => {
+  const lock = { held: false };
+  lock.runExclusive = jest.fn(async (_key, fn) => {
+    lock.held = true;
+    try { return await fn(); } finally { lock.held = false; }
+  });
+  lock.wasLockSkipped = (r) => r?.skipped === true;
+  return lock;
+});
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
   findInlineAwaitingEmail: jest.fn(async () => null),
@@ -675,13 +686,30 @@ describe('POST /admin/communications/customer-link', () => {
     test('email after a Both whose email leg failed re-sends the SAME inline row copy (no cooldown refusal)', async () => {
       wireDb({ customers: soloCustomer() });
       ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
-      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: true });
+      const lock = require('../utils/cron-lock');
+      let heldAtSend = null;
+      ReviewService.sendInlineEmailCopy.mockImplementationOnce(async () => { heldAtSend = lock.held; return { sent: true }; });
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ channel: 'email', sent: true, requestId: 'rr-texted', retriedInline: true });
-        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted');
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted', { skipClickGuard: true });
         expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+      // Codex #5367 r8 P1: the retry sends under the review-send lock.
+      expect(heldAtSend).toBe(true);
+      expect(lock.runExclusive).toHaveBeenCalledWith(expect.stringMatching(/^review-send:/), expect.any(Function), { recordHealth: false, waitForSlot: false });
+
+      // Another review send holds the lock: a 409, and no email.
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockClear();
+      lock.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'REVIEW_SEND_BUSY' });
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
       });
 
       // A failed retry keeps the leg's own reason.
@@ -923,6 +951,26 @@ describe('POST /admin/communications/customer-link', () => {
       });
       expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-later' }));
       expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'v-grp', visit_id: 'grp-1' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('appointment: a moved street-level hold (voice_agent, confirmed, customer_confirmed false) is never picked; the next visit is', async () => {
+    const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const appointmentPublic = require('./../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'upcoming', phase: null });
+    try {
+      const movedHold = { id: 'v-hold', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '08:00', status: 'confirmed', source_action: 'voice_agent', customer_confirmed: false };
+      const later = { id: 'v-later', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '13:00', status: 'confirmed', source_action: null, customer_confirmed: true };
+      wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([movedHold, later]) });
+      builders.buildAppointmentPageLink.mockResolvedValue({ url: 'https://wavespest.co/a/abc', line: 'x', appointment: { id: 'v-later' } });
+      await withServer(async (baseUrl) => {
+        expect((await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'appointment' })).status).toBe(200);
+      });
+      expect(builders.buildAppointmentPageLink).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-later' }));
+      // The hold was dropped before the page-state read: nothing was asked about it.
+      expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'v-hold' }));
     } finally {
       spy.mockRestore();
     }

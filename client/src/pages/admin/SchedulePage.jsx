@@ -1,4 +1,5 @@
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
+import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
 import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
@@ -41,12 +42,14 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
+import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
   isCustomAmountPreset,
@@ -74,6 +77,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
+import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, recordForProduct, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -688,9 +692,6 @@ const CUSTOMER_INTERACTION_ALIASES = {
   not_home_partial: "not_home_partial_access",
   concern: "customer_specific_concern",
 };
-const COMPLETION_PHOTO_MAX_BYTES = 1.5 * 1024 * 1024;
-const COMPLETION_PHOTO_MAX_DIMENSION = 1600;
-const COMPLETION_PHOTO_QUALITY_STEPS = [0.82, 0.72, 0.62, 0.54];
 
 function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[value] || value || "";
@@ -698,61 +699,6 @@ function normalizeCustomerInteractionValue(value) {
 
 function isCustomerConcernInteraction(value) {
   return normalizeCustomerInteractionValue(value) === "customer_specific_concern";
-}
-
-function dataUrlApproxBytes(dataUrl) {
-  const encoded = String(dataUrl || "").split(",")[1] || "";
-  return Math.ceil((encoded.length * 3) / 4);
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read photo"));
-    };
-    img.src = url;
-  });
-}
-
-async function prepareCompletionPhoto(file) {
-  if (!file?.type?.startsWith("image/")) {
-    throw new Error("Only image files can be attached.");
-  }
-  const image = await loadImageFromFile(file);
-  const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height);
-  let scale = largestSide > COMPLETION_PHOTO_MAX_DIMENSION
-    ? COMPLETION_PHOTO_MAX_DIMENSION / largestSide
-    : 1;
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(image, 0, 0, width, height);
-
-    for (const quality of COMPLETION_PHOTO_QUALITY_STEPS) {
-      const data = canvas.toDataURL("image/jpeg", quality);
-      if (dataUrlApproxBytes(data) <= COMPLETION_PHOTO_MAX_BYTES) {
-        return {
-          data,
-          name: file.name?.replace(/\.[^.]+$/, ".jpg") || "service-photo.jpg",
-          capturedAt: new Date().toISOString(),
-        };
-      }
-    }
-    scale *= 0.75;
-  }
-  throw new Error("Photo is too large to attach to completion.");
 }
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
@@ -1007,7 +953,7 @@ export function derivedTotalAmount(rate, areaSqft) {
 // for the actual (Codex r8 P1 on #4086).
 function lawnDerivedTotal(product, areaSqft) {
   if (isPerBasisUnit(product.rateUnit)) return "";
-  if ((product.lawnPlanManualFields || []).includes("amountUnit")
+  if ((product.propertyAmountUnitManual || (product.lawnPlanManualFields || []).includes("amountUnit"))
     && baseUnitOf(product.amountUnit) !== baseUnitOf(product.rateUnit)) return "";
   return derivedTotalAmount(product.rate, areaSqft);
 }
@@ -1085,6 +1031,52 @@ export function completionReconcilePrompt(error) {
   const lead = String(error?.message || "").trim()
     || "The report disagrees with the recorded values.";
   return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
+}
+
+// Whether the notes still carry a generated report's titles: the two-section
+// paragraph or the four-section report (writer rules), each title on its own
+// line or written inline with its text ("WHAT WE FOUND: You mentioned…"),
+// the forms the server's parser accepts.
+export function reportShapedNotes(notes) {
+  const text = String(notes || '');
+  return /^\s*WHAT WE DID(?: AND WHY)?(?::.*)?$/m.test(text)
+    && /^\s*WHAT WE FOUND(?::.*)?$/m.test(text);
+}
+
+// Whether a Generate should save the current notes as the tech's own
+// handwritten notes (the grounding a later regeneration or invalidation
+// restores). Never the untouched installed draft; never an edited draft
+// (report-shaped notes while a draft is installed, codex r54); but notes a
+// tech typed under the report's headings before any draft was installed
+// are theirs and are saved.
+export function shouldCaptureHandwrittenNotes({ notes, installedText = null, draftInstalled = false } = {}) {
+  const text = String(notes || '');
+  if (draftInstalled && reportShapedNotes(text)) return false;
+  return text.trim() !== String(installedText || '').trim();
+}
+
+// The completion route's edit heads-up 409 (code 'report_rules_review',
+// four-section report under GATE_REPORT_WRITER_RULES): an edit added
+// something the report leaves out. Returns the confirm() text, or null for
+// any other error. Like the reconciliation 409 it keeps the idempotency key,
+// so the confirmed resubmit replays under the same key.
+export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// The promise list is an optional read: a stalled one gives up rather than
+// hold the form (Codex #5516).
+const PROMISE_CHECK_TIMEOUT_MS = 15000;
+
+export function completionPromiseMarksPrompt(error) {
+  if (error?.code !== "promise_marks_changed") return null;
+  const lead = String(error?.message || "").trim();
+  return `${lead}\n\nOK — send as is.\nCancel — go back (the promise list reloads).`;
+}
+
+export const PROMISE_MARKS_CHANGED_PROMPT = "You changed a promise mark after the report was written, so the report may not match it.\n\nOK — send as is.\nCancel — go back and write the report again.";
+
+export function completionReportRulesPrompt(error) {
+  if (error?.code !== "report_rules_review") return null;
+  const lead = String(error?.message || "").trim();
+  return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
 }
 
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
@@ -1342,6 +1334,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "annual_prepay_addons_alert_failed",   // annual-prepay add-ons office alert not recorded
   "annual_prepay_addons_lookup_failed",  // annual-prepay add-ons unreadable against the visit's invoice
   "first_application_coverage_changed",  // trip's combined invoice now covers the visit; the resume reuses it
+  "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -9982,7 +9975,7 @@ function LawnPreviousVisitCard({ service }) {
   );
 }
 
-function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled }) {
+function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled, hideArea = false }) {
   const history = defaults.history;
   const score = (row) => row?.overall_score == null ? "—" : `${Math.round(Number(row.overall_score))}/100`;
   const delta = history.progress.baselineDelta;
@@ -9993,13 +9986,13 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
         <div style={{ fontSize: 16, fontWeight: 500 }}>{protocol?.window?.title || "Lawn plan"}</div>
         <button type="button" onClick={onReload} disabled={disabled || loading} style={{ padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 8, background: D.white, color: D.heading, fontSize: 14 }}>Refresh plan</button>
       </div>
-      <label style={{ display: "block", marginTop: 16, fontSize: 14 }}>
+      {!hideArea && <><label style={{ display: "block", marginTop: 16, fontSize: 14 }}>
         Area for this visit (sq ft)
         <input type="number" min="1" max="10000000" step="1" value={areaValue} disabled={disabled}
           onChange={event => onAreaChange(event.target.value)} placeholder="Enter treated area"
           style={{ display: "block", marginTop: 6, width: "100%", boxSizing: "border-box", padding: 12, fontSize: 16, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, background: D.white }} />
       </label>
-      <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.5 }}>Starts with saved turf area. For partial coverage, enter the area treated. Edited product amounts stay as entered.</p>
+      <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.5 }}>Starts with saved turf area. For partial coverage, enter the area treated. Edited product amounts stay as entered.</p></>}
       {loading && <p role="status" style={{ fontSize: 14 }}>Updating plan suggestions…</p>}
       {error && <p role="status" style={{ fontSize: 14 }}>Plan could not be refreshed. Enter actual amounts or retry.</p>}
       {defaults.message && <p style={{ fontSize: 14 }}>{defaults.message}</p>}
@@ -10580,6 +10573,17 @@ function LawnAssessmentCompletionBlock({
   );
 }
 
+// The one line a visit's shared property coverage describes. A combined
+// visit ("Lawn + Tree & Shrub") normalizes to one line while its raw type —
+// what the server classifies the frozen coverage from — names another; it
+// covers two areas, so it records no single shared coverage (null) and its
+// products and findings keep their own areas.
+function propertyAreaLineFor(service) {
+  const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
+  const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
+  return raw === normalized ? normalized : null;
+}
+
 function serviceLineFromType(serviceType = "") {
   const text = String(serviceType || "").toLowerCase();
   if (/\bpalmetto\b/.test(text)) return "pest";
@@ -10641,12 +10645,16 @@ function requiresAreaSqft(method, serviceType = "") {
   );
 }
 
-function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false) {
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false) {
   if (requiresLinearFt(method)) {
     return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
   }
   if (requiresAreaSqft(method, serviceType)) {
     return { unit: "sqft", label: "Sq ft", alertLabel: "square feet" };
+  }
+  if (includeServiceArea && ["tree_shrub", "mosquito"].includes(serviceLineFromType(serviceType))
+    && ["granular_broadcast", "broadcast_spray", "foliar_spray", "fog_ulv", "soil_drench"].includes(normalizeApplicationMethod(method))) {
+    return { unit: "sqft", label: "Sq ft", optional: true };
   }
   if (includeOptionalLawnArea && serviceLineFromType(serviceType) === "lawn" && normalizeApplicationMethod(method) === "spot_treatment") {
     return { unit: "sqft", label: "Treated sq ft", optional: true };
@@ -10794,7 +10802,16 @@ function treeShrubText(...values) {
   return values.filter(Boolean).join(" ").toLowerCase();
 }
 
-function treeShrubProductFlagsClient(selectedProducts = []) {
+// A catalog row labelled as a trunk injection, whatever its name says:
+// application method trunk_injection, or a rate per inch of trunk or per
+// palm. Mirrors isInjectionProduct in server/services/tree-shrub-closeout.js.
+function isInjectionCatalogRow(row) {
+  if (!row) return false;
+  if ((row.application_method ?? row.applicationMethod) === "trunk_injection") return true;
+  return /^\s*(ml|g)\s*\/\s*(inch|in\b|palm)/i.test(String(row.default_unit ?? row.defaultUnit ?? ""));
+}
+
+function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
   const productsText = (product) =>
     treeShrubText(
       product.name,
@@ -10828,9 +10845,12 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     if (/\b0\s*-\s*0\s*-\s*\d+/.test(textValue)) return false;
     return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
   });
-  const hasInjectionProduct = selectedProducts.some((product) =>
-    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
+  const injectionRows = selectedProducts.filter((product) =>
+    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)) ||
+    isInjectionCatalogRow(product) ||
+    isInjectionCatalogRow((catalog || []).find((row) => String(row.id) === String(product.productId))),
   );
+  const hasInjectionProduct = injectionRows.length > 0;
   const missingActuals = selectedProducts.filter((product) => {
     const amount = treeShrubNumber(product.totalAmount);
     return !amount || amount <= 0 || !product.amountUnit;
@@ -10843,6 +10863,7 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
+    injectionRows,
     missingActuals,
   };
 }
@@ -10867,6 +10888,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  injectionProducts = [],
   servicePhotos,
   service,
   customerRecap,
@@ -10928,12 +10950,21 @@ export function treeShrubCloseoutBlocksClient({
   if (closeout.injectionPerformed || productFlags.hasInjectionProduct) {
     const injection = closeout.injectionRecord || {};
     if (!String(injection.plantSpecies || "").trim()) push("Injection record requires plant species.", "injectionRecord.plantSpecies");
+    // The record's product, when it is one of this visit's injection products,
+    // brings its label: a per-inch label needs the trunk in inches (the server
+    // checks the same).
+    const { basis } = injectionRecordView(injection, injectionProducts);
+    const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
+    else if (basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
     // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
     // refuses the same dose (tree-shrub-closeout.js).
     else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
+    // A dose saved before the dose became a number of tsp or fl oz, and not
+    // readable as one, is entered again rather than sent unseen.
+    else if (!(Number(parseDose(injection.dose).amount) > 0)) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -10942,11 +10973,247 @@ export function treeShrubCloseoutBlocksClient({
   return blocks;
 }
 
-function TreeShrubCloseoutBlock({
+// The injection product's label in tsp or fl oz, per inch of trunk or per palm.
+function InjectionLabelLine({ rate, colors }) {
+  return (
+    <div style={{ fontSize: 14, color: colors.muted }}>
+      Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate)}</strong>
+    </div>
+  );
+}
+
+// The dose the tech put in, as a number of tsp or fl oz.
+function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
+  const { dose, unreadableDose } = view;
+  // The unit a dose is entered in: the saved dose's own, so clearing its
+  // amount never switches tsp to fl oz under the tech.
+  const [doseUnitPick, setDoseUnitPick] = useState(() => dose.unit || "fl_oz");
+  // What the tech is typing: the record keeps only a number it can read
+  // ("1 1/2" reads 1.5), never digits run together.
+  const [doseTyped, setDoseTyped] = useState(null);
+  const doseDraft = typedDraft(doseTyped, record.dose);
+  const doseUnit = dose.unit || doseUnitPick;
+  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  const perPalm = view.basis === "palm";
+  return (
+    <>
+      <div style={caption}>
+        <span>{perPalm ? "Dose you put in, per palm" : "Dose you put in"}</span>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
+          <input
+            inputMode="decimal"
+            aria-label="Dose amount"
+            value={doseDraft ?? dose.amount}
+            onChange={(e) => {
+              const typed = e.target.value;
+              const stored = doseText(quantityOf(typed), doseUnit);
+              setDoseUnitPick(doseUnit);
+              setDoseTyped({ typed, stored });
+              onDose(stored);
+            }}
+            placeholder="Dose"
+            style={input}
+          />
+          <select
+            aria-label="Dose unit"
+            value={doseUnit}
+            onChange={(e) => {
+              setDoseUnitPick(e.target.value);
+              if (dose.amount) onDose(doseText(dose.amount, e.target.value));
+            }}
+            style={select}
+          >
+            {DOSE_UNITS.map((unit) => (
+              <option key={unit.value} value={unit.value}>{unit.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
+      {unreadableDose && !doseDraft && (
+        <div style={problem}>
+          {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
+        </div>
+      )}
+    </>
+  );
+}
+
+// The tree's trunk in inches for a per-inch label (a saved size in another
+// unit is shown, to enter again); otherwise the size as typed.
+function InjectionSizeFields({ record, view, onSize, input, colors }) {
+  const { basis, trunkInches, unreadableTrunk } = view;
+  const [trunkTyped, setTrunkTyped] = useState(null);
+  const trunkDraft = typedDraft(trunkTyped, record.sizeClassOrDbh);
+  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  return (
+    <>
+      {basis === "inch" ? (
+        <label style={caption}>
+          Trunk (inches across, chest high)
+          <input
+            inputMode="decimal"
+            value={trunkDraft ?? trunkInches}
+            onChange={(e) => {
+              const typed = e.target.value;
+              // Only a trunk above zero is stored; "." or "0" stays a draft.
+              const inches = quantityOf(typed);
+              const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
+              setTrunkTyped({ typed, stored });
+              onSize(stored);
+            }}
+            placeholder="Inches"
+            style={input}
+          />
+        </label>
+      ) : (
+        <input
+          value={record.sizeClassOrDbh || ""}
+          onChange={(e) => onSize(e.target.value)}
+          placeholder="DBH / palm size"
+          style={input}
+        />
+      )}
+      {basis === "inch" && trunkTypingUnreadable && (
+        <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
+      )}
+      {unreadableTrunk && !trunkDraft && (
+        <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
+      )}
+    </>
+  );
+}
+
+// The injection record (owner rulings 2026-09-29, 2026-10-01): the product,
+// its label in tsp or fl oz, the band and trunk that settle the dose, and the
+// dose itself as a number of tsp or fl oz.
+function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, select, colors }) {
+  const setInjectionField = (field, nextValue) =>
+    onChange({ ...value, injectionRecord: { ...(value.injectionRecord || {}), [field]: nextValue } });
+  // The injection dose in the truck's measures (lib/injection-dose.js): the
+  // record's product, if it is one of this visit's injection products, brings
+  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz.
+  // The dose is a number of tsp or fl oz.
+  const record = value.injectionRecord || {};
+  const [otherProduct, setOtherProduct] = useState(false);
+  const view = injectionRecordView(record, injectionProducts);
+  const { chosen: chosenInjection, rate: labelRate } = view;
+  // The record keeps the catalog id of one of this visit's products, so the
+  // server matches its label by id even if the product is renamed.
+  const setProduct = (product, productAuto) => {
+    const next = injectionProducts.find((option) => option.name === product) || null;
+    // A label measured another way (per palm vs per inch) starts without the
+    // old size.
+    const clearSize = Boolean(next?.basis) && next.basis !== view.basis;
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId: next?.productId ?? null, clearSize }) });
+  };
+  // One injection product on this visit: the record names it, until the tech
+  // chooses or types a product of their own (then it is never put back). A
+  // product the form named itself follows the visit: when that product leaves
+  // the visit, the record names the new only one, or none.
+  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  // The record marks a product the form named (productAuto), so a restored
+  // draft still knows it may follow the visit.
+  const productTouched = useRef(false);
+  useEffect(() => {
+    if (productTouched.current) return;
+    const stale = Boolean(record.product) && record.productAuto === true &&
+      !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product && onlyInjection) || stale) {
+      setProduct(onlyInjection, Boolean(onlyInjection));
+    }
+  }, [onlyInjection, record.product, injectionProducts]);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {injectionProducts.length > 0 && (
+        <select
+          aria-label="Injection product"
+          value={otherProduct ? "__other__" : chosenInjection?.name || ""}
+          onChange={(e) => {
+            const picked = e.target.value;
+            productTouched.current = true;
+            setOtherProduct(picked === "__other__");
+            setProduct(picked === "__other__" ? "" : picked, false);
+          }}
+          style={select}
+        >
+          <option value="" disabled>Injection product</option>
+          {injectionProducts.map((product) => (
+            <option key={product.name} value={product.name}>{product.name}</option>
+          ))}
+          <option value="__other__">Other product…</option>
+        </select>
+      )}
+      {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
+        <input
+          value={record.product || ""}
+          onChange={(e) => {
+            productTouched.current = true;
+            setProduct(e.target.value, false);
+          }}
+          placeholder="Injection product"
+          style={input}
+        />
+      )}
+      {labelRate && <InjectionLabelLine rate={labelRate} colors={colors} />}
+      <InjectionSizeFields
+        record={record}
+        view={view}
+        onSize={(size) => setInjectionField("sizeClassOrDbh", size)}
+        input={input}
+        colors={colors}
+      />
+      <InjectionDoseFields
+        record={record}
+        view={view}
+        onDose={(dose) => setInjectionField("dose", dose)}
+        input={input}
+        select={select}
+        colors={colors}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={record.numberOfPorts ?? ""}
+          onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
+          placeholder="Ports"
+          style={input}
+        />
+        <input
+          type="date"
+          value={record.followUpDate || ""}
+          onChange={(e) => setInjectionField("followUpDate", e.target.value)}
+          style={input}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          value={record.plantSpecies || ""}
+          onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+          placeholder="Plant species"
+          style={input}
+        />
+        <input
+          value={record.targetIssue || ""}
+          onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+          placeholder="Injection target issue"
+          style={input}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function TreeShrubCloseoutBlock({
   value,
   onChange,
   blocks,
   productFlags,
+  injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
   textareaStyle,
@@ -10956,14 +11223,6 @@ function TreeShrubCloseoutBlock({
   const select = { ...(selectStyle || baseInputStyle), marginBottom: 8 };
   const textarea = { ...(textareaStyle || baseInputStyle), marginBottom: 8, minHeight: 82 };
   const setField = (field, nextValue) => onChange({ ...value, [field]: nextValue });
-  const setInjectionField = (field, nextValue) =>
-    onChange({
-      ...value,
-      injectionRecord: {
-        ...(value.injectionRecord || {}),
-        [field]: nextValue,
-      },
-    });
   const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -11107,57 +11366,14 @@ function TreeShrubCloseoutBlock({
         Injection add-on performed
       </label>
       {injectionVisible && (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.plantSpecies || ""}
-              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
-              placeholder="Plant species"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.sizeClassOrDbh || ""}
-              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
-              placeholder="DBH / palm size"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.product || ""}
-              onChange={(e) => setInjectionField("product", e.target.value)}
-              placeholder="Injection product"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.dose || ""}
-              onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose (tsp or fl oz)"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              type="number"
-              value={value.injectionRecord?.numberOfPorts ?? ""}
-              onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
-              placeholder="Ports"
-              style={input}
-            />
-            <input
-              type="date"
-              value={value.injectionRecord?.followUpDate || ""}
-              onChange={(e) => setInjectionField("followUpDate", e.target.value)}
-              style={input}
-            />
-          </div>
-          <input
-            value={value.injectionRecord?.targetIssue || ""}
-            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-            placeholder="Injection target issue"
-            style={input}
-          />
-        </div>
+        <TreeShrubInjectionRecord
+          value={value}
+          onChange={onChange}
+          injectionProducts={injectionProducts}
+          input={input}
+          select={select}
+          colors={colors}
+        />
       )}
     </div>
   );
@@ -12310,10 +12526,41 @@ export function CompletionPanel({
   // Measured lawn sqft from the turf profile: seeds the Sq ft field (and the
   // derived Total) when a broadcast/granular lawn product is added. No
   // profile / not a lawn visit → the fields stay manual as before.
+  const [propertyAreas, setPropertyAreas] = useState(null);
+  const [propertyVisitArea, setPropertyVisitArea] = useState(null);
+  // A completion rejected as `property_service_area_changed` refetches the
+  // property areas (new version) before the tech can retry; the explicit
+  // visit area (propertyVisitArea / lawnAreaOverride) is kept as entered.
+  const [propertyAreasRefreshToken, setPropertyAreasRefreshToken] = useState(0);
+  const [propertyAreasRefreshing, setPropertyAreasRefreshing] = useState(false);
+  // The visit whose first area read has answered (data, or unavailable). Until
+  // then a restored draft's area-derived quantities are unreconciled, and a
+  // completion would go out with no version check at all.
+  const [propertyAreasSettledFor, setPropertyAreasSettledFor] = useState(null);
+  const currentPropertyAreas = propertyAreas?.serviceId === service.id ? propertyAreas : null;
+  const propertyAreasVisitRef = useRef(service.id);
+  // The visit whose property areas answered "not available" (feature off,
+  // no property, or the lookup failed): its pending rows never wait on one.
+  const propertyAreasUnavailableRef = useRef(null);
+  useEffect(() => {
+    setPropertyAreas(null); setPropertyVisitArea(null);
+    if (propertyAreasVisitRef.current !== service.id) {
+      // Drop rows tied to the former visit's property area. A pending row
+      // stays only when that visit had no property areas to wait on; the
+      // plan refresh then re-derives its quantities and keeps the tech's edits.
+      const keepPending = propertyAreasUnavailableRef.current === propertyAreasVisitRef.current;
+      setSelectedProducts(current => current.filter(product => !product.propertyServiceAreaField
+        && (!product.propertyAreaDefault || (keepPending && product.propertyAreaDefault.pending))));
+      propertyAreasVisitRef.current = service.id;
+    }
+  }, [service.id]);
   const [lawnSqftForPrefill, setLawnSqftForPrefill] = useState(null);
   const [lawnCompletionDefaults, setLawnCompletionDefaults] = useState(null);
   const [lawnPlanReady, setLawnPlanReady] = useState(false);
   const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
+  // The property (row|address) the lawn override was entered against once
+  // shared areas loaded; null = entered with none loaded (adopted on load).
+  const [lawnAreaOverrideFor, setLawnAreaOverrideFor] = useState(null);
   const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
   // Names of the removed defaults, keyed by catalog id, saved with the draft:
   // a default removed, then hard-deleted from the catalog before the draft is
@@ -12324,8 +12571,16 @@ export function CompletionPanel({
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
-  const lawnPlanArea = lawnDefaultsEnabled ? lawnAreaOverride : undefined;
-  const lawnVisitArea = lawnAreaOverride !== undefined ? lawnAreaOverride : lawnCompletionDefaults?.lawnSqft ?? "";
+  const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
+  const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
+  // A lawn area entered for one property (e.g. restored from a draft) never
+  // applies to another, including the same row at a new address.
+  const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
+    && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
+    ? lawnAreaOverride : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
+    : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -12979,6 +13234,10 @@ export function CompletionPanel({
   // A job is "typed" when its completion profile carries a findingsType AND
   // the dispatch payload embedded the registry schema slice for it.
   const typedFindingsSchema = service.findingsSchema || null;
+  const findingsDisplaySchema = currentPropertyAreas && service.findingsSchema?.type === "tree_shrub"
+    && propertyAreaLineFor(service) === "tree_shrub"
+    ? { ...service.findingsSchema, fields: service.findingsSchema.fields.filter(field => field.key !== "bed_sqft_serviced") }
+    : service.findingsSchema || null;
   const isTypedFindings = !!(
     service.completionProfile?.findingsType && typedFindingsSchema
   );
@@ -13052,6 +13311,16 @@ export function CompletionPanel({
   // stale AI prose can't publish beside contradicting structured findings
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
+  // The installed generated report the notes hold (or were edited from);
+  // null again once the handwritten notes come back. Saved with the draft.
+  // Lets a regeneration tell an edited draft from handwritten notes that
+  // merely use the report's headings, and is the base completion compares
+  // the submitted report against for the edit heads-up (Codex #5500).
+  const installedReportDraftRef = useRef(null);
+  // The promise marks the installed report was written with (pending while
+  // a Generate request is out): a later change asks before sending.
+  const pendingGenerationPromiseSignatureRef = useRef(null);
+  const generationPromiseSignatureRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -13222,6 +13491,21 @@ export function CompletionPanel({
   // and the tech's picks. `techTips.available === false` (gate off) keeps
   // the observations/recommendations textareas above in place.
   const [techTips, setTechTips] = useState(null);
+  // The promise check (owner "ok yes add these" 2026-10-01): the open
+  // promises the tech can mark, and the marks by promise id.
+  const [promiseCheck, setPromiseCheck] = useState(null);
+  const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
+  const [promiseReloadKey, setPromiseReloadKey] = useState(0);
+  // Older promises a restored draft had marked, beyond the newest ten the
+  // list shows: asked for by id so the mark is kept and shown (Codex #5516).
+  // `promiseIncludeAnswered` is the include list the last load answered.
+  const [promiseIncludeIds, setPromiseIncludeIds] = useState([]);
+  const [promiseIncludeAnswered, setPromiseIncludeAnswered] = useState("");
+  // The last load failed (or timed out): kept apart from a list that came
+  // back empty, so a failed read never drops the marks (Codex #5516).
+  const [promiseCheckUnavailable, setPromiseCheckUnavailable] = useState(false);
+  const promiseIncludeKey = promiseIncludeIds.join(",");
+  const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
@@ -13440,6 +13724,41 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const propertyAreaLine = propertyAreaLineFor(service);
+  const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
+  const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
+  const reviewedPropertyArea = currentPropertyAreas?.areas[propertyAreaKey];
+  // Coverage belongs to the property row AT its address: a restored draft's
+  // coverage for a row since re-addressed is withheld (older drafts carry no
+  // address and are withheld too).
+  const propertyVisitOverride = propertyVisitArea?.serviceId === service.id
+    && propertyVisitArea?.propertyId === currentPropertyAreas?.propertyId
+    && (propertyVisitArea?.addressKey ?? null) === (currentPropertyAreas?.addressKey ?? null)
+    && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
+  const propertyTreatedArea = propertyAreaLine === "lawn" ? lawnVisitArea
+    : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
+  // The bed coverage this effect last accounted for (wrote or promoted), so
+  // its own earlier value is never mistaken for one the tech entered.
+  const bedCoverageSeenRef = useRef(null);
+  useEffect(() => {
+    if (!currentPropertyAreas || !isTypedFindings || propertyAreaLine !== "tree_shrub") return;
+    // The shared coverage field replaces the old internal bed measurement;
+    // retain the existing report/estimate-actuals field on normal closeout.
+    const entered = String(findingsValues.bed_sqft_serviced ?? "");
+    if (entered === String(propertyTreatedArea)) { bedCoverageSeenRef.current = entered; return; }
+    // Coverage typed before the measurements loaded (or restored from a
+    // draft) is the tech's explicit visit area: promote it to the visit
+    // override instead of replacing it with the reviewed property area.
+    if (entered !== "" && entered !== bedCoverageSeenRef.current && propertyVisitOverride === undefined
+      && Number.isFinite(Number(entered)) && Number(entered) >= 0 && Number(entered) <= 1000000) {
+      bedCoverageSeenRef.current = entered;
+      setPropertyVisitArea({ serviceId: service.id, propertyId: currentPropertyAreas.propertyId, addressKey: currentPropertyAreas.addressKey ?? null, kind: "beds", area: entered });
+      return;
+    }
+    invalidateGeneratedReportOnTypedEdit();
+    bedCoverageSeenRef.current = String(propertyTreatedArea);
+    setFindingsValues(current => ({ ...current, bed_sqft_serviced: String(propertyTreatedArea) }));
+  }, [currentPropertyAreas, isTypedFindings, propertyAreaLine, propertyTreatedArea, propertyVisitOverride, findingsValues.bed_sqft_serviced, service.id]);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
   const isTreeShrub =
@@ -13797,6 +14116,7 @@ export function CompletionPanel({
     if (!previousVisitState) return;
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
+    setLawnAreaOverrideFor(null);
     setLawnRemovedDefaultIds([]);
     lawnRemovedDefaultNamesRef.current = {};
     setLawnDefaultsSeedSuppressed(false);
@@ -13843,6 +14163,7 @@ export function CompletionPanel({
       // A subset of zones has no known square footage. Do not silently count
       // the entire saved lawn as treated after a zone is removed.
       setLawnAreaOverride("");
+      setLawnAreaOverrideFor(propertyAreasIdentity);
     }
   }, [lawnDefaultsEnabled, lawnAreaOverride, areasServiced]);
   useEffect(() => {
@@ -13861,6 +14182,34 @@ export function CompletionPanel({
           // In the rate's unit, or in spoons while the tech reads it in tsp.
           : amountInUnit(lawnDerivedTotal(product, lawnVisitArea), baseUnitOf(product.rateUnit), product.amountUnit) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
+  useEffect(() => {
+    // A default records the service-area kind it was derived from. When the
+    // visit is reclassified (or a draft from before that is restored) the
+    // row keeps its numbers but stops following: another kind's area must
+    // never replace it.
+    const kindChanged = product => product.propertyAreaDefault && product.propertyAreaDefault.kind !== propertyAreaKey;
+    const follows = product => product.propertyAreaDefault && !product.lawnPlanDefaults && !kindChanged(product)
+      && (product.propertyAreaDefault.pending || product.propertyAreaDefault.serviceId === service.id);
+    const next = selectedProducts.map(product => {
+      if (kindChanged(product)) return { ...product, propertyAreaDefault: null };
+      if (!currentPropertyAreas || !follows(product)) return product;
+      // An untouched default follows the visit's CURRENT property: after a
+      // reassignment it rebinds to the new property and takes its area.
+      const bound = !product.propertyAreaDefault.pending
+        && product.propertyAreaDefault.propertyId === currentPropertyAreas.propertyId;
+      const area = propertyTreatedArea;
+      if (bound && String(product.areaValue) === String(area)) return product;
+      return { ...product, areaValue: area, areaUnit: 'sqft', propertyServiceAreaField: true,
+        propertyAreaDefault: bound ? product.propertyAreaDefault
+          : { serviceId: service.id, propertyId: currentPropertyAreas.propertyId, kind: propertyAreaKey },
+        totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
+          ? product.totalAmount : amountInUnit(lawnDerivedTotal(product, area), baseUnitOf(product.rateUnit), product.amountUnit) };
+    });
+    if (next.some((product, index) => product !== selectedProducts[index])) {
+      invalidateGeneratedReportOnTypedEdit();
+      setSelectedProducts(next);
+    }
+  }, [currentPropertyAreas, propertyTreatedArea, propertyAreaKey, selectedProducts, service.id]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");
@@ -14397,11 +14746,19 @@ export function CompletionPanel({
     (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
-  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts, products);
+  // The injection record's product list: this visit's rows the closeout flags
+  // as injections (by name or by the catalog's injection label), each with its
+  // label rate in mL per inch of trunk or per palm for the dose helper.
+  const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
+    return { name: row.name, productId: row.productId ?? null, basis: injectionBasis(catalogRow || {}), rate: injectionLabelRate(catalogRow || {}) };
+  });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
         closeout: treeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        injectionProducts,
         servicePhotos,
         service,
         customerRecap,
@@ -14540,6 +14897,93 @@ export function CompletionPanel({
     return () => { cancelled = true; };
   }, [service.id]);
 
+  // The promise check: listed only while the writer rules are live on a
+  // visit the writer covers (the server decides). A failed load shows no
+  // card and keeps any marks as they stand; marking is optional.
+  useEffect(() => {
+    let cancelled = false;
+    setPromiseCheck(null);
+    if (!service.id) {
+      setPromiseCheckLoading(false);
+      return () => { cancelled = true; };
+    }
+    setPromiseCheckLoading(true);
+    const include = promiseIncludeKey;
+    // A deadline on every supported browser (AbortSignal.timeout is missing
+    // on older WebKit): a controller and a timer, which also cancels a load
+    // this effect has moved on from (Codex #5516).
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), PROMISE_CHECK_TIMEOUT_MS) : null;
+    const timeout = controller ? { signal: controller.signal } : {};
+    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
+      .then((data) => {
+        if (cancelled) return;
+        setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+        setPromiseCheckUnavailable(false);
+        setPromiseIncludeAnswered(include);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPromiseCheck(null);
+        setPromiseCheckUnavailable(true);
+      })
+      .finally(() => {
+        clearTimeout(deadline);
+        if (!cancelled) setPromiseCheckLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      controller?.abort();
+    };
+  }, [service.id, promiseReloadKey, promiseIncludeKey]);
+  const visitPromises = promiseCheck?.promises || [];
+  // Marks on promises the list has not shown yet and has not been asked
+  // for: kept as they stand until the list answers for them. Nothing is
+  // asked of a list that could not be read.
+  const unlistedMarkIds = promiseCheckLoading || promiseCheckUnavailable ? [] : Object.keys(promiseMarks).filter((id) => (
+    !visitPromises.some((promise) => promise.id === id)
+    && !(promiseIncludeAnswered ? promiseIncludeAnswered.split(",") : []).includes(id)
+  ));
+  const unlistedMarkKey = unlistedMarkIds.join(",");
+  useEffect(() => {
+    if (!unlistedMarkKey) return;
+    setPromiseIncludeIds((ids) => [...new Set([...ids, ...unlistedMarkKey.split(",")])].slice(0, 50));
+  }, [unlistedMarkKey]);
+  // No marks while Quick complete hides the report, on a backdated closeout
+  // (the marks would never apply) or on a visit that did no work: declined
+  // or incomplete (Codex #5516).
+  const promiseMarksSuppressed = quickComplete || backfillCloseout
+    || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
+  // Marked, listed promises only, each with the wording version the tech saw.
+  // While the list cannot be read, the marks go as the technician made them:
+  // the server checks each one against the promise as it stands, and asks
+  // when one changed (Codex #5516).
+  const markedPromises = Object.entries(promiseMarks || {}).map(([id, entry]) => ({ id, version: entry?.version }));
+  const promiseMarksForRequest = promiseMarksSuppressed ? []
+    : promiseMarksPayload(promiseMarks, promiseCheckUnavailable ? markedPromises : visitPromises);
+  // The marks that still hold: once the list loads, only marks on a listed
+  // promise's current wording (a restored mark on a reworded promise drops
+  // out); while it loads, or while it has yet to answer for a marked
+  // promise it did not show, the marks as they stand (so a restore never
+  // clears a good report early).
+  const validPromiseMarks = promiseCheckLoading || promiseCheckUnavailable || unlistedMarkIds.length
+    ? promiseMarks
+    : Object.fromEntries(visitPromises.flatMap((promise) => {
+      const entry = currentMark(promiseMarks, promise);
+      return entry ? [[promise.id, entry]] : [];
+    }));
+  // Marks the list has not answered for yet (still loading, or an older
+  // promise still being asked for): a report written now would leave them
+  // out while completion later applied them, so Generate and Complete wait
+  // (Codex #5516).
+  // Marks that will not be sent (a declined or incomplete visit, Quick
+  // complete, a backdated closeout) never hold anything (Codex #5516).
+  const promiseMarksPending = !promiseMarksSuppressed && promiseMarksSignature(promiseMarks).length > 0
+    && (promiseCheckLoading || unlistedMarkIds.length > 0);
+  // The marks as the staleness check and the report heads-up compare them.
+  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));
+
   useEffect(() => {
     let cancelled = false;
     setProtocolActions([]);
@@ -14658,7 +15102,7 @@ export function CompletionPanel({
     const areaEdited = lawnPlanArea !== undefined;
     const endpoint = `/admin/treatment-plans/${service.id}${areaEdited ? "/build" : includeCompletionDefaults ? "?completionDefaults=1" : ""}`;
     const request = areaEdited ? {
-      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: lawnPlanArea === "" ? null : Number(lawnPlanArea) }),
+      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: Number(lawnPlanArea) || null }),
     } : {};
     const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {
@@ -14887,6 +15331,7 @@ export function CompletionPanel({
       // no default rows, nothing removed) restored during an outage is not
       // read as empty and cleared by the debounced autosave (Codex #4113
       // batch 12, follow-up). Shared with the V2 page through CompletionPanel.
+      propertyVisitArea !== null ||
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
       protocolCompletionDefaultsRemovedIds.length > 0 ||
@@ -14899,6 +15344,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A promise mark is tech input on its own (a mark-only draft saves).
+      promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
       parkedNext.trim() ||
       nextVisitNote.trim() ||
@@ -14964,6 +15411,11 @@ export function CompletionPanel({
         // tech-authored rows (pre-push audit on #5049).
         protocolCompletionDefaultsSnapshot: protocolCompletionDefaultsSnapshotRef.current,
         lawnAreaOverride,
+        lawnAreaOverrideFor,
+        propertyVisitArea,
+        // Which bed coverage was the reviewed default (not typed by the
+        // tech): a restored draft promotes only a value beyond this.
+        bedCoverageSeen: bedCoverageSeenRef.current,
         // Persisted whenever removed defaults exist, not only while live
         // defaults are loaded: a draft restored during a plan outage would
         // otherwise lose its removed defaults on the next autosave, and the
@@ -15051,6 +15503,10 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        installedReportDraft: installedReportDraftRef.current,
+        // The promise check's marks restore with the draft they shaped.
+        promiseMarks,
+        generationPromiseSignature: generationPromiseSignatureRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15141,6 +15597,8 @@ export function CompletionPanel({
     // outage (Codex #4365 r2 P2). Re-evaluate on the flag itself.
     completionImprovements,
     lawnAreaOverride,
+    lawnAreaOverrideFor,
+    propertyVisitArea,
     lawnRemovedDefaultIds,
     protocolCompletionDefaultsRemovedIds,
     lawnDefaultsSeedSuppressed,
@@ -15177,6 +15635,8 @@ export function CompletionPanel({
     service.address,
     service.serviceAddress,
     service.propertyAddress,
+    // A mark is operator input: a mark-only change must save the draft.
+    promiseMarks,
   ]);
 
   function restoreDraft() {
@@ -15220,6 +15680,16 @@ export function CompletionPanel({
       protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
     }
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
+    // A restored override with no recorded property (an older draft, or one
+    // saved before the areas answered) cannot be verified: withheld whenever
+    // shared areas load, applied only when none do.
+    setLawnAreaOverrideFor(typeof savedDraft.lawnAreaOverrideFor === "string" ? savedDraft.lawnAreaOverrideFor
+      : savedDraft.lawnAreaOverride !== undefined ? "unverified-draft" : null);
+    // A draft that never recorded it (older) is read as default-derived.
+    bedCoverageSeenRef.current = Object.hasOwn(savedDraft, "bedCoverageSeen") ? savedDraft.bedCoverageSeen
+      : savedDraft.findingsValues?.bed_sqft_serviced != null ? String(savedDraft.findingsValues.bed_sqft_serviced) : null;
+    setPropertyVisitArea(savedDraft.propertyVisitArea?.serviceId === service.id
+      && savedDraft.propertyVisitArea?.kind === propertyAreaKey ? savedDraft.propertyVisitArea : null);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
     lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
@@ -15448,6 +15918,16 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    // Older drafts lack the field: a restored installed report counts.
+    installedReportDraftRef.current = typeof savedDraft.installedReportDraft === "string" && savedDraft.installedReportDraft
+      ? savedDraft.installedReportDraft
+      : generatedReportTextRef.current;
+    setPromiseMarks(savedDraft.promiseMarks && typeof savedDraft.promiseMarks === "object" && !Array.isArray(savedDraft.promiseMarks)
+      ? savedDraft.promiseMarks
+      : {});
+    generationPromiseSignatureRef.current = typeof savedDraft.generationPromiseSignature === "string"
+      ? savedDraft.generationPromiseSignature
+      : null;
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -15640,6 +16120,7 @@ export function CompletionPanel({
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
         preGenerationNotesRef.current = null;
         preGenerationChipDetachedRef.current = false;
+        installedReportDraftRef.current = null;
         setGeneratedReportCleared(true);
       }
     }
@@ -15880,19 +16361,23 @@ export function CompletionPanel({
     installedPhotoGroundingUsedRef.current = photoGroundingUsed;
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
-    // An EDITED older draft still carries the two-section report shape and
-    // must not be captured either: invalidation would restore it and
-    // completion would publish stale generated copy that predates the
-    // final findings (codex r54). Only genuinely handwritten notes ground
-    // a regeneration; the previous handwritten capture is kept otherwise.
-    const notesLookGenerated = /^\s*WHAT WE DID:?\s*$/m.test(notes)
-      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
-    if (!notesLookGenerated
-      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+    // An EDITED older draft still carries the report shape (two sections,
+    // or the four-section report under the writer rules, whose title is
+    // "WHAT WE DID AND WHY") and must not be captured either: invalidation
+    // would restore it and completion would publish stale generated copy
+    // that predates the final findings (codex r54). Only genuinely
+    // handwritten notes ground a regeneration; the previous handwritten
+    // capture is kept otherwise.
+    if (shouldCaptureHandwrittenNotes({
+      notes,
+      installedText: generatedReportTextRef.current,
+      draftInstalled: Boolean(installedReportDraftRef.current),
+    })) {
       preGenerationNotesRef.current = notes;
       preGenerationChipDetachedRef.current = chipLinesDetached;
     }
     generatedReportTextRef.current = String(reportText || "").trim();
+    installedReportDraftRef.current = generatedReportTextRef.current || null;
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
@@ -15923,6 +16408,7 @@ export function CompletionPanel({
     // the OLD flag/shape, self-invalidating a draft the tech never touched
     // the instant the flag changes.
     generationInputsRef.current = buildGenerationInputsSnapshot();
+    generationPromiseSignatureRef.current = pendingGenerationPromiseSignatureRef.current;
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -16271,8 +16757,11 @@ export function CompletionPanel({
       // on the customer report" directly, with no separate opt-in step).
       ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
+      // The promise check: the report says only what the tech marked.
+      ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
       ...typedFindingsPayload,
     };
+    pendingGenerationPromiseSignatureRef.current = effectivePromiseSignature;
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
@@ -16300,7 +16789,9 @@ export function CompletionPanel({
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
-      (isLawn && lawnAssessmentReady === "failed");
+      (isLawn && lawnAssessmentReady === "failed") ||
+      // A marked promise is visit detail the report can speak to (Codex #5516).
+      promiseMarksForRequest.length > 0;
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied, dryDown) {
@@ -16403,7 +16894,7 @@ export function CompletionPanel({
       // The suggestion stays editable and is still the tech's actual to
       // confirm; a label with no per-1k rate prefills nothing, as before.
       row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
-        lawnAreaDefault: row.areaUnit === "sqft",
+        lawnAreaDefault: row.areaUnit === "sqft" && (!currentPropertyAreas || productUsesPropertyArea(catalogProduct, row.applicationMethod)),
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
@@ -16425,6 +16916,17 @@ export function CompletionPanel({
     return productDimension(catalogRow || { name: sp.name, category: sp.category }) === "liquid";
   }
 
+  // Palm feeds (and bed-only products on a lawn visit) never take the shared
+  // property area — on any path that seeds or follows it. The lawn area is a
+  // whole-lawn broadcast quantity: only a broadcast method takes it; any other
+  // method on a lawn visit (a soil drench, spot work) stays manual.
+  function productUsesPropertyArea(product, applicationMethod) {
+    if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
+    return !!propertyAreaKey
+      && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
+      && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
+  }
+
   function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
@@ -16435,9 +16937,10 @@ export function CompletionPanel({
     // completion-defaults seed only; every other caller is unaffected.
     const applicationMethod = applicationMethodOverride
       || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+    const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      serviceTypeForArea,
+      serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -16460,9 +16963,11 @@ export function CompletionPanel({
     // Perimeter sprays start from the traced barrier's measured footage
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
+    const sharedArea = currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
+      : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
     const prefillArea =
-      areaRequirement?.unit === "sqft" && Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill) > 0
-        ? Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill)
+      areaRequirement?.unit === "sqft" && sharedArea !== "" && sharedArea != null && Number(sharedArea) >= 0
+        ? Number(sharedArea)
         : areaRequirement?.unit === "linear_ft" && Number(tracedLinearFt) > 0
           ? Number(tracedLinearFt)
           : "";
@@ -16538,6 +17043,9 @@ export function CompletionPanel({
         applicationMethod,
         applicationArea: "",
         areaValue: prefillArea,
+        propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+          ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, kind: propertyAreaKey, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
         // target_pests) so the tech starts from what the product is labeled to
@@ -16652,6 +17160,11 @@ export function CompletionPanel({
         if (governed) {
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
+        if (["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.propertyAreaDefault = null;
+        if (field === "amountUnit" && (p.propertyServiceAreaField || p.propertyAreaDefault)) {
+          next.propertyAmountUnitManual = true;
+          if (!p.totalAmountManual) next.totalAmount = "";
+        }
         if (field === "applicationArea") next.applicationAreaDefault = false;
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.
@@ -16659,7 +17172,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            serviceTypeForArea,
+            serviceTypeForArea, false, next.propertyServiceAreaField,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -16686,7 +17199,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
-            governed,
+            governed, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -17050,7 +17563,7 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false } = {}) {
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false, promisesConfirmed = false } = {}) {
     // The status poll's "resumable" verdict re-enters here while submitting
     // is STILL true (the button stayed in its completing state through the
     // whole chain) — that re-entry is the continuation of the same logical
@@ -17060,7 +17573,7 @@ export function CompletionPanel({
     if (submitting && !resumingPoll) return;
     // Draft discovery still settling (see baseCompletionCtaLabel): the button
     // is disabled, but a keyboard/programmatic submit must not race it.
-    if (draftLoading) return;
+    if (draftLoading || propertyAreasBlocked) return;
     setSubmitError("");
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
@@ -17086,6 +17599,22 @@ export function CompletionPanel({
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
+    // Marks restored with a draft are checked against the promise list once
+    // it loads; completing before then would drop them (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    // A promise mark changed after the report was written and the tech kept
+    // their edited report (an untouched one clears itself): the report may
+    // not match the marks, so the tech decides (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !resumingPoll
+      && installedReportDraftRef.current
+      && generationPromiseSignatureRef.current != null
+      && generationPromiseSignatureRef.current !== effectivePromiseSignature
+      && !window.confirm(PROMISE_MARKS_CHANGED_PROMPT)) {
       return;
     }
     const specialtyProductConflict = exclusiveProtocolProductConflict(
@@ -17597,11 +18126,15 @@ export function CompletionPanel({
             return productName ? [{ productId: item?.product?.id || id, productName }] : [];
           })
         : [];
-      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined);
+      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined) || (currentPropertyAreas && propertyAreaLine === "lawn");
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: reportTechnicianNotes,
+        ...(currentPropertyAreas && propertyAreaKey && propertyTreatedArea !== "" && propertyTreatedArea != null
+          ? { propertyServiceArea: { propertyId: currentPropertyAreas.propertyId, version: currentPropertyAreas.version, kind: propertyAreaKey, treatedSqft: Number(propertyTreatedArea),
+            // The tech set this visit's coverage; absent means the reviewed property default.
+            ...((propertyAreaLine === "lawn" ? effectiveLawnAreaOverride !== undefined : propertyVisitOverride !== undefined) ? { explicitVisitArea: true } : {}) } } : {}),
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -17614,6 +18147,16 @@ export function CompletionPanel({
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
+        // Edit heads-up (four-section report): the draft the notes were
+        // edited from, and the tech's "send as is" on the resubmit.
+        reportDraftBase: installedReportDraftRef.current || null,
+        ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
+        // The tech chose to send though a marked promise changed since the
+        // report was written (promise_marks_changed).
+        ...(promisesConfirmed ? { promiseMarksConfirmed: true } : {}),
+        // The promise check: Done closes the promise in the office list,
+        // Partly adds the still-left note (applied after the save).
+        ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -17655,7 +18198,7 @@ export function CompletionPanel({
         // demanded.
         lawnProtocolCompletion: lawnAreaSubmitted || lawnSkippedDefaults.length
           ? {
-              ...(lawnAreaSubmitted ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : {}),
+              ...(lawnAreaSubmitted ? { treatedSqft: lawnVisitArea === "" || Number(lawnVisitArea) === 0 ? null : Number(lawnVisitArea) } : {}),
               ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),
             } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
@@ -17926,7 +18469,7 @@ export function CompletionPanel({
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
-      return settleCompletionSubmitError(e, reconcileConfirmed);
+      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed, promisesConfirmed);
     }
     setSubmitting(false);
   }
@@ -17948,7 +18491,7 @@ export function CompletionPanel({
 
   // Every non-success outcome of a completion POST — the fresh build and
   // the committed replay end here.
-  async function settleCompletionSubmitError(e, reconcileConfirmed) {
+  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false, promisesConfirmed = false) {
     // Any outcome but another quiet side-effects retry ends the retry
     // COUNT — the committed flag and body snapshot deliberately survive
     // (see the ref declarations): after a committed 409, even the manual
@@ -17957,6 +18500,10 @@ export function CompletionPanel({
     sideEffectsRetryRef.current = 0;
     if (shouldResetCompletionIdempotencyKey(e)) {
       completionIdempotencyKeyRef.current = null;
+      if (e?.code === "property_service_area_changed") {
+        setPropertyAreasRefreshing(true);
+        setPropertyAreasRefreshToken((value) => value + 1);
+      }
       if (e?.code === "completion_pricing_changed") {
         setCompletionPricing(null);
         setPricingReloadKey((value) => value + 1);
@@ -17969,8 +18516,30 @@ export function CompletionPanel({
     if (reconcileText) {
       setSubmitting(false);
       if (window.confirm(reconcileText)) {
-        return handleSubmit(true);
+        return handleSubmit(true, { rulesConfirmed, promisesConfirmed });
       }
+      return;
+    }
+    // Edit heads-up (409, key preserved): never blocks — OK sends the
+    // report as is, Cancel goes back to edit it.
+    const rulesText = completionReportRulesPrompt(e);
+    if (rulesText) {
+      setSubmitting(false);
+      if (window.confirm(rulesText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true, promisesConfirmed });
+      }
+      return;
+    }
+    // A marked promise changed after the report was written (409, key
+    // preserved): OK sends as is; Cancel reloads the promises so the tech
+    // can mark them again and write the report again.
+    const promiseText = completionPromiseMarksPrompt(e);
+    if (promiseText) {
+      setSubmitting(false);
+      if (window.confirm(promiseText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed, promisesConfirmed: true });
+      }
+      setPromiseReloadKey((key) => key + 1);
       return;
     }
     if (completionResumeOwedError(e)) {
@@ -18300,6 +18869,9 @@ export function CompletionPanel({
       // below invalidates an in-flight response on settle like any other
       // input
       aiReportIncludeComms,
+      // a promise marked (or re-marked) after generation changes what the
+      // report should say about it
+      effectivePromiseSignature,
     ]);
   }
   useEffect(() => {
@@ -18320,7 +18892,20 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
+  // The installed report was written with promise marks that no longer
+  // hold (a restored draft whose promise was reworded since, which the
+  // restore's fresh watcher baseline cannot see): an untouched report clears
+  // itself like any changed input; an edited one asks at submit (Codex #5516).
+  useEffect(() => {
+    if (promiseCheckLoading || generating) return;
+    const written = generationPromiseSignatureRef.current;
+    if (written == null || written === effectivePromiseSignature) return;
+    const installed = generatedReportTextRef.current;
+    if (installed && String(notes || "").trim() === installed) invalidateGeneratedReportOnTypedEdit();
+    // promiseMarks: a restore sets marks and the report together, and its
+    // stale marks may leave the effective signature itself unchanged.
+  }, [effectivePromiseSignature, promiseCheckLoading, generating, promiseMarks]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -18354,6 +18939,7 @@ export function CompletionPanel({
       setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
+      installedReportDraftRef.current = null;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
       return restoredDetached;
@@ -18550,13 +19136,28 @@ export function CompletionPanel({
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.
   // ────────────────────────────────────────────────────────────────────
+  const propertyAreaPanel = propertyAreaKey && <PropertyServiceAreas key={service.id} serviceId={service.id}
+    serviceLine={propertyAreaLine} disabled={submitting || generating}
+    visitArea={propertyAreaLine === "lawn" ? effectiveLawnAreaOverride : propertyVisitOverride}
+    refreshToken={propertyAreasRefreshToken}
+    onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) { setPropertyAreasRefreshing(false); setPropertyAreasSettledFor(service.id); } }}
+    // A failed load after a stale-version 409 keeps completion blocked (the
+    // next submit would otherwise skip the version check); only a fresh
+    // version, or the feature being off, releases it. The panel offers Retry.
+    // A failed FIRST read settles the visit: the tech enters the area by hand.
+    onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; setPropertyAreasSettledFor(service.id); if (!failed) setPropertyAreasRefreshing(false); }}
+    onVisitAreaChange={area => {
+      invalidateGeneratedReportOnTypedEdit();
+      if (propertyAreaLine === "lawn") { setLawnAreaOverride(area === null ? undefined : area); setLawnAreaOverrideFor(propertyAreasIdentity); }
+      else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, addressKey: currentPropertyAreas?.addressKey ?? null, kind: propertyAreaKey, area });
+    }} />;
   const lawnProgressPanel = completionImprovements && isLawn && (
     !currentLawnPlanReady ? <p role="status" style={{ fontSize: 14 }}>Loading lawn plan…</p>
       : lawnCompletionDefaults?.serviceId !== service.id ? <div role="status" style={{ margin: "16px 0", fontSize: 14 }}>Lawn plan unavailable.
         <button type="button" onClick={() => setLawnPlanReloadKey(key => key + 1)} style={{ marginLeft: 12, padding: 8, fontSize: 14 }}>Retry plan</button></div>
       : lawnDefaultsEnabled ? <LawnVisitPlanSummary defaults={lawnCompletionDefaults} protocol={treatmentPlanStructuredProtocol}
-        areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
-        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
+        hideArea={!!currentPropertyAreas} areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
+        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); setLawnAreaOverrideFor(propertyAreasIdentity); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : <LawnPreviousVisitCard service={service} />
   );
@@ -19181,6 +19782,7 @@ export function CompletionPanel({
                   }
                   blocks={treeShrubCloseoutBlocks}
                   productFlags={treeShrubProductFlags}
+                  injectionProducts={injectionProducts}
                   inputStyle={mInput}
                   selectStyle={mSelect}
                   textareaStyle={mTextarea}
@@ -19190,10 +19792,12 @@ export function CompletionPanel({
                     text: M.ink,
                     muted: M.ink3,
                     error: M.err,
+                    warn: M.warn,
                   }}
                 />
               </Field>
             )}
+            {propertyAreaPanel}
             {lawnProgressPanel}
             {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
@@ -19557,6 +20161,16 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
+            {!promiseMarksSuppressed && promiseCheck && (
+              <PromiseCheck
+                promises={visitPromises}
+                total={promiseCheck.total}
+                marks={promiseMarks}
+                onChange={setPromiseMarks}
+                disabled={generating || submitting}
+                tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, onInk: M.actionFg, font }}
+              />
+            )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
@@ -19573,6 +20187,10 @@ export function CompletionPanel({
                   // it. Hold the action until the transcript has landed.
                   if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                    return;
+                  }
+                  if (promiseMarksPending) {
+                    alert(PROMISE_MARKS_LOADING_ALERT);
                     return;
                   }
                   if (dictation.listening) dictation.toggle();
@@ -19917,7 +20535,7 @@ export function CompletionPanel({
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
-                schema={typedFindingsSchema}
+                schema={findingsDisplaySchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
                 activityScore={typedActivityScore}
@@ -20252,7 +20870,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
-                          lawnDefaultsEnabled,
+                          lawnDefaultsEnabled, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -21062,7 +21680,7 @@ export function CompletionPanel({
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked ||
+                    treeShrubCompletionBlocked || propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
               }
               style={{
@@ -21072,7 +21690,7 @@ export function CompletionPanel({
                   draftLoading ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
-                      treeShrubCompletionBlocked ||
+                      treeShrubCompletionBlocked || propertyAreasBlocked ||
                       protocolActualsCompletionBlocked))
                     ? 0.5
                     : 1,
@@ -21512,6 +22130,7 @@ export function CompletionPanel({
                 }
                 blocks={treeShrubCloseoutBlocks}
                 productFlags={treeShrubProductFlags}
+                injectionProducts={injectionProducts}
                 inputStyle={inputStyle}
                 selectStyle={inputStyle}
                 textareaStyle={{ ...inputStyle, minHeight: 82, resize: "vertical" }}
@@ -21521,6 +22140,7 @@ export function CompletionPanel({
                   text: D.text,
                   muted: D.muted,
                   error: D.red,
+                  warn: D.amber,
                 }}
               />
             </div>
@@ -21573,6 +22193,7 @@ export function CompletionPanel({
               )}
             </div>
           )}
+          {propertyAreaPanel}
           {lawnProgressPanel}
           {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
@@ -21992,6 +22613,17 @@ export function CompletionPanel({
               </div>
             )}{" "}
           </div>
+          {!promiseMarksSuppressed && promiseCheck && (
+            <PromiseCheck
+              promises={visitPromises}
+              total={promiseCheck.total}
+              marks={promiseMarks}
+              onChange={setPromiseMarks}
+              disabled={generating || submitting}
+              compact
+              tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, onInk: D.white }}
+            />
+          )}
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
@@ -22008,6 +22640,10 @@ export function CompletionPanel({
                 // it. Hold the action until the transcript has landed.
                 if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                  return;
+                }
+                if (promiseMarksPending) {
+                  alert(PROMISE_MARKS_LOADING_ALERT);
                   return;
                 }
                 if (dictation.listening) dictation.toggle();
@@ -22323,7 +22959,7 @@ export function CompletionPanel({
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
-              schema={typedFindingsSchema}
+              schema={findingsDisplaySchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
               activityScore={typedActivityScore}
@@ -22651,7 +23287,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
-                      lawnDefaultsEnabled,
+                      lawnDefaultsEnabled, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -23264,7 +23900,7 @@ export function CompletionPanel({
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
-                  treeShrubCompletionBlocked ||
+                  treeShrubCompletionBlocked || propertyAreasBlocked ||
                   protocolActualsCompletionBlocked))
             }
             style={{
@@ -23282,7 +23918,7 @@ export function CompletionPanel({
                 draftLoading ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked ||
+                    treeShrubCompletionBlocked || propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
                   ? 0.6
                   : 1,

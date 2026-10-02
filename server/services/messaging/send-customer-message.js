@@ -105,6 +105,98 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Street-level address hold (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling
+// 2026-10-01): NO customer text, email or app message about a visit that is a live
+// unconfirmed street-level hold goes out until the office confirms the address. This is the
+// shared send step every visit-scoped customer message passes (appointmentId is the visit);
+// appointment-email.js enforces the same predicate for the email sender. Fail closed: a
+// lookup error holds the send (retryable — the hold clears when the office confirms).
+const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
+  code: 'STREET_LEVEL_HOLD',
+  reason: 'Visit is an address hold awaiting the office confirm',
+});
+// The visit a send is about: appointmentId, or (callers that thread only metadata, e.g. the
+// card request) metadata.scheduled_service_id / scheduledServiceId. metadata.visit_id is a visit
+// GROUP id and is not used.
+function heldVisitIdOf(input) {
+  return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
+}
+// Every visit a send's BODY links to, resolved on the server from the text (composer-customer-links
+// visitsLinkedInBody: reschedule, appointment, track, prep and card-request links, long or /l/ short). The
+// body is the authority: a pasted link, a restored draft, a scheduled replay and an old composer tab carry
+// no client metadata, yet reach the same customer. Memoized per input (the hold is asked twice, at 6.35 and
+// at the provider boundary). A resolution error fails CLOSED like the hold predicate itself: it rejects, the
+// caller treats it as held (retryable).
+const bodyVisitLookups = new WeakMap();
+function visitsLinkedInBodyOf(input) {
+  if (!bodyVisitLookups.has(input)) {
+    bodyVisitLookups.set(input, require('../composer-customer-links').visitsLinkedInBody(input.body));
+  }
+  return bodyVisitLookups.get(input);
+}
+// Every visit the send is about: the explicit ids (appointmentId, metadata.scheduled_service_id, and the
+// composer's metadata.linked_scheduled_service_ids, kept as an additional input) plus the visits the body's
+// own links resolve to.
+async function heldVisitIdsOf(input) {
+  const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
+  const fromBody = typeof input.body === 'string' && input.body ? (await visitsLinkedInBodyOf(input)).map((v) => v.id) : [];
+  return [...new Set([heldVisitIdOf(input), ...linked, ...fromBody].filter(Boolean).map(String))];
+}
+async function streetLevelHoldBlocksSend(input) {
+  // Visit-scoped content is held whatever the generic audience classification says: a phone-only
+  // composer send (a reschedule link inserted for a number whose owner was not adopted) and a shared-phone
+  // scheduled send classify as 'lead' yet still carry a customer's visit link. Only staff-facing
+  // audiences (internal briefings, admin, tech) are never about a customer's held visit.
+  if (['internal', 'admin', 'tech'].includes(input.audience)) return false;
+  // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
+  // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
+  // the office approved the address (the activation guards refuse a hold otherwise).
+  if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
+  let visitIds;
+  try {
+    visitIds = await heldVisitIdsOf(input);
+  } catch (err) {
+    logger.warn(`[send_customer_message] linked-visit lookup failed — holding the send: ${err.code || err.name || 'error'}`);
+    return true;
+  }
+  if (!visitIds.length) return false;
+  // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
+  // stops NEW holds but never releases the customer messages of holds already open.
+  const { isStreetLevelHoldVisit } = require('../street-level-hold');
+  for (const visitId of visitIds) {
+    if (await isStreetLevelHoldVisit(visitId)) return true;
+  }
+  return false;
+}
+
+// A hand-composed text replayed from the scheduled-SMS queue whose reschedule link points at a visit that
+// can no longer be rescheduled (cancelled, skipped, completed, underway — the same status gate the
+// /reschedule/:token page applies on click, reschedule-eligibility RESCHEDULABLE_STATUSES) is a stale link:
+// end it blocked and say why, instead of sending it (a held visit that left the hold by cancelling is
+// not a live hold any more, so the hold step alone would let it through). Scheduled replays of operator
+// text only: every immediate send, and every automated notice, keeps its prior behavior.
+const LINKED_VISIT_ENDED_BLOCK = Object.freeze({
+  code: 'LINKED_VISIT_ENDED',
+  reason: 'The visit this reschedule link points at is no longer reschedulable (cancelled, skipped or completed)',
+});
+// `fresh`: re-resolve the body's visits (no memo) — the provider-boundary recheck reads their LIVE status.
+async function endedLinkedVisitBlocksSend(input, { fresh = false } = {}) {
+  if (input.entryPoint !== 'scheduled_sms_cron' || input.metadata?.humanAuthored !== true) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience) || typeof input.body !== 'string' || !input.body) return false;
+  let linked;
+  try {
+    linked = fresh
+      ? await require('../composer-customer-links').visitsLinkedInBody(input.body)
+      : await visitsLinkedInBodyOf(input);
+  } catch {
+    // Step 6.36's memoized lookup already succeeded for the hold step, so an error here is the boundary's
+    // fresh read failing: fail CLOSED (the caller defers retryably), never send on an unreadable visit.
+    return fresh ? 'lookup_failed' : false;
+  }
+  const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
+  return linked.some((v) => v.rescheduleLink && v.status && !RESCHEDULABLE_STATUSES.has(String(v.status).toLowerCase()));
+}
+
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
 // round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
 // (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
@@ -260,6 +352,55 @@ function classifyDeliveryCertainty(outcome) {
   return 'unknown';
 }
 
+// Purposes whose SMS/App notices are billing follow-up (pay / update-card link or a
+// charge announcement) and so wait out an active collections dispute hold.
+const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
+
+// The machine-initiated dunning senders (Day 3-90 invoice follow-up ladder, late-payment checker,
+// balance reminder workflow, previsit balance reminder) send under the shared purposes
+// 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
+// the price-change notice also use - so they are recognised by their entry point
+// (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+// A queued replay (every deferred row replays under entry point scheduled_sms_cron) of a dunning
+// text whose purpose is the shared 'payment_link': the follow-up ladder's quiet-hours requeue. Its
+// registry recheck reads the hold before dispatch; this is the boundary read for a hold that commits
+// after it (Codex #5424 r14). The other gated queued rows replay under a gated purpose already.
+const HOLD_GATED_REPLAY_ORIGINS = Object.freeze(['invoice_followup_deferred']);
+function isHoldGatedBillingMessage(input = {}) {
+  if (input.audience !== 'customer' || !input.customerId) return false;
+  if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  if (input.entryPoint === 'scheduled_sms_cron'
+    && HOLD_GATED_REPLAY_ORIGINS.includes(String(input.metadata?.original_entry_point || ''))) return true;
+  return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
+}
+
+// The ONE gated hold predicate (round-11 P1, structural): run at step 1.5 AND again inside
+// providerPreparationCheck, the last pre-provider callback, so a dispute committed during the
+// policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
+// send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
+// customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+// (holdExempt 'operator') skip a plain dispute hold only - a fallback hold still waits; a lookup
+// failure answers held (fail closed).
+// `database` is the provider handoff's held transaction when the final-boundary re-check runs inside
+// one (providerPreparationCheck's `handoffDb`): the read MUST reuse that connection (a savepoint read),
+// never open a root-pool one - at DB_POOL_MAX=2 a second connection waiting on the locks the handoff
+// holds would deadlock the send against its own pool (Codex #5424 r13 P1). Undefined = the root pool.
+// The exemptions skip a plain DISPUTE hold only: a wrong-number / wrong-party fallback hold (an
+// all-channel outreach block) still stops the notice.
+async function billingHoldBlock(input = {}, database = undefined) {
+  const collectionHold = require('../collections/collection-hold');
+  if (!isHoldGatedBillingMessage(input)) return null;
+  const ignoreDisputeHold = input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt);
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
+  if (!held.held) return null;
+  logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  // ONE hold outcome everywhere (Codex #5424 r14): the retryable, deferred COLLECTION_HOLD_DEFER
+  // shape with nextAllowedAt. A queued replay (scheduler, registry, email retry rails) treats it as
+  // a wait and refunds the attempt; a caller that must not retry (the immediate completion text)
+  // reads it through collectionHold.isHoldSuppression and decides itself.
+  return { ok: false, ...collectionHold.holdDeferOutcome(held) };
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -339,6 +480,33 @@ async function sendCustomerMessageCore(input) {
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+  }
+
+  // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
+  // a pay / update-card link and is billing follow-up the customer was told is on hold. The
+  // billing-cron attempts, the Stripe webhook notices and every other live payment_failure
+  // sender reach the provider through here, so the live hold check sits at this one boundary
+  // (the accepted millisecond window of collection-hold.js: no cross-writer locking). Suppress
+  // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
+  // closed on an unverifiable hold. A notice for a payment the customer just made themselves
+  // (customerInitiated) is not follow-up and is exempt.
+  // The machine-initiated 'autopay' purpose is the same follow-up: the card-expiry sweeps
+  // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
+  // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
+  // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
+  // The machine-initiated DUNNING senders (isHoldGatedBillingMessage: the follow-up ladder, the
+  // late-payment and balance reminders, the previsit balance reminder) are the same follow-up:
+  // their preflight consulted the hold minutes earlier, but they await credit application, link
+  // shortening, ledger writes and rendering before reaching here, so a hold placed in between
+  // stops the send at this boundary. The suppression is a WAIT: every caller keeps the touch due
+  // (no failed row, nothing paused) and it goes out after the release. Exempt: a customer's own
+  // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+  // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
+  // these senders (they pause or skip before sending).
+  const heldBlock = await billingHoldBlock(input);
+  if (heldBlock) {
+    const { ok: _heldOk, ...heldOutcome } = heldBlock;
+    return { sent: false, blocked: true, ...heldOutcome };
   }
 
   // 2. Resolve policy
@@ -770,6 +938,63 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      // A deferred hold is requeued by its caller: hand back the transformed
+      // body (link wrap included) so the queued row is the text that goes out.
+      ...(blockedBy.deferred ? { sentBody: sendInput.body } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
+  //      a held visit reaches the customer before the office confirms the address.
+  if (await streetLevelHoldBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput) || 'linked in the body'} is a street-level address hold (${sendInput.purpose})`);
+    const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['street_level_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.36 Stale reschedule link on a scheduled operator text (see endedLinkedVisitBlocksSend): terminal.
+  if (await endedLinkedVisitBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] blocked: a linked visit is no longer reschedulable (${sendInput.entryPoint})`);
+    const blocked = { code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['linked_visit_ended'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -1001,6 +1226,29 @@ async function sendCustomerMessageCore(input) {
         'move_hold_boundary',
       );
     }
+    // Street-level address hold boundary re-check: a promotion that commits during the provider's
+    // own awaits must still hold the send (the same retryable deferral as the move hold).
+    if (await streetLevelHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
+        'street_level_hold_boundary',
+      );
+    }
+    // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
+    // (the lookup there is memoized) must still end the scheduled operator text, on its LIVE status.
+    const endedVerdict = await endedLinkedVisitBlocksSend(sendInput, { fresh: true });
+    if (endedVerdict === 'lookup_failed') {
+      return rememberBoundaryBlock(
+        { ok: false, code: 'LINKED_VISIT_LOOKUP_FAILED', reason: 'Could not re-read the visit this text links to', retryable: true },
+        'linked_visit_lookup_boundary',
+      );
+    }
+    if (endedVerdict) {
+      return rememberBoundaryBlock(
+        { ok: false, code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason },
+        'linked_visit_ended_boundary',
+      );
+    }
     // callback_number_needed boundary re-check (codex round-6 P1): step
     // 6.45 ran before preDispatchCheck and the provider's own async
     // preparation — a hold committed in between (the call pipeline's
@@ -1015,6 +1263,11 @@ async function sendCustomerMessageCore(input) {
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
     const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
+    // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
+    // suppression, consent and caller checks; a hold committed since must still stop a gated
+    // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
+    const holdBlock = await billingHoldBlock(sendInput, handoffDb);
+    if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
@@ -1221,6 +1474,8 @@ async function sendCustomerMessageCore(input) {
     });
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
+    // Accepted-but-unaudited callers still need the body that went out.
+    auditErr.sentBody = sendInput.body;
     throw auditErr;
   }
 
@@ -1308,6 +1563,9 @@ async function sendCustomerMessageCore(input) {
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    // The audited body after every transform above (withheld-link rewrite,
+    // GATE_SMS_LINK_WRAP short links): what the provider was handed.
+    sentBody: sendInput.body,
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),

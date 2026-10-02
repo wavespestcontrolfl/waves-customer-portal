@@ -317,21 +317,50 @@ async function listIntentModes() {
   return db('sms_intent_modes').orderBy('intent', 'asc');
 }
 
-async function setIntentMode({ intent, mode, actor, reason }) {
+/**
+ * The ladder is climbed one rung at a time: auto_send is written only over a
+ * stored 'suggest' mode (Codex r2 on #5531). Judge-graded readiness evidence
+ * accrues while an intent is still in shadow, and evaluateAutoSendEligibility
+ * deliberately evaluates the suggest → auto_send rung without reading the
+ * stored mode, so without this check a direct API caller could promote a
+ * well-judged shadow intent straight to autonomous sending. The fixed-copy
+ * gratitude lane is the one documented exception: it never suggests and
+ * qualifies from shadow through its own non-delivery exam.
+ */
+function autoSendRequiresSuggest(intent) {
+  return intent !== require('./sms-gratitude').GRATITUDE_INTENT;
+}
+
+async function setIntentMode({ intent, mode, actor, reason, dbi = db }) {
   const check = validateModeChange(intent, mode);
   if (!check.ok) {
     const err = new Error(check.error);
     err.statusCode = 400;
     throw err;
   }
-  const [row] = await db('sms_intent_modes')
-    .insert({
-      intent: check.intent,
-      mode,
-      updated_by: actor || 'admin',
-      reason: reason || null,
-      updated_at: new Date(),
-    })
+  const patch = {
+    mode,
+    updated_by: actor || 'admin',
+    reason: reason || null,
+    updated_at: new Date(),
+  };
+  if (mode === AUTO_SEND_MODE && autoSendRequiresSuggest(check.intent)) {
+    // Conditional update: the row must exist AND sit at 'suggest'. An intent
+    // with no row is shadow by definition, so there is no insert path here —
+    // the update either lands on the suggest row or touches nothing.
+    const [row] = await dbi('sms_intent_modes')
+      .where({ intent: check.intent, mode: 'suggest' })
+      .update(patch)
+      .returning('*');
+    if (!row) {
+      const err = new Error('auto_send is earned from suggest — promote this intent to suggest first');
+      err.statusCode = 409;
+      throw err;
+    }
+    return row;
+  }
+  const [row] = await dbi('sms_intent_modes')
+    .insert({ intent: check.intent, ...patch })
     .onConflict('intent')
     .merge(['mode', 'updated_by', 'reason', 'updated_at'])
     .returning('*');
@@ -548,7 +577,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -658,6 +687,18 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // OPEN TIMES without a live re-fetch at publish time — this is
             // just the snapshot, never a probe.
             ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
+            // Codex round-3 P2: the re-service lane(s) this draft's reply
+            // promises (validateReserviceOffer's own resolution, carried
+            // from sms-shadow-drafter.js) — null/omitted for an ordinary
+            // draft with no re-service promise. Read back at send time by
+            // agentDecisionSendBlockReason / the scheduler's queued-send
+            // recheck (reservicePromiseStillEligible) so a promise already
+            // reviewed can still be blocked if the customer's eligibility
+            // changed before it fired.
+            ...(Array.isArray(reserviceLanesSnapshot) && reserviceLanesSnapshot.length ? { reservice_lanes_snapshot: reserviceLanesSnapshot } : {}),
+            // Codex round-18 P2: the booked re-service callback the reply's already-booked fact described.
+            ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
             // Codex r3 P1: the actions this draft promises (payment link,
             // booking, escalation…) must ride the same snapshot a reviewer's
             // card reads — otherwise a card can promise an action the
@@ -666,6 +707,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Independent review finding (PR #5334): the visit(s) this
+            // draft's LIVE ETA fact was drawn from, carried through so the
+            // send-time choke point (verifyAgentDecisionForSend /
+            // agent-decision-send-checks.js) can recheck a minutes-away
+            // claim is still current before the reviewer's Send goes out —
+            // never a probe, just the snapshot, exactly like open_times_snapshot.
+            ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+            // Technician first name(s), independent of live entries (round-42 P2): read back at
+            // send time so name-subjected status wording is recognized with no live snapshot.
+            ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',
@@ -1252,6 +1303,7 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
 module.exports = {
   VALID_MODES,
   AUTO_SEND_MODE,
+  autoSendRequiresSuggest,
   ESCALATION_INTENTS,
   SUGGESTED_STATUS,
   SUGGEST_WORKFLOW,

@@ -24,6 +24,7 @@ jest.mock('../services/cancellation-processor', () => ({
 }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(false) }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 jest.mock('../services/cancellation-resolution', () => ({
   cancelFlowV2Enabled: () => process.env.GATE_CANCEL_FLOW_V2 === 'true',
   previewCancellationResolution: jest.fn(),
@@ -244,7 +245,7 @@ function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
     db: fakeDb,
-    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date('2026-10-01T00:00:00Z') },
+    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date(Date.now() + 30 * 24 * 3600 * 1000) },
     pricingAi: {
       variantsForService: pricingAi.variantsForService,
       optionServices: pricingAi.optionServices,

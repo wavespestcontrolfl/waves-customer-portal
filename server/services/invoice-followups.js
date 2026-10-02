@@ -44,12 +44,14 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const {
   billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
+const CustomerDunningKeys = require('./customer-dunning/constants');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -107,10 +109,13 @@ const { collectionsChannelPermitted: railGuardPermitted } = require('./collectio
 // payment_verification, not an overdue reminder, so it names no source and
 // the spacing shadow never observes it (Codex #5189 r5); its policy verdict
 // is unchanged.
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, verification = false) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, verification = false, holdExempt = null) {
   return railGuardPermitted({
     customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds,
     ...(verification ? {} : { source: 'invoice_followups' }), logTag: 'invoice-followups', detail,
+    // The operator "send now" button only (owner ruling 2026-09-30: deliberate office
+    // sends keep the pay link during a hold); automated ladder touches still wait.
+    ...(holdExempt ? { holdExempt } : {}),
   });
 }
 
@@ -156,7 +161,19 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
+// A dispute hold that landed after the preflight consult refused this leg at the provider boundary
+// (the ONE retryable COLLECTION_HOLD_DEFER outcome). That is a WAIT: nothing reached the customer
+// and nothing failed, so the reservation is released (no failed row, no spent attempt) and the touch
+// stays due (see the held-touch retime in fireTouch); it goes out after the release.
+function heldByDisputeHold(result) {
+  return require('./collections/collection-hold').isHoldSuppression(result);
+}
+
 async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
+  if (heldByDisputeHold(result)) {
+    await ContactLedger.releaseHeldReservation(ledger);
+    return true;
+  }
   if (result?.ok === true) {
     const originalContact = originalBillingContactArgs(result);
     originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
@@ -292,13 +309,16 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       recipientId: customer.id,
       triggerEventId: `invoice_followup:${row.invoice_id}:${step.id}`,
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
-      categories: ['invoice_followup', step.id],
+      // An operator's "send now" email (no billing-preference enforcement) keeps the dispute-hold
+      // exemption if the provider-retry rail later re-sends its stored copy.
+      categories: ['invoice_followup', step.id,
+        ...(enforceBillingPreference ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY])],
       suppressionGroupKey: 'transactional_required',
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
         })
-        : selfPayOnlyHandoff(row.invoice_id, state),
+        : selfPayOnlyHandoff(row.invoice_id, state, { holdCustomerId: customer.id }),
     });
     return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
@@ -863,6 +883,12 @@ async function runPending() {
     }
   }
 
+  // Customer-level overdue reminders (dunning consolidation §4): the kill
+  // switch releases every schedule that is dark BEFORE the batch below reads
+  // its members, then (live gate only) promotion takes customers with 2+
+  // active sequences onto one schedule. Neither ever sends in this run.
+  await prepareCustomerSchedules(now);
+
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
   // rather than staying armed and past-due until a restore fires a
@@ -898,6 +924,13 @@ async function runPending() {
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    // A customer on an open customer_dunning_schedules row: the schedule owns
+    // the cadence and these rows are membership state, never fired here —
+    // except an invoice waiting on bank micro-deposit verification, which the
+    // schedule's set excludes (balance-set.js) and so never reminds: its own
+    // row keeps sending the verification nudge (the loop below decides, per
+    // row, outside any lock). With no schedule rows this excludes nothing (pinned).
+    .where(gates.divertMicrodepositDunning ? notOwnedOrMicrodepositCandidate : notOwnedByCustomerSchedule)
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
@@ -908,10 +941,19 @@ async function runPending() {
       'i.created_at as invoice_created_at',
     );
 
+  const owners = await microdepositCandidateOwners(rows);
   let sent = 0, skipped = 0;
   for (const batchRow of rows) {
     let row = batchRow;
     try {
+      // A row of a customer on a combined schedule is in the batch only as a
+      // possible micro-deposit nudge: unless its invoice is waiting on that
+      // verification right now, it is the schedule's and is left untouched
+      // (no retime, no stale skip, no claim, not counted).
+      if (owners.has(String(row.customer_id))) {
+        if (!(await awaitingMicrodepositVerification(row))) continue;
+        row = { ...row, owned_microdeposit: true };
+      }
       // A legacy-cadence touch moved to its Day 90 ladder day is processed
       // on that new day in this same run when the new day is today (pre-push
       // audit P1): skipping it would let the next tick find it past its
@@ -933,20 +975,138 @@ async function runPending() {
         if (skip.updated && skip.nextAt
             && skip.nextAt.getTime() <= now.getTime()
             && !isStaleTouch(skip.nextAt, now)) {
-          await fireStep({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
-          sent++;
+          sent += await fireCounted({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
         }
         continue;
       }
-      await fireStep(row);
-      sent++;
+      const fired = await fireCounted(row);
+      sent += fired;
+      skipped += 1 - fired;
     } catch (err) {
       logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
       skipped++;
     }
   }
+  await runCustomerScheduleEngine(now);
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+// One batch row through fireStep, counted the way runPending always has (1 =
+// sent), except a row fireStep refused because its customer is on an open
+// customer-level schedule (0): nothing was claimed or sent.
+async function fireCounted(row) {
+  const out = await fireStep(row, { ownedMicrodeposit: row.owned_microdeposit === true });
+  return out && out.ownedBy ? 0 : 1;
+}
+
+// ── micro-deposit verification nudges on a combined schedule ─────────────
+//
+// The customer-level set excludes an invoice whose PaymentIntent waits on the
+// customer's two bank micro-deposits (balance-set.js, `excluded.md`): the
+// combined reminder never names or nudges it. That invoice's OWN row stays its
+// one sender (Codex local review P1: owning every row of the customer left
+// these verification nudges with no sender at all), on its own cadence, through
+// fireTouch's existing verification copy, contact policy and spacing. Who owns
+// an invoice is decided by the same live Stripe signal both sides read (the
+// engine at its resolve, this path at the touch): waiting on verification ->
+// this row, otherwise the schedule. No Stripe call ever runs under a lock: the
+// batch pre-check below runs before the fence, and fireTouch re-checks after
+// the claim committed and sends NOTHING unless the invoice is still waiting.
+
+function notOwnedOrMicrodepositCandidate() {
+  this.whereRaw(`(NOT EXISTS (SELECT 1 FROM customer_dunning_schedules c WHERE c.customer_id = s.customer_id AND c.status IN (${
+    CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')})) OR i.stripe_payment_intent_id IS NOT NULL)`, CustomerDunningKeys.OPEN_STATUSES);
+}
+
+// The customers among the batch's PaymentIntent rows that are on an open
+// schedule (one read; none when no row carries a PaymentIntent).
+async function microdepositCandidateOwners(rows) {
+  if (!gates.divertMicrodepositDunning) return new Set();
+  const ids = [...new Set(rows.filter((r) => r.invoice_stripe_pi).map((r) => String(r.customer_id)))];
+  if (!ids.length) return new Set();
+  const owned = await db('customer_dunning_schedules').whereIn('customer_id', ids)
+    .whereIn('status', CustomerDunningKeys.OPEN_STATUSES).select('customer_id');
+  return new Set((owned || []).map((r) => String(r.customer_id)));
+}
+
+// Fail CLOSED for an owned row: an unreadable state reads as "not waiting", so
+// the row stays the schedule's (which holds the whole set on the same
+// unreadable state) and nothing is sent from either side.
+const awaitingMicrodepositVerification = (row) => gates.divertMicrodepositDunning && !!row.invoice_stripe_pi
+  && StripeService.isInvoiceAwaitingMicrodepositVerification({ id: row.invoice_id, stripe_payment_intent_id: row.invoice_stripe_pi });
+
+// ── customer-level overdue reminders (dunning consolidation) ─────────────
+//
+// Ownership is dynamic: an open customer_dunning_schedules row for the
+// customer. The schedule engine (services/customer-dunning/) takes the
+// customer's advisory key EXCLUSIVELY for promotion, its claim and every
+// close/release; the per-invoice paths below take the SAME key SHARED, always
+// BEFORE any invoice or sequence row lock (the engine's order: key -> schedule
+// row -> invoice rows -> sequence rows), and re-read ownership under it. The
+// key is a session-independent transaction lock, released at commit.
+
+const OPEN_SCHEDULE_SQL = `SELECT id FROM customer_dunning_schedules WHERE customer_id = ? AND status IN (${
+  CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')}) LIMIT 1`;
+
+function notOwnedByCustomerSchedule() {
+  this.whereRaw(`NOT EXISTS (SELECT 1 FROM customer_dunning_schedules c WHERE c.customer_id = s.customer_id AND c.status IN (${
+    CustomerDunningKeys.OPEN_STATUSES.map(() => '?').join(', ')}))`, CustomerDunningKeys.OPEN_STATUSES);
+}
+
+const lockCustomerDunningShared = (trx, customerId) => trx.raw(
+  'SELECT pg_advisory_xact_lock_shared(hashtext(?))', [CustomerDunningKeys.lockKey(customerId)],
+);
+
+// Read AFTER the shared key is held, as its own statement: a promotion that
+// committed while this transaction waited for the key is then visible (a
+// READ COMMITTED statement snapshot is taken when the statement starts).
+async function openCustomerScheduleId(trx, customerId) {
+  const result = await trx.raw(OPEN_SCHEDULE_SQL, [customerId, ...CustomerDunningKeys.OPEN_STATUSES]);
+  return result?.rows?.[0]?.id || null;
+}
+
+// The engine's gate readers. Absent only where a suite stubs feature-gates
+// for the per-invoice engine alone; production always exports them.
+function customerDunningGates() {
+  const FeatureGates = require('../config/feature-gates');
+  return typeof FeatureGates.dunningCustomerScheduleLive === 'function'
+    && typeof FeatureGates.dunningCustomerScheduleShadowLive === 'function' ? FeatureGates : null;
+}
+
+// Before the batch: release whatever is dark (releaseIfDark logs and raises
+// its own read / release failures to the office), then promote under the live
+// gate. Promotion never sends in its own run (seed.js). Neither can cost the
+// run its per-invoice touches: an owned row stays out of the batch either way.
+async function prepareCustomerSchedules(now) {
+  const gatesModule = customerDunningGates();
+  if (!gatesModule) return;
+  try {
+    await require('./customer-dunning/wiring').releaseIfDark(now);
+    if (gatesModule.dunningCustomerScheduleLive()) await require('./customer-dunning/schedule').promote(now);
+  } catch (err) {
+    logger.error(`[invoice-followups] customer-dunning release/promotion failed — per-invoice touches still run: ${err.message}`);
+  }
+}
+
+// After the per-invoice loop: the live schedules (GATE_DUNNING_CUSTOMER_SCHEDULE
+// and its prerequisites), else the shadow run, which writes NOTHING. A failure
+// here never costs the run its per-invoice result.
+async function runCustomerScheduleEngine(now) {
+  const gatesModule = customerDunningGates();
+  if (!gatesModule) return;
+  const live = gatesModule.dunningCustomerScheduleLive();
+  if (!live && !gatesModule.dunningCustomerScheduleShadowLive()) return;
+  try {
+    const Runner = require('./customer-dunning/runner');
+    // `now` is runPending's start (read from the wall clock): claims are
+    // stamped from it plus all time elapsed since, including the per-invoice
+    // loop above, so none is born expired. Cadence still uses `now`.
+    if (live) await Runner.runCustomerSchedules(now, { clockStartedAt: now.getTime() });
+    else await Runner.shadowRun(now);
+  } catch (err) {
+    logger.error(`[invoice-followups] customer-dunning ${live ? 'run' : 'shadow run'} failed: ${err.message}`);
+  }
 }
 
 /**
@@ -1200,6 +1360,89 @@ function heldTouchFloor(now = new Date()) {
   return anchorTo10amNY(now, 1, 0);
 }
 
+// How long the FINAL step may keep being held past its own scheduled day.
+const FINAL_STEP_HOLD_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Hold a claimed touch, undelivered and not terminal, for the next NY
+ * calendar day: the retime the collections-policy and ledger-outage returns
+ * in fireTouch owe. Leaving the row due instead lets runPending's stale grace
+ * pass the step by at the next daily tick — a silently missed reminder.
+ *
+ * BOUNDED (owner ruling, audit P1): a hold that renews every day would pin a
+ * sequence on one step forever under a persistent denial and later send very
+ * old copy. A held step therefore retries daily only while it is still the
+ * current stage: the hold applies only when the retry day is BEFORE the next
+ * step's scheduled date (same anchor and cadence fireTouch advances along).
+ * Otherwise nothing is written and the row stays due as before, so the stale
+ * skip moves it to the next step, whose copy supersedes this one. The FINAL
+ * step has no next step, so its hold is capped at 7 days after its own
+ * scheduled date; past that the row is left as it was.
+ *
+ * Days are compared as NY calendar days at the day the cron can actually retry
+ * (firstEligibleFireAt: a Friday hold retries Tuesday, which may already be the
+ * next step's day).
+ *
+ * Operator send-now is never held (see the guard at the top).
+ *
+ * Guarded like the stale skip: it lands only while this worker still holds the
+ * claim (fireStep's stamp) on the same active step AND the claimed next_touch_at
+ * is unchanged, so an admin edit, pause or a manual send-now that moved the
+ * sequence since is left alone. Best-effort:
+ * a failed write leaves the prior behaviour (row still due) and never throws
+ * out of the touch. Returns whether the retime landed.
+ */
+async function holdTouchUntilNextDay(row, claimStamp, why, { operatorInitiated = false } = {}) {
+  // An operator send-now keeps today's behaviour: its row is selected without
+  // the invoice anchor aliases (the anchor would fall back to the sequence's
+  // created_at), and it is a one-off click, not a cron cadence to protect.
+  if (operatorInitiated) return false;
+  const floor = heldTouchFloor();
+  let nextStepAt;
+  let withinWindow;
+  try {
+    const anchorAt = sequenceAnchor(row);
+    nextStepAt = computeNextTouchAt(anchorAt, row.step_index + 1);
+    const ownStepAt = computeNextTouchAt(anchorAt, row.step_index);
+    // Compare the day the cron can ACTUALLY retry (first send-window day on or
+    // after the floor), not the raw floor: a Friday hold retries Tuesday, which
+    // may already be the next step's day (Codex #5404 r1 P1).
+    const retryDay = etDateString(firstEligibleFireAt(floor));
+    withinWindow = nextStepAt
+      ? retryDay < etDateString(firstEligibleFireAt(nextStepAt))
+      : !!ownStepAt && retryDay <= etDateString(new Date(ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS));
+  } catch (err) {
+    logger.warn(`[invoice-followups] hold bound could not be computed for sequence ${row.id} (${why}): ${err.message} — not held`);
+    return false;
+  }
+  if (!withinWindow) {
+    logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} not held (${why}) — ${nextStepAt ? "the next step's day arrives first" : 'past the final step\'s 7-day hold window'}; left to the stale skip`);
+    return false;
+  }
+  const guard = { id: row.id, status: 'active', step_index: row.step_index };
+  if (claimStamp) guard.touch_claimed_at = claimStamp;
+  try {
+    let query = db('invoice_followup_sequences').where(guard);
+    // A send-now that rewrote next_touch_at meanwhile must not be overwritten
+    // (Codex #5404 r1 P2). Compared at millisecond precision: some writers
+    // stamp it with the DB clock (microseconds, e.g. visit-completion-packets'
+    // trx.fn.now()) while pg hands JS a millisecond Date, so plain equality
+    // would never match and every hold would silently no-op.
+    if (row.next_touch_at) {
+      query = query.whereRaw("date_trunc('milliseconds', next_touch_at) = ?", [new Date(row.next_touch_at)]);
+    }
+    const updated = await query.update({ updated_at: db.fn.now(), next_touch_at: floor });
+    if (Number(updated) > 0) {
+      logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} held (${why}) — retimed to ${floor.toISOString()}`);
+      return true;
+    }
+    logger.warn(`[invoice-followups] hold retime no-op for sequence ${row.id} (${why}) — sequence changed since the claim`);
+  } catch (err) {
+    logger.warn(`[invoice-followups] hold retime failed for sequence ${row.id} (${why}): ${err.message}`);
+  }
+  return false;
+}
+
 /**
  * Advance a sequence past touches whose eligible send day already passed,
  * without sending them. Walks the same anchored timeline fireTouch advances
@@ -1251,7 +1494,7 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row, { operatorInitiated = false } = {}) {
+async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -1259,6 +1502,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   const claimStamp = new Date();
   let claimedSeq = null;
   let claimedInvoice = null;
+  let ownedBy = null;
   try {
     // Claim inside a transaction that locks the INVOICE row first.
     // InvoiceService.update locks the same row before re-checking the claim,
@@ -1267,6 +1511,12 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
     // pre-commit snapshots of each other. The transaction holds no external
     // work: it commits before any rendering or sending.
     await db.transaction(async (trx) => {
+      // The customer's dunning key, SHARED, before the invoice row: the
+      // schedule engine takes it EXCLUSIVELY and then locks member invoice
+      // rows, so taking it after the invoice lock would invert that order and
+      // could deadlock. A promotion either commits first (seen below) or waits
+      // for this claim to commit and then refuses on its fresh stamp.
+      await lockCustomerDunningShared(trx, row.customer_id);
       const lockedInvoice = await trx('invoices')
         .where({ id: row.invoice_id })
         .forUpdate()
@@ -1314,6 +1564,13 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
         );
         return;
       }
+      // A customer on an open customer-level schedule: the schedule owns the
+      // cadence; this row is membership state and is never fired or claimed —
+      // unless the caller brings it as a micro-deposit nudge (runPending's
+      // pre-check): then it is claimed, and fireTouch sends only the
+      // verification nudge, only if the invoice is still waiting on it.
+      ownedBy = await openCustomerScheduleId(trx, row.customer_id);
+      if (ownedBy && !ownedMicrodeposit) return;
       const claimed = await trx('invoice_followup_sequences')
         .where({ id: row.id })
         .where(function () {
@@ -1337,6 +1594,10 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
     return;
   }
+  if (ownedBy && !ownedMicrodeposit) {
+    logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
+    return { ownedBy };
+  }
   if (!claimedSeq) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
     return;
@@ -1348,12 +1609,15 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   // decide whether sending would leak the payer's bearer link, and a payer
   // assigned since the batch SELECT would otherwise be invisible to it.
   row.anchor_at = claimedSeq.anchor_at;
+  // The locked, claimed due time: holdTouchUntilNextDay's guard compares it, so a
+  // send-now rewrite after the claim is a no-op there, not an overwrite.
+  row.next_touch_at = claimedSeq.next_touch_at;
   row.customer_id = claimedSeq.customer_id;
   row.invoice_payer_id = claimedInvoice.payer_id ?? null;
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1366,7 +1630,15 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   }
 }
 
-async function fireTouch(row, { operatorInitiated = false } = {}) {
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false } = {}) {
+  // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
+  // re-judged now, after the claim committed and outside any lock. No longer
+  // waiting on verification -> the invoice is the schedule's: nothing is sent
+  // or written here (the claim clears in fireStep's finally).
+  if (verificationOnly && !(await awaitingMicrodepositVerification(row))) {
+    logger.info(`[invoice-followups] sequence ${row.id} not sent — invoice ${row.invoice_id} is no longer waiting on bank verification and customer ${row.customer_id} is on a customer reminder schedule`);
+    return;
+  }
   const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -1434,11 +1706,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
     return;
   }
-  const mdPending = gates.divertMicrodepositDunning
+  const mdPending = verificationOnly || (gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
       stripe_payment_intent_id: row.invoice_stripe_pi,
-    });
+    }));
   const category = mdPending ? 'payment_issue' : 'invoice';
   let explicitChannels = null;
   if (!operatorInitiated) {
@@ -1456,8 +1728,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // 2026-08-14: the email leg must not ride the SMS verdict). Gate off ⇒
   // both true without consulting, byte-identical (pinned by test). A policy
   // denial is a TRANSIENT state (frequency window, releasable hold) — a
-  // both-denied touch returns with the sequence still active and due, so
-  // the next tick re-decides; it is never paused terminally for policy.
+  // both-denied touch returns with the sequence still active and retimed to
+  // the next day (holdTouchUntilNextDay), so a later tick re-decides; it is never paused terminally for policy.
   const selectedChannels = explicitChannels;
   const nonEmailChannels = selectedChannels === null ? ['sms']
     : ['push', 'sms'].filter((channel) => selectedChannels.includes(channel));
@@ -1468,17 +1740,26 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     try { ownLedgerIds = await currentStepLedgerIds(row, step, policyChannels); }
     catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
+      await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable', { operatorInitiated });
       return;
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending)));
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated ? 'operator' : null)));
   const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
   const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
   const smsPermitted = channelPolicy.sms === true;
   const emailPermitted = channelPolicy.email === true;
   if (!Object.values(channelPolicy).some(Boolean)) {
     logger.info(`[invoice-followups] collections policy denied selected channels for sequence ${row.id} — touch deferred to a later run`);
+    // Held, not skipped: retimed past today so the daily tick's stale grace
+    // does not pass this step by. Nothing was drawn or sent here. Only when
+    // some denied channel is TRANSIENT (a spacing window, a releasable hold):
+    // when every channel is durably denied (flag, suppression, standing) the
+    // denial will not lift, so the step is left due as before — one attempt.
+    if (policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index]))) {
+      await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied', { operatorInitiated });
+    }
     return;
   }
   // Apply any available account credit before dunning so the reminder bills amount
@@ -1583,6 +1864,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // durable one (flag, suppression) waives it so the step cannot be pinned
   // forever. The global-hold gate above still stops an all-denied touch.
   let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
+  // A dispute hold refused a leg at the send boundary after the preflight (a wait, not a failure).
+  let holdSuppressedAtBoundary = false;
   if (emailPermitted) {
     let emailLedger = null;
     try {
@@ -1628,6 +1911,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
+        if (heldByDisputeHold(emailResult)) holdSuppressedAtBoundary = true;
       }
     } else if (selectedChannels !== null) emailHold = true;
   }
@@ -1705,6 +1989,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             ...(channel === 'push' ? { appOnly: true } : {}),
           },
           hasEmailLeg: emailSelected,
+          // An operator "send now" keeps its pay link during a dispute hold on EVERY Text/App leg
+          // (owner ruling 2026-09-30), the same exemption the legacy single-SMS call carries.
+          // (Today an operator send never resolves explicit channels, so this leg is only reached
+          // by automated touches; the exemption is threaded so the two paths cannot diverge.)
+          ...(operatorInitiated ? { operatorInitiated: true, holdExempt: 'operator' } : {}),
           preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
         });
       } catch (err) {
@@ -1718,6 +2007,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
           && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
+      } else if (heldByDisputeHold(result)) {
+        // Dispute hold landed after the preflight: a WAIT, never a failed send.
+        await ContactLedger.releaseHeldReservation(ledger);
+        holdStep(result);
+        smsSkipReason = 'collection_hold';
+        holdSuppressedAtBoundary = true;
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1774,6 +2069,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // it (an operator clicked THIS touch at this moment); the 10:16 ET
         // cron path stays fenced.
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
+        // The office "send now" click is a deliberate operator send: it keeps its pay link during a
+        // dispute hold (owner ruling 2026-09-30), so the customer-message boundary lets it through.
+        // Automated ladder touches carry no exemption and wait.
+        ...(operatorInitiated ? { holdExempt: 'operator' } : {}),
         metadata: {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
@@ -1790,7 +2089,17 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // fences on. Fail-closed, with no lock held across provider I/O.
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
-      if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+      if (sendResult && heldByDisputeHold(sendResult)) {
+        // Dispute hold landed after the preflight: nothing was sent and nothing failed. Release the
+        // reservation and keep the touch due (retimed a day, like the preflight hold) - never
+        // paused, never queued onto the scheduled-SMS rail (the queued row would carry the pay link).
+        await ContactLedger.releaseHeldReservation(smsLedger);
+        smsSkipReason = 'collection_hold';
+        smsDeferUntil = heldTouchFloor();
+        smsHoldUnowned = true;
+        holdSuppressedAtBoundary = true;
+        logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held by a collections dispute hold at the send boundary — touch stays due`);
+      } else if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
@@ -1873,6 +2182,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       smsDeferUntil = heldTouchFloor();
     }
     if (smsDeferUntil) {
+      if (holdSuppressedAtBoundary) {
+        logger.info(`[invoice-followups] touch for sequence ${row.id} held by a collections dispute hold at the send boundary — kept due until ${smsDeferUntil.toISOString()}`);
+      }
       // Nothing failed — the touch fired outside the 8AM-8PM ET send
       // window and no email leg covered it. Keep the sequence active and
       // move ONLY this touch to the window open; the same step re-fires at
@@ -1887,10 +2199,24 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       || ['collections_policy_denied', 'ledger_unavailable'].includes(emailResult.reason)
     ) {
       // Transient collections-policy denial / ledger outage — NOT a
-      // delivery failure. Leave the sequence armed and due (no status
-      // write) so a later tick re-decides; pausing terminally here would
-      // turn a 24h frequency window into a permanently silenced sequence.
-      logger.info(`[invoice-followups] touch for sequence ${row.id} held by collections policy/ledger — retrying on a later run`);
+      // delivery failure. Keep the sequence active (no status write) and
+      // retime it to the next day so a later tick re-decides; pausing
+      // terminally here would turn a 24h frequency window into a
+      // permanently silenced sequence, and leaving the row due would let the
+      // daily tick's stale grace skip the step instead of retrying it.
+      // Classified by what ACTUALLY happened on each leg: the email result's
+      // default reason reads 'collections_policy_denied' even when Email was
+      // never selected, so it only counts while a leg really has a transient
+      // denial or outage. A terminal outcome on one leg (SMS non-mobile,
+      // blocked) never discards another leg's transient denial: the email
+      // leg must still be retried once its window passes (Codex #5404 r2 P1).
+      const transientLeg = policyChannels.some((_channel, index) => !verdictAllows(policyResults[index])
+        && !verdictDurablyDenied(policyResults[index]))
+        || smsSkipReason === 'ledger_unavailable' || emailResult.reason === 'ledger_unavailable';
+      if (transientLeg) {
+        await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason, { operatorInitiated });
+      }
+      logger.info(`[invoice-followups] touch for sequence ${row.id} handled by collections policy/ledger — retrying on a later run`);
     } else {
       await db('invoice_followup_sequences').where({ id: row.id }).update({
         updated_at: db.fn.now(),
@@ -1950,7 +2276,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
   const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
-  await db('invoice_followup_sequences').where({ id: row.id }).update({
+  // A verification nudge of a customer on a combined schedule (verificationOnly) advances its row only while
+  // it still holds the row exactly as it claimed it: a release of the schedule lands every member (a new
+  // step, or the schedule's pause), and a send outliving its claim TTL must not overwrite that landing.
+  // (A release refuses while this claim is fresh: closeUnderLock's member-claim check.)
+  const progressed = await db('invoice_followup_sequences').where({
+    id: row.id,
+    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : {}),
+  }).update({
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
@@ -1958,6 +2291,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
+  if (verificationOnly && !Number(progressed)) {
+    logger.warn(`[invoice-followups] sequence ${row.id} not advanced after its verification nudge — the row changed under the send (a customer reminder schedule released it); its landing is kept`);
+  }
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
@@ -2141,6 +2477,17 @@ async function releaseFromAutopayHold(invoiceId) {
  * Called per-customer when autopay fails — bumps the counter on every
  * active autopay-held sequence for that customer, and releases any whose
  * count has crossed the threshold.
+ *
+ * A customer-level schedule (dunning consolidation §8) is deliberately NOT
+ * written here. Its autopay hold is not parked: the engine revisits an
+ * `autopay_hold` schedule at every run and judges `customerOnAutopay` itself —
+ * resumed (and sent in that same run) once the customer is off autopay, closed
+ * once the balance is gone, held again while autopay still stands. Releasing
+ * it here would hand the members back to the per-invoice ladder only for the
+ * next run to promote them again; resuming it would be re-held at the next
+ * revisit. The member rows below are still counted and released as before:
+ * they are the schedule's membership state (a released member stops holding
+ * the set as `member_autopay_hold`).
  */
 async function handleAutopayFailure(customerId) {
   const rows = await db('invoice_followup_sequences')
@@ -2572,23 +2919,80 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
   });
 }
 
+// An operator send-now with nothing to send never answers as a success (the panel would toast "Done" over
+// a click that sent nothing): the route turns these into a 409 with this copy.
+const SEND_NOW_FINISHED = Object.freeze({
+  ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.',
+});
+const SEND_NOW_NO_SEQUENCE = Object.freeze({
+  ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.',
+});
+
 /**
  * Send the next touch right now, even if it's not due yet. Virginia uses this
  * when a customer is dodging (e.g. "push them to day-14 language today").
+ *
+ * Returns undefined for a per-invoice send that went to fireStep, and
+ * { ok: false, reason: 'nothing_to_send', message } when there is nothing to
+ * send (no sequence, a stopped / completed one, a paid or void invoice). For a
+ * customer on an open customer-level schedule it returns the schedule's
+ * send-now result ({ routedTo: 'customer_schedule', scheduleId, ... },
+ * customer-dunning/wiring.js). The combined step goes out only when `combined`
+ * ({ scheduleId, stepIndex }, the step the operator was shown and confirmed)
+ * names that schedule at its current step; otherwise nothing is sent
+ * (COMBINED_CONFIRM_REQUIRED, or SCHEDULE_CHANGED for a step that moved on). A
+ * `combined` confirmation for a customer no longer on a schedule sends nothing
+ * either: the invoice's own step is not the message the operator confirmed
+ * (COMBINED_SCHEDULE_CLOSED).
+ *
+ * A `combined` confirmation is judged BEFORE this invoice's own exits: the
+ * operator confirmed the schedule's step, not this invoice's, so this invoice
+ * having been paid (or its row finished) since the panel loaded does not end
+ * the click while the schedule still covers the customer's other invoices.
  */
-async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null } = {}) {
+  const Wiring = () => require('./customer-dunning/wiring');
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
+
+  if (combined) {
+    const customerId = seq?.customer_id
+      ?? (await db('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id ?? null;
+    if (!customerId) return Wiring().combinedScheduleClosed(combined.scheduleId);
+    // Read under the customer's dunning key (SHARED), as every per-invoice path reads ownership.
+    let owner = null;
+    await db.transaction(async (trx) => {
+      await lockCustomerDunningShared(trx, customerId);
+      owner = await openCustomerScheduleId(trx, customerId);
+    });
+    return owner
+      ? Wiring().sendNowForInvoiceOnSchedule(owner, customerId, combined)
+      : Wiring().combinedScheduleClosed(combined.scheduleId);
+  }
+
+  if (!seq) return SEND_NOW_NO_SEQUENCE;
+  if (seq.status === 'stopped' || seq.status === 'completed') return SEND_NOW_FINISHED;
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice || isTerminalInvoice(invoice)) return;
+  if (!invoice || isTerminalInvoice(invoice)) return SEND_NOW_FINISHED;
 
-  // Temporarily set next_touch_at in the past + status active, then fire
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    updated_at: db.fn.now(),
-    status: 'active',
-    next_touch_at: new Date(Date.now() - 1000),
+  // Temporarily set next_touch_at in the past + status active, then fire —
+  // unless the customer is on a customer-level schedule: then the click needs
+  // the operator's confirmation of the schedule's CURRENT step (refused here,
+  // nothing sent), and this row (membership state) is left exactly as it is.
+  // Checked and written under the customer's dunning key (SHARED), so a
+  // promotion cannot commit between the check and the write.
+  let ownedBy = null;
+  await db.transaction(async (trx) => {
+    await lockCustomerDunningShared(trx, seq.customer_id);
+    ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
+    if (ownedBy) return;
+    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: trx.fn.now(),
+      status: 'active',
+      next_touch_at: new Date(Date.now() - 1000),
+    });
   });
+  if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, null);
 
   const row = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
@@ -2600,8 +3004,14 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
     .first();
+  if (!row) return SEND_NOW_FINISHED;
 
-  if (row) await fireStep(row, { operatorInitiated });
+  // A promotion that committed after the re-arm above: fireStep refused under
+  // the key (nothing was claimed or sent), so the click needs the schedule's
+  // step confirmed.
+  const fired = await fireStep(row, { operatorInitiated });
+  if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
+  return undefined;
 }
 
 /**
@@ -2723,9 +3133,23 @@ module.exports = {
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
   ladderThrough90Live,
+  // Cadence helpers, exported for services/customer-dunning/ (dunning
+  // consolidation) so the customer schedule computes step dates with the
+  // exact code the per-invoice ladder uses. No logic lives behind these.
+  computeNextTouchAt,
+  anchorTo10amNY,
+  sequenceAnchor,
+  heldTouchFloor,
+  adoptionLanding,
+  isStaleTouch,
+  FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID,
   markAtRiskForLongOverdue,
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
-  // Pure predicates, exported for tests only.
-  _test: { canSystemResume, isSystemStopStamp },
+  // Exported for tests only (fireStep + the batch ownership predicate: the
+  // customer-dunning PostgreSQL concurrency suite drives them directly).
+  _test: {
+    canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, notOwnedOrMicrodepositCandidate,
+    reviveLegacyFinishedSequences, reviveReopenedLowStepSequences,
+  },
 };

@@ -5,6 +5,12 @@
  * attached PDF.
  */
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),

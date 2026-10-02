@@ -20,6 +20,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
+const { buildWriterRecords } = require('./report-writer-records');
 const {
   pestReportExpectationsGateOn, buildWhatToExpect, toExpectationProduct,
 } = require('./pest-report-expectations');
@@ -283,7 +284,9 @@ function lawnAssessmentLine(row, prior) {
 // that must not reach a customer-facing LLM. Findings (title + severity) are
 // authored as findings and give the model enough to spot recurring pests and note
 // change across visits.
-async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDate, knex, limit = 2 }) {
+async function loadPriorVisits({
+  customerId, serviceLine, serviceType, beforeDate, knex, limit = 2, excludeAutoNoActivity = false,
+}) {
   if (!customerId) return [];
   try {
     const rows = await knex('service_records')
@@ -313,10 +316,17 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDat
     }).slice(0, limit);
     if (!visibleRows.length) return [];
     const ids = visibleRows.map((r) => r.id);
-    const findings = await knex('service_findings')
+    const loaded = await knex('service_findings')
       .whereIn('service_record_id', ids)
-      .select('service_record_id', 'severity', 'title')
+      .select('service_record_id', 'severity', 'title', ...(excludeAutoNoActivity ? ['category'] : []))
       .catch(() => []);
+    // Under GATE_REPORT_WRITER_RULES the automatic "No activity observed"
+    // row (no-activity-finding.js, stamped whenever a visit recorded no
+    // observation) stays out: it reads as a technician finding the tech
+    // never made.
+    const findings = excludeAutoNoActivity
+      ? loaded.filter((f) => f.category !== 'no_activity')
+      : loaded;
     const byRecord = findings.reduce((acc, f) => {
       const key = String(f.service_record_id);
       (acc[key] = acc[key] || []).push(f);
@@ -396,7 +406,7 @@ async function loadProductSafety(products, knex) {
   const list = Array.isArray(products) ? products : [];
   const ids = [...new Set(list.map((p) => p && p.productId).filter(Boolean))];
   const names = [...new Set(list.map((p) => cleanText(p && p.name)).filter(Boolean))];
-  const empty = { safetyFacts: [], deterministicApplications: [] };
+  const empty = { safetyFacts: [], deterministicApplications: [], writerApplications: [] };
   if (!ids.length && !names.length) return empty;
   try {
     const rows = await knex('products_catalog')
@@ -430,6 +440,21 @@ async function loadProductSafety(products, knex) {
     }));
     const rowsById = new Map(approvedRows.map((row) => [String(row.id), row]));
     const rowsByName = new Map(approvedRows.map((row) => [cleanText(row.name).toLowerCase(), row]));
+    // Name-only selections beside id-backed ones: the query above read ids
+    // only (so a stale name can't pull facts for an id-backed product); the
+    // writer's applications still need each name-only selection's own
+    // catalog row (Codex #5500). Safety facts are unchanged.
+    const idlessNames = [...new Set(list.filter((p) => p && !p.productId).map((p) => cleanText(p.name)).filter(Boolean))];
+    const writerRowsByName = new Map(rowsByName);
+    if (ids.length && idlessNames.length) {
+      const nameRows = await knex('products_catalog')
+        .whereIn('name', idlessNames)
+        .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number', 'approved_for_service_report');
+      for (const row of (Array.isArray(nameRows) ? nameRows : []).filter(catalogApprovedForReport)) {
+        const key = cleanText(row.name).toLowerCase();
+        if (!writerRowsByName.has(key)) writerRowsByName.set(key, row);
+      }
+    }
     const deterministicApplications = list.flatMap((selected) => {
       const catalog = selected?.productId
         ? rowsById.get(String(selected.productId))
@@ -453,7 +478,31 @@ async function loadProductSafety(products, knex) {
           : null,
       }];
     });
-    return { safetyFacts, deterministicApplications };
+    // Each selected product's catalog identity with its recorded method,
+    // area and targets: the writer rules' approved wording (EXPECTATIONS,
+    // HOW IT WORKS) is chosen per application from these.
+    const writerApplications = list.flatMap((selected) => {
+      const catalog = selected?.productId
+        ? rowsById.get(String(selected.productId))
+        : writerRowsByName.get(cleanText(selected?.name).toLowerCase());
+      if (!catalog) return [];
+      const method = cleanText(redactAccessCodes(selected?.applicationMethod));
+      const role = [catalog.category, catalog.product_type]
+        .map((value) => DETERMINISTIC_APPLICATION_ROLES.get(cleanText(value).toLowerCase().replace(/[_-]+/g, ' ')))
+        .find(Boolean);
+      return [{
+        name: cleanText(catalog.name),
+        epaReg: cleanText(catalog.epa_reg_number) || null,
+        role: role || null,
+        method: method || null,
+        methodLabel: Object.hasOwn(DETERMINISTIC_METHOD_LABELS, method) ? DETERMINISTIC_METHOD_LABELS[method] : null,
+        applicationArea: cleanText(redactAccessCodes(selected?.applicationArea)) || null,
+        targets: Array.isArray(selected?.targets)
+          ? selected.targets.map((target) => cleanText(redactAccessCodes(target))).filter(Boolean)
+          : null,
+      }];
+    });
+    return { safetyFacts, deterministicApplications, writerApplications };
   } catch (err) {
     logger.warn(`[report-copy-context] product-safety load failed: ${err.message}`);
     return empty;
@@ -507,6 +556,19 @@ async function buildReportCopyContext({
   products = [],
   productNames = [],
   serviceDate,
+  // GATE_REPORT_WRITER_RULES, decided by the route for writers in scope
+  // (never lawn or tree/shrub/palm): no footage, no product-safety or
+  // household block, no automatic no-activity prior finding, and the
+  // writer records (approved expectations and how-it-works wording, the
+  // service type, the reach-out date).
+  writerRules = false,
+  // Writer-rules inputs from the route's resolved service profile.
+  findingsType = null,
+  // 'one_time' | 're_service' | 'recurring' (null when unknown).
+  serviceKind = null,
+  // The technician's promise marks, resolved by the route against the
+  // customer's open promises (visit-promises.js).
+  visitPromises = [],
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -529,7 +591,9 @@ async function buildReportCopyContext({
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
   const [priorVisits, productEvidence, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
-    loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
+    loadPriorVisits({
+      customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex, excludeAutoNoActivity: writerRules,
+    }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
     (isRealTime && lat != null && lng != null)
@@ -597,7 +661,7 @@ async function buildReportCopyContext({
       application.role,
       application.method ? `selected method: ${application.method}` : null,
       application.area ? `selected area: ${application.area}` : null,
-      application.areaValue && application.areaUnit
+      !writerRules && application.areaValue && application.areaUnit
         ? `treated area entered: ${application.areaValue} ${application.areaUnit}`
         : null,
     ].filter(Boolean).join('; '));
@@ -716,7 +780,26 @@ async function buildReportCopyContext({
   // number until `windowClosed`. Only the product-class what-to-expect
   // lines (deterministic, not time-dependent) ground the writer; the rain
   // card stays a render-time, deterministic surface.
-  if (line === 'pest' && pestReportExpectationsGateOn()) {
+  // Under the writer rules the approved wording reaches the writer for every
+  // line it covers, whatever the expectations card's own gate says, and the
+  // screen allows exactly the timeframes and dates it supplies.
+  let writerAllowedPhrases = [];
+  let writerAllowedDates = [];
+  let writerPromiseCount = 0;
+  if (writerRules) {
+    const records = buildWriterRecords({
+      serviceYmd,
+      line,
+      findingsType,
+      serviceKind,
+      applications: productEvidence.writerApplications,
+      promises: visitPromises,
+    });
+    sections.push(...records.sections);
+    writerAllowedPhrases = records.allowedPhrases;
+    writerAllowedDates = records.allowedDates;
+    writerPromiseCount = records.promiseCount || 0;
+  } else if (line === 'pest' && pestReportExpectationsGateOn()) {
     const expectationProducts = productSafety.map(toExpectationProduct);
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
     const expectationLines = whatToExpect?.lines || [];
@@ -725,7 +808,9 @@ async function buildReportCopyContext({
     }
   }
 
-  if (productSafety.length) {
+  // Product names, actives and re-entry figures only fed re-entry wording,
+  // which the report's safety section owns under the writer rules.
+  if (productSafety.length && !writerRules) {
     const lines = productSafety.map((p) => {
       const bits = [
         p.activeIngredient ? `active: ${p.activeIngredient}` : null,
@@ -740,7 +825,7 @@ async function buildReportCopyContext({
     sections.push(`PRODUCT SAFETY / RE-ENTRY (label data — use for re-entry & rainfast guidance, do not invent numbers):\n${lines.join('\n')}`);
   }
 
-  if (property) {
+  if (property && !writerRules) {
     const bits = [
       property.pets ? `pets on site: ${property.pets}` : null,
       property.chemicalSensitivity || null,
@@ -779,6 +864,8 @@ async function buildReportCopyContext({
     hasTreeShrubReviewedPhotoSignals: line === 'tree_shrub'
       && treeShrubReviewGrounding?.source === 'reviewed_photo_signals'
       && Object.keys(treeShrubReviewGrounding.scores || {}).length > 0,
+    // The technician's marked promises reached the writer's PROMISES record.
+    hasVisitPromises: writerPromiseCount > 0,
     targets,
     monthNum,
   };
@@ -787,6 +874,8 @@ async function buildReportCopyContext({
     contextText,
     signals,
     deterministicApplications: productEvidence.deterministicApplications,
+    writerAllowedPhrases,
+    writerAllowedDates,
   };
 }
 

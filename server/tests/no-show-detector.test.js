@@ -693,8 +693,12 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     // (round-24 P2).
     // On a clock taken NOW, not the tick's: the check is about what is true
     // at the moment the push leaves (round-24 P1).
-    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);');
-    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date() } = {}) {');
+    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) {');
+    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date(), lock = true, rethrow = false } = {}) {');
+    // Asked again at each device's provider boundary, as a plain read (no
+    // stop lock or FOR UPDATE mid-send) — codex #5421 P1.
+    expect(detector).toContain('checkCurrent: (recheckConn) => stillOverdue(recheckConn, notice, { now: new Date(), lock: false, rethrow: true }),');
+    expect(detector).toContain('if (lock) await require(\'./visit-groups\').lockStopForRow(trx, serviceId);');
     // And a tech's own dismissal clears any supersession stamp the sweep
     // wrote in the meantime, or the next cycle resurrects the card it cleared.
     const route = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'tech-notifications.js'), 'utf8');
@@ -1671,6 +1675,25 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     // Even when the row does not carry the anchor flag, anchor_service_id does.
     const unflagged = { ...move, rows: [{ id: 'anchor' }, { id: 'sib-1' }] };
     expect(seriesSupersessions([unflagged], all).map((e) => e.visit_id)).toEqual(['sib-1']);
+  });
+
+  // GATE_SERIES_MOVE_CARRIES_VISIT: a partner carried WITH the anchor
+  // occurrence is part of the stop the text quoted (its landed start), so it
+  // gets that KNOWN start; a partner of a later occurrence stays unknown.
+  test('a partner carried with the anchor gets the stop start the text quoted; a later partner stays unknown', () => {
+    const carried = {
+      id: 'move-2', sent_at: '2026-09-11T18:00:00.000Z', anchor_service_id: 'anchor',
+      result: { rescheduledOccurrences: [{ id: 'anchor', date: '2026-09-12', windowStart: '10:00', visitId: 'v1', visitWindowStart: '09:00' }] },
+      rows: [
+        { id: 'anchor', anchor: true },
+        { id: 'pest-a', partner: true, forOccurrenceId: 'anchor' },
+        { id: 'pest-b', partner: true, forOccurrenceId: 'sib-1' },
+      ],
+    };
+    const byId = Object.fromEntries(seriesSupersessions([carried], new Set(['anchor', 'pest-a', 'pest-b'])).map((e) => [e.visit_id, e]));
+    // 09:00 ET on 2026-09-12 (EDT, UTC-4).
+    expect(byId['pest-a'].start_at).toBe('2026-09-12T13:00:00.000Z');
+    expect(byId['pest-b'].start_at).toBeNull();
   });
 
   // rebooker.js's projectOccurrenceDate SHIFTS an exceptional date by the

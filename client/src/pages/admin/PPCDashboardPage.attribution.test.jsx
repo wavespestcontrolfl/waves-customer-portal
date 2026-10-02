@@ -16,10 +16,11 @@ function campaign(id, platform, campaignType, spend, revenue, conversions, statu
 
 async function mount(campaigns) {
   vi.stubGlobal("fetch", vi.fn(async (url) => {
-    if (url === "/api/admin/ads/campaigns") return { json: async () => ({ campaigns }) };
+    if (url === "/api/admin/ads/campaigns") return { ok: true, json: async () => ({ campaigns }) };
     if (url === "/api/admin/ads/funnel?period=30d" || url === "/api/admin/ads/revenue-attribution?period=month") {
-      return { json: async () => null };
+      return { ok: true, json: async () => null };
     }
+    if (url === "/api/admin/ads/sync-status") return { ok: true, json: async () => ({ syncs: [] }) };
     throw new Error(`Unexpected request: ${url}`);
   }));
   const view = render(<PPCDashboardPage />);

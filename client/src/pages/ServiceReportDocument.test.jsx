@@ -354,6 +354,98 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain(rawBlurb);
   });
 
+  it('prints exactly one watering line for a hold visit (the banner sentence is not restated by the hero task or insights)', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [
+          { category: 'water', headline: 'Water', customerAction: line1 },
+          { category: 'mowing', headline: 'Mowing', customerAction: `Raise the mower one setting. ${line1}` },
+        ],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+    expect(text).toContain('Raise the mower one setting.'); // other advice in the same action survives
+    expect(text).toContain('That gives today’s treatment time to work.');
+  });
+
+  it('a label mow hold on the banner changes nothing in the printed document', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const build = (banner) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner,
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
+      },
+    });
+    const base = { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const mow = { days: 2, untilAt: '2026-10-03T19:00:00.000Z', untilDate: '2026-10-03', untilLabel: 'Sat 3 PM', line: 'Mowing: hold off until Sat 3 PM, 2 days after today\'s treatment.' };
+    const without = render(<ServiceReportDocument data={build(base)} token="tok123" />);
+    const textWithout = without.container.textContent;
+    without.unmount();
+    const withMow = render(<ServiceReportDocument data={build({ ...base, mowHold: mow })} token="tok123" />);
+    expect(withMow.container.textContent).toBe(textWithout);
+    expect(withMow.container.textContent).not.toContain('Mowing: hold off');
+    expect(withMow.container.textContent.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+  });
+
+  it('hold then water-in: a hero task carrying both banner lines prints each line once', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const line2 = 'After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.';
+    const line3 = 'Run it even if it is not your usual day.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold_then_water_in', lines: [line1, line2, line3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${line3}`, holdTask: `${line1} ${line2}`, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line2 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
+  it('partial credit: the frozen any-day sentence inside an action is stripped even though the banner composed a longer line', () => {
+    const line1 = 'Water in today’s treatment by Thu 2 PM.';
+    const line2 = 'Run each zone about 40 minutes.';
+    const frozen3 = 'Run it even if it is not your usual day.';
+    const composed3 = `${frozen3} That counts toward this week’s watering.`;
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in', lines: [line1, line2, composed3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${frozen3}`, waterInTask: line1, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2} ${frozen3}` },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent.split(frozen3)).toHaveLength(2);
+  });
+
+  it('without a banner the recommendations list is unchanged', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { aftercare: { watering: line1 }, snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: 'Water the front strip by hand.' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain('Water the front strip by hand.');
+  });
+
   it('keeps approved visual moments and the turf-height gauge photo', () => {
     const data = {
       ...BASE_DATA,
@@ -1695,5 +1787,115 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
       pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
     }} token="tok123" />);
     expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
+  });
+});
+
+describe('ServiceReportDocument: the four-section report', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Light activity under the sink.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We placed bait where the roaches were feeding.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['You may see more roaches in the open for a week or two.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Let us know if you still see them after that.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+
+  it('prints the summary with its section titles', () => {
+    render(<ServiceReportDocument
+      data={{ ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections }}
+      token="tok123"
+    />);
+    expect(screen.getByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText('We placed bait where the roaches were feeding.')).toBeInTheDocument();
+    expect(screen.queryByText(body)).toBeNull();
+  });
+
+  it('drops the separate "What to expect" block when the sections carry their own', () => {
+    const whatToExpect = { lines: ['Ants that find the bait carry it back to the colony.'] };
+    const withSections = { ...BASE_DATA, typedReport: { ...BASE_DATA.typedReport, todaysResult: { ...BASE_DATA.typedReport.todaysResult, body } }, reportSections: sections, pestReportV2: { expectations: { whatToExpect } } };
+    const { unmount } = render(<ServiceReportDocument data={withSections} token="tok123" />);
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+    unmount();
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { expectations: { whatToExpect } } }} token="tok123" />);
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+
+  it('prints the summary as before without sections', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('What we did and why')).toBeNull();
+    expect(screen.getByText('We completed the scheduled service.')).toBeInTheDocument();
+  });
+});
+
+// Lawn PDF diet (lawn report rebuild P8): a payload carrying `lead`
+// (GATE_LAWN_REPORT_LEAD) prints the lead's reason as the status detail, finding
+// bullets as headline + what we saw (+ why it matters only for needs_attention),
+// never the "What Waves did" line, and not the follow-up's stock no-action line.
+// The same payload without `lead`, and tree & shrub, print exactly as before.
+describe('lawn PDF lead diet', () => {
+  const STOCK = 'No action is needed from you before then unless the area changes quickly.';
+  const lawnV2 = (extra = {}) => ({
+    snapshot: { overallScore: 78, statusHeadline: 'Stable, watching the edge', rootCause: 'Snapshot root cause sentence.', scoreExplanation: 'Score explanation sentence.' },
+    insights: [
+      { category: 'weeds', status: 'needs_attention', headline: 'Weed pressure is climbing', whatWeSaw: 'Weeds compete with the turf.', whyItMatters: 'Weeds spread fastest in thin turf.', wavesAction: 'Spot-treated the weeds.' },
+      { category: 'damage', status: 'watch', headline: 'A few stress patterns', whatWeSaw: 'Some stress patterns in the turf.', whyItMatters: 'Catching them early helps.', wavesAction: 'Documented the areas.' },
+    ],
+    followUp: { scheduled: true, headline: 'Follow-up already planned', reason: 'We will recheck the edge.', customerAction: STOCK },
+    ...extra,
+  });
+  const lawn = (reportV2) => ({ ...BASE_DATA, serviceLine: 'lawn', typedReport: null, reportV2 });
+  const text = (data) => render(<ServiceReportDocument data={data} token="tok123" />).container.textContent;
+
+  it('with a lead: status detail is lead.why, bullets are headline + what we saw, no What Waves did, no stock no-action line', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'Stable', why: 'The edge is the main driver.', applied: null, yourPart: [], next: null } })));
+    expect(out).toContain('The edge is the main driver.');
+    expect(out).not.toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Weed pressure is climbing');
+    expect(out).toContain('Weeds compete with the turf.');
+    // why it matters prints for needs_attention only
+    expect(out).toContain('Weeds spread fastest in thin turf.');
+    expect(out).not.toContain('Catching them early helps.');
+    expect(out).toContain('Some stress patterns in the turf.');
+    expect(out).not.toContain('Spot-treated the weeds.');
+    expect(out).not.toContain('Documented the areas.');
+    expect(out).not.toContain(STOCK);
+    // the follow-up section itself still prints
+    expect(out).toContain('Follow-up already planned');
+    expect(out).toContain('We will recheck the edge.');
+  });
+
+  it('with a lead, a real follow-up task still prints in the recommendations list', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'Stable', why: null, applied: null, yourPart: [], next: null }, followUp: { scheduled: true, headline: 'Follow-up already planned', reason: 'We will recheck.', customerAction: 'Mark the sprinkler head near the fence.' } })));
+    expect(out).toContain('Mark the sprinkler head near the fence.');
+  });
+
+  it('without a lead: legacy status detail, full bullets and the stock line are unchanged', () => {
+    const out = text(lawn(lawnV2()));
+    expect(out).toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Weeds spread fastest in thin turf.');
+    expect(out).toContain('Catching them early helps.');
+    expect(out).toContain('Spot-treated the weeds.');
+    expect(out).toContain('Documented the areas.');
+    expect(out).toContain(STOCK);
+  });
+
+  it('a lead "why" the web dropped falls back to the score explanation in the PDF', () => {
+    const out = text(lawn(lawnV2({ lead: { headline: 'x', why: null, yourPart: [], next: null } })));
+    expect(out).toContain('Score explanation sentence.');
+  });
+
+  it('the mowing step still prints when the gauge line is dropped', () => {
+    const mowCard = { category: 'mowing', status: 'watch', headline: 'Lawn is being mowed a bit short', whatWeSaw: 'Height is below the band.', customerAction: 'Raise the mower one setting.' };
+    const v2 = lawnV2({ lead: { headline: 'x', why: 'Lead why.', yourPart: [], next: null }, mowing: { status: 'too_short', measuredHeightInches: 2, recommendation: null } });
+    const out = text(lawn({ ...v2, insights: [...v2.insights, mowCard] }));
+    expect(out).toContain('Raise the mower one setting.');
+  });
+
+  it('tree & shrub ignores a lead and prints the full bullets', () => {
+    const data = { ...BASE_DATA, serviceLine: 'tree_shrub', typedReport: null, reportV2: lawnV2({ lead: { headline: 'x', why: 'Lead why should not print.', yourPart: [], next: null } }) };
+    const out = text(data);
+    expect(out).not.toContain('Lead why should not print.');
+    expect(out).toContain('Snapshot root cause sentence.');
+    expect(out).toContain('Spot-treated the weeds.');
+    expect(out).toContain('Catching them early helps.');
   });
 });

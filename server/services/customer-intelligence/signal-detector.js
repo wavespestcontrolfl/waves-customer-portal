@@ -1,4 +1,5 @@
 const db = require('../../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('../collections/collection-hold');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
@@ -222,11 +223,11 @@ class SignalDetector {
 
     // ── Payment Signals ──────────────────────────────────────────
     try {
-      const failedPayments = await db('payments')
+      const failedPayments = await excludeNeverAttemptedHoldDeferrals(db('payments')
         .where('customer_id', customerId)
         .where('status', 'failed')
         .whereNull('superseded_by_payment_id')
-        .where('payment_date', '>', new Date(now - 60 * 86400000))
+        .where('payment_date', '>', new Date(now - 60 * 86400000)))
         .count('* as count').first();
 
       const failCount = parseInt(failedPayments?.count || 0);

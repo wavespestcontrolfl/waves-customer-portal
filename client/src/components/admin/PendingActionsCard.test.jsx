@@ -161,3 +161,22 @@ test('an unknown confirm outcome is neither done nor failed and never re-offers 
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
   vi.unstubAllGlobals();
 });
+
+it('Codex #5514 r5: a card stored as preview-only (minted before the commit path) offers no Confirm', () => {
+  const stored = {
+    id: '22222222-2222-4222-8222-222222222222',
+    tool: 'set_railway_gate',
+    expiresInMs: 600000,
+    contract: {
+      tier: 'yellow', action_label: 'Change a Railway feature gate', preview_only: true,
+      effects: [{ kind: 'operational', label: 'Change: false → true' }],
+    },
+  };
+  render(<PendingActionsCard actions={[stored]} variant="light" />);
+  expect(screen.getByText(/Preview only: /)).toBeInTheDocument();
+  expect(screen.queryByText(/Awaiting your confirmation/)).not.toBeInTheDocument();
+  expect(screen.getByText(/made as a preview only and can't be applied/)).toBeInTheDocument();
+  expect(screen.getByText(/Change: false → true/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+});

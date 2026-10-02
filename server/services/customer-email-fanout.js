@@ -60,7 +60,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 // in-flight send) but gets its own column-only customer_email sync below —
 // this service is diff-gated, so "heal on the next fan-out" never comes.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 // Mirrors OPEN_STATES in routes/admin-triage.js.
 const OPEN_REVIEW_STATES = ['open', 'in_progress'];
@@ -1307,6 +1307,9 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
+        // Address key first (writers take it before rows); the send below
+        // re-enters it and runs its vetoes on this same connection (B13).
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         for (const holdId of holdIds) {
           // Target-bound (r35): a correction retargeting a releasing row
           // preserves its fence, so only the held_email CAS can refuse
@@ -1350,7 +1353,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         // stamps the rollback restored.
         Object.assign(holdClaims, gatedStamps);
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;
@@ -1414,6 +1417,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // read lock, and the pre-stamp is already durable.
     try {
       await conn.transaction(async (trx) => {
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: pendingConfirmation.id,
@@ -1429,7 +1433,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           throw lost;
         }
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;
@@ -1490,6 +1494,15 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
+    if (e.deliveryAmbiguous) {
+      // A provider timeout / 5xx / network failure AFTER dispatch: the DOI may
+      // have been accepted. Keep the pre-stamp (the dedupe evidence) and re-pend
+      // under the neutral marker — never clear the stamp, never arm the forced
+      // resend (the retry's dedupe guard then settles on the stamp).
+      logger.warn(`[email-fanout] DOI delivery is ambiguous for subscriber ${pendingConfirmation.id} — pre-stamp stands, holds re-pended neutral`);
+      await repenHolds('doi_delivery_ambiguous');
+      return false;
+    }
     // The pre-stamp must not bury an undelivered DOI: clear it, conditional
     // on the row still being OUR verified payload (a rotation landing
     // mid-send already replaced or cleared it, and B's callback owns

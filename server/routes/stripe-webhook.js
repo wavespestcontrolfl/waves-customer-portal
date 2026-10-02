@@ -960,7 +960,7 @@ router.post(
           // is absent (rare authorize-only fail). Each Stripe event has a
           // distinct id, so this preserves per-attempt dedupe granularity
           // even in the no-charge case.
-          await handlePaymentIntentFailed(event.data.object, event.id);
+          await handlePaymentIntentFailed(event.data.object, event.id, event.created);
           break;
 
         case 'charge.refunded':
@@ -2798,6 +2798,8 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
     priorAttempts = Number((await db('payments')
       .where({ customer_id: processingRow.customer_id, status: 'failed' })
       .whereNot({ id: processingRow.id })
+      // A collections-hold placeholder never reached Stripe: not an attempt.
+      .modify((q) => require('../services/collections/collection-hold').excludeNeverAttemptedHoldDeferrals(q))
       .where(function () {
         this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
           .orWhere(function () {
@@ -2852,7 +2854,7 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
 /**
  * payment_intent.payment_failed — Update to failed, log failure reason
  */
-async function handlePaymentIntentFailed(paymentIntent, eventId) {
+async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = null) {
   const piId = paymentIntent.id;
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'failed');
@@ -3110,6 +3112,10 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       await PaymentLifecycleEmail.sendPaymentFailed({
         paymentIntentId: piId,
         attemptId,
+        // GATE_BILLING_EMAIL_DETAILS: the card and the moment of the failure
+        // (Stripe's event time, so a late redelivery names the real day).
+        paymentIntent,
+        failedAt: eventCreated ? new Date(eventCreated * 1000) : null,
         customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
         ...(failedCombinedAlloc ? {
           invoiceId: paymentIntent.metadata?.waves_invoice_id || failedCombinedAlloc[0].invoiceId,
@@ -5006,7 +5012,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     }
     const acceptedIntentId = estimateData?.acceptedRecurringCardSetupIntentId || null;
     if (acceptedIntentId && acceptedIntentId !== setupIntent.id) {
-      logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
+      logger.info(acceptedIntentId === RecurringCards.ACCEPTED_NO_CAPTURE_MARKER
+        ? `[stripe-webhook] recurring card intent ${setupIntent.id} was never bound — estimate ${estimate.id} accepted without a verified capture — not enrolling`
+        : `[stripe-webhook] recurring card intent ${setupIntent.id} superseded by accepted ${acceptedIntentId} (estimate ${estimate.id}) — not enrolling`);
       return;
     }
     // The intent the accept COMMITTED with was judged under the customer
@@ -5044,6 +5052,16 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       }
       if (live.metadata?.retired === 'true') {
         logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was retired by the customer (replaced by ${live.metadata.replaced_by || 'n/a'}) — not enrolling (estimate ${estimate.id})`);
+        return;
+      }
+      // PR-B (r3 pre-push P0): an intent minted for the after-visit existing-
+      // customer flow only ever enrolls through the accept that bound it. An
+      // UNBOUND one (abandoned tab, refused accept, the sub-gate since turned
+      // off) is never a legacy capture — recovering it would enroll with base
+      // consent and could undo an Auto Pay opt-out. Genuine legacy captures
+      // (minted without the stamp) keep today's recovery.
+      if (live.metadata?.paf_after_visit === 'true') {
+        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was minted for the after-visit flow but never bound by an accept — not enrolling (estimate ${estimate.id})`);
         return;
       }
     }
@@ -5122,6 +5140,31 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
+      // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the accept stamps the consent
+      // variant the capture UI rendered; recovery records that same text
+      // (after_visit_card, v12) rather than the base card consent. Only the
+      // accepted intent carries it, and only a known variant is honored.
+      ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
+        ? { consentVariant: 'after_visit_card' }
+        : {}),
+      // PR-B: the accept stamped an explicit Auto Pay opt-out — recovery keeps
+      // the card (saved + consent) but must not enroll it either.
+      // GitHub Codex #5481 r5 P1: the exact text + version the accept recorded
+      // as shown — recorded verbatim, so a recovery that runs after a consent
+      // copy change never records wording the customer did not see.
+      ...(boundToAccept && typeof estimateData?.acceptedRecurringCardConsent?.text === 'string'
+        && estimateData.acceptedRecurringCardConsent.text
+        && typeof estimateData.acceptedRecurringCardConsent.version === 'string'
+        ? { renderedConsent: { text: estimateData.acceptedRecurringCardConsent.text, version: estimateData.acceptedRecurringCardConsent.version } }
+        : {}),
+      // The committed acceptance time (GitHub Codex #5481 r7): an opt-out the
+      // customer made AFTER accepting must stop this recovery from enrolling the
+      // capture (enrollConsentedMethod's opted_out_after_authorization guard),
+      // exactly as the accept's own inline enrollment passes acceptAuthorizedAt.
+      ...(boundToAccept && estimate.accepted_at ? { authorizedAt: new Date(estimate.accepted_at) } : {}),
+      ...(boundToAccept && estimateData?.acceptedRecurringCardSkipEnrollment === true
+        ? { skipEnrollment: true }
+        : {}),
     });
     // This handler can be the ONLY durable recovery path (crash after the
     // accept commit, browser never returned) — a TRANSIENT failure must

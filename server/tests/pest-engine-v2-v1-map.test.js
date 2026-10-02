@@ -72,11 +72,12 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // authored wording. This is the safety property that survives: the line
   // still tells the customer to keep their distance and call for medical
   // help when the answered node has anything under it that keeps distance.
-  // The line is triaged for the node's worst member (Codex #5106 r1): the
-  // fire-ants node holds the allergen, pet-toxic little fire ant; widow spiders are
-  // venomous biters, so a bite gets emergency care, not "call a doctor".
+  // The line is triaged for the worst of what the read named plus those
+  // entries' catalog look-alikes (owner 2026-10-01; was the node's worst
+  // member, Codex #5106 r1): fire ants are allergen stingers; widow spiders
+  // are venomous biters, so a bite gets emergency care, not "call a doctor".
   test.each([
-    ['fire-ant', 'fire-ants', [UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES.allergen, UNNAMED_SAFETY_CLAUSES.pets].join(' ')],
+    ['fire-ant', 'fire-ants', [UNNAMED_SAFETY_LINE, UNNAMED_SAFETY_CLAUSES.allergen].join(' ')],
     ['black-widow', 'widow-spiders', `${UNNAMED_SAFETY_CLAUSES.base} ${UNNAMED_SAFETY_CLAUSES.venomousBite}`],
   ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId, line) => {
     const built = answerFor(slug, { approved: false });
@@ -90,6 +91,57 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     const line = answerFor(slug, { approved: false }).genericSafetyLine;
     expect(line).toContain(UNNAMED_SAFETY_CLAUSES.venomousBite);
     expect(line).not.toContain(UNNAMED_SAFETY_CLAUSES.general);
+  });
+
+  // Owner 2026-10-01: a chinch bug read that climbs to "a true bug" must not
+  // borrow the kissing bug's or wheel bug's warning. Neither read (chinch
+  // bug, spittlebug) nor their look-alikes (big-eyed bug, chinch bug) has a
+  // hazard, so the climbed answer carries no warning at all.
+  const climbTo = (reads) => buildAnswer({
+    candidates: reads.map(([slug, confidence, approved = false]) => ({
+      ...candidate(slug, { approved }), confidence, verified: true,
+    })),
+    disagreed: false, disagreementNode: null,
+    escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
+    qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+
+  test('a chinch bug climb to true bugs carries no kissing-bug warning', () => {
+    const built = climbTo([['chinch-bug', 0.4], ['spittlebug', 0.3]]);
+    expect(built).toMatchObject({ answer: { level: 'group', node_id: 'true-bugs' }, entry: null });
+    expect(built.genericSafetyLine).toBeNull();
+  });
+
+  test('a named kissing bug anywhere under the climbed node keeps its full warning', () => {
+    const built = climbTo([['chinch-bug', 0.4], ['kissing-bug', 0.3]]);
+    expect(built.answer.node_id).toBe('true-bugs');
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.allergen);
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.vector);
+  });
+
+  // Pre-push Codex P1: pairs are authored one way. Little fire ant lists
+  // pharaoh ant (not the reverse), so a pharaoh ant climb keeps the little
+  // fire ant's allergen and pet clauses.
+  test('a reverse catalog look-alike still sets the warning', () => {
+    const built = answerFor('pharaoh-ant', { approved: false });
+    expect(built.entry).toBeNull();
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.allergen);
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.pets);
+  });
+
+  test('an off-catalog read under the node still triages for every member', () => {
+    const offCatalog = {
+      slug: null, offCatalogName: 'unlisted bug', groupId: 'true-bugs', confidence: 0.3, entry: null,
+      traitsVisible: [], traitsNotVisible: [], checked: false, verified: false,
+    };
+    const built = buildAnswer({
+      candidates: [{ ...candidate('chinch-bug', { approved: false }), confidence: 0.4 }, offCatalog],
+      disagreed: false, disagreementNode: null,
+      escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
+      qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built.answer.node_id).toBe('true-bugs');
+    expect(built.genericSafetyLine).toContain(UNNAMED_SAFETY_CLAUSES.vector);
   });
 
   test('a draft cane toad keeps a vet instruction for pets', () => {
@@ -390,7 +442,8 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     // own hazards" test above) — unweakened for all 239 pest entries.
     const audited = catalog.listEntries({ section: 'pest' }).filter((entry) => entry.service.referral
       || entry.safety.protected || entry.risk === 'medical');
-    expect(audited).toHaveLength(59);
+    // 59 approved + shot-hole-borers-ambrosia-beetles (draft, arborist referral).
+    expect(audited).toHaveLength(60);
 
     for (const entry of audited) {
       const built = answerFor(entry.slug, { approved: false });

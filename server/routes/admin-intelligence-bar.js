@@ -59,6 +59,7 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
+const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
@@ -145,6 +146,7 @@ const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
 const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
+const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -158,6 +160,9 @@ const INFRA_TOOLS = [
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
   ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
   ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
+  // needs_me: read-only list of open admin alerts + standing conditions. Alert text
+  // names customers, so it rides the admin-only infra set, not the base tools.
+  ...NEEDS_ME_TOOLS,
   // The sitemap submit is advertised with the other outside-service writes in
   // the global infrastructure prompt, so it rides the global infra set too —
   // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
@@ -531,6 +536,15 @@ const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabl
 // never touched by this — only this health-event copy.
 const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
+// A search_field_intelligence result with no page, entry or operational
+// match. Open contradictions only ever attach to returned hits.
+const KNOWLEDGE_GAP_MAX = 300;
+function isEmptyKnowledgeSearch(result) {
+  if (!result || typeof result.query !== 'string' || !result.query) return false;
+  const none = (list) => !Array.isArray(list) || list.length === 0;
+  return none(result.fieldIntelligence) && none(result.knowledgeBase) && none(result.operationalKnowledge);
+}
+
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
@@ -767,6 +781,30 @@ const PINNED_DISPLAY_BUILDERS = {
       message: preview.body_preview,
     }
     : null),
+  // Feature switches (Codex r1 on #5489): the card must show the live facts
+  // the preview read — current → new, what it means, the target and the
+  // restart — not just the raw gate name / value the model sent.
+  set_railway_gate: (params, preview) => (preview?.preview === true && preview.gate
+    ? {
+      gate: preview.gate,
+      change: `${preview.current_value} → ${preview.new_value}`,
+      meaning: preview.meaning,
+      controls: preview.controls,
+      target: `${preview.target?.service || 'portal'} (${preview.target?.environment || 'production'})`,
+      restart: preview.redeploy_notice,
+    }
+    : null),
+  set_growthbook_feature_environment: (params, preview) => (preview?.preview === true && preview.feature
+    ? {
+      feature: preview.feature,
+      change: `${preview.current_state} → ${preview.new_state}`,
+      default_value: preview.default_value ?? 'none set',
+      targeting_rules: preview.rule_count,
+      // Every rule in full, one line each (Codex r1 on #5514, P1).
+      ...(preview.rules ? { rules: preview.rules } : {}),
+      effect: preview.effect_note,
+    }
+    : null),
 };
 
 // Where a fingerprint-verified preview's `_version` rides to the executor,
@@ -882,6 +920,16 @@ function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
   }
+  if (toolName === 'update_lead_contact' && preview?.changes) {
+    // The card shows the resolved lead and only the fields that change,
+    // as before → after — never the raw lead_name search string.
+    return {
+      lead: `${preview.lead_name} (${preview.lead_status})`,
+      ...Object.fromEntries(Object.entries(preview.changes).map(([field, c]) => [
+        field, `${c.from == null ? '(empty)' : c.from} → ${c.to == null ? '(cleared)' : c.to}`,
+      ])),
+    };
+  }
   if (toolName === 'bulk_update_leads') {
     // Curated card: the pinned id list is authoritative but unreadable —
     // show the count + sample the operator is approving, never a raw array.
@@ -985,6 +1033,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // card; the model relays the existing match to the operator.
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
+    }
+    if (toolUse.name === 'update_lead_contact' && preview?.lead_id) {
+      // Pin the resolved lead: a lead_name proposal must never re-resolve to
+      // a different row at Confirm (the preview fingerprint also binds it).
+      params.lead_id = String(preview.lead_id);
+      delete params.lead_name;
+      // Pin the approved before → after values: the confirmed executor
+      // re-asserts THESE in its UPDATE's WHERE, not whatever it re-reads
+      // after the fingerprint check (pre-push P1). `_`-prefixed: never
+      // shown, ignored by the unconfirmed fingerprint re-run.
+      params._approved_changes = preview.changes;
+    }
+    // A feature switch already in the requested state is a plain answer, not
+    // a failure and not a card (Codex r3 on #5489): no is_error result, no
+    // Tool Health failure, nothing to confirm.
+    if (preview?.already_set === true) {
+      return { modelResult: preview };
     }
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
@@ -1414,6 +1479,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // window, updateLeadStatus refuses (preview_changed) instead of
       // overwriting a state the card never showed.
       params._expected_status = lead.status;
+      // ...and its version (codex #5477 r18): a handled request reopened and closed
+      // again by a later booking during the pending window is a different close.
+      params._expected_updated_at = lead.updated_at ? new Date(lead.updated_at).toISOString() : null;
       preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
     }
     if (toolUse.name === 'bulk_update_leads') {
@@ -2004,6 +2072,7 @@ You are on the Leads page. Virginia uses this daily to manage the sales pipeline
 PIPELINE STAGES (in order):
 new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
+Handled: a /book preferred-time request that closed itself when the customer booked online (not won, not lost)
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
 LEAD TYPES: inbound_call, inbound_sms, form_submission, chat_widget, walk_in, referral, ai_agent, voicemail, email_inquiry
@@ -2018,6 +2087,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
+- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost
@@ -2131,21 +2201,22 @@ RESPONSE STYLE:
 // requests never load the tools, so their prompts must not describe them.
 const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only).
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. Two more switch actions — set_railway_gate (set a known GATE_* variable to 'true' or 'false' on the portal's production service) and set_growthbook_feature_environment (enable or disable a GrowthBook feature in one environment — the environment switch, not the value it serves) — prepare a confirmation card for the owner's login too; the change happens only when the operator confirms, and it refuses (nothing written) if the gate or flag changed after the card was shown. For a gate, Railway redeploys the portal with the new value, so it restarts briefly and the change takes effect once that deploy is live. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only). set_railway_gate prepares a preview card setting one known GATE_* variable to the literal value 'true' or 'false' (owner-only); only gates the portal already knows and has a description for are accepted — anything else is changed in the Railway dashboard. The value is the raw variable value, not "on/off": some gates are inverted (a name ending in _OFF or _DISABLED — e.g. GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker OFF), so map what the operator wants to happen through the gate's meaning, and if that is unclear ask which value they want.
 - Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a confirmation card (owner-only).
 - Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a confirmation card (owner-only).
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
 - GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a confirmation card (owner-only); request_codex_review always posts the exact text "@codex review".
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads. set_growthbook_feature_environment prepares a confirmation card to enable or disable a feature in one environment (owner-only). Enabled is NOT "serving true": an enabled feature serves its default value and rules, and a disabled environment makes callers fall back to their code default. Changing a flag's served value or rules happens in the GrowthBook UI.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
 - Meta Ads: get_meta_ads_delivery_status (effective_status = what is ACTUALLY delivering), get_meta_ads_issues (WITH_ISSUES/disapproved ads). Same rules as Google Ads.
 - Truck (Bouncie): get_truck_status (live location/running/fuel/tracker freshness), get_truck_trips (a day's trips + mileage — the live view of the tax mileage ledger's source).
 - Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
 - Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
 - Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
+- Open work: needs_me (everything open: unresolved admin alerts + the dashboard's standing counts, each with area, link, done-when and who may act; older unlabeled alerts come back separately as "unsorted" and are not counted as work). Read-only; never resolve a "person" item.
 - Internal crons: get_scheduled_job_health (the portal's OWN scheduled jobs — pricing sweeps, syncs, reminder crons — last run/success, failure streaks, stuck-mid-run). The internal counterpart to the external checks above.
 - SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
 - Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.
@@ -2155,7 +2226,7 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- Beyond the short owner-only preview list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
+- Beyond the short owner-only list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
 
 
 // Default-off capability gates applied to EVERY context's list in one place
@@ -2381,6 +2452,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
     return executeJobHealthTool(toolName, input);
+  }
+  if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
+    return executeNeedsMeTool(toolName, input);
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
@@ -2728,6 +2802,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // results. Returned only when the gate is on; off = today's payload.
     const toolActivityOn = gateEnvValue('GATE_IB_TOOL_ACTIVITY');
     const toolActivity = [];
+    // Knowledge searches that found nothing this request. Returned to the
+    // client only, so the operator can choose to add one to the weekly
+    // knowledge-gaps email (POST /knowledge-gap). Never logged here: the
+    // search text can carry a customer's name, address or phone.
+    const knowledgeMisses = new Set();
 
     // Tool-use loop
     let lastToolResponse = null;
@@ -2948,6 +3027,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -3115,6 +3195,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // Operator-facing activity lines (GATE_IB_TOOL_ACTIVITY). Absent when
       // the gate is off so the payload stays byte-identical.
       ...(toolActivityOn ? { toolActivity } : {}),
+      // Knowledge searches that came back empty, for the "add to knowledge
+      // gaps" prompt. Absent when there were none.
+      ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the
@@ -3166,6 +3249,51 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 }
 
 router.post('/query', runQuery);
+
+// Operator-chosen knowledge gap: the client offers this after a knowledge
+// search came back empty, with the search text in an editable box. Nothing
+// is saved unless the operator taps the button, so the text is what they
+// chose to keep. Feeds the weekly knowledge-gaps email
+// (services/knowledge/knowledge-gaps-weekly.js).
+router.post('/knowledge-gap', async (req, res) => {
+  if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+  // One key per prompt box: a retry after a lost response re-sends it and
+  // the unique index makes the second insert a no-op.
+  const requestKey = typeof req.body?.request_key === 'string' ? req.body.request_key.trim().toLowerCase() : '';
+  if (!UUID_RE.test(requestKey)) return res.status(400).json({ error: 'request_key must be a UUID' });
+  const question = typeof req.body?.question === 'string' ? req.body.question.replace(/\s+/g, ' ').trim() : '';
+  if (question.length < 3 || question.length > KNOWLEDGE_GAP_MAX) {
+    return res.status(400).json({ error: `question must be 3 to ${KNOWLEDGE_GAP_MAX} characters` });
+  }
+  // The weekly email lists a question by its letters and digits; one with
+  // none (e.g. "???") would be saved but never listed.
+  if (!require('../services/knowledge/knowledge-gaps-weekly').questionKey(question)) {
+    return res.status(400).json({ error: 'question needs at least one letter or number' });
+  }
+  try {
+    await db('knowledge_queries').insert({
+      query: question,
+      articles_referenced: JSON.stringify([]),
+      asked_by: 'intelligence_bar',
+      coverage: 'none',
+      request_key: requestKey,
+    }).onConflict('request_key').ignore();
+    // A retry (same key) saved nothing new: answer with the text actually
+    // stored, so the screen shows what the weekly email will list.
+    const stored = await db('knowledge_queries').where({ request_key: requestKey }).first('query');
+    res.json({ success: true, question: stored?.query ?? question });
+  } catch (err) {
+    // Never pass the error on: knex puts the bindings (the operator's text,
+    // which can still hold customer details) in its message. Code +
+    // constraint are enough to diagnose.
+    logger.error(
+      `[intelligence-bar] knowledge gap save failed (code=${err?.code || 'unknown'}`
+      + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+    );
+    res.status(500).json({ error: 'Could not save the knowledge gap. Try again.' });
+  }
+});
 
 router.post('/tasks/:id/select-target', async (req, res, next) => {
   if (!gateEnvValue('GATE_IB_PLATFORM')) return res.status(404).json({ error: 'Not found' });
@@ -3357,6 +3485,16 @@ router.post('/confirm-action', async (req, res, next) => {
     if (action.tool_name === 'cancel_appointment'
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
+      await PendingActions.recordResult(action.id, result);
+      return res.status(409).json(result);
+    }
+
+    // A card minted while its tool was still preview-only (#5489, before this
+    // commit path deployed) carries contract.preview_only — it was approved
+    // as "cannot be applied", so it never executes (Codex r5 on #5514). Such
+    // rows expire within PendingActions.TTL_MINUTES of the deploy.
+    if (action.contract?.preview_only === true) {
+      const result = { error: 'This card was created as a preview only and cannot be applied — ask again for a fresh confirmation card.', code: 'preview_only' };
       await PendingActions.recordResult(action.id, result);
       return res.status(409).json(result);
     }

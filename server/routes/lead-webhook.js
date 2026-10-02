@@ -232,6 +232,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       timeline,
       leadSource,
       heardAbout,
+      heardAboutPrompt,
       signHost,
     } = intake;
     // The visitor's declared timeline sets urgency directly; null when the
@@ -571,6 +572,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // call-pipeline lead attaching to a web submission gains the join too.
       ...(anonId ? { anon_id: anonId } : {}),
       ...(heardAbout ? { heard_about: heardAbout } : {}),
+      ...(heardAboutPrompt ? { heard_about_prompt: heardAboutPrompt } : {}),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -979,6 +981,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fbp: fbp || null,
           anon_id: anonId || null,
           heard_about: heardAbout || null,
+          heard_about_prompt: heardAboutPrompt || null,
           is_residential: true,
         }).returning('*');
         leadRecord = newLead;
@@ -1120,10 +1123,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // (jsonb_strip_nulls drops a key the row never had) so the triage
               // snapshot — whose schema has none of them — can't erase the
               // extra-property ask, the "Wants service" line or the sign host.
+              // The form's stage and normalized address ride along too: the call
+              // pipeline reads them to tell a web-form address from a call's.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', 'address', COALESCE(extracted_data, '{}'::jsonb)->'address', 'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }
@@ -1366,7 +1371,7 @@ async function attachVoicemailPrefillLead({ body, fields, webhookStage }) {
 async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
   const query = db('leads')
     .where({ id: leadId })
-    .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+    .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled'])
     .whereNull('converted_at');
   if (extraWhere) extraWhere(query);
   const [attached] = await query
@@ -1651,6 +1656,20 @@ function sanitizeHeardAbout(value) {
   return HEARD_ABOUT_OPTIONS.has(key) ? key : null;
 }
 
+// Optional follow-up to the AI choices above ("What did you ask it?"). Stored
+// as typed — no redaction — but only for chatgpt / other_ai, and normalized to
+// one printable line (whitespace collapsed) capped at 500 chars. Anything else
+// (non-string, empty, or a non-AI heard_about) resolves to null.
+const HEARD_ABOUT_PROMPT_MAX = 500;
+const HEARD_ABOUT_PROMPT_KEYS = new Set(['chatgpt', 'other_ai']);
+
+function sanitizeHeardAboutPrompt(value, heardAbout) {
+  if (!HEARD_ABOUT_PROMPT_KEYS.has(heardAbout)) return null;
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text.slice(0, HEARD_ABOUT_PROMPT_MAX).trim() : null;
+}
+
 function buildLeadWebhookIntake(body = {}) {
   // Map raw form field names (garbled -> clean)
   const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
@@ -1695,6 +1714,7 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.referrer,
   );
 
+  const heardAbout = sanitizeHeardAbout(body.heard_about);
   return {
     email,
     rawPhone,
@@ -1712,7 +1732,8 @@ function buildLeadWebhookIntake(body = {}) {
     serviceKey,
     timeline,
     leadSource,
-    heardAbout: sanitizeHeardAbout(body.heard_about),
+    heardAbout,
+    heardAboutPrompt: sanitizeHeardAboutPrompt(body.heard_about_prompt, heardAbout),
     // Exact key only, like `message` below — and kept OUT of `message`.
     signHost: normalizeSignHost(body.sign_host),
     // Free-prose message body — the readiness gate's commercial-signal scan
@@ -2107,4 +2128,5 @@ module.exports._test = {
   isHoneypotTripped,
   enrollNewLeadAutomation,
   sanitizeHeardAbout,
+  sanitizeHeardAboutPrompt,
 };
