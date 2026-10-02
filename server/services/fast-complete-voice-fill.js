@@ -521,7 +521,7 @@ function quantitiesIn(text) {
 // Only a positive dose / mix phrase says "same as last time"; a historical or
 // negated mention ("last time I used...", "but not today", "same area") does not.
 const SAME_AS_LAST_RE = /\b(same (amount|mix|rate|dose|as last time|as last visit)|the usual (mix|amount|rate|dose)|like last time)\b/i;
-const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area)\b/i;
+const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area|(not|never|isn'?t|wasn'?t|no longer)( (the|quite|exactly))? same|different (amount|mix|rate|dose))\b/i;
 
 function pushUnclear(unclear, heard, reason) {
   const entry = { heard: cleanText(heard, CAPS.heard), reason: cleanText(reason, CAPS.reason) };

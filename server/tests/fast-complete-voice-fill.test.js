@@ -1071,3 +1071,10 @@ describe('a number said right before a product name', () => {
     expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBe(4);
   });
 });
+
+describe('a contradicted "same as last time" is no flag', () => {
+  test.each(['Used Taurus, not same as last time.', 'Taurus, not the same as last time.', 'Taurus same as last time but a different rate.'])('"%s"', (t) => {
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+  });
+});
