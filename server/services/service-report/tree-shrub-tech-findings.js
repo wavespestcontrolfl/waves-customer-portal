@@ -190,6 +190,34 @@ function editText(finding) {
  * from signals that included it is dropped. Edit: the prose is dropped too (it
  * would contradict the technician's text). The input is not mutated.
  */
+// Hidden decisions applied to one visit's formatted scores (the history path).
+// formatAssessmentScores() only knows decisions stored in composite_scores
+// (the accepted-preview path); a visit whose preview was rejected and re-scored
+// keeps its hides only in structured_notes.treeShrubTechFindings.
+function hideFrozenFindingsInScores(scores, findings) {
+  const hidden = (Array.isArray(findings) ? findings : []).filter((f) => f && f.action === 'hidden');
+  if (!hidden.length || !scores) return scores;
+  const next = { ...scores, overallScore: null };
+  for (const f of hidden) next[KEY_TO_SCORE[f.key]] = null;
+  return next;
+}
+
+// Frozen decisions for a set of assessment rows, keyed by service_record_id.
+// One read; a failed read means no extra hiding (never a throw into the report).
+async function loadFrozenTechFindingsByRecord(rows, knex) {
+  const ids = [...new Set((Array.isArray(rows) ? rows : []).map((r) => r && r.service_record_id).filter(Boolean))];
+  const byRecord = new Map();
+  if (!ids.length) return byRecord;
+  const records = await knex('service_records').whereIn('id', ids).select('id', 'structured_notes').catch(() => []);
+  for (const rec of Array.isArray(records) ? records : []) {
+    let notes = rec.structured_notes;
+    if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+    const findings = normalizeTechFindings(notes && notes.treeShrubTechFindings);
+    if (findings.length) byRecord.set(String(rec.id), findings);
+  }
+  return byRecord;
+}
+
 // Caption vocabulary per finding. A caption is tied to a finding when it uses
 // that finding's words; one with generic assessment wording ("visible signals")
 // cannot be placed reliably and is treated as tied to every replaced finding.
@@ -305,6 +333,8 @@ function hasTechFindingLines(findings) {
 
 module.exports = {
   hasTechFindingLines,
+  hideFrozenFindingsInScores,
+  loadFrozenTechFindingsByRecord,
   KEY_TO_SCORE,
   TECH_FINDING_LABELS,
   INSIGHT_FINDING_KEYS,

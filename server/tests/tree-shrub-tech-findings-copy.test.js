@@ -428,3 +428,51 @@ describe('every category edited or hidden: the writer grounding stays valid', ()
     expect(src).toContain('if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals)');
   });
 });
+
+describe('later reports\' history honors an earlier visit\'s frozen hides', () => {
+  const { buildTreeShrubAssessmentReportData } = require('../services/tree-shrub-assessment');
+  const row = (id, recordId, date, pest) => ({
+    id, customer_id: 'c1', service_record_id: recordId, service_date: date, confirmed_by_tech: true,
+    foliage_fullness: 80, leaf_color_vigor: 80, pest_activity: pest, disease_leaf_spot: 80, water_heat_stress: 80, overall_score: 78,
+    observations: '', plant_groups: [], composite_scores: null, tech_confirmed_pest: false, tech_confirmed_disease: false,
+  });
+  // Visit 1: preview rejected and re-scored, so composite_scores carries no
+  // reviewed decisions; its hide lives only in the service record's notes.
+  const rows = [row('a1', 'r1', '2026-08-01', 30), row('a2', 'r2', '2026-09-01', 70)];
+  const notes = {
+    r1: { treeShrubTechFindings: [{ key: 'pest_activity', action: 'hidden', detail: null, label: 'x' }] },
+    r2: {},
+  };
+  const reads = [];
+  const knex = (table) => {
+    reads.push(table);
+    const data = table === 'tree_shrub_assessments' ? rows
+      : table === 'service_records' ? Object.entries(notes).map(([id, n]) => ({ id, structured_notes: id === 'r1' ? JSON.stringify(n) : n }))
+        : [];
+    const q = {
+      where: () => q, whereIn: () => q, select: () => q, orderBy: () => q, limit: () => q,
+      first: async () => rows[1], then: (res) => Promise.resolve(data).then(res), catch: async () => data,
+    };
+    return q;
+  };
+  const service = { id: 'r2', customer_id: 'c1', service_date: '2026-09-01' };
+
+  test('gate on: the earlier visit\'s hidden metric and overall are omitted from the later report\'s trend', async () => {
+    gateOn();
+    const out = await buildTreeShrubAssessmentReportData(service, 'tree_shrub', knex);
+    expect(out.trend).toHaveLength(2);
+    expect(out.trend[0]).toMatchObject({ pestActivity: null, overallScore: null, foliageFullness: 80 });
+    expect(out.trend[1]).toMatchObject({ pestActivity: 70, overallScore: 78 });
+    // And through the report builder, the pest trend has no hidden point left to chart.
+    const report = buildTreeShrubReportV2({ treeShrubAssessment: out, techFindings: [] });
+    expect(report.trends.pest).toBeUndefined();
+  });
+
+  test('gate off: history is read exactly as before and the notes are never fetched', async () => {
+    gateOff();
+    reads.length = 0;
+    const out = await buildTreeShrubAssessmentReportData(service, 'tree_shrub', knex);
+    expect(out.trend[0]).toMatchObject({ pestActivity: 30, overallScore: 78 });
+    expect(reads).not.toContain('service_records');
+  });
+});

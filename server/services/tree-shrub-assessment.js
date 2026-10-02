@@ -26,6 +26,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { anthropicText, geminiText } = require('./llm/call');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
+  hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord,
 } = require('./service-report/tree-shrub-tech-findings');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
@@ -987,9 +988,18 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
   const droppedPhotoCount = photos.filter((p) => !p.url).length;
   const visiblePhotos = photos.filter((p) => p.url);
 
-  const scores = formatAssessmentScores(assessment);
+  // GATE_TS_TECH_FINDINGS_COPY: a visit whose preview was rejected and re-scored
+  // keeps its hide decisions only in the service record's frozen findings, so
+  // history applies each visit's own (one read, current visit included).
+  const frozenByRecord = techFindingsCopyLive()
+    ? await loadFrozenTechFindingsByRecord(historyRows, knex)
+    : null;
+  const withFrozenHides = (row, formatted) => (frozenByRecord
+    ? hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(row.service_record_id)))
+    : formatted);
+  const scores = withFrozenHides(assessment, formatAssessmentScores(assessment));
   const trend = historyRows.map((r) => {
-    const s = formatAssessmentScores(r);
+    const s = withFrozenHides(r, formatAssessmentScores(r));
     return {
       date: r.service_date,
       overallScore: s.overallScore,

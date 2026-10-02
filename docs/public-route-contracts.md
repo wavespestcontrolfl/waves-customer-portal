@@ -433,6 +433,41 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
+lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
+read at call time, no redeploy to flip): on the tree/shrub service-report
+payload (`/api/reports/:token/data` and the PDF, which share
+`buildReportV1Data` → `buildTreeShrubReportV2`), gate on lets the technician's
+own decisions on the photo-read findings (frozen at completion in the service
+record's `structured_notes.treeShrubTechFindings`, written whether or not the
+signed preview was accepted) override the photo read in customer copy. The
+payload gains no new field or route: only the existing `reportV2` strings and
+scores change. Per finding: **hide** — the category score, the overall score it
+influenced, the photo-read summary, any insight card built on it, any photo
+caption tied to it, and its point in the visit's (and later reports') trend
+history are withheld; the category reads "tracking", never healthy. **Confirm**
+— the diagnosis row and insight read as the technician's finding ("Your
+technician confirmed …"), still in signals language (no infestation or
+diagnosis claim). **Edit** — the technician's own text replaces the system
+sentence, with the photo-read prose and captions for that category withheld.
+It is the ONLY free technician text this change can add to the public payload:
+it is capped at 400 characters, run through `redactAccessCodes`
+(`context-aggregator.js`, the report-egress access-code redactor) both when
+frozen and when rendered, so gate, garage, lockbox and alarm codes never
+egress, and it passes the palm-crown strip below. **Monitor** keeps today's
+signals-only wording. The photo read itself stays on the stored assessment row
+for the office; admin views are unchanged. Palm-crown rule (owner 2026-10-01,
+photos are ground level): no customer copy on this payload, nor the AI report
+writer's output, may state or imply that a palm's crown, spear leaf or newest
+fronds look healthy or normal — `stripCrownHealthClaims` removes any positive
+claim (a ground-level phrase does not excuse it) while keeping adverse
+statements and "could not check from the ground" disclaimers, and the strong
+leaf-color sentence no longer says "healthy new growth". The stored-PDF cache
+key carries `-tsfind<revision>` while the gate is on, so flipping it
+re-renders tree/shrub PDFs. Gate off (or unset) is byte-identical to before:
+nothing is frozen, no copy changes and the PDF key is unchanged. Auth, token
+gates, rate limits and headers are unchanged.
+
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
 (`/api/reports/:token/data`, the only caller that opts in with
