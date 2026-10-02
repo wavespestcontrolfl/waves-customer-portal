@@ -472,6 +472,10 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // so Full form and "+ Other product" wait for the clip, like Complete and
   // photos. Close still works: it discards the sheet, typed note included.
   const [dictationPending, setDictationPending] = useState(false);
+  // A photo change in hand in the note's box (a description open, whose own
+  // mic may be recording, a change saving, a removal to answer): Full form
+  // waits for it the same way (codex local r3 on #5624).
+  const [photoBusy, setPhotoBusy] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -502,13 +506,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -523,7 +527,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
@@ -972,7 +976,7 @@ function useReportDraft({ request, base }) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onCompleted, onFullForm, isMobile,
+  onPhotoBusy, onCompleted, onFullForm, isMobile,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1000,6 +1004,9 @@ function ReportFlowForm({
   const [photoReloads, setPhotoReloads] = useState(0);
   const reloadPhotos = useCallback(() => setPhotoReloads((n) => n + 1), []);
   const [photoHold, setPhotoHold] = useState('');
+  // The sheet's header (Full form) waits on the same photo change in hand.
+  useEffect(() => { onPhotoBusy?.(!!photoHold); }, [photoHold, onPhotoBusy]);
+  useEffect(() => () => onPhotoBusy?.(false), [onPhotoBusy]);
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
@@ -1273,7 +1280,9 @@ function VisitStep({
     products: ctx.products,
     commonProducts: pickerCommonProducts,
     rows: products.rows,
-    locked: locked || dictationPending,
+    // A photo description's own mic may be recording: the picker never
+    // covers it (codex local r3 on #5624).
+    locked: locked || dictationPending || !!photoHold,
     isMobile,
     onFullForm,
     onPick: (product) => onAddProduct(product, sprayMethod),

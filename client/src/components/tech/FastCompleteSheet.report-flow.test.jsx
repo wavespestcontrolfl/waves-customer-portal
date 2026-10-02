@@ -1232,6 +1232,24 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     await waitFor(() => expect(addPhoto().disabled).toBe(false));
   });
 
+  test('Full form and the product picker wait while a description is open (codex local r3 on #5624)', async () => {
+    const staged = stagedPhotos();
+    render(<FastCompleteSheet service={NOTE_BOX} request={makeRequest({ photos: staged.photos, photoChange: staged.photoChange })} onClose={() => {}} onCompleted={() => {}} onFullForm={() => {}} />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const fullForm = () => screen.getByRole('button', { name: 'Full form' });
+    const otherProduct = () => screen.getByRole('button', { name: '+ Other product' });
+    expect(fullForm().disabled).toBe(false);
+    expect(otherProduct().disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(fullForm().disabled).toBe(true);
+    expect(otherProduct().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(fullForm().disabled).toBe(false));
+    expect(otherProduct().disabled).toBe(false);
+  });
+
   test('a description the server refuses stays open with its words, and says why', async () => {
     const staged = stagedPhotos();
     const refused = Object.assign(new Error('Photo caption contains wording we can\'t put on a customer report (eliminated).'), {
