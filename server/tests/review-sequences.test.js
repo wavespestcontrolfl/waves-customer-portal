@@ -499,7 +499,7 @@ describe('review sequences — cadence engine', () => {
     expect(row.custom_body).toBe(intro); // persisted for retry reuse
   });
 
-  test('tech voice on: a cadence email touch takes the tech-voice intro, recorded review_request_email_tech_voice', async () => {
+  test('tech voice on: a cadence EMAIL touch keeps the fixed company-voice email (owner 2026-10-02: texts only for now)', async () => {
     mockGates.reviewAskTechVoice = true;
     const intro = 'Deb, you asked whether the ants would come back along the lanai. A Google review would help us a lot.';
     mockDraftTechVoice.mockResolvedValue(intro);
@@ -521,10 +521,12 @@ describe('review sequences — cadence engine', () => {
     });
 
     expect(out.ok).toBe(true);
+    // No drafted paragraph of either kind: the fixed generic intro sends.
     expect(mockDraftEmailIntro).not.toHaveBeenCalled();
-    expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ channel: 'email', sequenceId: 'seq-pe-tv', sequenceStep: 2 });
-    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).toBe(intro);
-    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email_tech_voice');
+    expect(mockDraftTechVoice).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).not.toBe(intro);
+    expect(mockEmailSendTemplate.mock.calls[0][0].payload.intro_paragraph).toMatch(/Google review/);
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email');
   });
 
   test('a cadence email touch falls back to the generic intro when the drafter declines', async () => {

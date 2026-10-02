@@ -4826,7 +4826,12 @@ const ReviewService = {
     // P2): an operator-edited/republished version without the variable would
     // silently ignore the draft — paying for the LLM call and crediting
     // control copy to the personalized variant.
-    if (actualChannel === "email" && !persistedBody && sequenceId != null
+    // Tech voice drafts the review TEXTS only (owner ruling 2026-10-02): the
+    // review email keeps its fixed company-voice copy, since a drafted tech
+    // paragraph inside a company-signed email reads as two voices. A
+    // tech-voice email (its own closing and sign-off) comes with the review
+    // page work.
+    if (actualChannel === "email" && !persistedBody && sequenceId != null && !techVoice
       && await this._emailIntroVariableActive()) {
       const recipientIsAccountHolder = !!(emailContact?.email && customer.email
         && String(emailContact.email).trim().toLowerCase() === String(customer.email).trim().toLowerCase());
@@ -4841,24 +4846,13 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          // Same-day reuse only under tech voice (see the SMS path above).
-          const { etCalendarDayOf } = require("../utils/datetime-et");
-          // Reused only in the mode that wrote it: under tech voice, a draft
-          // the tech-voice writer made (fact-checked) on this same ET day;
-          // with the switch off, never a tech-voice draft (it may say
-          // "today" and would be recorded as personalized).
+          // Never a tech-voice draft (it may say "today" and would be
+          // recorded as personalized), and an older personalized intro only
+          // if it still passes today's checks (neutral wording, Google named).
           const priorTechVoice = /_tech_voice$/.test(String(prior?.template_key || ""));
-          const sameDay = techVoice
-            ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
-            : !priorTechVoice;
-          // Same re-check for an older personalized email intro.
-          const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
-            && (prior.service_type || null) === (serviceType || null)
-            && (prior.service_record_id || null) === (serviceRecordId || null)
-            && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
-          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
-            || require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
-              { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null);
+          const reusable = prior?.custom_body && !priorTechVoice
+            && require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
+              { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null;
           if (reusable) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
@@ -4871,13 +4865,11 @@ const ReviewService = {
             sequenceStep,
             serviceDate,
           };
-          const drafted = techVoice
-            ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "email" }) : null)
-            : await Drafter.draftEmailIntro(draftInput);
+          const drafted = await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
         if (persistedBody) {
-          recordedTemplateKey = techVoice ? "review_request_email_tech_voice" : "review_request_email_personalized";
+          recordedTemplateKey = "review_request_email_personalized";
         }
       }
     }
@@ -4890,7 +4882,7 @@ const ReviewService = {
     // listed in CAP_EXEMPT_TEMPLATE_KEYS; ASK_TOUCH_SQL still counts them
     // as asks for the funnel and supersede guards).
     if (actualChannel === "email" && templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId) && !noLinkSend) {
-      recordedTemplateKey = persistedBody ? `${templateId}_email_${techVoice ? "tech_voice" : "personalized"}` : `${templateId}_email`;
+      recordedTemplateKey = persistedBody ? `${templateId}_email_personalized` : `${templateId}_email`;
     }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE

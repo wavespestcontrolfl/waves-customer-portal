@@ -189,7 +189,6 @@ const CAP_EXEMPT_TEMPLATE_KEYS = [
   'first_treatment_ask_email',
   'first_treatment_ask_email_personalized',
   'first_treatment_ask_tech_voice',
-  'first_treatment_ask_email_tech_voice',
 ];
 const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMPT_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`;
 
