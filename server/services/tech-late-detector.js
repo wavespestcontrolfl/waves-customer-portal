@@ -97,7 +97,32 @@ async function runTechLateCheck() {
   }
 }
 
+// A visit that became a street-level address hold AFTER a late alert was raised for it was never dispatched,
+// so the alert is moot. Resolve those through the existing alert resolver (auto: true, the system-resolve
+// stamp every status-driven resolve uses), on the detector's own tick — no write in the hold promotion.
+async function resolveAlertsForHeldVisits() {
+  try {
+    const { OVERDUE_ALERT_TYPES, resolveAlert } = require('./dispatch-alerts');
+    const { heldVisitSubquery } = require('./street-level-hold');
+    const open = await db('dispatch_alerts as a')
+      .whereIn('a.type', OVERDUE_ALERT_TYPES)
+      .whereNull('a.resolved_at')
+      .whereNotNull('a.job_id')
+      .whereExists(function heldVisit() {
+        // The hold predicate is keyed on the visit alias: join the alert's visit through a nested select.
+        this.select(1).from('scheduled_services as s').whereRaw('s.id = a.job_id')
+          .whereExists(function holdCard() { heldVisitSubquery(this, 's'); });
+      })
+      .select('a.id');
+    for (const { id } of open) await resolveAlert({ id, auto: true });
+    if (open.length) logger.info(`[tech-late-detector] resolved ${open.length} late alert(s) for visits that are now address holds`);
+  } catch (err) {
+    logger.warn(`[tech-late-detector] held-visit alert resolve failed: ${err.message}`);
+  }
+}
+
 async function runInner() {
+  await resolveAlertsForHeldVisits();
   // The same cron and dispatch-alert lifecycle use communication evidence
   // under the new gate; there is no competing overdue scan while enabled.
   const tracking = require('./no-show-detector');
@@ -125,6 +150,7 @@ async function runInner() {
   // (codex P1, PR #4403 round 10). Best-effort: a cleanup failure must not
   // stop the fallback scan.
   await tracking.cleanupAfterDisable(db).catch((err) => logger.warn(`[tech-late-detector] tracking cleanup failed: ${err.message}`));
+  const { heldVisitSql, runUnlessLiveHold } = require('./street-level-hold');
   let rows;
   try {
     const result = await db.raw(`
@@ -154,6 +180,8 @@ async function runInner() {
           AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
           AND s.technician_id IS NOT NULL
           AND s.window_start IS NOT NULL
+          -- An uncleared street-level address hold was never dispatched: no late alert for it.
+          AND NOT EXISTS (${heldVisitSql('s')})
       )
       SELECT
         c.job_id,
@@ -209,7 +237,9 @@ async function runInner() {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= TECH_LATE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
-      await createAlert({
+      // A promotion to a street-level hold can land after the scan above: re-read the hold under the visit
+      // row lock right before alerting, and raise nothing for a held (never dispatched) visit.
+      const guarded = await runUnlessLiveHold(row.job_id, (trx) => createAlert({
         type: 'tech_late',
         severity,
         techId: row.tech_id,
@@ -220,7 +250,9 @@ async function runInner() {
           window_end: row.window_end,
           scheduled_date: normalizeDateOnly(row.scheduled_date),
         },
-      });
+        trx,
+      }));
+      if (guarded.held) continue;
       created += 1;
     } catch (err) {
       // 23505 = unique_violation. The partial unique index
@@ -246,6 +278,7 @@ async function runInner() {
 
 module.exports = {
   runTechLateCheck,
+  resolveAlertsForHeldVisits,
   TECH_LATE_GRACE_MINUTES,
   TECH_LATE_CRITICAL_MINUTES,
   TECH_LATE_MAX_DELAY_MINUTES,

@@ -7,8 +7,10 @@ class MissedAppointment {
    * system. 2+ skips in 90 days surfaces a recommended outreach task — no
    * SMS is sent automatically; the team reviews and sends manually.
    */
-  async onSkip(scheduledServiceId, reason = 'no_show') {
-    const service = await db('scheduled_services')
+  // `conn`: an optional open transaction / connection to run on (default: the shared pool), so a caller that
+  // already holds a connection (the street-level hold guard) never waits on a second pool checkout.
+  async onSkip(scheduledServiceId, reason = 'no_show', conn = db) {
+    const service = await conn('scheduled_services')
       .where({ id: scheduledServiceId })
       .first();
 
@@ -18,7 +20,7 @@ class MissedAppointment {
     }
 
     const customerId = service.customer_id;
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
     // original_date + original_window = the slot that was missed. Together
@@ -27,7 +29,7 @@ class MissedAppointment {
     // no-show rebooks it in place — possibly later the SAME day), so dedupe
     // checks and the 90-day count discriminate by (service, slot date, slot
     // window), never by service row alone (codex r1+r2 on #3110).
-    await db('reschedule_log').insert({
+    await conn('reschedule_log').insert({
       customer_id: customerId,
       scheduled_service_id: scheduledServiceId,
       reason_code: 'customer_noshow',
@@ -37,7 +39,7 @@ class MissedAppointment {
       notes: reason || 'skip',
     });
 
-    return this.evaluateThreshold(customerId, reason);
+    return this.evaluateThreshold(customerId, reason, conn);
   }
 
   /**
@@ -47,8 +49,8 @@ class MissedAppointment {
    * customer_noshow through the rebooker — can run the threshold without
    * inserting the occurrence a second time (codex r2 on #3110).
    */
-  async evaluateThreshold(customerId, reason = 'no_show') {
-    const customer = await db('customers').where({ id: customerId }).first();
+  async evaluateThreshold(customerId, reason = 'no_show', conn = db) {
+    const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
     // Count distinct missed OCCURRENCES, not rows: a nightly-sweep flag and
@@ -58,10 +60,10 @@ class MissedAppointment {
     // because the window differs. Legacy rows with NULL slot fields
     // collapse per-service, matching the old per-row behavior closely
     // enough for the 90-day window.
-    const skipCount = await db('reschedule_log')
+    const skipCount = await conn('reschedule_log')
       .where({ customer_id: customerId, reason_code: 'customer_noshow' })
-      .where('created_at', '>', db.raw("NOW() - INTERVAL '90 days'"))
-      .select(db.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
+      .where('created_at', '>', conn.raw("NOW() - INTERVAL '90 days'"))
+      .select(conn.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
       .first();
 
     const totalSkips = parseInt(skipCount.count, 10);
@@ -79,7 +81,7 @@ class MissedAppointment {
       `Can we find a better day/time that works for you? ` +
       `Reply with your preferred day or call us. - Waves Pest Control`;
 
-    await db('customer_interactions').insert({
+    await conn('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'task',
       channel: 'internal',

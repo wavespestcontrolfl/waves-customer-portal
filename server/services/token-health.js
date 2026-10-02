@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { TYPESAFE_SYSTEMONE_API, TYPESAFE_PINNED_MODEL_RE } = require('./llm/call');
+const { TYPESAFE_SYSTEMONE_API, TYPESAFE_PINNED_MODEL_RE, WORKERS_AI_ACCOUNTS_API, workersAiDecisionModel } = require('./llm/call');
 
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
 
@@ -20,7 +20,7 @@ const KNOWN_PLATFORMS = new Set([
   'meta_ads', 'meta_capi', 'meta_audiences',
   'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
   'bouncie', 'beehiiv', 'dataforseo',
-  'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'typesafe', 'google',
+  'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'typesafe', 'cloudflare_workers_ai', 'google',
   'sendgrid',
   'github',
 ]);
@@ -851,6 +851,64 @@ async function checkTypeSafe() {
   }
 }
 
+// Cloudflare Clef on Workers AI (typed decisions' second provider,
+// GATE_TYPED_DECISIONS_CLEF). Like TypeSafe, the probe is the smallest real
+// request: one yes/no question over a one-word state against the configured
+// model. 401/403 = the token is bad or lacks the Workers AI permission
+// (expired); 429/529 = the token works but the service is busy (healthy for
+// credential purposes); anything else, or a 200 whose envelope reports
+// failure, is an error.
+const WORKERS_AI_PROBE_TIMEOUT_MS = 15000;
+async function checkCloudflareWorkersAI() {
+  const platform = 'cloudflare_workers_ai';
+  const envVarName = process.env.CF_WORKERS_AI_TOKEN ? 'CF_WORKERS_AI_TOKEN' : 'CF_API_TOKEN';
+  const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN;
+  const account = process.env.CF_ACCOUNT_ID;
+
+  if (!token || !account) {
+    const result = { platform, status: 'not_configured', lastError: !account ? 'CF_ACCOUNT_ID not set' : 'CF_WORKERS_AI_TOKEN or CF_API_TOKEN not set', expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+  // The adapter refuses a model the catalog does not register as a Cloudflare
+  // decision model, so a green credential with an unusable model would lie.
+  if (!workersAiDecisionModel(MODELS.CLOUDFLARE_CLEF)) {
+    const result = { platform, status: 'error', lastError: `MODEL_CLOUDFLARE_CLEF must be a registered Cloudflare decision model (clef-flash or clef), got ${MODELS.CLOUDFLARE_CLEF}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+
+  try {
+    const res = await fetch(`${WORKERS_AI_ACCOUNTS_API}/${encodeURIComponent(account)}/ai/run/@cf/cloudflare/${MODELS.CLOUDFLARE_CLEF}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ state: 'ping', questions: { ok: { type: 'noul', instructions: 'Is the state the word ping?' } } }),
+      signal: AbortSignal.timeout(WORKERS_AI_PROBE_TIMEOUT_MS),
+    });
+
+    if (res.status === 429 || res.status === 529) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success !== false) {
+      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+      return result;
+    }
+    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
+    const message = (Array.isArray(data.errors) && data.errors[0] && data.errors[0].message) || data.error?.message || data.message || `HTTP ${res.status}`;
+    const result = { platform, status, lastError: message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'api_key', envVarName });
+    return result;
+  }
+}
+
 async function checkGoogle() {
   const platform = 'google';
   const envVarName = process.env.GOOGLE_MAPS_API_KEY ? 'GOOGLE_MAPS_API_KEY' : 'GOOGLE_API_KEY';
@@ -996,6 +1054,7 @@ const TokenHealthService = {
       case 'openai': return checkOpenAI();
       case 'gemini': return checkGemini();
       case 'typesafe': return checkTypeSafe();
+      case 'cloudflare_workers_ai': return checkCloudflareWorkersAI();
       case 'google': return checkGoogle();
       case 'sendgrid': return checkSendGrid();
       case 'github': return checkGitHub();
@@ -1034,6 +1093,7 @@ const TokenHealthService = {
     results.push(await checkOpenAI());
     results.push(await checkGemini());
     results.push(await checkTypeSafe());
+    results.push(await checkCloudflareWorkersAI());
     results.push(await checkGoogle());
     results.push(await checkSendGrid());
     results.push(await checkGitHub());

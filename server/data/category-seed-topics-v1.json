@@ -463,10 +463,10 @@
       ],
       "internal_links": [
         "/lawn-care-venice-fl/",
-        "/lawn-care/lawn-watering-tips/"
+        "/lawn-care/overwatering-lawn-vs-underwatering/"
       ],
       "verify_notes": [
-        "Verify /lawn-care/lawn-watering-tips/ resolves on the live sitemap before including it."
+        "Verify /lawn-care/overwatering-lawn-vs-underwatering/ resolves on the live sitemap before including it."
       ]
     },
     {
@@ -1397,7 +1397,7 @@
       "internal_links": [
         "/pest-control-services/",
         "/pest-control/get-rid-of-ghost-ants-in-sarasota/",
-        "/pest-control/get-rid-of-sugar-ants/"
+        "/pest-control/how-do-i-get-rid-of-sugar-ants/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
@@ -1441,7 +1441,7 @@
       "internal_links": [
         "/pest-control-services/",
         "/termite-control/",
-        "/pest-control/get-rid-of-carpenter-ants/"
+        "/pest-control/dangerous-ants-in-florida/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
@@ -1487,7 +1487,7 @@
       "internal_links": [
         "/pest-control-services/",
         "/pest-control/get-rid-of-german-cockroaches/",
-        "/pest-control/get-rid-of-roaches/"
+        "/pest-control/can-cockroaches-play-dead/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
@@ -1578,7 +1578,7 @@
       "internal_links": [
         "/pest-control-services/",
         "/pest-control/rat-mites-bradenton-fl/",
-        "/pest-control/bed-bug-treatment-bradenton/"
+        "/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
@@ -1625,7 +1625,7 @@
       "internal_links": [
         "/pest-control-services/",
         "/pest-control/mud-dauber-wasps/",
-        "/pest-control/get-rid-of-paper-wasps/"
+        "/pest-control/get-rid-of-wasps/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
@@ -1804,7 +1804,7 @@
       ],
       "internal_links": [
         "/pest-control-services/",
-        "/pest-control/get-rid-of-fire-ants/",
+        "/pest-control/fire-ant-treatment-bradenton-fl/",
         "/lawn-care/mole-crickets-bahia-sarasota-fl/"
       ],
       "verify_notes": [

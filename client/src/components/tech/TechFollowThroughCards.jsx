@@ -29,7 +29,8 @@ const TECH_POLL_MS = 5 * 60 * 1000;
 export default function TechFollowThroughCards({ fieldWorkspace = false, ...props }) {
   const selectedUi = fieldWorkspace ? fieldUi : ui;
   return <>
-    <RescheduleProposalCards pollMs={TECH_POLL_MS} ui={selectedUi} />
-    <FollowThroughCards pollMs={TECH_POLL_MS} {...props} ui={selectedUi} />
+    {/* A technician gets no customer calls: no "Open call" link. */}
+    <RescheduleProposalCards pollMs={TECH_POLL_MS} ui={selectedUi} openCall={false} />
+    <FollowThroughCards pollMs={TECH_POLL_MS} {...props} ui={selectedUi} openCall={false} />
   </>;
 }

@@ -304,12 +304,12 @@ equivalent fetch exactly (no deadline there either). Both PDF
 cache-decision sites (the direct `/:token` route and the queued renderer
 in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
 object `buildReportV1Data` returns and skip storing under the stable
-`-pex1` key when it is set, so a later render — once the window closes or
+`-pex2` key when it is set, so a later render — once the window closes or
 the provider recovers — is what gets cached, not a permanent "no rain
 block" copy. This flag rides the JSON payload the same way
 `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
-`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+`spiders: { headline, whatWeDid, expectation }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
 that eaves were treated — the tech may have tagged it while applying it
@@ -321,7 +321,7 @@ completedActions "serviced-eaves" choice, "Completed the recorded eave and
 soffit service." (`client/src/lib/service-completion-choices.js`), names the
 eaves/soffit and so opens the section, but records no web-removal work of
 any kind — it could just as easily be a residual application or a plain
-inspection. Every wording below opens with "We knocked down webs...", so
+inspection. Every wording below opens with "We swept webs and egg sacs...", so
 that specific claim additionally requires an action that actually says a web
 was removed: either it names web(s)/webbing/a cobweb directly (the
 completedActions "removed-webs" choice, "Removed accessible webs from the
@@ -329,14 +329,15 @@ recorded exterior areas.") or it explicitly SWEPT (the protocol library's
 "Swept eaves, window frames, door frames, and lanai" — sweeping IS the
 web-removal act). A location-only eave/soffit action with neither gets NO
 card at all, gate on or off, residual evidence or not — an unproven "we
-knocked down webs" claim is never invented just because a treatment
-happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
-ALWAYS one of two fixed combinations: (1) the action was recorded but no
+swept webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` are
+ALWAYS one of two fixed combinations (no `nextStep`: owner 2026-10-01, webs
+are not a return-visit item): (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
 tying it to the eaves — de-web-only wording, no treatment claim ("We
-knocked down webs around the eaves and entry points.") and an expectation
-that never says "the residual we applied"; (2) the action was recorded AND
+swept webs and any egg sacs from your eaves and entry points.") and an
+expectation that never credits a residual; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
 (owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
@@ -347,8 +348,8 @@ nothing else stands in for it — matched by exact key, never a substring),
 or the visit separately recorded a genuine `treatmentApplied: true` eave
 action, never just the sweep-only action that gates the section in the
 first place) → combined wording ("We
-knocked down webs and treated the eaves and entry points where spiders
-build.") with a residual-backed expectation — even here, the eaves-treated
+swept webs and any egg sacs, then applied a residual insecticide to the eaves
+and entry points where spiders build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
 alone and never on free text. Neither combination ever interpolates a raw
 completed protocol-action label. Raw protocol-action labels
@@ -375,7 +376,8 @@ Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 (owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
 cracks/voids, never a surface barrier, so it never shares the pyrethroid
 barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
-Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Bait → roach gel bait; Advion Ant Bait Gel → ant bait; Advion WDG Granular
+(a granular bait broadcast by the pound, with no approved line) → no class;
 Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
 explicitly mapped to no class. A product NOT in this map gets no line —
 fail closed, never guessed; extending the map to a new product requires an
@@ -390,9 +392,22 @@ recorded) method is treated as unknown, never assumed exterior; an
 unrecognized or free-text area string never qualifies either, fail closed;
 when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
-rather than silently asserting the claim. Never a "guarantee"
-or "eliminate" claim (screened through the existing `validateCustomerCopy`
-banned-copy guard). The what-to-expect facts (never the rain block, never
+rather than silently asserting the claim. The non-repellent "6-foot
+perimeter band" sentence needs one non-repellent application that is both
+ant-tagged and recorded as a band: an explicit `perimeter_spray` method or a
+perimeter/foundation chip (Perimeter, Exterior perimeter, Property
+perimeter, Foundation, Foundation perimeter) by exact key; any other
+exterior chip is spot work and gets the general non-repellent wording. Each line names the active ingredient from a
+closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
+lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
+pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the
+barrier sentence names only the products recorded exterior. The bait and
+dust lines make no placement claim (the builder reads no area or method),
+the AI writer's plain variant leaves out label durations ("up to 8
+months") and customer instructions, and the Tekko Pro 6-month
+cockroach-nymph sentence needs a roach target on that application. Never a
+"guaranteed" or "eliminated" claim (screened through the existing
+`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
 the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
@@ -553,6 +568,15 @@ These values freeze the billed row's service ownership for combined-visit
 closeout. They are opaque, non-bearer references that grant no read or write
 access; no sibling invoice, report, receipt, or other bearer token rides a line
 item. Legacy and unrelated invoice rows may omit the ownership fields.
+
+Visit note: `/api/pay/:token` returns `service.techNotes` only as the reviewed
+report text (`customerSafeVisitNotes` with `projectLine`, server/services/context-aggregator.js;
+owner ruling 2026-10-01: customers see only the report text, never the tech's
+raw note). The invoice keeps the note as it stood when billed, which on older
+invoices is the raw note, so the route screens it on the way out against the
+visit's own record (`service_records` by the invoice's `service_record_id` and
+`customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
+missing record returns null.
 
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
@@ -986,23 +1010,77 @@ row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
 window or the suppression. Filing a lead also stamps its
 `ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
-public lead. A booking NEVER closes a preferred-time request (owner ruling
-2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
-on both the first commit and the `txResult.existing` replay; a free re-service
-callback visit is skipped) never marks the lead won and never touches its funnel
-row — the booking's own attribution runs exactly as for any other booking.
-Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
-booked customer's open preferred-time leads (phone match) whose
-`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
-booked <service> for <date> (visit <id>) on /book — close this request if
-nothing else is needed" — deduped per (lead, visit) through
-`lead_activities.metadata`, so a replay never stacks notes; a newer request is
-new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+public lead. A booking closes a preferred-time request on its own (owner ruling
+2026-10-01, replacing the 2026-09-30 note-only rule): a completed self-booking
+(`createSelfBooking`, every service type, on both the first commit and the
+`txResult.existing` replay; a free re-service callback visit is skipped) moves
+each of the booked customer's open preferred-time leads whose
+`last_requested_at` is at or before the booking (60 s of clock slack) to the
+terminal status `handled`. A lead qualifies only when its phone matches (last
+10 digits), its `customer_id` is null or the booked customer, AND its identity
+corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
+to that customer, or its email matches the customer's non-blank email, or its
+first AND last name both match. A phone match alone never closes a request (a
+shared household or reassigned number). The booked visit must also carry every
+service line the request asked for (`inferServiceLine` per part of a composite
+such as `Lawn Care + Pest Control` or `Lawn & Pest`, on both sides); a request
+that named no service is answered by any booking, and one asking for a line the
+visit does not carry (a lawn + pest request, then a lawn-only booking) stays
+open for the office. It must also be for the same property, judged by /book's own address matcher
+(`addressMatchesCustomer`: normalized street with suffix variants, unit value,
+zip) against the visit's service address (its own stamp, else the customer's);
+a customer with two homes on one phone who asks at A and books at B, or at
+another unit of the same building, keeps the A request open (a side with no
+street does not block the close). The audit row and the FYI name the visit's service and day
+as read under the visit lock. A request staff attached an estimate
+to (`leads.estimate_id` set) is never closed and never converted by the
+booking: it stays open, as before this change, and converts the way any
+estimate-linked lead does (the estimate's acceptance,
+`markLinkedLeadEstimateAccepted`) or by staff. `handled` means closed, neither
+won nor lost, and is set through
+`closeBookedPreferredLeads`. It is NOT `markConverted` and settles no funnel stage
+(`handled` has no funnel mapping, so the `ad_service_attribution` stage stays
+as it is and nothing is uploaded to Google or Meta for the request); the
+booking's own attribution runs exactly as for any other booking. Once the
+booking has its own funnel row, the closed request's row is removed
+(`dropSupersededPreferredFunnelRows`), so the journey counts as one lead; only
+by the booking whose close is the request's CURRENT one (a request reopened and
+closed again by a later booking is that booking's). First
+touch keeps the credit (owner ruling 2026-10-01): when the request's row came
+in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
+and the booking's own row has no paid click id, the booking's
+row first takes the request's touch (source, detail, lead date, click ids,
+UTM campaign/term, `is_paid`; the earliest paid request by first-contact
+instant wins, and the transfer is recorded on that request's close audit
+(`touch_to`) so a close that runs in parts (a replay closing an older request
+later) still ends on the earliest contact; when the
+booking converted a genuine lead instead of writing its own row, that lead's
+booked row is the target, and it keeps its own touch when its first contact
+(`leads.first_contact_at`, the instant, not the row's calendar `lead_date`)
+came no later than the request's; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
+is credited, and reported, to that ad. Every other lead surface
+treats `handled` as closed: it is out of the open set, out of every prospect
+denominator (conversion, win and lost rates), and never re-attached by a later
+form, call, estimate or email fan-out. The close runs inside the per-(lead,
+visit) transaction that takes, in order, the booked customer `FOR SHARE`
+(the visit's CURRENT owner, so a merge since the booking is judged on the
+winner; re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
+live, not cancelled / skipped / rescheduled / no_show, and not a callback; customer before visit, the order a customer merge
+uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
+converted or deleted, no estimate attached, phone still matching the
+customer's current phone, `customer_id` null or the booker's, identity still
+corroborated, same service line), then writes ONE `status_change` activity row
+("Closed automatically — customer booked <service> for <date> (visit <id>) on
+/book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
+replay never closes twice; a newer request is new work and stays open. The office
+gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
+deduped per (lead, visit)) and nothing else: no customer message of any kind.
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it), and moves a lead off it only when the caller sends `seen_status: 'handled'` together with `seen_updated_at` matching the lead's current `updated_at` (so a request reopened and closed again by a later booking is not overwritten from a view of the earlier close) (the status its page showed; the Leads page sends it with every status change and mark-lost, and a caller that sends none is refused with 409) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
-booking that committed while a submit was still in flight (its note ran before
-the lead was visible) is reconciled by the submit after its commit: the lead gets
-the same note and NO `new_lead` bell rings; with no live booking since the
+booking that committed while a submit was still in flight (its close ran before
+the lead was visible) is reconciled by the submit after its commit: the lead
+closes the same way (with the admin FYI) and NO `new_lead` bell rings; with no live booking since the
 request began the bell rings as usual. A repeat submit inside 24h merges only that
 request's own fields into `extracted_data`; the lead's first-touch UTM /
 referrer / landing URL are written once at creation and kept. The service line
@@ -1491,6 +1569,66 @@ tender, text }` (the exact authorization recorded as shown) beside the existing
 recovery record that text and version verbatim (never re-derived from current copy), and the
 recovery passes the committed `accepted_at` as the authorization time so an Auto Pay opt-out made
 after accepting is honored.
+Setup fee billed with the first visit (pay-after-first-visit PR-C,
+`GATE_PAF_SETUP_FEE`, dark; needs `GATE_PAY_AFTER_FIRST_VISIT`). Three public payload
+additions, each OMITTED (never `false`) unless true, so every gate-off response is
+byte-identical to before. (1) GET `/api/estimates/:token/data`
+`recurringCardPolicy.setupFeeAfterFirstVisit: true` only when BOTH gates are exactly
+`'true'` and the policy the accept would resolve puts this customer on the card rail with a
+FRESH capture (`required: true`, not the Auto Pay paused / off cohorts: a customer satisfied by a
+saved or enrolled method sees no capture, so never the after-visit text, and keeps today's
+payable setup invoice) AND every monthly-billed
+tier row in the quoted pricing carries a positive visit count (the accept defers only
+onto a priced first visit, and a tier row's per-visit price resolves only with a known
+visit count; otherwise the field is omitted and the page keeps today's invoice wording)
+AND the resolved customer does not keep monthly membership billing (one shared server
+predicate, also used by the legacy page copy and the accept; any lookup failure omits the
+field). The React page applies
+its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
+only when this is true AND its own selection resolves to the setup-only shape (monthly
+tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean
+about the viewer's own estimate: no customer, payer or payment-method data. (2) PUT
+`/api/estimates/:token/accept` request body `setupFeeAfterFirstVisitShown: true` ATTESTS the
+tab rendered that promise (render-bound, omitted otherwise); the accept recomputes the
+promise inside its transaction from the same inputs and, on ANY difference between the
+attestation and what it would apply, refuses with `409 { code: 'SETUP_FEE_TERMS_REFRESH' }`
+(whole accept rolls back; the page refetches). The deferred fee joins the accept's ONE
+collection promise (`resolveCollectionPromise`, see PR-B above): for a card tender the promise is
+`after_visit_card`, so the tab attests it with `recurringCardConsentVariant` / `Version` /
+`Tender` like the PR-B cohort and any difference is refused `409 CONSENT_VARIANT_STALE`; the
+accept persists `estimate_data.acceptedRecurringCardConsent` (exact text) and
+`acceptedRecurringCardConsentVariant`, which the `setup_intent.succeeded` recovery records
+verbatim. A bank tender records the base ACH consent. Success payload
+`setupFeeAfterFirstVisit: true` when this
+accept actually STAMPED the setup fee on the first visit's series parent
+(`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
+the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and
+`nextStep: 'confirmed'`. An accept that is not eligible to defer (not on the card rail, a
+bait-station setup or first-application line in the quote, a monthly tier whose visit
+count is unknown, or a converted customer whose billing lane is not `per_application`)
+keeps today's payload and pay link, omits the field and records the BASE consent. An
+accept the page DID promise first-visit billing for (card rail, setup-only shape, known
+visit counts, `per_application` lane) whose stamp cannot land (no series parent, no
+billable first visit, a different claim already on the series, or a MULTI-PROGRAM accept —
+the claim lives on one program's series and could not follow whichever program is performed
+first, so a multi-program accept never defers the fee) is REFUSED with
+`409 { code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false }` and the whole accept rolls
+back, never a payable setup invoice recorded under the after-first-visit consent; the
+retry, without the attestation, takes today's payable setup invoice. (3) Durable retry: the accept
+persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
+transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
+already-accepted estimate (`alreadyAccepted: true`) rebuilds the same
+`setupFeeAfterFirstVisit: true`, never a pay link. The setup fee is billed on the first
+PERFORMED visit's own invoice and charged once to the saved method; a no-show or
+cancelled series bills nothing. A fee the first performed visit cannot bill on its own
+completion invoice (the visit billed nothing, a grouped closeout handed to the office, a
+dues-covered billing lane) is PARKED FOR THE OFFICE, never turned into a free-standing
+invoice: the stamp is cleared and one internal `setup_fee_office_billing` dispatch alert
+(amount, series, estimate, customer) is the durable owed-fee record the office bills by
+hand, once. No draft invoice is created outside the normal completion mint, and nothing is
+sent to the customer. The accept notification (customer account feed) says
+nothing is charged today and the fee bills with the first visit. No message is sent
+because of these fields.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -1886,6 +2024,53 @@ headline + what we saw (+ why it matters only for needs_attention) with no
 line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
 stamp while the gate is on, so gate-off PDFs are never served after the flip
 (or the reverse on rollback).
+`GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
+for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
+(lawn only, never tree & shrub; no new route, token, privacy or rate-limit
+surface): instead of the peak / shoulder / dormant note it is one calendar-based,
+tier-neutral sentence for the visit's month and grass (St. Augustine,
+Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
+says what the program focuses on that time of year, never what the visit
+applied. It is written from `server/config/protocols.json` months, and any step
+the protocol makes conditional (skipped, soil-test or weather gated, optional,
+or on request) is only stated with a qualifier such as "where the
+lawn needs it" or "when conditions allow". It is at most about 30 words, and
+never naming a product, an ordinance, a county, a blackout, a law, a clock time,
+plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
+carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
+is null, and the old note stays, for a visit that is not a recurring lawn plan
+visit (the visit's catalog service identity must be a recurring lawn plan:
+one-time lawn jobs, callbacks and unresolved identities get no line; the
+WaveGuard tier is never the signal), for a visit with no assessment date, and
+for a June to September visit that may have applied nitrogen (the program
+applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
+with no `analysis_n`, or any applied product the catalog cannot resolve.
+The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
+lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+renders a program line once as a small "This time of year" card above the
+trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
+print `seasonalNote`, so its content and cache signature are unchanged.
+`GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key
+for key, and makes no read or write) adds an optional `reportV2.sinceLast` to the
+`/api/reports/:token/data` lawn payload (lawn only, never tree & shrub; no new
+route, token, privacy or rate-limit surface; nothing renders it yet, the web
+report and PDF are unchanged and keep their cache signature). It is DATA for the
+progress engine and the copy writer: `{ v: 1, priorAssessmentId, priorDate,
+applied: [{ name, activeIngredient, kind, tag, targets (at most 3) }], checks:
+[{ key, status }] }`, read from the PRIOR visit's frozen treatment memory: what
+that visit applied and which of water, weeds, damage, coverage and mowing it said
+it would keep watching (at most 3; the customer's own concern is not carried).
+No state words ("clear", "still watching") are decided here. The prior visit is
+the previous confirmed assessment at the SAME property with a strictly earlier
+date (needs `GATE_LAWN_PROPERTY_HISTORY`; a later-dated or same-day row is never
+the prior, and a customer who moved gets no prior). The key is absent when there
+is no prior or the prior has no frozen memory. Each visit's own entry is frozen
+into `service_records.structured_notes.lawnVisitMemory[<assessment id>]` at its
+first render (first writer wins per assessment, no migration) together with the
+`sinceLast` block it carried, and replayed byte for byte after, so a permanent
+token never changes when later visits are added. A render whose entry could not
+be frozen is marked uncacheable (`weekWeatherUncacheable`); delivery is not held.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

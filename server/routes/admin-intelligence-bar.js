@@ -920,6 +920,16 @@ function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
   }
+  if (toolName === 'update_lead_contact' && preview?.changes) {
+    // The card shows the resolved lead and only the fields that change,
+    // as before → after — never the raw lead_name search string.
+    return {
+      lead: `${preview.lead_name} (${preview.lead_status})`,
+      ...Object.fromEntries(Object.entries(preview.changes).map(([field, c]) => [
+        field, `${c.from == null ? '(empty)' : c.from} → ${c.to == null ? '(cleared)' : c.to}`,
+      ])),
+    };
+  }
   if (toolName === 'bulk_update_leads') {
     // Curated card: the pinned id list is authoritative but unreadable —
     // show the count + sample the operator is approving, never a raw array.
@@ -1023,6 +1033,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // card; the model relays the existing match to the operator.
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
+    }
+    if (toolUse.name === 'update_lead_contact' && preview?.lead_id) {
+      // Pin the resolved lead: a lead_name proposal must never re-resolve to
+      // a different row at Confirm (the preview fingerprint also binds it).
+      params.lead_id = String(preview.lead_id);
+      delete params.lead_name;
+      // Pin the approved before → after values: the confirmed executor
+      // re-asserts THESE in its UPDATE's WHERE, not whatever it re-reads
+      // after the fingerprint check (pre-push P1). `_`-prefixed: never
+      // shown, ignored by the unconfirmed fingerprint re-run.
+      params._approved_changes = preview.changes;
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -1458,6 +1479,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // window, updateLeadStatus refuses (preview_changed) instead of
       // overwriting a state the card never showed.
       params._expected_status = lead.status;
+      // ...and its version (codex #5477 r18): a handled request reopened and closed
+      // again by a later booking during the pending window is a different close.
+      params._expected_updated_at = lead.updated_at ? new Date(lead.updated_at).toISOString() : null;
       preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
     }
     if (toolUse.name === 'bulk_update_leads') {
@@ -2048,6 +2072,7 @@ You are on the Leads page. Virginia uses this daily to manage the sales pipeline
 PIPELINE STAGES (in order):
 new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
+Handled: a /book preferred-time request that closed itself when the customer booked online (not won, not lost)
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
 LEAD TYPES: inbound_call, inbound_sms, form_submission, chat_widget, walk_in, referral, ai_agent, voicemail, email_inquiry
@@ -2062,6 +2087,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
+- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost

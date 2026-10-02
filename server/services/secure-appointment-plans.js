@@ -370,6 +370,11 @@ async function directRodentSetupForRow(database, row) {
       const claimInvoice = await database('invoices').where({ id: cl.invoice_id }).first('status');
       if (claimInvoice && !['void', 'cancelled', 'canceled', 'refunded'].includes(String(claimInvoice.status).toLowerCase())) return 0;
     }
+    // HANDED TO THE OFFICE: a completion parked this series' setup for manual
+    // billing (setup_fee_office_billing alert; the stamp was cleared and no
+    // claim was written). The office owns that fee exactly once; never derive
+    // a second obligation for it.
+    if (await require('./setup-fee-obligation').officeParkedSetupFeeSeries(database, [anchor.id])) return 0;
   }
   // Estimate provenance lives on the ROOT (codex #3591 r47 local P0): a
   // series child carries no source_estimate_id of its own, so the anchor's
@@ -514,7 +519,9 @@ async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId
   for (const rc of rootClaims || []) {
     if (await settledSetupClaimForInvoice(database, rc.invoice_id)) return true;
   }
-  return false;
+  // A fee parked for the office on any root of the estimate is carried too
+  // (the office bills it once by hand).
+  return require('./setup-fee-obligation').officeParkedSetupFeeSeries(database, ids);
 }
 
 // The positive booking-time stamp on the visit's series anchor, or null —

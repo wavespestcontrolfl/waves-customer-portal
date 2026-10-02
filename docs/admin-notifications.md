@@ -71,6 +71,9 @@ customer's message by this rule.
    (`server/services/admin-alert-relevance.js`) is the backstop for one-shot classes only.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
    day in total. A class that would push past that becomes a standing count.
+   Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
+   tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
+   rings; tomorrow it may be too late to act.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
@@ -132,6 +135,10 @@ Then, by severity:
   the full finding as `text`. `raiseAdminAlert` refuses a `broken` spec and says so.
 - **`fyi`**: `raiseAdminAlert` writes nothing and returns
   `{ id: null, suppressed: true, reason: 'fyi' }`. An FYI fact belongs on its page.
+  The one exception is an emitter the owner has ruled should leave a row: it passes
+  `fyiRow: true` in `opts` and the FYI is written like a `needs-you` row, with
+  `metadata.severity` still `fyi` (today only the `/book` preferred-time request that
+  closes itself when the customer books, under category `lead`).
 
 A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
 rule still rings, with its headline cut to 60, the structured fields that are valid

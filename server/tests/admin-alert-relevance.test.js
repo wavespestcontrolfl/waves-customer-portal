@@ -306,6 +306,26 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:z' } }))).reason).toBeNull();
   });
 
+  test('promise marks: settled once every promise it names is closed, gone, or acted on by the office after the bell', async () => {
+    const P1 = uid(510);
+    const P2 = uid(511);
+    const marks = note({ category: 'alert', link: `/admin/customers?customerId=${CUST}&tab=comms`, metadata: { dedupeKey: `visit-promise-marks:${VISIT}`, promise_ids: [P1, P2] } });
+    const promises = (one, two) => { mockTables.call_commitments = [{ id: P1, status: 'open', reviewed_at: null, ...one }, { id: P2, status: 'open', reviewed_at: null, ...two }]; };
+    promises({}, {});
+    expect(await reasonFor(marks)).toEqual({ cls: 'promise_marks', reason: null });
+    // One closed, the other still open and untouched: still relevant.
+    promises({ status: 'fulfilled' }, { reviewed_at: BEFORE_BELL });
+    expect((await reasonFor(marks)).reason).toBeNull();
+    // The office acted on the other after the bell (a note, a confirm): settled.
+    promises({ status: 'fulfilled' }, { reviewed_at: AFTER_BELL });
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // Dismissed, or gone.
+    mockTables.call_commitments = [{ id: P1, status: 'dismissed', reviewed_at: null }];
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // A bell that names no promise is never judged.
+    expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
+  });
+
   const move = (metadata = {}) => note({
     category: 'schedule_conflict', link: '/admin/dispatch?tab=schedule',
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },
@@ -398,6 +418,16 @@ describe('class rules', () => {
     mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
     expect((await reasonFor(leadNote())).reason).toBe('A visit was booked');
     expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
+  });
+
+  test('new lead (codex #5477 r2/r3 P1): a lead whose CURRENT status is handled is moved on whatever the timestamps say, even when the close landed before the bell', async () => {
+    for (const updated_at of [AFTER_BELL, BEFORE_BELL, undefined]) {
+      mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at })];
+      expect((await reasonFor(leadNote())).reason).toBe('Request was handled');
+    }
+    // reopened by staff after being handled: not handled any more, so relevant again (the sweep puts the bell back)
+    mockTables.leads = [lead({ status: 'new', customer_id: null, updated_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
   });
 
   test('new lead: the lead\'s state from before the bell never counts — a website submission attached to a lead already quoted, worked or booked stays relevant', async () => {

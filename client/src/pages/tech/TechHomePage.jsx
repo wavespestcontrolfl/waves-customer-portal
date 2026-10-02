@@ -51,6 +51,8 @@ import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
+import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
+import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -106,6 +108,30 @@ function isReserviceFastCompleteEligible(service) {
     // A completed (or otherwise closed) re-service stays on the recap
     // editor, which updates an existing record; /complete would only
     // answer service_already_completed and drop the tech's corrections.
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
+// flag): `treeShrubFastCompleteEnabled` rides the schedule payload per
+// service, true only when the gate is live AND this tech has the flag. An
+// open tree & shrub visit then opens the one-screen sheet instead of the
+// Dispatch typed-completion deep link. Flag off, or any other service, routes
+// exactly as before.
+function isTreeShrubFastCompleteEligible(service) {
+  return service?.treeShrubFastCompleteEnabled === true
+    && service?.completionProfile?.findingsType === 'tree_shrub'
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
+// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
+// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
+// TYPED one_time_lawn_treatment visit) then opens the one-screen sheet instead
+// of the Dispatch typed-completion deep link. Gate off, or any other service,
+// routes exactly as before.
+function isLawnReserviceFastCompleteEligible(service) {
+  return service?.lawnReserviceFastCompleteEnabled === true
+    && service?.completionProfile?.serviceKey === 'lawn_re_service'
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
@@ -269,6 +295,8 @@ export default function TechHomePage({ section = 'today' }) {
   const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [fastCompleteService, setFastCompleteService] = useState(null);
+  const [treeShrubFastService, setTreeShrubFastService] = useState(null);
+  const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -638,13 +666,22 @@ export default function TechHomePage({ section = 'today' }) {
     if (isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
     else setRecapService(service);
   }, []);
+  // Every entry point that would send a typed visit to the Dispatch deep link:
+  // a lawn re-service under its gate, or a tree & shrub visit under its gate and
+  // the tech's flag, opens its Fast Complete sheet first; everything else is the
+  // deep link, as before.
+  const openTypedVisit = useCallback((service) => {
+    if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
+    else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
+    else openTypedCompletion(service);
+  }, []);
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
       if (usesDispatchCompletion(only)) {
-        openTypedCompletion(only);
+        openTypedVisit(only);
       } else if (isPestControlService(only)) {
         openPestCompletion(only);
       } else {
@@ -653,7 +690,7 @@ export default function TechHomePage({ section = 'today' }) {
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrContinue, openPestCompletion]);
+  }, [projectServices, openProjectOrContinue, openPestCompletion, openTypedVisit]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -665,7 +702,7 @@ export default function TechHomePage({ section = 'today' }) {
   };
   const openServiceReport = (service) => {
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
-    if (usesDispatchCompletion(service)) openTypedCompletion(service);
+    if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
     else openProjectOrContinue(service);
   };
@@ -1009,7 +1046,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
                   usesDispatchCompletion(s)
-                    ? openTypedCompletion(s)
+                    ? openTypedVisit(s)
                     : isPestControlService(s) ? openPestCompletion(s) : openProjectOrContinue(s)
                 )}
                 onPhotos={(s) => setPhotoTarget({
@@ -1094,7 +1131,7 @@ export default function TechHomePage({ section = 'today' }) {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (usesDispatchCompletion(service)) openTypedCompletion(service);
+            if (usesDispatchCompletion(service)) openTypedVisit(service);
             else if (isPestControlService(service)) openPestCompletion(service);
             else openProjectOrContinue(service);
           }}
@@ -1160,6 +1197,70 @@ export default function TechHomePage({ section = 'today' }) {
           onFullForm={() => {
             const raw = fastCompleteService;
             setFastCompleteService(null);
+            openTypedCompletion(raw);
+          }}
+        />
+      )}
+
+      {treeShrubFastService && (
+        <FastCompleteTreeShrubSheet
+          key={treeShrubFastService.id}
+          service={{
+            id: treeShrubFastService.id,
+            customerName: treeShrubFastService.customer_name || treeShrubFastService.customerName,
+            serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
+            address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || '',
+            timeLabel: serviceWindowLabel(treeShrubFastService) || '',
+            // The visit the tech tapped, checked against the live context
+            // (same fields the pest sheet routes with).
+            routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            routedScheduledDate: treeShrubFastService.scheduledDate || treeShrubFastService.scheduled_date || null,
+            routedPropertyId: 'propertyId' in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
+            routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
+          }}
+          request={techRequest}
+          onClose={(options) => {
+            setTreeShrubFastService(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setTreeShrubFastService(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" with no catalog go to the full
+          // completion screen (the Dispatch typed-completion deep link).
+          onFullForm={() => {
+            const raw = treeShrubFastService;
+            setTreeShrubFastService(null);
+            openTypedCompletion(raw);
+          }}
+        />
+      )}
+
+      {lawnReserviceFastService && (
+        <FastCompleteLawnReserviceSheet
+          key={lawnReserviceFastService.id}
+          service={{
+            id: lawnReserviceFastService.id,
+            customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
+            serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,
+            address: shortAddress(lawnReserviceFastService.address) || lawnReserviceFastService.address || '',
+            timeLabel: serviceWindowLabel(lawnReserviceFastService) || '',
+            // The visit the tech tapped, checked against the live context
+            // (same fields the pest and tree & shrub sheets route with).
+            routedCustomerId: lawnReserviceFastService.customerId || lawnReserviceFastService.customer_id || null,
+            routedScheduledDate: lawnReserviceFastService.scheduledDate || lawnReserviceFastService.scheduled_date || null,
+            routedPropertyId: 'propertyId' in lawnReserviceFastService ? lawnReserviceFastService.propertyId : undefined,
+            routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
+          }}
+          request={techRequest}
+          onClose={(options) => {
+            setLawnReserviceFastService(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setLawnReserviceFastService(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" with no catalog go to the full
+          // completion screen (the Dispatch typed-completion deep link).
+          onFullForm={() => {
+            const raw = lawnReserviceFastService;
+            setLawnReserviceFastService(null);
             openTypedCompletion(raw);
           }}
         />

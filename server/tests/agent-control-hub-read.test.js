@@ -33,13 +33,15 @@ jest.mock('../services/ops-queue', () => ({ getOpsQueue: (...a) => mockOpsQueue(
 const mockActivity = jest.fn();
 jest.mock('../services/agent-activity', () => ({ getActivity: (...a) => mockActivity(...a) }));
 jest.mock('../services/llm-dispatch-metrics', () => ({ RETENTION_DAYS: 30 }));
+const mockLaneCosts = jest.fn();
+jest.mock('../services/llm-cost', () => ({ laneCosts: (...a) => mockLaneCosts(...a) }));
 
 const hubRead = require('../services/agent-control/hub-read');
 const modelSwitchboard = require('../services/model-switchboard');
 
 // 2026-09-04 17:30 ET (EDT, UTC-4) — a fixed clock so buckets are stable.
 const NOW = new Date('2026-09-04T21:30:00Z');
-const GATES = ['GATE_AGENT_CONTROL_READ', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
+const GATES = ['GATE_AGENT_CONTROL_READ', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_COST_TRACKING'];
 const saved = {};
 
 beforeAll(() => { for (const g of GATES) saved[g] = process.env[g]; });
@@ -51,6 +53,7 @@ beforeEach(() => {
   for (const k of Object.keys(fixtures)) delete fixtures[k];
   mockOpsQueue.mockReset();
   mockActivity.mockReset();
+  mockLaneCosts.mockReset();
 });
 
 const lanesFixture = () => modelSwitchboard.getSwitchboard().lanes;
@@ -288,6 +291,53 @@ describe('readLanes / readAreas', () => {
     expect(out.window).toEqual({ from: '2026-09-04T04:00:00.000Z', to: NOW.toISOString() });
     expect(out.areas).toHaveLength(modelSwitchboard.AREAS.length);
     expect(out.areas[0].spark).toHaveLength(18);
+  });
+});
+
+describe('estimated cost (GATE_LLM_COST_TRACKING)', () => {
+  test('off: no price read, cost null everywhere, phase and basis say so', async () => {
+    const out = await hubRead.readLanes({ window: '7d', now: NOW });
+    expect(mockLaneCosts).not.toHaveBeenCalled();
+    expect(out.phases.cost).toBe(false);
+    expect(out.basis.cost).toBeNull();
+    expect(out.lanes.every((l) => l.estCostUsd === null && !('unpricedCalls' in l))).toBe(true);
+  });
+
+  test('on: lanes carry their window estimate, areas sum their lanes, basis names the price age', async () => {
+    process.env.GATE_LLM_COST_TRACKING = 'true';
+    mockLaneCosts.mockResolvedValue({
+      priced: true,
+      pricesFetchedAt: new Date('2026-09-01T11:40:00Z'),
+      byLane: new Map([['sms_draft', { usd: 1.23456, unpricedCalls: 2 }], ['sms_intent', { usd: 0.5, unpricedCalls: 0 }]]),
+    });
+    const lanes = await hubRead.readLanes({ window: '7d', now: NOW });
+    const w = hubRead.resolveWindow('7d', NOW);
+    expect(mockLaneCosts).toHaveBeenCalledWith(w.from, w.to);
+    expect(lanes.phases.cost).toBe(true);
+    expect(lanes.basis.cost).toEqual({ source: 'openrouter_list_prices', estimate: true, priced: true, pricesFetchedAt: '2026-09-01T11:40:00.000Z' });
+    expect(lanes.lanes.find((l) => l.id === 'sms_draft')).toMatchObject({ estCostUsd: 1.2346, unpricedCalls: 2 });
+    // a quiet lane is a measured zero once prices exist
+    expect(lanes.lanes.find((l) => l.id === 'estimate_followup')).toMatchObject({ estCostUsd: 0, unpricedCalls: 0 });
+    // a lane with no ledger rows by policy (image generation) is never a measured zero
+    expect(lanes.lanes.find((l) => l.id === 'image_gen').estCostUsd).toBeNull();
+    const areas = await hubRead.readAreas({ window: '7d', now: NOW });
+    expect(areas.areas.find((a) => a.key === 'sms').estCostUsd).toBe(1.7346);
+  });
+
+  test('on, before the first price pull: cost stays null and basis says unpriced', async () => {
+    process.env.GATE_LLM_COST_TRACKING = 'true';
+    mockLaneCosts.mockResolvedValue({ priced: false, pricesFetchedAt: null, byLane: new Map() });
+    const out = await hubRead.readLanes({ window: '7d', now: NOW });
+    expect(out.basis.cost).toMatchObject({ priced: false, pricesFetchedAt: null });
+    expect(out.lanes.every((l) => l.estCostUsd === null)).toBe(true);
+  });
+
+  test('a cost read failure never takes the hub down', async () => {
+    process.env.GATE_LLM_COST_TRACKING = 'true';
+    mockLaneCosts.mockRejectedValue(new Error('relation "llm_model_prices" does not exist'));
+    const out = await hubRead.readLanes({ window: '7d', now: NOW });
+    expect(out.basis.cost).toBeNull();
+    expect(out.lanes.length).toBeGreaterThan(0);
   });
 });
 

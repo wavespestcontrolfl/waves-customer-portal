@@ -1742,7 +1742,7 @@ function digitsFromClarifyRef(sourceRef) {
 
 // Statuses the staleness recheck retires with — kept byte-identical to the
 // pre-lock guard so operator-facing 409 copy doesn't churn.
-const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled']);
 
 /**
  * The dispatch decision for a CLAIMED clarify draft (admin approve/revise

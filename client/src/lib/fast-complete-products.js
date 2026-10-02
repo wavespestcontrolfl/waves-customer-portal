@@ -13,7 +13,7 @@
 // in. The server's unit list has no tsp, so a tsp amount is sent as fl oz
 // (6 tsp = 1 fl oz) and read back in tsp by formatMeasuredAmount.
 import { formatMeasuredAmount } from "./mix-amount";
-import { TSP_PER_FL_OZ } from "./measure-units";
+import { TSP_PER_FL_OZ, submittedAmount } from "./measure-units";
 import { isDryFormProduct, resolveRatePrefill } from "./product-rate-prefill";
 
 // A gel bait's usual weight reads in grams, the unit it is recorded in.
@@ -38,6 +38,22 @@ export function productGroup(product) {
   const key = categoryKey(product);
   if (HIDDEN_CATEGORIES.has(key)) return "hidden";
   return PEST_CATEGORIES.has(key) ? "pest" : "other";
+}
+
+// The categories a lawn visit applies, listed first in the lawn-aware picker.
+// Everything else (pest baits, termiticides, ...) waits behind "Show other
+// products".
+const LAWN_CATEGORIES = new Set([
+  "herbicide", "pre-emergent", "post-emergent", "fungicide", "insecticide", "fertilizer",
+  "liquid fertilizer", "micronutrient", "micronutrient fertilizer", "pgr", "amendment", "soil amendment", "biostimulant",
+  "wetting agent", "adjuvant", "surfactant", "soil surfactant",
+]);
+
+/** 'pest' (the primary list) | 'other' | 'hidden' for the lawn-aware picker. */
+export function lawnProductGroup(product) {
+  const key = categoryKey(product);
+  if (HIDDEN_CATEGORIES.has(key)) return "hidden";
+  return LAWN_CATEGORIES.has(key) ? "pest" : "other";
 }
 
 /** The category as the tech reads it: "Insecticide", "IGR", "Termite bait". */
@@ -116,7 +132,7 @@ const UNIT_ALIASES = {
   weight: { g: "g", gram: "g", oz: "oz", ounce: "oz", lb: "lb", pound: "lb" },
   count: { each: "each" },
 };
-function measureUnit(unit, dimension) {
+export function measureUnit(unit, dimension) {
   return UNIT_ALIASES[dimension]?.[baseUnit(unit)] || null;
 }
 
@@ -168,6 +184,9 @@ export function seededAmount(amount, unit) {
     ? { amount: Number(amount) * TSP_PER_FL_OZ, unit: "tsp" }
     : { amount, unit };
 }
+
+/** The amount /complete would receive is above zero (a tsp amount goes as fl oz). */
+export const hasAmount = (row) => submittedAmount(row.totalAmount, row.amountUnit).totalAmount > 0;
 
 /** An amount the way the truck measures it: "1½ tsp", "4 fl oz", "5 g". */
 export function amountText(amount, unit) {

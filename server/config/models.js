@@ -204,6 +204,10 @@ const DEFAULTS = Object.freeze({
   // free text). Production PINS a dated version: the `jev-latest` alias moves
   // under us, so the adapter refuses any model that is not jev-N.N.N.
   TYPESAFE_JEV: 'jev-1.13.0',
+  // Cloudflare Clef (Workers AI): decision-only models with Jev-compatible
+  // answers. Cloudflare publishes no dated ids, so the pin is the id itself
+  // plus the model the provider reports serving, recorded on every ledger row.
+  CLOUDFLARE_CLEF: 'clef-flash',
 });
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
@@ -251,13 +255,16 @@ const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
-const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini', TYPESAFE: 'typesafe' });
+const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini', TYPESAFE: 'typesafe', CLOUDFLARE: 'cloudflare' });
 
 // Cross-provider model defaults (env-overridable; same convention as the #1834
 // lawn pipeline's LAWN_WRITER_MODEL / LAWN_VISION_MODEL). NOT Anthropic IDs, so
 // scripts/check-models.js intentionally skips them (it validates Anthropic only).
 // TypeSafe Jev typed-decision model (ROUTES.typedDecision). Pinned version.
 const TYPESAFE_JEV = process.env.MODEL_TYPESAFE_JEV || DEFAULTS.TYPESAFE_JEV;
+// Cloudflare Clef typed-decision model (ROUTES.typedDecisionClef): a second
+// provider for the same decision packages. clef-flash (9B) or clef (27B).
+const CLOUDFLARE_CLEF = process.env.MODEL_CLOUDFLARE_CLEF || DEFAULTS.CLOUDFLARE_CLEF;
 
 const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
   || process.env.MODEL_OPENAI_BEST
@@ -419,6 +426,10 @@ const MODEL_CATALOG = {
   // writes text, so its only cap is 'decision' and no text/vision picker may
   // offer it.
   'jev-1.13.0': { label: 'TypeSafe Jev 1.13', provider: 'typesafe', caps: ['decision'], status: 'current' },
+  // Cloudflare Clef on Workers AI: decision-only, same question and answer
+  // shapes as Jev. Never a text or vision picker option.
+  'clef-flash': { label: 'Cloudflare Clef-flash', provider: 'cloudflare', caps: ['decision'], status: 'current' },
+  'clef': { label: 'Cloudflare Clef', provider: 'cloudflare', caps: ['decision'], status: 'current' },
   'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], status: 'unavailable' },
 };
 
@@ -454,6 +465,10 @@ const ROUTES = Object.freeze({
   // fallback: nothing else answers typed questions, so callers fall back to
   // their existing path on `ok:false`. Never a TEXT_POLICIES leg.
   typedDecision: Object.freeze({ provider: PROVIDER.TYPESAFE, model: TYPESAFE_JEV }),
+  // The same decision packages on Cloudflare Clef (Workers AI), recorded
+  // beside Jev for comparison. Single-leg like typedDecision; dark behind
+  // GATE_TYPED_DECISIONS_CLEF (which also needs GATE_TYPED_DECISIONS).
+  typedDecisionClef: Object.freeze({ provider: PROVIDER.CLOUDFLARE, model: CLOUDFLARE_CLEF }),
 });
 
 // Generated-text policies always cross providers. The shared LLM dispatcher
@@ -663,6 +678,7 @@ module.exports = {
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   TYPESAFE_JEV,
+  CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,

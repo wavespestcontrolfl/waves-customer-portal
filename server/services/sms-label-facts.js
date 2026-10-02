@@ -952,7 +952,7 @@ function looksNonEnglish(text) {
 // by UNREADABLE_SCRIPT_RE above.
 const wordList = (list) => new Set(list.split(/\s+/));
 const SUPPORTED_PROFILES = {
-  en: wordList('the and is are to of you your for will we it that this with can be on in at have our they not if as or so from by but do i my me us an a how what when where why about there here would could should was were has had am please thanks thank'),
+  en: wordList('ive dont cant wont didnt isnt thats youre theyre the and is are to of you your for will we it that this with can be on in at have our they not if as or so from by but do i my me us an a how what when where why about there here would could should was were has had am please thanks thank'),
   es: wordList('el la los las de del que y en un una es son por para con su sus se lo al muy pero como esta estan tiene puede le mi tu si ya hay ser'),
   pt: wordList('o a os as de do da dos das que e em um uma sao por para com seu sua se nao muito mas como esta estao tem pode meu voce ja ser'),
   fr: wordList('le la les des du de un une et est sont pour avec votre vos ne pas que qui dans sur ce cette il elle nous vous mon ma mes je tu ils elles ou'),
@@ -997,15 +997,19 @@ const ALLOWED_DIACRITICS = 'áàâãçéèêëíîïñóôõœæùúûüÿ';
 function isEnglishInbound(inbound) {
   if (inboundOverCap(inbound)) return false;
   const current = Array.isArray(inbound) ? inbound[0] : inbound;
+  // a pure reaction quotes OUR message: the quote is not the customer's language (the 2026-10-01 sweep held such reactions as foreign)
+  if (isPureReaction(canonText(current))) return !looksNonEnglish(current) && !hasUnsupportedLanguage(current); // positive evidence still holds
   return !(isUnverifiedLanguageInbound(inbound) || looksNonEnglish(current) || hasUnsupportedLanguage(current));
 }
 const SMS_CORE_WORDS = wordList('when can is are ok okay thanks thank yes no dog dogs cat cats pet pets kid kids child children baby lawn yard grass rain rains outside inside out in spray sprayed spraying treatment treated visit service technician tech now today tomorrow tonight yesterday safe dry wet wash washed water watering mow mowing sprinkler sprinklers walk play swim hours hour minutes minute days day week home appointment schedule reschedule pest bugs ants roaches termites weeds fertilizer wait yet still again back go going please hi hello hey good morning afternoon evening price cost pay paid invoice bill estimate quote question help need want know tell time late early soon sure done finished complete works work fine great perfect sounds see then monday tuesday wednesday thursday friday saturday sunday okay yep yeah nope pool patio deck garage gate fence bee bees wasp wasps mice rats rat mouse any update updates pls plz thx ty call text email send sent whats hows wheres coming come came leave left open closed confirm confirmed cancel free busy available options option name address phone number');
 // Common English words beyond the function words and SMS core (contractions split at the apostrophe: "don't" -> don).
 const ENGLISH_COMMON = wordList('be have do say get make go know take see come think look want give use find tell ask work seem feel try leave call keep let begin help show hear play run move live believe bring happen write provide sit stand lose pay meet include continue set learn change lead understand watch follow stop create speak read allow add spend grow open walk win offer remember love consider appear buy wait serve die send expect build stay fall cut reach kill remain suggest raise pass sell require report decide pull time year people way day man thing woman life child world school state family student group country problem hand part place case week company system program question government number night point home water room mother area money story fact month lot right study book eye job word business issue side kind head house service friend father power hour game line end member law car city community name president team minute idea body information back parent face level office door health person art war history party result change morning reason research girl guy moment air teacher force education good new first last long great little own other old right big high different small large next early young important few public bad same able sure clear full free hot cold late low wet dry fine ready safe nice happy sorry busy open real best better worse most more less enough much many every each both any some such only just even still also very too quite really already always never often sometimes usually maybe probably actually again then there here now today tomorrow yesterday tonight soon later ago away out up down off over under around before after during until since while because though although if unless whether once twice yes yeah yep nope okay ok thanks thank please hello hi hey bye welcome sorry excuse dont doesnt didnt isnt arent wasnt werent wont cant couldnt wouldnt shouldnt havent hasnt hadnt im ive ill id youre youve youll thats whats hows wheres whos theres heres lets gonna wanna gotta lemme pls plz thx ty idk btw asap tho cuz cause don doesn didn isn aren wasn weren won couldn wouldn shouldn haven hasn hadn ll ve re pest pests bug bugs ant ants roach roaches cockroach cockroaches termite termites spider spiders mosquito mosquitoes mosquitos flea fleas tick ticks rodent rodents mouse mice rat rats wasp wasps hornet hornets bee bees honeybee honeybees snake snakes squirrel squirrels raccoon raccoons lizard lizards palmetto silverfish earwig earwigs cricket crickets moth moths beetle beetles grub grubs chinch weevil nest nests hive infestation infested swarm droppings trap traps bait baits lawn lawns grass sod turf yard yards backyard frontyard garden gardens weed weeds fertilizer fertilize fertilizing sprinkler sprinklers irrigation zone zones mow mowed mowing mower trim trimmed trimming palm palms tree trees shrub shrubs hedge hedges bush bushes flower flowers plant plants mulch dirt soil patio deck porch lanai cage screen pool pools garage driveway sidewalk walkway fence gate gates roof attic crawlspace foundation slab kitchen bathroom bedroom closet laundry living dining basement window windows door doors wall walls floor floors ceiling baseboard baseboards sink cabinet cabinets outlet vent vents pipe pipes drain outside inside outdoors indoors exterior interior perimeter front rear side corner entry entrance treatment treatments treat treated treating spray sprays sprayed spraying apply applied applying application applications product products granule granules granular liquid dust dusted residue label labels schedule scheduled scheduling reschedule rescheduled reschedules cancel canceled cancelled booking book booked appointment appointments visit visits visited technician technicians tech techs crew team teammate manager owner staff someone anyone everyone customer customers account plan plans membership renew renewal contract warranty guarantee guaranteed service services quarterly monthly annual annually yearly weekly bimonthly initial recurring onetime one invoice invoices bill billing balance payment payments paid pay paying card cards cash check checks receipt refund refunded charge charged price prices pricing cost costs quote quotes estimate estimates free discount deposit autopay email emails text texts texted texting phone phones number address street avenue road drive lane court zip city county name morning mornings afternoon afternoons evening evenings night nights weekend weekends monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun january february march april may june july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec spring summer fall autumn winter season seasonal rain rainy rained raining rains shower showers storm storms stormy thunderstorm thunderstorms weather forecast humid humidity drizzle downpour hurricane tropical sunny cloudy windy heat hot cool degrees wash washed washing rinse rinsed flood flooded flooding puddle puddles damp soaked soak soaking wet moist dry dried drying set cure cured sink sank absorb absorbed dog dogs puppy puppies cat cats kitten kittens pet pets animal animals bird birds chicken chickens horse horses fish rabbit rabbits kid kids child children baby babies toddler toddlers teen teens family neighbor neighbors neighbour guest guests visitor visitors elderly grandma grandpa grandkids parents husband wife son daughter mom dad brother sister home house apartment condo townhouse villa unit building business commercial restaurant store shop hoa community gated code gate lockbox key keys lock locked unlocked open closed access available availability opening openings slot slots window windows arrival arrive arrives arrived arriving eta route en late early ontime on time sooner quickly asap urgent emergency problem problems issue issues concern concerns complaint worry worried question questions answer answers update updates news info details detail reply respond response confirm confirmed confirmation remind reminder note notes message messages voicemail photo photos picture pictures video attach attached link links website online app portal login password receive received got sent forward forwarded missed missing lost found broken fixed fix repair damaged damage stain stains smell smells odor noise noises sound sounds heard saw seen noticed notice notices spotted spot spots patch patches brown yellow green thin dead alive live living crawling flying biting bites bite itchy swollen sting stings stung allergic allergy asthma sick baby pregnant medication medical doctor vet vets hospital toxic poison poisonous chemical chemicals organic natural eco friendly harmful harm hurt safe unsafe dangerous risk nothing something anything everything nobody somebody anybody nowhere somewhere anywhere everywhere whatever whenever wherever however whoever whichever who whom whose which what where when why how than then so if or nor yet not no nor per via plus minus about above across against along among behind below beneath beside between beyond despite except inside into like near onto outside past through throughout toward towards underneath upon within without adam waves benetti virginia pleasure owe owed recorded delivered report reports guide prep portal awesome perfect wonderful amazing appreciate appreciated helpful helped quick fast slow earlier latest newer older previous following original another others else own instead rather perhaps already ahead along apart aside besides beyond whole half double single couple dozen bunch lots plenty piece pieces kind sort type thing things stuff way ways place places case cases side sides turn turns chance reason reasons idea ideas plan matter matters trouble mind wish hope hoped guess bet sounds sound looks look looked seems seemed feels felt gets got getting goes went gone comes came coming takes took taken makes made making gives gave given says said tells told asks asked keeps kept lets puts put runs ran walks walked plays played waits waited stays stayed leaves left calls called sends sent texts texted pays paid works worked using used needs needed wants wanted thinks thought knows knew sees saw seen finds found begins began ends ended starts started stops stopped tries tried moves moved lives lived turns turned shows showed shown happens happened holds held brings brought sits sat stands stood loses lost meets met learns learned changes changed lasts lasted checking checked checks calling covered cover covers include includes included including user users approved approve approves proactive outreach date dates human humans thread threads body bodies reply replies truth manual manually review reviews fallback content contents source sources template templates queue queued caller callers ordinary legacy cutoff attention requiring require required different suggestion suggestions suggest suggested push pending draft drafts caption captions photo context canonical persistence pattern patterns proposed proposal change expected effect effects validation exam windows state states fact facts dispatch dispatched meaning mean means meant read reads reading write writes wrote written speak spoke spoken talk talked talking chat chatted conversation discuss discussed mention mentioned explain explained describe described ask asking answering wondering wonder curious interested interest looking searching search searched hoping trying tried getting waiting needing wanting thinking planning starting finishing finished done doing going staying leaving arriving showing sending receiving paying booking cancelling rescheduling scheduling confirming checking calling texting emailing help helping helped thanks thank thankful grateful glad pleased happy unhappy upset angry mad annoyed frustrated disappointed confused surprised worried nervous scared afraid careful carefully quickly slowly easily hardly really actually basically literally seriously honestly obviously apparently supposedly hopefully luckily unfortunately finally suddenly recently lately currently normally usually typically generally mostly mainly especially particularly specifically exactly clearly certainly definitely probably possibly perhaps maybe whatever anyway anyways though however meanwhile otherwise instead besides plus also too either neither both whether while whereas although unless until unlike including excluding regarding concerning according depending following considering given based due unable able ready willing sure certain positive negative correct wrong true false real fake actual exact proper right left okay alright fine great good bad better best worse worst nice cool sweet lovely beautiful ugly pretty terrible awful horrible fantastic excellent outstanding decent fair average normal regular usual typical common rare unusual strange weird odd funny serious silly crazy insane huge tiny massive giant enormous little medium extra overall entire whole full empty fresh stale raw ripe ready hurry rush quick slow easy hard soft loud quiet busy free lazy tired sleepy awake asleep hungry thirsty sick healthy fit strong weak rich poor cheap costly expensive worth valuable useful useless helpful harmful safe risky dangerous careful reckless clean dirty neat messy tidy wet dry hot cold warm cool chilly freezing boiling burning bright dim dark light heavy thin thick fat skinny long short tall wide narrow deep shallow high low big small large old new young all he she him her his hers its their theirs them these those been being were was am is are has have had having does did done doing would could should might must shall may will can cannot ought whom whose that this myself yourself himself herself itself ourselves themselves mine yours ours i me my we us our you your they it and the of to in for on with at by from as into onto up out off over under again further once here there when where why how all both each few more most other some such no nor not only own same so than too very can just should now second third fourth fifth sixth seventh eighth ninth tenth zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million dozen half quarter couple pair single double next last previous final middle top bottom left right center centre upper lower inner outer main major minor general special specific certain particular possible impossible likely unlikely necessary available similar simple easy hard difficult tough quiet loud bright dark heavy light thick thin deep shallow wide narrow tall short strong weak rich poor cheap expensive fair sweet sour bitter fresh clean dirty messy neat tidy wild tame close far near nearby distant local main whole entire complete partial total extra additional spare rest remaining several various numerous multiple lots plenty enough less least fewer fewest anymore anyway anyhow besides otherwise therefore thus hence meanwhile finally eventually recently currently previously formerly lately nowadays sometime somehow someday somewhat almost nearly mostly mainly partly barely hardly scarcely simply merely truly surely certainly definitely absolutely exactly precisely roughly approximately about around per each every either neither')
+// Everyday words the 2026-10-01 prod sweep found missing (texts held as "not English" for them alone), and #5520 r5's "everybody".
+const ENGLISH_EXTRA = wordList('im everybody everyone everything soap dish dishes impressed impress reimburse reimbursed reimbursement lol lmao omg haha digit digits cert certificate certificates permit permits inspection inspections inspector inspect shine growth llc inc company property management vendor credentials referral referrals rentals rental manor loop via east west north south ranch effective residence home homes');
 let englishLexiconCache = null;
 function englishLexicon() {
   if (!englishLexiconCache) {
-    englishLexiconCache = new Set([...SUPPORTED_PROFILES.en, ...SMS_CORE_WORDS, ...ENGLISH_COMMON]);
+    englishLexiconCache = new Set([...SUPPORTED_PROFILES.en, ...SMS_CORE_WORDS, ...ENGLISH_COMMON, ...ENGLISH_EXTRA]);
     // the domain words the owner approved (COMPANY FACTS, product-free) are English by construction
     for (const fact of require('./sms-company-facts').COMPANY_FACTS) for (const w of wordsOf(stripMarks(fact.toLowerCase()))) englishLexiconCache.add(w);
   }
@@ -1020,17 +1024,110 @@ function englishKnown(word) {
 }
 // English by PROPORTION, not by one shared word: a code-switched "Kailan puwedeng lumabas ang aso after treatment?" has two English
 // tokens in seven and is unverified. Tokens are letters only, two or more of them (numbers, URLs, emoji and one-letter words drop out).
+// Follow-up to #5416 (prod sweep: 29 of 30 flags were English): what is not language never counts against a text - a reaction
+// ("Liked “See you Tuesday”"), a name or other capitalized word after the first word of a sentence, and an address
+// (the words after a house number up to its street word). A text of three tokens or fewer is held only on POSITIVE evidence:
+// a function word of a language the guards cannot read ("Dlaczego nie"), never an unknown English word ("No growth").
 const ENGLISH_SHARE = 0.6;
+const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|questioned|removed\s+an?\s+\w+\s+from|reacted\s+\S+\s+to)\s+[\u201c\u2018"'][\s\S]*$|reacted\s+\S+\s+to\s+(?:an?\s+)?(?:image|photo|picture|video|message|attachment|sticker|gif)\s*$)/i;
+// A reaction with nothing typed after the quote it reacts to (a truncated quote with no closing mark is still pure).
+function isPureReaction(text) {
+  if (!REACTION_RE.test(text)) return false;
+  const open = text.search(/[\u201c\u2018"']/);
+  if (open < 0) return true; // a reaction to an image / video carries no quote
+  const closer = { '\u201c': '\u201d', '\u2018': '\u2019', '"': '"', "'": "'" }[text[open]];
+  // the FIRST matching closing mark ends the quote (a truncated quote with none is still pure); any letters after it are the customer's own text
+  const close = text.indexOf(closer, open + 1);
+  return close < 0 || !/\p{L}/u.test(text.slice(close + 1));
+}
+const STREET_WORDS = wordList('st street rd road dr drive ln lane ave avenue blvd boulevard ct court cir circle pl place ter terrace way pkwy parkway hwy highway trl trail loop run cv cove pt point sq square apt ste suite unit');
+// Function / timing words of languages the guards cannot read, beyond the profiles above (Polish, Vietnamese without diacritics).
+const EXTRA_FOREIGN_WORDS = wordList('nie czy jest sie kiedy dlaczego mozna moge moga prosze dziekuje dzien dobry dwie godziny godzin godzine poczekaj czekac psy pies dzieci deszcz trawnik juz tylko khi nao cho the ngoai sau xit thuoc toi hoi tre em choi tren duoc khong bao lau');
+let foreignWordSetCache = null;
+function foreignWordSet() {
+  if (!foreignWordSetCache) {
+    const lex = englishLexicon();
+    foreignWordSetCache = new Set();
+    for (const set of [SUPPORTED_PROFILES.es, SUPPORTED_PROFILES.pt, SUPPORTED_PROFILES.fr, ...Object.values(UNSUPPORTED_PROFILES), EXTRA_FOREIGN_WORDS]) {
+      for (const w of set) if (w.length > 1 && !lex.has(w)) foreignWordSetCache.add(w);
+    }
+  }
+  return foreignWordSetCache;
+}
+// The tokens that can speak for the text's language: lower-cased, accents removed, with names and addresses left out.
+function languageTokens(text, { keepNames = false } = {}) {
+  // Title Case or ALL CAPS text is not a run of names: when nearly every word after the first is capitalized, every word counts
+  // ("Hi this is Marisol Quintanilla" stays a name; "Can The Dogs Go Out Now" does not).
+  const rest = (stripMarks(text).match(/[A-Za-z]{2,}/g) || []).slice(1);
+  const keepCapitalized = keepNames || (rest.length > 0 && rest.filter((w) => /^[A-Z]/.test(w)).length >= 0.8 * rest.length);
+  // contractions are one word ("i'm" -> "im", "don\u2019t" -> "dont"), as the lexicon spells them
+  const raws = text.replace(/(\p{L})['\u2019](\p{L})/gu, '$1$2').split(/\s+/).filter(Boolean);
+  // An address is a house number followed, within four words, by a street word ("4821 Weatherby Oaks Cir"): only those words are
+  // skipped. A number with no street word after it ("2 godziny wystarczy?", "2 hours later") leaves every word counted.
+  const skip = new Set();
+  raws.forEach((raw, i) => {
+    if (!/^\d+[a-z]?[,.]?$/i.test(raw)) return;
+    for (let j = i + 1; j <= i + 4 && j < raws.length; j++) {
+      const word = stripMarks(raws[j]).toLowerCase().replace(/[^a-z]/g, '');
+      if (STREET_WORDS.has(word)) {
+        for (let k = i + 1; k <= j; k++) skip.add(k);
+        // a street word that ends a sentence ("St." then "Kiedy psy?") ends the address: what follows is read as words (#5537 r1)
+        if (/[.!?]["\u201d\u2019')]*$/.test(raws[j])) break;
+        // the address tail: a unit ("apt 102"), then a state code and zip directly after the street ("Dr FL 34000")
+        let k = j + 1;
+        if (k < raws.length && /^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[k])) { skip.add(k); k += 1; if (k < raws.length && /^#?\d+\w?[,.]?$/.test(raws[k])) { skip.add(k); k += 1; } }
+        // (no city skip: capitalized words after a street can be a sentence, "1200 Main St Kiedy Psy", #5537 r1; only a state code + zip)
+        if (k < raws.length && /^[A-Z]{2},?$/.test(raws[k])) { skip.add(k); k += 1; }
+        if (k < raws.length && /^\d{5}(?:-\d{4})?[,.]?$/.test(raws[k])) skip.add(k);
+        break;
+      }
+    }
+  });
+  const tokens = [];
+  let sentenceStart = true;
+  raws.forEach((raw, i) => {
+    const endsSentence = /[.!?]["\u201d\u2019')]*$/.test(raw);
+    if (skip.has(i)) { sentenceStart = endsSentence; return; }
+    // a number glued to a word ("2godziny", "4hrs") still contributes the word; a bare number contributes nothing
+    // (an ordinal's suffix - "4th", "21st" - is part of the number)
+    for (const word of stripMarks(raw.replace(/^\d+(?:st|nd|rd|th)\b/i, '').replace(/^[\d.,:/#-]+/, '')).match(/[A-Za-z]+/g) || []) {
+      const lower = word.toLowerCase();
+      const capitalized = /^[A-Z]/.test(word);
+      if (!((capitalized && !sentenceStart && !keepCapitalized) || lower.length < 2)) tokens.push(lower);
+      sentenceStart = false;
+    }
+    if (endsSentence) sentenceStart = true;
+  });
+  return tokens;
+}
 function isUnverifiedLanguageInbound(inbound) {
   if (inboundOverCap(Array.isArray(inbound) ? inbound[0] : inbound)) return true;
-  const text = canonText(Array.isArray(inbound) ? inbound[0] : inbound).toLowerCase();
-  const plain = stripMarks(text.replace(/https?:\/\/\S+|www\.\S+|\S+@\S+/g, ' '));
-  if (wordsOf(plain).length < 2) return false;
+  const original = canonText(Array.isArray(inbound) ? inbound[0] : inbound).replace(/https?:\/\/[^\s"'\u201d\u2019]+|www\.[^\s"'\u201d\u2019]+|[^\s"'\u201c\u2018]+@[^\s"'\u201d\u2019]+/g, ' ');
+  const text = original.toLowerCase();
+  if (wordsOf(stripMarks(text)).length < 2) return false;
   if ([...text.matchAll(/\p{L}/gu)].some(([ch]) => !/[a-z]/.test(ch) && !ALLOWED_DIACRITICS.includes(ch))) return true;
-  const tokens = wordsOf(plain).filter((w) => w.length > 1);
+  if (isPureReaction(original)) return false;
+  // Names leave the count only when the rest is plainly English: one unknown lowercase word beside a name puts every word back
+  // ("Hi Fido kimehet most kerlek please?" is judged on all six words, #5520 r4; "Hi this is Marisol Quintanilla" stays English).
+  const withoutNames = languageTokens(original);
+  // (and when leaving names out leaves nothing, the capitalized words are all there is to judge: "1200 Main St Pot Iesi")
+  const tokens = withoutNames.length && withoutNames.every(englishKnown) ? withoutNames : languageTokens(original, { keepNames: true });
   if (!tokens.length) return false;
+  const foreign = foreignWordSet();
+  // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
+  if (tokens.length <= 3) {
+    // A short text is judged on ALL its words, capitalized ones included (#5520 r3): leaving a name out of two or three words
+    // lets one English word carry a foreign verb ("Can Fido mehet?"). Names in the lexicon ("Hey Adam") still read as English.
+    const all = languageTokens(original, { keepNames: true });
+    if (all.some((w) => foreign.has(w))) return true;
+    const knownShort = all.filter(englishKnown).length;
+    // A short text that asks a label question must be ALL known words: one unknown word beside "outside" is exactly where a
+    // foreign question hides ("Kutyak mehetnek outside?", #5520 r2). Any other short text needs half ("No growth" stays English).
+    const asksLabel = askedKindsOf(text).kinds.length > 0 || askedKindsOf(text).elliptical;
+    return asksLabel ? knownShort < all.length : knownShort * 2 < all.length;
+  }
   const known = tokens.filter(englishKnown).length;
-  return !(known / tokens.length >= ENGLISH_SHARE || (tokens.length <= 2 && known === tokens.length));
+  return known / tokens.length < ENGLISH_SHARE;
 }
 
 // The greeting "buenos dias" says no timing; everything else in the table is held.
@@ -1147,11 +1244,14 @@ const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:
 
 // A short follow-up with no topic word ("is it ok now?", "what about now", "and outside?") asks whatever the
 // thread was about; with nothing classifiable in the thread it is treated as asking both kinds (fail closed).
-const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
+// A BARE first-person modal follow-up (Codex #5416 r30: "Can we now?", "Can I now?", "Are we allowed now?") is elliptical too: the
+// whole message is the modal plus a closed vocabulary of re-entry / timing words, so "can I clean the grill now?" stays its own question.
+const FIRST_PERSON_FOLLOWUP_RE = /^(?:(?:so|ok|okay|but)\s+)?(?:can|could|may|should|are|am)\s+(?:we|i)\b(?:\s+(?:now|yet|then|today|tonight|too|also|still|go|be|allowed|ok|okay|good|fine|safe|to|out|outside|inside|in|back|there|it|on|walk|wait|let|the|dogs?|kids?|pets?|cats?|them|again|already|please|pls|plz|just|maybe|really))*[\s?.!]*$/;
+const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this|everyone|everybody)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
 const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment|book|booking|visit|pay|price|cost|service)\b/.source].join('|'));
 function isEllipticalInbound(text) {
   // (a bare "can we come back now?" is a short follow-up too: it carries the thread's kinds and visit references, though "come" is a NOT_ELLIPTICAL word)
-  return text.split(/\s+/).length <= 8 && (asksBareBackEntry(text) || (ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text)));
+  return text.split(/\s+/).length <= 8 && (asksBareBackEntry(text) || FIRST_PERSON_FOLLOWUP_RE.test(text) || (ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text)));
 }
 
 // No question shape is required for a topic: "tell me when my dogs can go outside" asks re-entry as much as a
@@ -1178,11 +1278,25 @@ function cleaningKinds(text) {
   if (CLEANING_RE.test(text) && (WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text))) return ['reentry', 'rain'];
   return WASH_VERB_RE.test(text) && WASH_TREATMENT_RE.test(text) ? ['rain'] : null;
 }
+// Whether watering will hurt the treatment ("Will the sprinklers weaken it?", "does irrigation affect the spray?") is the rain-fast question
+// in other words (Codex #5416 r34), not general watering advice. A generic noun (problem / issue / matter) counts only when it is tied
+// to the treatment, and so does every effect verb ("will the sprinklers be a problem for the treatment?", "will they weaken it?"); "Sprinkler issue in
+// zone 2" and "will the sprinklers hurt my new plants?" are not about the treatment (#5520 r2).
+const WATERING_EFFECT_OBJECT_SRC = '(?:treatment|treated|spray\\w*|application|applied|product|granules?|fertiliz\\w*|it|that)';
+// Effectiveness wording is about the treatment whatever its grammar ("make it less effective", "affect how well it works", "whether it
+// works", #5520 r4).
+const WATERING_EFFECTIVENESS_RE = /\b(?:less\s+effective|effectiveness|(?:how\s+well|whether|if)\s+(?:it|the\s+(?:treatment|spray|product|application))\s+(?:still\s+)?works?|stop\s+(?:it\s+)?(?:from\s+)?working)\b/;
+const WATERING_EFFECT_RE = new RegExp(`\\b(?:(?:weaken\\w*|affect\\w*|hurt\\w*|harm\\w*|ruin\\w*|undo\\w*|dilut\\w*|impact\\w*|reduc\\w*|cancel\\w*|mess(?:es|ed)?\\s+(?:up|with)|interfer\\w*\\s+with|(?:have|has)\\s+an?\\s+effect\\s+on)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?|(?:a\\s+)?(?:problem|issue|matter|bother)\\s+(?:for|with|to)\\s+(?:the\\s+|my\\s+|our\\s+|your\\s+|this\\s+)?)${WATERING_EFFECT_OBJECT_SRC}\\b`);
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
   if (context) return ['reentry', 'rain'];
-  return OTHER_REENTRY_TOPIC_RE.test(text) ? null : [];
+  // a re-entry topic beside the watering ("will the sprinklers hurt the dogs if they walk on it?") goes to the general classifier first
+  if (OTHER_REENTRY_TOPIC_RE.test(text)) return null;
+  // (whole message, not per sentence: binding the effect wording to the watering sentence dropped real questions that point back across
+  // sentences - "The sprinklers ran. Will that make the ant bait less effective?" - so an unrelated effectiveness question beside a
+  // sprinkler mention asks rain too, and a person answers it. Fail closed.)
+  return WATERING_EFFECT_RE.test(text) || WATERING_EFFECTIVENESS_RE.test(text) ? ['rain'] : [];
 }
 
 function askedKindsOf(inboundText) {
@@ -1472,6 +1586,7 @@ async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, t
 // LABEL FACTS speaks for the customer's LATEST performed visit. A message that
 // points at a different visit (a future one, or an older one) gets the none-on-file
 // section instead. Conservative: anything ambiguous reads as a different visit.
+// A COUNTED visit reference ("three visits ago", "2 treatments back", "a couple services before") is never the latest one.
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_SRC = '(?:sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?';
 // A COUNTED weekday ("two Tuesdays ago", "2 Tuesdays ago", "a few Tuesdays ago", "a couple Tuesdays back", "the Tuesday before that", "every other Tuesday") is
@@ -1481,7 +1596,7 @@ const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upc
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|prior)|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);

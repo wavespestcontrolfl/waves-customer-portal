@@ -51,7 +51,7 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT,
@@ -3055,7 +3055,9 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
 // pay-after-first-visit card rail — the checkbox renders the after_visit_card
 // (v12) authorization, the variant the accept records.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false }) {
+// afterVisitSetup (GATE_PAF_SETUP_FEE): the setup fee is billed with the first
+// visit — the copy names it and the checkbox renders the after_visit_card text.
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3093,6 +3095,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
   const methodTypeRef = useRef(methodType);
   const agreedRef = useRef(false);
   const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
+  // The checkbox assents to the RENDERED authorization: a variant change while
+  // the modal is open clears it.
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3248,9 +3253,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
                 // Paused / explicitly-off Auto Pay: the method is kept on file
                 // but never charged automatically — a pay link follows each visit.
                 ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} send you a pay link after each completed service.`
-                : (bank
-                  ? `Save your bank account to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.`
-                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, your card is charged that service’s amount automatically.`))}
+                : (afterVisitSetup
+                  ? (bank
+                    ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After your first visit is completed, that visit and your one-time setup fee are debited automatically, then each completed service after that. Bank transfers have no added card surcharge.'
+                    : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After your first visit is completed, your card is charged for that visit and your one-time setup fee, then for each completed service after that.`)
+                  : (bank
+                    ? `Save your bank account to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.`
+                    : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, your card is charged that service’s amount automatically.`)))}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -3264,7 +3273,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {prepay
               ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-              : (bank ? ACH_CONSENT_TEXT : (afterVisit ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
+              : (bank ? ACH_CONSENT_TEXT : ((afterVisit || afterVisitSetup) ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
           </span>
         </label>
         {error ? (
@@ -4261,6 +4270,13 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         // payload with alreadyAccepted: true — say so plainly.
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This estimate was already accepted — you're all set.
+        </div>
+      ) : null}
+      {acceptResult?.setupFeeAfterFirstVisit ? (
+        // GATE_PAF_SETUP_FEE: the setup fee was stamped on the first visit
+        // (no invoice, no pay link) — say when it is billed.
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          Nothing is charged today — your setup fee is billed with your first visit.
         </div>
       ) : null}
       {isAnnualPrepay && acceptResult?.invoiceSettled && acceptResult?.prepayChargeStatus ? (
@@ -5803,6 +5819,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // resolve-time check needs the live modal state, not its closure snapshot.
   const recurringCardIntentOpenRef = useRef(false);
   const recurringCardSetupIntentIdRef = useRef(null);
+  // GATE_PAF_SETUP_FEE: whether THIS RENDER shows the "setup fee billed with your
+  // first visit" promise (set from the render-time value below); /accept attests
+  // it and the server refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+  const setupFeeAfterVisitShownRef = useRef(false);
+  // A SETUP_FEE_TERMS_REFRESH 409 returns the promise the accept would apply
+  // (it reads the post-conversion lane, which /data cannot always predict);
+  // it wins for THIS selection so the next confirm attests it instead of
+  // refusing again.
+  const [setupFeePromiseOverride, setSetupFeePromiseOverride] = useState(null);
+  const setupFeeSelectionKeyRef = useRef('');
   // GitHub Codex #5481 r3: the collection promise the capture UI RENDERED for
   // the captured intent — { tender, variant, version } — recorded at the moment
   // of capture, never recomputed at accept (a plan switch after the capture must
@@ -7306,8 +7332,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // held ones (Auto Pay paused / off) their base card / ACH text too
             // (GitHub Codex #5481 r7). Gate-off policies carry none of these.
             const pol = data?.recurringCardPolicy;
+            // ...and so does a capture that rendered the setup-fee promise
+            // (GATE_PAF_SETUP_FEE), the PR-B cohort or not.
             if (paymentPreference === 'prepay_annual'
-              || !(pol?.afterVisitConsent === true || pol?.afterVisitPaused === true || pol?.afterVisitAutopayOff === true)) return {};
+              || !(pol?.afterVisitConsent === true || pol?.afterVisitPaused === true || pol?.afterVisitAutopayOff === true
+                || setupFeeAfterVisitShownRef.current)) return {};
             const rendered = recurringCardSetupIntentIdRef.current ? recurringCardRenderedConsentRef.current : null;
             const cur = afterVisitRenderedRef.current;
             const tender = rendered ? rendered.tender : 'card';
@@ -7327,6 +7356,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
           recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
+          // Attests the after-first-visit setup-fee promise this tab rendered
+          // (render-bound: sent only while the copy is on screen).
+          setupFeeAfterFirstVisitShown: setupFeeAfterVisitShownRef.current ? true : undefined,
           prepayChargeAcknowledgedTotalCents: prepayChargeAckRef.current?.totalCents ?? undefined,
           // Binds the ack to the method the quote displayed — a default
           // switch server-side re-quotes instead of charging a card the
@@ -7448,6 +7480,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // since this tab loaded — refetch so the capture UI renders exactly
             // what the server will record, drop the captured intent (its
             // checkbox was for the old text) and keep the plan selections.
+            // An earlier setup-fee refresh answer is stale now too: the
+            // refetched /data decides the setup-fee promise again.
+            setSetupFeePromiseOverride(null);
             recurringCardSetupIntentIdRef.current = null;
             setInlineCardIntent(null);
             await loadEstimate({ preserveSelection: true });
@@ -7467,6 +7502,26 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // renders the current text; the reservation survives in the
             // server-side hold.
             throw new Error(body.error || CONSENT_VERSION_STALE_MESSAGE);
+          }
+          if (body.code === 'SETUP_FEE_TERMS_REFRESH') {
+            if (typeof body.setupFeePromise === 'boolean') {
+              setSetupFeePromiseOverride({ key: setupFeeSelectionKeyRef.current, value: body.setupFeePromise });
+            }
+            // The first-visit setup-fee terms this tab rendered no longer match
+            // what the accept would bill (a rail, gate or lane difference). The
+            // acceptance rolled back; refetch so the page shows the terms the
+            // server will apply, keep the reservation and selections, and ask
+            // for one more tap. The card authorization the customer ticked was
+            // for the OLD terms (the refreshed page may render a different
+            // consent text): drop the captured intent so the capture remounts
+            // unticked and the new terms are agreed to fresh.
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            prepayChargeAckRef.current = null;
+            setPrepayChargeQuote(null);
+            setPrepayConsentChecked(false);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your billing terms were updated — please review them and confirm again.');
           }
           if (body.code === 'PREPAY_QUOTE_STALE') {
             // The acknowledged prepay total drifted (credit/deposit change
@@ -8485,19 +8540,41 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     extraInvoiceRows: rodentSetupInvoiceRows,
     selectedFrequency: combinedFrequency,
   });
+  // GATE_PAF_SETUP_FEE: this selection is the setup-only (monthly-tier) shape
+  // on the card rail — the accept stamps the setup fee on the first visit and
+  // bills it with that visit, so the capture copy and consent text say so.
+  // One selection key for every per-selection answer (setup fee, timing).
   const afterVisitSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
   afterVisitSelectionKeyRef.current = afterVisitSelectionKey;
+  setupFeeSelectionKeyRef.current = afterVisitSelectionKey;
+  const setupFeeServerAnswer = setupFeePromiseOverride?.key === afterVisitSelectionKey ? setupFeePromiseOverride.value : null;
+  // Every surface that renders the setup-fee promise reads THIS, so the copy,
+  // the payment options and the attestation always agree.
+  const setupFeePromiseEnabled = setupFeeServerAnswer ?? !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit;
+  const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
+    enabled: setupFeePromiseEnabled,
+    serviceMode,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+  });
+  setupFeeAfterVisitShownRef.current = !!setupFeeAfterVisitCopy;
   // The ONE payment-timing answer every surface below renders from.
   const paymentTiming = resolvePaymentTiming({
     policy: data?.recurringCardPolicy,
     paymentPreference,
     serviceMode,
-    invoiceShape: afterVisitInvoiceShape,
+    // A setup fee stamped on the first visit (GATE_PAF_SETUP_FEE) leaves
+    // nothing to bill at confirm: the setup-only shape is not "at confirm".
+    invoiceShape: setupFeeAfterVisitCopy ? { ...afterVisitInvoiceShape, setupOnly: false } : afterVisitInvoiceShape,
     selectionKey: afterVisitSelectionKey,
     timingAnswer,
   });
-  const captureTiming = captureTimingProps(paymentTiming);
-  const afterVisitRendered = captureTiming.afterVisit;
+  const captureTiming = { ...captureTimingProps(paymentTiming), afterVisitSetup: !!setupFeeAfterVisitCopy };
+  // The setup-fee capture renders the after_visit_card text too.
+  const afterVisitRendered = captureTiming.afterVisit || captureTiming.afterVisitSetup;
   afterVisitTimingShownRef.current = paymentTiming?.attestTiming === true;
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
@@ -9248,6 +9325,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
+                setupFeeAfterFirstVisit={setupFeePromiseEnabled}
               />
             </>
           ) : null}
@@ -9404,14 +9482,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                       ? (inlineCardState.methodType === 'us_bank_account'
                         ? 'Bank transfers have no added card surcharge.'
                         : CARD_SURCHARGE_DISCLOSURE)
-                      : (() => {
-                        // Read from the one timing answer (null outside the
-                        // existing-customer cohort: today's sentence).
-                        const firstNow = paymentTiming?.firstInvoice === 'at_confirm' ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '';
-                        if (paymentTiming?.held === 'paused') return `Nothing is charged today. ${firstNow}Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
-                        if (paymentTiming?.held === 'off') return `Nothing is charged today. ${firstNow}We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
-                        return `Nothing is charged today. ${firstNow}Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`;
-                      })()))
+                      : (setupFeeAfterVisitCopy
+                        ? `Nothing is charged today. Your card on file is charged after your first visit is completed — that visit's amount plus your one-time setup fee — and after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`
+                        : (() => {
+                          // Read from the one timing answer (null outside the
+                          // existing-customer cohort: today's sentence).
+                          const firstNow = paymentTiming?.firstInvoice === 'at_confirm' ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '';
+                          if (paymentTiming?.held === 'paused') return `Nothing is charged today. ${firstNow}Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                          if (paymentTiming?.held === 'off') return `Nothing is charged today. ${firstNow}We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                          return `Nothing is charged today. ${firstNow}Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`;
+                        })())))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
@@ -9598,6 +9678,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
+                setupFeeAfterFirstVisit={setupFeePromiseEnabled}
               />
             </div>
           ) : null
