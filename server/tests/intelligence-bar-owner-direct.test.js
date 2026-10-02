@@ -27,10 +27,14 @@ beforeEach(() => {
     leads: [{ id: LEAD, customer_id: null, first_name: null, last_name: 'Fixture' }, { id: LEAD_TWIN, customer_id: null, first_name: null, last_name: 'Fixture' }],
   };
   db.mockReset().mockImplementation(table => {
-    let ids, nameMatch = false;
-    const q = { where: () => q, whereNull: () => q, limit: () => q, select: () => q,
+    let ids, id, nameMatch = false;
+    const q = { where: key => { if (key && typeof key === 'object' && key.id) id = key.id; return q; }, whereNull: () => q, limit: () => q, select: () => q,
+      first: async () => (rows[table] || []).find(row => row.id === id),
       whereRaw: () => { nameMatch = true; return q; },
-      whereIn: (key, values) => { if (key === 'id') ids = values; return q; },
+      // A name lookup (whereIn on a normalized-name expression) sees every
+      // row; namedCustomers then keeps only the rows whose name the clause
+      // actually states.
+      whereIn: (key, values) => { if (key === 'id') ids = values; else nameMatch = true; return q; },
       then: resolve => Promise.resolve(ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : nameMatch ? rows[table] || [] : []).then(resolve) };
     return q;
   });
@@ -273,6 +277,23 @@ describe('reads for the owner login', () => {
     const task = { targets: [{ customer_id: A }], target: { customer_id: A } };
     const prepared = await Context.prepareReadInput({}, direct(task), { toolName: 'get_customer_detail', schema: { properties: { customer_id: {} } } });
     expect(prepared.input.customer_id).toBe(A);
+  });
+
+  test('conflicting selectors on a read refuse for every login and are never forwarded', async () => {
+    const schemaWithSelectors = { properties: { customer_id: {}, customer_name: {}, phone: {} } };
+    // Customer A by name, customer B's id: the reader would answer about B.
+    const conflict = { customer_name: 'Synthetic Person', customer_id: B };
+    expect(await Context.prepareReadInput(conflict, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput(conflict, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput(conflict, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    // The same name with its own id is fine.
+    const agree = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
+    expect(agree.input.customer_id).toBe(A);
+    // A name outside the task with no id is a scope refusal, which the owner
+    // login bypasses.
+    const outside = { customer_name: 'Other Person' };
+    expect(await Context.prepareReadInput(outside, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.prepareReadInput(outside, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outside });
   });
 
   test('a bad record id on a read still refuses', async () => {

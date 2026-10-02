@@ -848,9 +848,20 @@ async function resolveCustomerSelector(params, input, context, schema) {
     .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [digits(params.phone)])
     .select(CUSTOMER_FIELDS);
   const explicitRead = !permitted.size && params.phone && !params.customer_name && context.explicitReadPhones?.includes(digits(params.phone));
+  // Two selectors on one call that name different customers (a name plus
+  // another customer's id, or a phone another customer carries) are a data
+  // conflict, not a scope question: refused for every login with a code the
+  // owner-direct fallback never bypasses (Codex r3 on #5563), because the
+  // readers resolve customer_id before customer_name and would answer about
+  // the id while the owner asked about the name.
+  const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
+  if (suppliedId && matches.length && !matches.some(customer => customer.id === suppliedId)) {
+    return { error: 'The customer name or phone and the customer id on this lookup name different customers', code: 'selector_conflict' };
+  }
   const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
   const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
-  if (selectorMismatch(customer, params, digits)) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
+  if (customer && selectorMismatch(customer, params, digits)) return { error: 'The customer name or phone and the customer id on this lookup name different customers', code: 'selector_conflict' };
+  if (!customer) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
   input.customer_id = customer.id;
   delete input.customer_name;
   if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
