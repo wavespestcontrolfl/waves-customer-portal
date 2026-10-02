@@ -107,8 +107,11 @@ const CONVERSATION_WINDOW_DAYS = 30;
 async function staffTextSender({ phone, customerId = null, database = db, now = new Date() }) {
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const customerLines = [TWILIO_NUMBERS.mainLine.number, ...Object.values(TWILIO_NUMBERS.locations).map((l) => l.number)];
-  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (digits.length === 10) {
+  // Full-number identity (NANP: with or without the leading 1; international:
+  // the whole number), never a bare last-10 suffix that could match an
+  // unrelated sender — the same rule as findSingleCustomerForPhone.
+  const candidates = require('../utils/phone').phoneMatchDigits(phone);
+  if (candidates.length) {
     const since = new Date(now.getTime() - CONVERSATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
     const last = await database('sms_log')
@@ -116,7 +119,7 @@ async function staffTextSender({ phone, customerId = null, database = db, now = 
       .where('direction', 'inbound')
       .whereIn('to_phone', customerLines)
       .where('created_at', '>=', since)
-      .whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .whereRaw("regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [candidates])
       .orderBy('created_at', 'desc')
       .first('to_phone');
     if (last?.to_phone) return { fromNumber: last.to_phone, reason: 'conversation' };

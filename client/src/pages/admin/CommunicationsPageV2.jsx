@@ -1351,7 +1351,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         if (cancelled || !r?.fromNumber
           || !composerAcceptsServerSender(composerStateRef.current, requested.line, Array.isArray(r.replaceableLines) ? r.replaceableLines : [])) return;
         setFromNumber(r.fromNumber);
-        setThreadLock({ contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber });
+        // Only a live conversation locks the picker ("Replying from … to
+        // continue thread"); a home-line / main default is a preselect staff
+        // can change.
+        setThreadLock(r.reason === "conversation"
+          ? { contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber }
+          : null);
       })
       .catch(() => {});
     return () => { cancelled = true; };

@@ -267,6 +267,8 @@ it("GATE_HOME_LINE: a late /sender answer replaces the automatic history line, t
   // …and the server's answer lands afterwards: it still applies.
   await act(async () => { answer(); });
   await waitFor(() => expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(homeLine));
+  // A home-line default is a preselect, not a thread lock: staff can change it.
+  expect(screen.getByRole("combobox", { name: "Send from" })).not.toBeDisabled();
   fireEvent.change(field, { target: { value: "Hi from your local office" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(bodyOf("/admin/communications/sms")).toMatchObject({ fromNumber: homeLine, body: "Hi from your local office" });
@@ -296,4 +298,17 @@ it("GATE_HOME_LINE: a late /sender answer never replaces a recruiting/tech histo
   expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
   await act(async () => { answer(); });
   expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+});
+
+it("GATE_HOME_LINE: a recent-conversation answer locks the picker to that line (home-line PR 3)", async () => {
+  const conversationLine = "+19412973337";
+  let answer;
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => (String(url).includes("/admin/communications/sender?")
+    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: conversationLine, reason: "conversation", replaceableLines: [line, conversationLine] })); })
+    : base(url, options)));
+  setup();
+  await act(async () => { answer(); });
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(conversationLine));
+  expect(screen.getByRole("combobox", { name: "Send from" })).toBeDisabled();
 });

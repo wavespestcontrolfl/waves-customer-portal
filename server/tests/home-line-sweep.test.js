@@ -155,7 +155,15 @@ describe('staffTextSender (staff texts, PR 3)', () => {
       ['where', 'direction', 'inbound'],
       ['where', 'created_at', '>=', new Date('2026-09-02T12:00:00Z')],
       ['whereIn', 'to_phone', expect.arrayContaining([MAIN, PARRISH, VENICE])],
-      ['whereRaw', expect.stringContaining('from_phone'), ['5551234567']],
+      ['whereRaw', expect.stringContaining('= ANY'), [['15551234567', '5551234567']]],
+    ]));
+  });
+
+  test('an international number matches only on its full digits', async () => {
+    const { database, seen } = senderDb({ customer: null });
+    await staffTextSender({ phone: '+447700900123', database, now });
+    expect(seen.sms_log).toEqual(expect.arrayContaining([
+      ['whereRaw', expect.stringContaining('= ANY'), [['447700900123']]],
     ]));
   });
 
