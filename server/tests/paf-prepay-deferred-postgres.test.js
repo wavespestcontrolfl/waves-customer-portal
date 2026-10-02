@@ -326,6 +326,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await facts(f.childId)).toBeNull();
     });
 
+    it('the announcement is reserved for one visit, and a year already paid gets none (Codex r9)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      expect(await facts(f.childId)).toBeNull();
+      const paid = await deferredAccept({ invoiceStatus: 'paid' });
+      expect(await facts(paid.parentId)).toBeNull();
+    });
+
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
       const removed = await deferredAccept();
       await trx('payment_methods').where({ id: removed.pmId }).del();
@@ -494,6 +505,30 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
       await release();
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_before_visit', reason: 'invoice_void' });
+    });
+
+    it('a visit billed to a payer assigned after the accept is not held and never releases the year (Codex r9)', async () => {
+      const f = await deferredAccept();
+      const payer = require('../services/payer');
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === f.parentId ? 7 : null }));
+      try {
+        expect(await covers(f.parentId)).toBe(false);
+        expect(await covers(f.childId)).toBe(true);
+        await perform(f.parentId, f.customerId);
+        expect(await release()).toMatchObject({ released: 0 });
+        expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+      }
+    });
+
+    it('a deleted year invoice still hands the office the held visit already done (Codex r9)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ prepay_invoice_id: null });
+      await trx('invoices').where({ id: f.invoiceId }).del();
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', reason: 'invoice_missing', performed_visit_id: f.parentId });
     });
 
     it('a failed due-date update leaves the job waiting for the next pass', async () => {

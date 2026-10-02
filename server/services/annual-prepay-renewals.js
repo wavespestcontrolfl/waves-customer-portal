@@ -4162,6 +4162,14 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
     // holds nothing, even before the term sync catches up.
     const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
     if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return false;
+    // A visit billed to a third-party payer (a visit-specific or account
+    // payer assigned after the accept) is not held: completion bills it to
+    // that payer, so it never releases the year's charge either (GitHub Codex
+    // #5567 r9). The same resolver completion's own payer exclusion reads.
+    const visitPayer = await require('./payer').resolveForInvoice({
+      database: conn, customerId: scheduledService.customer_id, scheduledServiceId: scheduledService.id, throwOnError: true,
+    });
+    if (visitPayer?.payerId) return false;
     // Only a visit the year actually BOUGHT is held: the same sold selection
     // first activation will stamp (count cap, window as projected for a
     // payment today, ownership, callbacks out), minus a visit the stamp-time

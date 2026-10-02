@@ -133,20 +133,22 @@ async function releaseOne(row, now) {
     // year HELD is work done while it was pending, for the office to bill. A
     // callback, a visit past the sold count or a price-drifted visit was
     // never held — it billed on its own (Codex r8).
+    // A deleted invoice row also clears the term's prepay_invoice_id (FK), so
+    // the term is found by its estimate then (GitHub Codex #5567 r9).
     let visit = null;
-    if (invoice) {
-      const deadTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('*');
-      if (deadTerm) {
-        const held = await require('./annual-prepay-renewals').pafDeferredHeldVisitIds(deadTerm, db);
-        visit = (await performedVisitCandidates(row.id, invoice.customer_id)).find((v) => held.has(String(v.id))) || null;
-      }
+    const deadTerm = await db('annual_prepay_terms')
+      .where(invoice ? { prepay_invoice_id: invoice.id } : { source_estimate_id: row.id }).first('*');
+    const deadCustomerId = invoice?.customer_id || deadTerm?.customer_id || null;
+    if (deadTerm && deadCustomerId) {
+      const held = await require('./annual-prepay-renewals').pafDeferredHeldVisitIds(deadTerm, db);
+      visit = (await performedVisitCandidates(row.id, deadCustomerId)).find((v) => held.has(String(v.id))) || null;
     }
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
     const moved = await patchJob(row.id, {
       // Work already done was held, not billed: it must reach the office.
       status: visit ? 'cancelled_after_visit' : 'cancelled_before_visit',
       reason,
-      ...(visit ? { performed_visit_id: visit.id, customer_id: invoice.customer_id } : {}),
+      ...(visit ? { performed_visit_id: visit.id, customer_id: deadCustomerId } : {}),
       resolved_at: now.toISOString(),
       resolved_by: 'paf_release',
     }, whileAwaiting);
@@ -501,9 +503,13 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     // is charged, so the regular "nothing due today" text is the true one;
     // credit that only lowers it makes the amount "up to" the ceiling.
     const invoice = job.invoice_id
-      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'total', 'credit_applied')
+      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
       : null;
     if (!invoice) return null;
+    // Still owed and not already moving (GitHub Codex #5567 r9): a year paid,
+    // processing, or dead before the release pass gets no new charge.
+    const invStatus = String(invoice.status || '').toLowerCase();
+    if (['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
     const credit = require('./customer-credit');
     let creditLowers = false;
     if (await credit.autoApplyWouldApply(invoice, conn)) {
@@ -513,6 +519,13 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
       return null;
     }
+    // One announcement per year (GitHub Codex #5567 r9): reserve it on the
+    // job for THIS visit while it still waits. Two completions racing before
+    // a release pass both pass the reads above; only one wins the reservation.
+    // A retry of the same visit's closeout re-wins its own.
+    const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
+      .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);
+    if (!reserved) return null;
     const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
   } catch (err) {
