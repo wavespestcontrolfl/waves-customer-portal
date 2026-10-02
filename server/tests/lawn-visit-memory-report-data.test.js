@@ -489,9 +489,11 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     'svc-prior': { structured_notes: { lawnVisitMemory: { 'la-prior': priorEntry } } },
   });
   const live = () => { process.env.GATE_LAWN_VISIT_MEMORY = 'true'; process.env.GATE_LAWN_PROPERTY_HISTORY = 'true'; };
-  const photo = (id, quality) => ({
-    id, assessment_id: 'la-cur', customer_visible: true, is_best_photo: false, quality_score: quality, photo_order: 1, photo_type: 'general',
+  const photo = (id, quality, assessmentId = 'la-cur') => ({
+    id, assessment_id: assessmentId, customer_visible: true, is_best_photo: false, quality_score: quality, photo_order: 1, photo_type: 'general',
   });
+  // The prior read's own photos: its confidence gates the comparison too.
+  const PRIOR_PHOTOS = [photo('pp1', 80, 'la-prior'), photo('pp2', 80, 'la-prior')];
   const render = (recs, patch = {}) => {
     const { knex } = withRecords({ ...fixtures(), ...patch }, recs);
     return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p13', knex, {});
@@ -509,7 +511,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     live();
     setHistory([PRIOR, CUR]);
     const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
-    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     const progress = data.reportV2.progress;
     expect(progress).toMatchObject({ v: 1, eligible: true, daysSincePrior: 60, confidence: { level: 'moderate', comparable: true } });
     expect(progress.overall.direction).toBe('flat'); // the two visits carry the same scores
@@ -533,7 +535,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
   test('the progress block is NOT part of the public payload: not enumerable, not in JSON, not in a spread', async () => {
     live();
     setHistory([PRIOR, CUR]);
-    const data = await render(records(), { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    const data = await render(records(), { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     expect(data.reportV2.progress).toBeTruthy();
     expect(Object.keys(data.reportV2)).not.toContain('progress');
     expect(JSON.stringify(data)).not.toMatch(/"progress"|lawn_progress|engineVersion/);
@@ -543,7 +545,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
   test('the public payload with the gate on differs from gate off by sinceLast alone (the engine adds no key)', async () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     setHistory([PRIOR, CUR]);
-    const patch = { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] };
+    const patch = { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] };
     const off = JSON.parse(JSON.stringify(await render(records(), patch)));
     live();
     const on = JSON.parse(JSON.stringify(await render(records(), patch)));
@@ -571,7 +573,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
   test('decimal quality scores arrive from pg as strings and still count ("80.00" is adequate)', async () => {
     live();
     setHistory([PRIOR, CUR]);
-    const data = await render(records(), { lawn_assessment_photos: [photo('p1', '80.00'), photo('p2', '80.00')] });
+    const data = await render(records(), { lawn_assessment_photos: [photo('p1', '80.00'), photo('p2', '80.00'), ...PRIOR_PHOTOS] });
     expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
   });
 
@@ -579,7 +581,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     live();
     setHistory([PRIOR, CUR]);
     const legacy = (id) => ({ ...photo(id, '30.00'), turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true });
-    const data = await render(records(), { lawn_assessment_photos: [legacy('p1'), legacy('p2')] });
+    const data = await render(records(), { lawn_assessment_photos: [legacy('p1'), legacy('p2'), ...PRIOR_PHOTOS] });
     expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
   });
 
@@ -595,7 +597,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     recs['svc-cur'].structured_notes.lawnVisitMemory = {
       'la-cur': { v: 1, assessmentId: 'la-cur', serviceDate: '2026-09-30', applied: [], checks: [], sinceLast: FROZEN_SINCE },
     };
-    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
     // Judged against la-prior (60 days), not the later-added la-mid (29 days).
     expect(data.reportV2.progress).toMatchObject({ eligible: true, daysSincePrior: 60 });
@@ -612,8 +614,18 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
         sinceLast: { v: 1, priorAssessmentId: 'la-gone', priorDate: '2026-08-01', applied: PRIOR_ENTRY.applied, checks: PRIOR_ENTRY.checks },
       },
     };
-    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     expect(data.reportV2.progress).toMatchObject({ eligible: false, items: [] });
+  });
+
+  test('a prior read with no usable photos makes the comparison unclear (fail closed)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records({ ...PRIOR_ENTRY, applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: false });
+    expect(data.reportV2.progress.items.find((i) => i.rowId === 'herbicide_broadleaf').state).toBe('unclear');
+    expect(data.reportV2.progress.overall.direction).toBe('unknown');
   });
 
   test('a prior that froze no memory still gets a direction, with no items', async () => {
@@ -621,7 +633,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     setHistory([PRIOR, CUR]);
     const recs = records();
     recs['svc-prior'].structured_notes = {};
-    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     expect(data.reportV2.sinceLast).toBeUndefined();
     expect(data.reportV2.progress).toMatchObject({ eligible: true, items: [] });
     expect(data.reportV2.progress.overall.direction).toBe('flat');

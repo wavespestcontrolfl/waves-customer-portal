@@ -17,7 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
+const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
@@ -5469,7 +5469,32 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           const prior = frozenPriorId != null && typeof input?.priorInputFor === 'function'
             ? input.priorInputFor(frozenPriorId)
             : input?.prior;
-          lawnProgress = buildLawnProgress({ current: input?.current, prior, sinceLast: visitMemorySinceLast || null });
+          // This visit's FROZEN date (a corrected schedule date must not move a
+          // permanent report across a treatment window); the prior's frozen
+          // date rides sinceLast.priorDate.
+          const frozenEntry = storedVisitMemoryFor(service.structured_notes, lawnAssessment.assessmentId);
+          const current = input?.current
+            ? { ...input.current, date: frozenEntry?.serviceDate || input.current.date }
+            : input?.current;
+          let priorForProgress = prior;
+          if (prior) {
+            // The prior read's own photo confidence, read the way this visit's
+            // is (top five visible). A failed read is UNKNOWN: fail closed.
+            const priorPhotos = await knex('lawn_assessment_photos')
+              .where({ assessment_id: prior.assessmentId, customer_visible: true })
+              .orderBy('is_best_photo', 'desc')
+              .orderBy('quality_score', 'desc')
+              .orderBy('photo_order', 'asc')
+              .limit(5)
+              .catch(() => null);
+            priorForProgress = {
+              ...prior,
+              confidence: Array.isArray(priorPhotos)
+                ? deriveAssessmentConfidence({ photos: priorPhotos.map(photoQualityForConfidence) })
+                : 'unknown',
+            };
+          }
+          lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
         } catch {
           lawnProgress = null;
         }

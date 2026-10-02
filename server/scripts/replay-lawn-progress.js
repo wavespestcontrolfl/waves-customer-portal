@@ -36,7 +36,7 @@ const {
   divergentMetricsFrom, photoQualityForConfidence,
 } = require('../services/service-report/lawn-progress');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { selectPriorVisit } = require('../services/service-report/lawn-visit-memory');
+const { selectPriorVisit, appliedFromProducts } = require('../services/service-report/lawn-visit-memory');
 const { createAuditKnex } = require('./audit-lawn-expectation-products');
 
 const BEHIND_WARN_SHARE = 0.25; // W5: re-check calibration above about 25 percent
@@ -122,12 +122,9 @@ function sideOf(row) {
 function progressFor({ current, prior }, { band, overallBand }) {
   const cur = sideOf(current);
   const pri = prior ? sideOf(prior) : null;
-  // The report path only has the CURRENT confidence (no extra read for the
-  // prior's photos), but the prior row's own divergence flags do count.
-  if (pri) {
-    delete pri.confidence;
-    pri.divergentMetrics = divergentMetricsFrom(prior.divergenceFlags);
-  }
+  // Like the report: the prior's own photo confidence AND its divergence
+  // flags count (sideOf already carries the flags inside confidence).
+  if (pri) pri.divergentMetrics = divergentMetricsFrom(prior.divergenceFlags);
   return buildLawnProgress({
     current: cur,
     prior: pri,
@@ -146,17 +143,37 @@ function behindStats(results) {
   return { states, judged, behind: states.behind || 0, behindShare: judged ? (states.behind || 0) / judged : 0 };
 }
 
-/**
- * Pure: replay rows in, the full report out.
- * @param {ReplayRow[]} rows
- * @param {{band?:number, overallBand?:number, since?:string|null}} [opts]
- */
-function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_BAND, since = null } = {}) {
-  // `since` (YYYY-MM-DD) limits which visits are judged; earlier rows still serve as priors.
-  const pairs = pairAssessments(Array.isArray(rows) ? rows : []).filter((p) => !since || p.current.date >= since);
-  const results = pairs.map((pair) => ({ ...pair, progress: progressFor(pair, { band, overallBand }) }));
+const itemKey = (item) => (item.kind === 'applied' ? `${item.rowId}:${item.metric}` : `check:${item.key}`);
+const lowConfidenceFor = (item, p) => !p.confidence.comparable
+  || (item.kind === 'applied' && p.confidence.divergentMetrics.includes(item.metric));
 
-  const eligible = results.filter((r) => r.progress.eligible);
+// Engine rules the replay re-checks on real data; any hit exits 1.
+const INVARIANTS = [
+  ['low_confidence_not_unclear', (item, p) => item.kind === 'applied' && lowConfidenceFor(item, p) && item.state !== 'unclear'],
+  ['cross_season_color_not_seasonal', (item, p) => item.kind === 'applied' && item.metric === 'color_health'
+    && p.season.seasonChange && !['unclear', 'seasonal'].includes(item.state)],
+  ['behind_without_verdict', (item) => item.kind === 'applied' && item.state === 'behind' && item.rawVerdict !== 'behind'],
+];
+
+// Per-pair things a person should look at before sign-off: [bucket, test] where
+// test returns extra fields for the entry, or null when the pair is fine.
+const PAIR_ODDITIES = [
+  ['shortGap', (p) => (p.daysSincePrior < SHORT_GAP_DAYS ? {} : null)],
+  ['longGap', (p) => (p.daysSincePrior > LONG_GAP_DAYS ? {} : null)],
+  ['confidenceUnknown', (p) => (p.confidence.level === 'unknown' ? {} : null)],
+  ['scoreSwing', (p) => {
+    const swings = Object.entries(p.deltas).filter(([m, d]) => m !== 'overall' && d != null && Math.abs(d) >= SWING_POINTS);
+    return swings.length ? { metrics: Object.fromEntries(swings) } : null;
+  }],
+  ['mixedSignals', (p) => {
+    if (p.overall.direction === 'up' && p.items.some((i) => i.state === 'behind')) return { note: 'overall up, an item behind' };
+    if (p.overall.direction === 'down' && p.items.some((i) => i.state === 'improving')) return { note: 'overall down, an item improving' };
+    return null;
+  }],
+  ['noMappedProducts', (p) => (p.items.length ? null : {})],
+];
+
+function summarize(results, eligible, { band, overallBand }) {
   const summary = {
     band,
     overallBand,
@@ -166,81 +183,76 @@ function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_
     pairs: eligible.length,
     confidence: {},
     overall: {},
-    itemStates: Object.fromEntries(STATES.map((s) => [s, 0])),
+    itemStates: Object.fromEntries(STATES.map((st) => [st, 0])),
     byRowMetric: {},
     gates: {},
-    judgedItems: 0,
-    behindShare: 0,
-    behindPairs: 0,
-    pairsWithItems: 0,
-    behindAboveLine: false,
+    pairsWithItems: eligible.filter((r) => r.progress.items.length).length,
+    behindPairs: eligible.filter((r) => r.progress.items.some((i) => i.state === 'behind')).length,
   };
-
-  for (const r of eligible) {
-    bump(summary.confidence, r.progress.confidence.level);
-    bump(summary.overall, r.progress.overall.direction);
-    if (r.progress.items.length) summary.pairsWithItems += 1;
-    if (r.progress.items.some((i) => i.state === 'behind')) summary.behindPairs += 1;
-    for (const item of r.progress.items) {
+  for (const { progress } of eligible) {
+    bump(summary.confidence, progress.confidence.level);
+    bump(summary.overall, progress.overall.direction);
+    for (const item of progress.items) {
       summary.itemStates[item.state] += 1;
-      const key = item.kind === 'applied' ? `${item.rowId}:${item.metric}` : `check:${item.key}`;
-      summary.byRowMetric[key] = summary.byRowMetric[key] || Object.fromEntries(STATES.map((s) => [s, 0]));
+      const key = itemKey(item);
+      summary.byRowMetric[key] = summary.byRowMetric[key] || Object.fromEntries(STATES.map((st) => [st, 0]));
       summary.byRowMetric[key][item.state] += 1;
       if (item.gate) bump(summary.gates, item.gate);
     }
   }
   const stats = behindStats(eligible);
-  summary.judgedItems = stats.judged;
-  summary.behindShare = Math.round(stats.behindShare * 1000) / 1000;
-  summary.behindAboveLine = stats.behindShare > BEHIND_WARN_SHARE;
+  return {
+    ...summary,
+    judgedItems: stats.judged,
+    behindShare: Math.round(stats.behindShare * 1000) / 1000,
+    behindAboveLine: stats.behindShare > BEHIND_WARN_SHARE,
+  };
+}
 
-  const bandSweep = BAND_SWEEP.map((b) => {
-    const swept = pairs.map((pair) => ({ ...pair, progress: progressFor(pair, { band: b, overallBand }) })).filter((r) => r.progress.eligible);
-    const s = behindStats(swept);
-    return { band: b, judgedItems: s.judged, behind: s.behind, behindShare: Math.round(s.behindShare * 1000) / 1000 };
-  });
-
-  // ── Oddities: things a person should look at before sign-off ──────────────
+function findOddities(eligible) {
   const oddities = {
-    invariantViolations: [],
-    shortGap: [],
-    longGap: [],
-    confidenceUnknown: [],
-    scoreSwing: [],
-    mixedSignals: [],
-    noMappedProducts: [],
-    unmappedProducts: {},
+    invariantViolations: [], unmappedProducts: {}, ...Object.fromEntries(PAIR_ODDITIES.map(([bucket]) => [bucket, []])),
   };
   for (const r of eligible) {
     const p = r.progress;
     const ref = { assessment: short(r.current.id), prior: short(r.prior.id), date: r.current.date, days: p.daysSincePrior };
     for (const item of p.items) {
-      const lowConfidence = !p.confidence.comparable || (item.kind === 'applied' && p.confidence.divergentMetrics.includes(item.metric));
-      if (item.kind === 'applied' && lowConfidence && item.state !== 'unclear') {
-        oddities.invariantViolations.push({ ...ref, rule: 'low_confidence_not_unclear', item: `${item.rowId}:${item.metric}`, state: item.state });
-      }
-      if (item.kind === 'applied' && item.metric === 'color_health' && p.season.seasonChange && !['unclear', 'seasonal'].includes(item.state)) {
-        oddities.invariantViolations.push({ ...ref, rule: 'cross_season_color_not_seasonal', item: item.rowId, state: item.state });
-      }
-      if (item.state === 'behind' && item.rawVerdict !== 'behind' && item.kind === 'applied') {
-        oddities.invariantViolations.push({ ...ref, rule: 'behind_without_verdict', item: `${item.rowId}:${item.metric}`, state: item.state });
+      for (const [rule, broken] of INVARIANTS) {
+        if (broken(item, p)) oddities.invariantViolations.push({ ...ref, rule, item: itemKey(item), state: item.state });
       }
     }
-    if (p.daysSincePrior < SHORT_GAP_DAYS) oddities.shortGap.push(ref);
-    if (p.daysSincePrior > LONG_GAP_DAYS) oddities.longGap.push(ref);
-    if (p.confidence.level === 'unknown') oddities.confidenceUnknown.push(ref);
-    const swings = Object.entries(p.deltas).filter(([m, d]) => m !== 'overall' && d != null && Math.abs(d) >= SWING_POINTS);
-    if (swings.length) oddities.scoreSwing.push({ ...ref, metrics: Object.fromEntries(swings) });
-    if (p.overall.direction === 'up' && p.items.some((i) => i.state === 'behind')) oddities.mixedSignals.push({ ...ref, note: 'overall up, an item behind' });
-    if (p.overall.direction === 'down' && p.items.some((i) => i.state === 'improving')) oddities.mixedSignals.push({ ...ref, note: 'overall down, an item improving' });
-    if (!p.items.length) oddities.noMappedProducts.push(ref);
+    for (const [bucket, test] of PAIR_ODDITIES) {
+      const extra = test(p);
+      if (extra) oddities[bucket].push({ ...ref, ...extra });
+    }
     for (const name of p.unmapped) bump(oddities.unmappedProducts, name);
   }
+  return oddities;
+}
+
+const judgedPairs = (pairs, opts) => pairs
+  .map((pair) => ({ ...pair, progress: progressFor(pair, opts) }));
+
+/**
+ * Pure: replay rows in, the full report out.
+ * @param {ReplayRow[]} rows
+ * @param {{band?:number, overallBand?:number, since?:string|null}} [opts]
+ */
+function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_BAND, since = null } = {}) {
+  // `since` (YYYY-MM-DD) limits which visits are judged; earlier rows still serve as priors.
+  const pairs = pairAssessments(Array.isArray(rows) ? rows : []).filter((p) => !since || p.current.date >= since);
+  const results = judgedPairs(pairs, { band, overallBand });
+  const eligible = results.filter((r) => r.progress.eligible);
+
+  const bandSweep = BAND_SWEEP.map((b) => {
+    const st = behindStats(judgedPairs(pairs, { band: b, overallBand }).filter((r) => r.progress.eligible));
+    return { band: b, judgedItems: st.judged, behind: st.behind, behindShare: Math.round(st.behindShare * 1000) / 1000 };
+  });
 
   return {
-    summary,
+    summary: summarize(results, eligible, { band, overallBand }),
     bandSweep,
-    oddities,
+    oddities: findOddities(eligible),
     pairs: eligible.map((r) => ({
       assessment: short(r.current.id),
       prior: short(r.prior.id),
@@ -249,8 +261,8 @@ function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_
       confidence: r.progress.confidence.level,
       overall: r.progress.overall.direction,
       items: r.progress.items.map((i) => (i.kind === 'applied'
-        ? { item: `${i.rowId}:${i.metric}`, state: i.state, delta: i.basis.scoreDelta }
-        : { item: `check:${i.key}`, state: i.state })),
+        ? { item: itemKey(i), state: i.state, delta: i.basis.scoreDelta }
+        : { item: itemKey(i), state: i.state })),
     })),
   };
 }
@@ -320,7 +332,7 @@ async function loadReplayRows(db) {
       [ids],
     )).rows : [];
     const productRows = recordIds.length ? (await trx.raw(
-      `SELECT service_record_id, product_name, targets
+      `SELECT service_record_id, product_name, product_category, active_ingredient, targets
          FROM service_products
         WHERE service_record_id = ANY(?::uuid[]) AND NULLIF(TRIM(product_name), '') IS NOT NULL
         ORDER BY service_record_id, created_at`,
@@ -337,7 +349,12 @@ async function loadReplayRows(db) {
     const productsBy = new Map();
     for (const p of productRows) {
       const list = productsBy.get(p.service_record_id) || [];
-      list.push({ name: p.product_name, targets: Array.isArray(p.targets) ? p.targets : [] });
+      list.push({
+        name: p.product_name,
+        activeIngredient: p.active_ingredient || null,
+        kind: p.product_category ? String(p.product_category).toLowerCase() : null,
+        targets: Array.isArray(p.targets) ? p.targets : [],
+      });
       productsBy.set(p.service_record_id, list);
     }
 
@@ -380,7 +397,10 @@ async function loadReplayRows(db) {
           scores: scoresFromAssessmentRow(a),
           photos: photosBy.get(a.id) || [],
           divergenceFlags: Array.isArray(flags) ? flags : [],
-          applied: a.service_record_id ? (productsBy.get(a.service_record_id) || []) : [],
+          // Shaped exactly as visit memory freezes it (support products out,
+          // at most 8 products and 3 targets each), so the replay judges what
+          // the deployed engine would see.
+          applied: a.service_record_id ? appliedFromProducts(productsBy.get(a.service_record_id) || []) : [],
           order: a.confirmed_order || '',
         };
       });

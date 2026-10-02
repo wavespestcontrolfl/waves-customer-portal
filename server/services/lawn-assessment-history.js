@@ -4,14 +4,16 @@
  * may degrade, but a delivery fence must distinguish unavailable from absent.
  */
 const crypto = require('crypto');
-const db = require('../models/db');
+// Loaded only when a caller passes no knex, so a script that injects its own
+// read-only connection (P13 replay) never builds the app's global client.
+const defaultDb = () => require('../models/db');
 const logger = require('./logger');
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const { calculateLawnOverallScore } = require('../../shared/lawn-scores.cjs');
 
 const RESOLVER_VERSION = 2;
 
-function assessmentQuery(customerId, knex = db, { confirmed = true } = {}) {
+function assessmentQuery(customerId, knex = defaultDb(), { confirmed = true } = {}) {
   const query = knex('lawn_assessments as la')
     .leftJoin('service_records as sr', 'la.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'ss.id', knex.raw('COALESCE(la.service_id, sr.scheduled_service_id)'))
@@ -46,7 +48,7 @@ function resolveVisit(row) {
 }
 
 /** Explicit property ids may be inactive: a historical visit keeps its lawn. */
-async function visitEligibility({ customerId, propertyId, allowPrimary = true }, knex = db) {
+async function visitEligibility({ customerId, propertyId, allowPrimary = true }, knex = defaultDb()) {
   const properties = await knex('customer_properties').where({ customer_id: customerId }).select('*');
   const active = properties.filter((property) => property.active);
   const sole = active.length === 1 ? active[0] : null;
@@ -83,7 +85,7 @@ function isEligible(row, scope) {
   return !!(row.history_visit_property_id || (row.property_id && row.confirmed_by_tech) || scope.includeUnlinked);
 }
 
-async function scopeForAssessment(row, knex = db) {
+async function scopeForAssessment(row, knex = defaultDb()) {
   const scope = await visitEligibility({
     customerId: row.customer_id,
     propertyId: row.property_id || row.history_visit_property_id || null,
@@ -131,7 +133,7 @@ function installedRows(rows, { current, pinned = false } = {}) {
     || a.visit_identity.localeCompare(b.visit_identity));
 }
 
-async function installedForVisit({ customerId, serviceRecordId, serviceId }, knex = db) {
+async function installedForVisit({ customerId, serviceRecordId, serviceId }, knex = defaultDb()) {
   if (!customerId || (!serviceRecordId && !serviceId)) return null;
   const record = serviceRecordId
     ? await knex('service_records').where({ id: serviceRecordId, customer_id: customerId }).first('id', 'scheduled_service_id')
@@ -146,7 +148,7 @@ async function installedForVisit({ customerId, serviceRecordId, serviceId }, kne
   return installedRows(await query)[0] || null;
 }
 
-async function eligibleVisitIds(scope, knex = db) {
+async function eligibleVisitIds(scope, knex = defaultDb()) {
   if (!scope?.propertyId) return [];
   const visits = await knex('scheduled_services').where({ customer_id: scope.customerId }).select(
     'id as service_id', 'customer_id', 'id as history_visit_id', 'customer_id as history_visit_customer_id',
@@ -158,7 +160,7 @@ async function eligibleVisitIds(scope, knex = db) {
 }
 
 /** Apply the same proven-visit set to the two ancillary history tables. */
-function restrictVisitHistory(query, table, eligibleIds, knex = db) {
+function restrictVisitHistory(query, table, eligibleIds, knex = defaultDb()) {
   if (eligibleIds === undefined) return query;
   const records = knex('service_records as history_record')
     .whereColumn('history_record.customer_id', `${table}.customer_id`)
@@ -182,7 +184,7 @@ function restrictVisitHistory(query, table, eligibleIds, knex = db) {
   });
 }
 
-async function applicableReset({ customerId, propertyId, throughVisitDate, throughConfirmedOrder }, knex = db) {
+async function applicableReset({ customerId, propertyId, throughVisitDate, throughConfirmedOrder }, knex = defaultDb()) {
   if (!propertyId) return null;
   const resets = await knex('lawn_baseline_resets').where({ customer_id: customerId })
     .where(function propertyOrLegacy() { this.where({ property_id: propertyId }).orWhereNull('property_id'); })
@@ -207,7 +209,7 @@ async function applicableReset({ customerId, propertyId, throughVisitDate, throu
   return null;
 }
 
-async function propertyHistory({ customerId, scope, throughVisitDate, reset, current, pinned = false, rows }, knex = db) {
+async function propertyHistory({ customerId, scope, throughVisitDate, reset, current, pinned = false, rows }, knex = defaultDb()) {
   const candidates = rows || await assessmentQuery(customerId, knex);
   const eligible = candidates.filter((row) => {
     const visit = resolveVisit(row);
@@ -249,7 +251,7 @@ function historyIdentity(scope, reset, rows, eligibleIds = []) {
   })).digest('hex');
 }
 
-async function historyForAssessment(row, { pinned = false, knex = db } = {}) {
+async function historyForAssessment(row, { pinned = false, knex = defaultDb() } = {}) {
   const candidates = await assessmentQuery(row.customer_id, knex);
   const joined = candidates.find((candidate) => candidate.id === row.id) || row;
   const scope = await scopeForAssessment(joined, knex);
@@ -276,7 +278,7 @@ async function historyForAssessment(row, { pinned = false, knex = db } = {}) {
   };
 }
 
-async function historyForReport(service, { assessment, pinned = false } = {}, knex = db) {
+async function historyForReport(service, { assessment, pinned = false } = {}, knex = defaultDb()) {
   if (assessment) return historyForAssessment(assessment, { pinned, knex });
   const visitId = service.scheduled_service_id || service.service_id;
   const visit = visitId ? await knex('scheduled_services').where({ id: visitId, customer_id: service.customer_id }).first() : null;
@@ -287,7 +289,7 @@ async function historyForReport(service, { assessment, pinned = false } = {}, kn
 
 /** A visit being assessed has no installed current row yet. Its prior context
  * uses the same property/reset scope and excludes every attempt of this visit. */
-async function historyBeforeVisit({ customerId, scheduledService, throughVisitDate }, knex = db) {
+async function historyBeforeVisit({ customerId, scheduledService, throughVisitDate }, knex = defaultDb()) {
   const scope = await scopeForAssessment(visitEvidence(customerId, scheduledService), knex);
   const reset = await applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate }, knex);
   const rows = (await propertyHistory({ customerId, scope, throughVisitDate, reset }, knex))
@@ -295,7 +297,7 @@ async function historyBeforeVisit({ customerId, scheduledService, throughVisitDa
   return { scope, reset, rows, previous: rows[rows.length - 1] || null, baseline: rows[0] || null };
 }
 
-async function latestForCustomer(customerId, { limit, propertyId } = {}, knex = db) {
+async function latestForCustomer(customerId, { limit, propertyId } = {}, knex = defaultDb()) {
   const scope = await visitEligibility({ customerId, propertyId }, knex);
   const throughVisitDate = etDateString();
   const reset = await applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate }, knex);

@@ -23,6 +23,10 @@ const MAX_APPLIED = 8;
 const MAX_TARGETS = 3;
 const MAX_CHECKS = 3;
 const MAX_TEXT = 80;
+// A product name is an IDENTITY (the expectations engine matches the exact
+// catalog name), so it is never cut at MAX_TEXT: the longest lawn catalog
+// names run past 100 characters.
+const MAX_NAME = 200;
 
 // classifyProduct's focus tag per kind (lawn-report-v2.js). Pinned against
 // classifyProduct itself in the tests so the two cannot drift apart.
@@ -73,10 +77,36 @@ function ymd(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 
-const text = (value) => {
+const text = (value, max = MAX_TEXT) => {
   const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
-  return s ? s.slice(0, MAX_TEXT) : null;
+  return s ? s.slice(0, max) : null;
 };
+
+/**
+ * "What we applied", shaped exactly as it is frozen: support products dropped,
+ * at most MAX_APPLIED products and MAX_TARGETS targets each. Shared with the
+ * P13 calibration replay so it judges what production would have frozen.
+ * @param {Array<{name, activeIngredient?, kind?, targets?}>} products
+ */
+function appliedFromProducts(products) {
+  const applied = [];
+  for (const p of Array.isArray(products) ? products : []) {
+    if (!p || !text(p.name, MAX_NAME)) continue;
+    // Surfactants, wetting agents and growth regulators make no treatment
+    // claim; remembering them as "what we applied" would restate one.
+    if (isSupportProduct(p)) continue;
+    const kind = Object.prototype.hasOwnProperty.call(TAG_BY_KIND, p.kind) ? p.kind : 'other';
+    applied.push({
+      name: text(p.name, MAX_NAME),
+      activeIngredient: text(p.activeIngredient),
+      kind,
+      tag: TAG_BY_KIND[kind],
+      targets: (Array.isArray(p.targets) ? p.targets : []).map((t) => text(t)).filter(Boolean).slice(0, MAX_TARGETS),
+    });
+    if (applied.length >= MAX_APPLIED) break;
+  }
+  return applied;
+}
 
 /**
  * The entry for one visit, from the deterministic reportV2 (built BEFORE any
@@ -89,23 +119,7 @@ function buildVisitMemory({ reportV2, assessmentId, serviceDate } = {}) {
   const date = ymd(serviceDate);
   if (!date) return null;
 
-  const products = Array.isArray(reportV2.treatment?.products) ? reportV2.treatment.products : [];
-  const applied = [];
-  for (const p of products) {
-    if (!p || !text(p.name)) continue;
-    // Surfactants, wetting agents and growth regulators make no treatment
-    // claim; remembering them as "what we applied" would restate one.
-    if (isSupportProduct(p)) continue;
-    const kind = Object.prototype.hasOwnProperty.call(TAG_BY_KIND, p.kind) ? p.kind : 'other';
-    applied.push({
-      name: text(p.name),
-      activeIngredient: text(p.activeIngredient),
-      kind,
-      tag: TAG_BY_KIND[kind],
-      targets: (Array.isArray(p.targets) ? p.targets : []).map(text).filter(Boolean).slice(0, MAX_TARGETS),
-    });
-    if (applied.length >= MAX_APPLIED) break;
-  }
+  const applied = appliedFromProducts(reportV2.treatment?.products);
 
   const insights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
   const ranked = insights
@@ -285,6 +299,7 @@ async function resolveVisitMemoryForRender({
 
 module.exports = {
   VISIT_MEMORY_VERSION,
+  appliedFromProducts,
   TAG_BY_KIND,
   buildVisitMemory,
   selectPriorVisit,

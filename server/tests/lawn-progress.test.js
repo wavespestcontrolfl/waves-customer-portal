@@ -644,3 +644,38 @@ describe('prior divergence flags', () => {
   });
 });
 
+describe('codex r2 on #5566', () => {
+  const herbicide = [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }];
+  const full = (over = {}) => ({ turf_density: 70, weed_suppression: 70, color_health: 70, stress_damage: 70, overall: 70, ...over });
+
+  it('the frozen sinceLast.priorDate wins over a corrected live prior date', () => {
+    const out = buildLawnProgress({
+      current: { date: '2026-09-30', scores: full(), confidence: 'high' },
+      prior: { date: '2026-09-25', scores: full() }, // live date moved after the freeze
+      sinceLast: { priorDate: '2026-08-01', applied: herbicide, checks: [] },
+    });
+    expect(out.daysSincePrior).toBe(60);
+  });
+
+  it('no overall direction unless all four categories exist on both visits', () => {
+    const run = (cur, pri) => buildLawnProgress({
+      current: { date: '2026-09-30', scores: cur, confidence: 'high' },
+      prior: { date: '2026-08-01', scores: pri },
+      sinceLast: null,
+    }).overall;
+    expect(run(full({ overall: 80 }), full({ overall: 70 })).direction).toBe('up');
+    expect(run(full({ overall: 80, stress_damage: null }), full({ overall: 70 }))).toMatchObject({ direction: 'unknown', reason: 'incomplete_scores' });
+    expect(run(full({ overall: 80 }), full({ overall: 70, color_health: null })).direction).toBe('unknown');
+  });
+
+  it("a noisy prior read (low photo confidence) makes the comparison unclear", () => {
+    const out = buildLawnProgress({
+      current: { date: '2026-09-30', scores: full({ weed_suppression: 90 }), confidence: 'high' },
+      prior: { date: '2026-08-31', scores: full(), confidence: 'low' },
+      sinceLast: { priorDate: '2026-08-31', applied: herbicide, checks: [] },
+    });
+    expect(out.confidence.comparable).toBe(false);
+    expect(out.items.every((i) => i.state === 'unclear')).toBe(true);
+  });
+});
+

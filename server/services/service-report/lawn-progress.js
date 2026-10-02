@@ -339,13 +339,76 @@ function seasonOf(side) {
   return day ? getSeason(Number(day.slice(5, 7))) : null;
 }
 
+// Why a visit cannot be compared, first that applies (null = comparable).
+// The frozen sinceLast pins the visit its treatments came from: scores from
+// any other visit would judge those treatments against the wrong dates.
+const INELIGIBLE = [
+  ['baseline', ({ current }) => Boolean(current?.isBaseline)],
+  ['prior_mismatch', ({ prior, sinceLast }) => sinceLast?.priorAssessmentId != null && prior?.assessmentId != null
+    && String(sinceLast.priorAssessmentId) !== String(prior.assessmentId)],
+  ['no_prior', ({ prior, current, priorDay, curDay }) => !prior?.scores || !current?.scores
+    || priorDay == null || curDay == null || curDay <= priorDay],
+];
+
+/**
+ * How far the two visits' scores can be compared. A noisy PRIOR read makes a
+ * delta as unreliable as a noisy current one, so the prior's photo confidence
+ * (when the caller has it) and its divergence flags count too.
+ */
+function comparisonGates(current, prior) {
+  const confidence = normalizeConfidence(current.confidence);
+  const priorConfidence = prior.confidence == null ? null : normalizeConfidence(prior.confidence);
+  const comparable = [confidence, priorConfidence].every((c) => c == null || COMPARABLE_LEVELS.has(c.level));
+  const divergent = new Set([
+    ...confidence.divergentMetrics,
+    ...(priorConfidence?.divergentMetrics || []),
+    ...(Array.isArray(prior.divergentMetrics) ? prior.divergentMetrics : []),
+  ]);
+  const priorSeason = seasonOf(prior);
+  const curSeason = seasonOf(current);
+  const seasonalLine = crossSeasonNoteFromSeasons(priorSeason, curSeason);
+  return {
+    level: confidence.level,
+    comparable,
+    divergent,
+    seasonChange: seasonalLine != null,
+    season: { prior: priorSeason, current: curSeason, seasonChange: seasonalLine != null, seasonalLine },
+  };
+}
+
+/** One item per judged metric of each prior applied row, then one per prior check. */
+function progressItems({ sinceLast, priorDate, days, current, prior, gates, band }) {
+  const { rows, unmapped } = appliedRows(sinceLast?.applied, priorDate);
+  const items = rows.flatMap((row) => {
+    // Judged metrics when the row has windows; otherwise its one metric, which
+    // judgeProgress answers 'holding_steady'.
+    const metrics = Object.keys(row.metricWindows || {});
+    return (metrics.length ? metrics : [row.metric])
+      .filter((metric) => METRICS.includes(metric))
+      .map((metric) => itemForMetric({ row, metric, days, cur: current.scores, prior: prior.scores, gates, band }));
+  });
+  const checks = Array.isArray(sinceLast?.checks) ? sinceLast.checks : [];
+  return { items: [...items, ...checks.map((check) => itemForCheck(check, gates.comparable))], unmapped };
+}
+
+/**
+ * The overall score is a null-aware weighted blend (shared/lawn-scores.cjs):
+ * an assessment missing a category renormalizes over the rest, which is a
+ * different statistic. A direction needs all four categories on BOTH visits.
+ */
+function sameOverallBasis(current, prior) {
+  return METRICS.every((m) => scoreOf(current.scores, m) != null && scoreOf(prior.scores, m) != null);
+}
+
 /**
  * @param {object} input
  * @param {{date, season?, isBaseline?, scores, confidence}} input.current this visit's assessment
  * @param {{assessmentId?, date, season?, scores, confidence?, divergentMetrics?}} input.prior the prior visit's assessment
  * @param {object|null} [input.sinceLast] reportV2.sinceLast (P12): { priorAssessmentId, priorDate, applied[], checks[] }
- *   When both name an assessment and they differ, the scores belong to another
- *   visit than the frozen treatments: nothing is judged (reason 'prior_mismatch').
+ *   Its FROZEN priorDate wins over the prior row's live date (a corrected
+ *   schedule date must not move a permanent report across a window). When
+ *   sinceLast and prior name different assessments nothing is judged
+ *   (reason 'prior_mismatch').
  * @param {number} [input.band] category dead-band (default 8)
  * @param {number} [input.overallBand] overall dead-band (default 4)
  * @returns {object} { v, engineVersion, eligible, reason, daysSincePrior, confidence, season, overall, deltas, items, unmapped }
@@ -367,68 +430,32 @@ function buildLawnProgress({
     unmapped: [],
   };
 
-  if (current?.isBaseline) return { ...base, reason: 'baseline' };
-  // The frozen sinceLast pins the visit its treatments came from; scores from
-  // any other visit would judge those treatments against the wrong dates.
-  if (sinceLast?.priorAssessmentId != null && prior?.assessmentId != null
-    && String(sinceLast.priorAssessmentId) !== String(prior.assessmentId)) {
-    return { ...base, reason: 'prior_mismatch' };
-  }
-  const priorDay = dayNumber(prior?.date || sinceLast?.priorDate);
+  const priorDate = dayString(sinceLast?.priorDate || prior?.date);
+  const priorDay = dayNumber(priorDate);
   const curDay = dayNumber(current?.date);
-  if (!prior?.scores || !current?.scores || priorDay == null || curDay == null || curDay <= priorDay) {
-    return { ...base, reason: 'no_prior' };
-  }
+  const ineligible = INELIGIBLE.find(([, test]) => test({ current, prior, sinceLast, priorDay, curDay }));
+  if (ineligible) return { ...base, reason: ineligible[0] };
 
   const days = curDay - priorDay;
-  const confidence = normalizeConfidence(current.confidence);
-  // A noisy PRIOR read makes the delta as unreliable as a noisy current one.
-  const priorConfidence = prior.confidence == null ? null : normalizeConfidence(prior.confidence);
-  const comparable = COMPARABLE_LEVELS.has(confidence.level)
-    && (priorConfidence == null || COMPARABLE_LEVELS.has(priorConfidence.level));
-  // The prior's own divergence flags (no photo read needed) make those
-  // categories as unreliable as the current visit's.
-  const divergent = new Set([
-    ...confidence.divergentMetrics,
-    ...(priorConfidence?.divergentMetrics || []),
-    ...(Array.isArray(prior.divergentMetrics) ? prior.divergentMetrics : []),
-  ]);
-
-  const priorSeason = seasonOf(prior);
-  const curSeason = seasonOf(current);
-  const seasonalLine = crossSeasonNoteFromSeasons(priorSeason, curSeason);
-  const seasonChange = seasonalLine != null;
-  const gates = { comparable, divergent, seasonChange };
-
-  const { rows, unmapped } = appliedRows(sinceLast?.applied, dayString(sinceLast?.priorDate || prior.date));
-  const items = [];
-  for (const row of rows) {
-    // Judged metrics when the row has windows; otherwise its one metric, which
-    // judgeProgress answers 'holding_steady'.
-    const metrics = Object.keys(row.metricWindows || {});
-    for (const metric of (metrics.length ? metrics : [row.metric])) {
-      if (!METRICS.includes(metric)) continue;
-      items.push(itemForMetric({ row, metric, days, cur: current.scores, prior: prior.scores, gates, band }));
-    }
-  }
-  for (const check of Array.isArray(sinceLast?.checks) ? sinceLast.checks : []) {
-    items.push(itemForCheck(check, comparable));
-  }
+  const gates = comparisonGates(current, prior);
+  const { items, unmapped } = progressItems({ sinceLast, priorDate, days, current, prior, gates, band });
+  const overall = sameOverallBasis(current, prior)
+    ? overallDirection({
+      curOverall: scoreOf(current.scores, 'overall'),
+      priorOverall: scoreOf(prior.scores, 'overall'),
+      comparable: gates.comparable,
+      seasonChange: gates.seasonChange,
+      band: overallBand,
+    })
+    : { direction: 'unknown', delta: null, band: overallBand, reason: 'incomplete_scores' };
 
   return {
     ...base,
     eligible: true,
-    reason: null,
     daysSincePrior: days,
-    confidence: { level: confidence.level, comparable, divergentMetrics: [...divergent].sort() },
-    season: { prior: priorSeason, current: curSeason, seasonChange, seasonalLine },
-    overall: overallDirection({
-      curOverall: scoreOf(current.scores, 'overall'),
-      priorOverall: scoreOf(prior.scores, 'overall'),
-      comparable,
-      seasonChange,
-      band: overallBand,
-    }),
+    confidence: { level: gates.level, comparable: gates.comparable, divergentMetrics: [...gates.divergent].sort() },
+    season: gates.season,
+    overall,
     deltas: Object.fromEntries([...METRICS, 'overall'].map((m) => [m, delta(scoreOf(current.scores, m), scoreOf(prior.scores, m))])),
     items,
     unmapped,

@@ -527,3 +527,18 @@ describe('fail-soft reads can report a failure without changing what they return
     await expect(getTurfHeightTrend('cust-1', 12, failing())).resolves.toEqual([]);
   });
 });
+
+describe('appliedFromProducts (shared with the P13 replay)', () => {
+  const { appliedFromProducts } = require('../services/service-report/lawn-visit-memory');
+  it('keeps a long catalog name whole (it is an identity), caps targets at 3, drops support products', () => {
+    const longName = 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer';
+    const out = appliedFromProducts([
+      { name: longName, kind: 'fertilizer', targets: ['a', 'b', 'c', 'd'] },
+      { name: 'LESCO 90/10 Nonionic Surfactant' },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe(longName);
+    expect(out[0].targets).toEqual(['a', 'b', 'c']);
+  });
+});
+

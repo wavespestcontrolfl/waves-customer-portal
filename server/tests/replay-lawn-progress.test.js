@@ -252,7 +252,8 @@ describe('loadReplayRows', () => {
       scores: { turf_density: 80, weed_suppression: 60, color_health: 70, stress_damage: 40, overall: expect.any(Number) },
       photos: ['80.00', null, 'adequate'],
       divergenceFlags: [{ metric: 'color_health', gap: 30 }],
-      applied: [{ name: 'Celsius WG', targets: ['Clover'] }],
+      // Shaped like the frozen visit memory (appliedFromProducts).
+      applied: [{ name: 'Celsius WG', activeIngredient: null, kind: 'other', tag: 'lawn treatment', targets: ['Clover'] }],
       order: '2026-05-01T12:00:00.000000',
       priorId: null,
       superseded: false,
