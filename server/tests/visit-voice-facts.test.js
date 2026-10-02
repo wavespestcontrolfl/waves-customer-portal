@@ -286,8 +286,9 @@ describe('validateVoiceFacts', () => {
     const note = "Didn't spray today; placed bait inside along the counter.";
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
     expect(read({ method: 'none', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: false, noSpray: true });
-    // Never on words the note does not hold, and "not said" is no claim at all.
-    expect(read({ method: 'none', quote: 'did not spray anything' })).toMatchObject({ noSpray: false });
+    // Never on words the note does not hold (that is unclear, so the sheet
+    // asks), and "not said" is no claim at all.
+    expect(read({ method: 'none', quote: 'did not spray anything' })).toMatchObject({ noSpray: false, unclearSpray: true });
     expect(read({ method: 'not_said', quote: '' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: false });
     expect(read({ method: 'spot', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });

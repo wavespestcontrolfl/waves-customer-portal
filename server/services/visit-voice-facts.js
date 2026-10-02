@@ -254,7 +254,10 @@ function validateVoiceFacts(json, note) {
 // sheet then holds while a spray product is still on the visit.
 function readSpray(spray, grounding) {
   if (spray.method === 'none') {
-    return { spray: null, unclearSpray: false, noSpray: !!groundedQuote(spray.quote, grounding) };
+    // Heard but not in the note's words: unclear, so the sheet asks rather than
+    // record the house mix as sprayed.
+    const grounded = !!groundedQuote(spray.quote, grounding);
+    return { spray: null, unclearSpray: !grounded, noSpray: grounded };
   }
   const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
   const holds = !!read && !read.denied;
