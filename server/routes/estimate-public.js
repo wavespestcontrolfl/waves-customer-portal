@@ -13670,6 +13670,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // customer's own authorization row up by this version instead
               // of manufacturing a current-version consent they never read.
               consent_text_version: String(req.body?.consentTextVersion || ''),
+              // The after-visit authorization's own version label the tab
+              // attested (GitHub Codex #5567 r11): recovery re-records that
+              // text only while it is still current.
+              ...(prepayDeferredToFirstVisitResult
+                ? { consent_variant_version: String(req.body?.prepayChargeConsentVersion || '').trim() } : {}),
               // First prepay visit — the recovery sweep re-runs the
               // promised inspection-credit redemption against THIS booking
               // before charging or delivering a pay link (Codex r9 P0: the

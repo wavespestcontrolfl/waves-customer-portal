@@ -138,7 +138,8 @@ postgres('annual prepay charged after the first visit', () => {
       method_key: 'k', authorized_total_cents: TOTAL_CENTS, authorized_base_cents: TOTAL_CENTS,
       authorized_at: authorizedAt, scheduled_service_id: f.parentId, payer_scope_scheduled_service_id: f.parentId,
       status: 'awaiting_first_visit', deferred_to_first_visit: true, created_at: authorizedAt,
-      consent_text_version: require('../services/payment-method-consent-text').CONSENT_VERSION, ...jobPatch,
+      consent_text_version: require('../services/payment-method-consent-text').CONSENT_VERSION,
+      consent_variant_version: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION, ...jobPatch,
     };
     await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'accepted',
       estimate_data: JSON.stringify({ prepayAutoChargeJob: job }) });
@@ -660,6 +661,30 @@ postgres('annual prepay charged after the first visit', () => {
       await sweep();
       expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
       expect((await jobOf(f)).status).toBe('paid');
+    });
+
+    it('after-visit text changed while the job waited (bundle still current): charges only on the row recorded under the attested text (Codex r11)', async () => {
+      const ConsentText = require('../services/payment-method-consent-text');
+      const withRow = await deferredAccept({ jobPatch: { consent_variant_version: 'v0_old_after_visit' } });
+      await trx('payment_method_consents').insert({ customer_id: withRow.customerId, stripe_payment_method_id: withRow.pmStripeId,
+        source: 'estimate_accept', consent_text_version: 'v0_old_after_visit',
+        consent_text_snapshot: ConsentText.AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT, created_at: new Date() });
+      await perform(withRow.parentId, withRow.customerId);
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId) => {
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+        return { ok: true };
+      });
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      // No current-version snapshot was manufactured for that customer.
+      const rows = await trx('payment_method_consents').where({ customer_id: withRow.customerId }).select('consent_text_version');
+      expect(rows.map((r) => r.consent_text_version)).toEqual(['v0_old_after_visit']);
+      StripeService.chargeInvoiceWithSavedCard.mockClear();
+      const without = await deferredAccept({ jobPatch: { consent_variant_version: 'v0_old_after_visit' } });
+      await perform(without.parentId, without.customerId);
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
     it('consent text changed and no after-visit row on record: pay link, never a charge', async () => {

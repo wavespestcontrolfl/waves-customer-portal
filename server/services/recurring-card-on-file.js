@@ -1294,7 +1294,16 @@ function classifySavedMethodChargeInvoice(freshInvoice) {
 async function resolvePrepayRecoveryAuthorization(job, customerId) {
   const { renderedConsentVersionIsCurrent } = require('./payment-method-consent-text');
   const version = typeof job?.consent_text_version === 'string' && job.consent_text_version ? job.consent_text_version : null;
-  if (renderedConsentVersionIsCurrent(version)) return { recordable: true, version };
+  // A deferred job was authorized under the after-visit text, whose own
+  // version label it stamps (consent_variant_version): recordable only while
+  // THAT text is current, whatever the bundle version (GitHub Codex #5567 r11).
+  const deferredJob = job?.deferred_to_first_visit === true;
+  const variantVersion = typeof job?.consent_variant_version === 'string' && job.consent_variant_version ? job.consent_variant_version : null;
+  const recordable = deferredJob
+    ? (renderedConsentVersionIsCurrent(version)
+      && variantVersion === require('./payment-method-consent-text').consentVersionForVariant('after_visit_prepay', 'card'))
+    : renderedConsentVersionIsCurrent(version);
+  if (recordable) return { recordable: true, version };
   const since = (job?.authorized_at || job?.created_at) ? new Date(job.authorized_at || job.created_at) : null;
   // A job deferred to the first visit (GATE_PAF_PREPAY) was authorized under
   // the after_visit_prepay text, recorded under that variant's own version
@@ -1307,7 +1316,9 @@ async function resolvePrepayRecoveryAuthorization(job, customerId) {
       // The PREPAY authorization specifically (codex #5434 r3 P1) — never a
       // base consent the recurring-card backstop recorded for the method.
       variant: deferred ? 'after_visit_prepay' : 'prepay_card',
-      ...(version && !deferred ? { version } : { anyVersion: true }),
+      ...(deferred
+        ? (variantVersion ? { version: variantVersion } : { anyVersion: true })
+        : (version ? { version } : { anyVersion: true })),
       ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
     })
     : false;
