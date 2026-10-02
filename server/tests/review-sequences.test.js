@@ -4981,9 +4981,16 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const out = await ReviewService.sendOutreachTouch({
         customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
         sequenceId: 'seq-tv7', sequenceStep: 1, serviceRecordId: 'sr-tv-7',
+        manageRetryVia: 'sequence', // as the sequence runner calls it
       });
-      expect(out).toMatchObject({ ok: false, retryable: true, reason: 'fallback_stamp_failed' });
+      expect(out).toMatchObject({ ok: false, code: 'FALLBACK_STAMP_FAILED' });
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      // Pre-push audit: the sequence runner keeps the retry; the row never goes back
+      // to processScheduled (pending + scheduled_for), which would resend the stale draft.
+      const row = mock.__state.rows.review_requests[0];
+      expect(['failed', 'deferred']).toContain(row.status);
+      expect(row.status).not.toBe('pending');
+      expect(row.scheduled_for == null).toBe(true);
     });
 
     test('tech voice on but no verified draft: the fixed Day-0 template sends', async () => {

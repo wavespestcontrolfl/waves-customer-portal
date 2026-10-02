@@ -5055,9 +5055,12 @@ const ReviewService = {
           await db("review_requests").where({ id: request.id }).update({ template_key: fallbackId, custom_body: null });
         } catch (err) {
           logger.warn(`[review] tech-voice long-link fallback stamp failed — retrying the step (requestId=${request.id}): ${err.message}`);
-          await db("review_requests").where({ id: request.id }).whereNot({ status: "sending" })
-            .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) }).catch(() => {});
-          return { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "fallback_stamp_failed" };
+          // The canonical outcome routing keeps retry ownership right: a
+          // cadence touch goes back to the SEQUENCE runner (row failed, step
+          // retryable), never to processScheduled, which would resend the
+          // row's stale draft and bypass this fallback.
+          return this._applyOutreachSendResult(request,
+            { deliveryOutcome: "not_sent", retryable: true, code: "FALLBACK_STAMP_FAILED" }, manageRetryVia, "sms");
         }
         request.template_key = fallbackId;
       }
