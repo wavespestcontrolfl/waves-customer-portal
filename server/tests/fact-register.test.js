@@ -657,6 +657,12 @@ describe('findUnverifiedClaims', () => {
       'Large patch is rarely dormant in summer.',
       'Large patch is hardly ever inactive in summer.',
       'Large patch rarely slows down once temperatures are above 85°F.',
+      // Celsius is converted before the 80°F line is applied (codex #5414 round 4)
+      'Large patch thrives at 30°C.',
+      'Large patch thrives when temperatures are 30 degrees Celsius or higher.',
+      'Large patch thrives when temperatures are between 29 and 35°C.',
+      'Large patch spreads when temperatures are above 30°C.',
+      'Large patch is worst when it is 32 Celsius out.',
       // a degree figure with real temperature context is still hot, even near a geometry word
       'Large patch thrives when temperatures are 90 degrees, forming arcs around sprinkler heads.',
     ])('a negated receding word is still the claim: %s', (sentence) => {
@@ -757,6 +763,11 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active when temperatures are lower than or equal to 80 degrees.',
       'Large patch is active when temperatures are at or below 80°F.',
       'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
+      // cool Celsius figures stay cool once converted
+      'Large patch is active when temperatures are 20°C.',
+      'Large patch is most likely when temperatures are 15 to 25 degrees Celsius.',
+      'Large patch is active when temperatures are below 30°C.',
+      'Large patch is active when temperatures are 24°C or lower.',
       // angular degrees are not temperatures
       'Large patch often appears as a 90-degree arc around a sprinkler head.',
       'Large patch rings can meet at a 90° angle along a sidewalk.',

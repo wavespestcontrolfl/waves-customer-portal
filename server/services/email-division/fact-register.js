@@ -729,6 +729,13 @@ function tempValue(text) {
   return (TENS_VALUE[tens] || 0) + (UNIT_VALUE[unit] || 0);
 }
 const isHotValue = (n) => n >= 80 && n <= 129;
+// The 80-degree line is Fahrenheit. A Celsius figure is converted before it
+// is judged, so "thrives at 30°C" (86°F) is the claim and "20°C" is not
+// (codex #5414 round 4).
+const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+celsius\\b|\\s*celsius\\b)';
+const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius/i;
+const toFahrenheit = (celsius) => (celsius * 9) / 5 + 32;
+const tempValueF = (text, ...units) => (units.some((u) => u && IS_CELSIUS.test(u)) ? toFahrenheit(tempValue(text)) : tempValue(text));
 
 // Temperatures are judged at SENTENCE level, once, BEFORE the sentence is
 // split into clauses (codex #5187 follow-up, rounds 1-2): the splitter breaks
@@ -755,6 +762,7 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 // of 80°F or less" is cool through the trailing "or less" fold.
 const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
+const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
 function foldTemperatures(sentence) {
@@ -765,14 +773,17 @@ function foldTemperatures(sentence) {
   };
   let text = String(sentence).replace(TEMP_RANGE, (match, a, unitA, b, unitB) => {
     if (!unitA && !unitB) return match; // "80 to 90 lawns" is not a temperature
-    const low = Math.min(tempValue(a), tempValue(b));
+    const low = Math.min(tempValueF(a, unitA, unitB), tempValueF(b, unitA, unitB));
     return token(isHotValue(low) ? 'hottemp' : 'cooltemp', match);
   });
-  text = text.replace(TEMP_TRAILING, (match, figure, _unit, direction) => {
-    const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValue(figure));
+  text = text.replace(TEMP_TRAILING, (match, figure, unit, direction) => {
+    const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValueF(figure, unit));
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
   text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
+  // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
+  // judged on its Fahrenheit value, so the raw-number triggers never see it.
+  text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
   const restore = (clause) => String(clause).replace(/\b(?:hot|cool)temp(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
   return { text, restore };
 }

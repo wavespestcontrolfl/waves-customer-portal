@@ -60,7 +60,7 @@ class WikiQA {
   async query(question, context = {}) {
     // Build live index directly from knowledge_base (not the compiled _summaries.md)
     const indexRows = await db('knowledge_base')
-      .where('active', true)
+      .whereRaw('active IS NOT FALSE') // NULL counts as on, the same rule as the article load below
       .whereNot('path', 'like', 'wiki/_%')
       .select('path', 'title', 'summary', 'category')
       .orderBy('category');
@@ -116,7 +116,7 @@ ${liveIndex}`,
       // Fallback: search by keywords
       const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
       const fallbackArticles = await db('knowledge_base')
-        .where('active', true)
+        .whereRaw('active IS NOT FALSE')
         .where(function () {
           for (const kw of keywords.slice(0, 5)) {
             this.orWhere('content', 'ilike', `%${kw}%`)
