@@ -9476,6 +9476,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // it (GitHub Codex #5567 r15).
         if (svc.paf_held_term_id && resumingCommittedCompletion) {
           deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
+          // The year stopped covering the visit before this resume (voided,
+          // refunded, dispute-suspended): the visit bills normally, so its
+          // stamp goes too, never left to release or recover the year
+          // (GitHub Codex #5567 r17).
+          if (!deferredPrepayCovered) {
+            await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
+            svc.paf_held_term_id = null;
+          }
         } else {
           const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
             || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });

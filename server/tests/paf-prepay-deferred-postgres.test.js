@@ -332,6 +332,29 @@ postgres('annual prepay charged after the first visit', () => {
     expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
   });
 
+  it('a resumed closeout whose year stopped covering it drops its stamp (Codex r17)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId })
+      .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const key = randomUUID();
+    const input = { serviceId: f.parentId, idempotencyKey: key,
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } };
+    await completeScheduledService(input);
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBe(f.termId);
+    // The closeout's side effects are resumed after the year was voided.
+    await trx('service_completion_attempts').where({ service_id: f.parentId })
+      .update({ status: 'side_effects_pending', updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+    await completeScheduledService(input);
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
+
   it('a reopened held visit closed again as paid another way loses its stamp (Codex r16)', async () => {
     const f = await deferredAccept();
     const techId = randomUUID();
