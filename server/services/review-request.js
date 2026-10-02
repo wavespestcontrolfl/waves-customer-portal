@@ -4656,11 +4656,12 @@ const ReviewService = {
     // The visit's own service type decides (it gates the termite rule), read
     // from its record every touch. If it can't be read, the touch is not
     // drafted at all: a sequence's cached type is never trusted in its place.
-    const voiceVisitType = !techVoice || !(serviceRecordId || scheduledServiceId) ? null
+    const voiceAnchor = !techVoice || !(serviceRecordId || scheduledServiceId) ? null
       : await (serviceRecordId
-        ? db("service_records").where({ id: serviceRecordId }).first("service_type")
-        : db("scheduled_services").where({ id: scheduledServiceId }).first("service_type"))
-        .then((row) => row?.service_type || null).catch(() => null);
+        ? db("service_records").where({ id: serviceRecordId }).first("service_type", "technician_id")
+        : db("scheduled_services").where({ id: scheduledServiceId }).first("service_type", "technician_id"))
+        .catch(() => null);
+    const voiceVisitType = voiceAnchor?.service_type || null;
     // A cadence anchored only to its scheduled visit (enrolled before the
     // service record existed) reads the report from the record that visit has
     // by now, linked by scheduled_service_id.
@@ -4673,7 +4674,12 @@ const ReviewService = {
     const voiceVisit = !voiceVisitType ? null : {
       serviceRecordId: serviceRecordId || linkedRecord?.id || null,
       serviceDate: linkedRecord?.service_date || serviceDate,
-      technicianId: linkedRecord?.technician_id || technicianId,
+      // A linked record's technician wins even when it has none: the scheduled
+      // technician was never verified on the completed visit.
+      // A record-anchored cadence speaks only as that record's technician
+      // (none = no name), never one the earlier recovery fell back to.
+      technicianId: linkedRecord ? (linkedRecord.technician_id || null)
+        : serviceRecordId ? (voiceAnchor?.technician_id || null) : technicianId,
       serviceType: linkedRecord?.service_type || voiceVisitType,
     };
     // The request row (rate page name / photo / date, tech attribution) must
@@ -4683,8 +4689,8 @@ const ReviewService = {
       serviceRecordId = linkedRecord.id;
       serviceDate = voiceVisit.serviceDate;
       serviceType = voiceVisit.serviceType;
-      if (linkedRecord.technician_id && linkedRecord.technician_id !== technicianId) {
-        technicianId = linkedRecord.technician_id;
+      if ((linkedRecord.technician_id || null) !== (technicianId || null)) {
+        technicianId = linkedRecord.technician_id || null;
         techName = null; // resolved from technicianId below, never the scheduled tech's name
       }
     }
@@ -4692,6 +4698,9 @@ const ReviewService = {
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
         : null;
+    // The request row carries the same technician's name the text speaks as
+    // (the rate page shows it next to their photo).
+    if (linkedRecord && !techName && voiceTechName) techName = voiceTechName;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template

@@ -4966,6 +4966,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.service_record_id).toBe('sr-tv-8');
       expect(row.technician_id).toBe('tech-real');
+      expect(row.tech_name).toBe('Maria'); // #5524 r17: the resolved name is saved too
+    });
+
+    test('#5524 pre-push: a cadence anchored to a record with no technician drafts with no name', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-11', first_name: 'Ravi', last_name: 'P', phone: '+19410000086', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-tv-11', customer_id: 'tv-11', scheduled_service_id: 'ss-tv-11', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), technician_id: null }],
+        scheduled_services: [{ id: 'ss-tv-11', customer_id: 'tv-11', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: 'tech-sched' }],
+        technicians: [{ id: 'tech-sched', name: 'Sched Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv11', sequenceStep: 1, serviceRecordId: 'sr-tv-11',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+    });
+
+    test('#5524 pre-push: a linked record with no technician drafts with no name, never the scheduled tech', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-10', first_name: 'Ravi', last_name: 'P', phone: '+19410000087', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-10', customer_id: 'tv-10', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: 'tech-sched' }],
+        service_records: [{ id: 'sr-tv-10', customer_id: 'tv-10', scheduled_service_id: 'ss-tv-10', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), created_at: new Date(), technician_id: null }],
+        technicians: [{ id: 'tech-sched', name: 'Sched Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv10', sequenceStep: 1, scheduledServiceId: 'ss-tv-10', technicianId: 'tech-sched', techName: 'Sched Tech',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.technician_id == null).toBe(true);
+      expect(row.tech_name == null).toBe(true);
     });
 
     test('#5524 r9: a visit whose service type cannot be read is not drafted (a stale cached type is never trusted)', async () => {
