@@ -119,6 +119,9 @@ describe('anchorSoleProperty — a series child follows its series (ops 2026-10-
       }
       let root = null;
       let customerId = null;
+      let unlinkedOnly = false;
+      const live = (v) => !['cancelled', 'skipped'].includes(v.status);
+      const inSeries = (v) => (v.id === root || v.recurring_parent_id === root) && v.customer_id === customerId && live(v);
       const q = {
         join: () => q,
         where: (a) => {
@@ -127,10 +130,14 @@ describe('anchorSoleProperty — a series child follows its series (ops 2026-10-
           } else if (a['ss.customer_id']) customerId = a['ss.customer_id'];
           return q;
         },
+        whereNull: () => { unlinkedOnly = true; return q; },
         distinct: () => q,
+        select: async () => visits.filter((v) => inSeries(v) && !v.property_id).map((v) => ({
+          service_address_line1: v.service_address_line1 || null, service_address_line2: null,
+          service_address_city: v.service_address_city || null, service_address_zip: v.service_address_zip || null,
+        })),
         limit: async (n) => {
-          const rows = visits.filter((v) => (v.id === root || v.recurring_parent_id === root) && v.customer_id === customerId
-            && !['cancelled', 'skipped'].includes(v.status) && v.property_id
+          const rows = visits.filter((v) => inSeries(v) && v.property_id
             && properties.some((p) => p.id === v.property_id && p.active && p.customer_id === customerId));
           return [...new Set(rows.map((r) => r.property_id))].slice(0, n).map((property_id) => ({ property_id }));
         },
@@ -193,6 +200,33 @@ describe('anchorSoleProperty — a series child follows its series (ops 2026-10-
     await anchorSoleProperty(row, COLS, trx);
     expect(row.property_id).toBe(UUID_RENTAL);
     expect(seriesConn.locks).toEqual([UUID_RENTAL]);
+  });
+
+  test('an unlinked live visit stamped with another address, or an unstamped one against a non-primary house, leaves the series unresolved', async () => {
+    const stampedElsewhere = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: UUID_HOME },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: null, service_address_line1: '200 Rental Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+    ] });
+    const a = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(a, COLS, stampedElsewhere);
+    expect(a.property_id).toBeNull();
+
+    const unstampedVsRental = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: UUID_RENTAL },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: null },
+    ] });
+    const b = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(b, COLS, unstampedVsRental);
+    expect(b.property_id).toBeNull();
+
+    // …while an unstamped one agrees with the PRIMARY (it reads as the primary)
+    const unstampedVsHome = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: UUID_HOME },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: null },
+    ] });
+    const c = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(c, COLS, unstampedVsHome);
+    expect(c.property_id).toBe(UUID_HOME);
   });
 
   test('a legacy NULL-status visit counts as live', async () => {

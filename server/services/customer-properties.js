@@ -872,9 +872,36 @@ async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
     .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
     .distinct('ss.property_id')
     .limit(2);
+  // Live visits of the series with NO property are evidence too (the
+  // 20260829000050 backfill leaves ambiguous ones unlinked): one stamped
+  // with another address, or unstamped (it reads as the customer's primary)
+  // while the candidate is not the primary, makes the series unresolved.
+  const unlinked = (c) => c('scheduled_services as ss')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId })
+    .whereNull('ss.property_id')
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
+    .select('ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip');
+  const candidate = (c, id) => c('customer_properties').where({ id, customer_id: customerId, active: true })
+    .first('address_line1', 'address_line2', 'city', 'zip', 'is_primary');
+  const decide = async (c) => {
+    const rows = await read(c);
+    if (rows.length !== 1) return null;
+    const id = rows[0].property_id;
+    const [others, house] = await Promise.all([unlinked(c), candidate(c, id)]);
+    if (!house) return null;
+    const houseKey = addressKey(house);
+    for (const o of others) {
+      if (o.service_address_line1) {
+        if (addressKey({ address_line1: o.service_address_line1, address_line2: o.service_address_line2, city: o.service_address_city, zip: o.service_address_zip }) !== houseKey) return null;
+      } else if (!house.is_primary) {
+        return null;
+      }
+    }
+    return id;
+  };
   try {
-    const rows = await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
-    return rows.length === 1 ? rows[0].property_id : null;
+    return await (conn.isTransaction ? conn.transaction((sp) => decide(sp)) : decide(conn));
   } catch {
     return null;
   }
