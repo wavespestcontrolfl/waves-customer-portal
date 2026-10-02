@@ -173,7 +173,9 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
 
   test('the verdict must be an accepted in-area PREMISE / SUB_PREMISE address', () => {
     expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'SUB_PREMISE' }, stored, V2)).toBe(true);
-    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected' }, stored, V2)).toBe(true);
+    // a `corrected` verdict changed some component — possibly the unit Google's form cannot show — so it holds (codex #5559 r16 P1)
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected' }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected', granularity: 'SUB_PREMISE' }, { ...stored, address_line2: 'Apt 3' }, { ...V2, street_line_2: 'Apt 3' })).toBe(false);
     expect(firstNameAdvisoryAddressOk({ ...AV, granularity: undefined }, stored, V2)).toBe(false);
     expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'ROUTE' }, stored, V2)).toBe(false);
     expect(firstNameAdvisoryAddressOk({ ...AV, status: 'ambiguous' }, stored, V2)).toBe(false);
@@ -341,7 +343,7 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false); // booking-path site: no duplicate
     await trx('triage_items').update({ status: 'in_progress' });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
-    await trx('triage_items').update({ status: 'resolved' }); // a resolved card is not re-opened by the other site
+    await trx('triage_items').update({ status: 'dismissed' }); // a card the office dismissed is not re-opened or re-filed
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
     // RELINK / REBOOK: the call now owes a first name on a DIFFERENT blank-name customer B while A's
@@ -364,14 +366,21 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(true);
     expect((await trx('triage_items').where({ call_log_id: callLogId }))[0].payload.customer_ids).toEqual([customerId, other]);
-    // when the call's cards are ALL terminal, a newly owed customer gets a FRESH card; a listed one is not re-opened
-    await trx('triage_items').update({ status: 'resolved' });
+    // when the call's cards are ALL terminal, a newly owed customer gets a FRESH card; a dismissed one is not re-filed
+    await trx('triage_items').update({ status: 'dismissed' });
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await fileMissingFirstNameCard(trx, { ...args, customerId: third })).toBe(true);
     rows = await trx('triage_items').where({ call_log_id: callLogId }).orderBy('created_at');
     expect(rows).toHaveLength(2);
     expect(rows.filter((r) => r.status === 'open')).toHaveLength(1);
     expect(rows.find((r) => r.status === 'open').payload.customer_ids).toEqual([third]);
+    // a RESOLVED card (the name was given) does not block a fresh one: filing again means the name was cleared since (codex #5559 r16)
+    await trx('triage_items').where({ call_log_id: callLogId }).del();
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(true);
+    await trx('triage_items').update({ status: 'resolved' });
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(true);
+    rows = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(rows.map((r) => r.status).sort()).toEqual(['open', 'resolved']);
     await trx('triage_items').where({ call_log_id: callLogId }).del();
     await fileMissingFirstNameCard(trx, args);
     // the finalization recheck: only an open / claimed card keeps the reason counting toward review_status

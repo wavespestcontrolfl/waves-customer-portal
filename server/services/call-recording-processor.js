@@ -3756,13 +3756,14 @@ function addressesExactlyMatch(stored = {}, verdictInput = {}) {
 // only when the verdict is an accepted in-area premise AND the stored address exactly
 // matches BOTH the address the verdict ran on (`verdictInput`: the caller's raw V2
 // service_address; a street recovery that rewrote it is not exact) AND the verdict's own
-// normalized address (street, city, ZIP — Google's form carries no unit). A correction
-// that changed anything but cosmetics therefore holds, whichever of the two the stored
-// row kept (codex #5559 r13 pre-push P1). Used by customer creation and by the booking
-// hold, so neither can re-judge what the other accepted. Pure.
+// normalized address (street, city, ZIP — Google's form carries no unit). Only a
+// `validated_accept` verdict qualifies: a `corrected` one changed some component of what
+// the caller said — possibly the unit, which the normalized form cannot show — so it
+// holds for the office (codex #5559 r13 pre-push P1, r16 P1). Used by customer creation
+// and by the booking hold, so neither can re-judge what the other accepted. Pure.
 function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
   const n = av?.normalized;
-  return verdictAcceptsAddress(av) && !!verdictInput && !!n
+  return av?.status === 'validated_accept' && verdictAcceptsAddress(av) && !!verdictInput && !!n
     && addressesExactlyMatch(extracted, verdictInput)
     && addressesExactlyMatch({ ...extracted, address_line2: null },
       { street_line_1: n.street_line_1, street_line_2: null, city: n.city, postal_code: n.postal_code });
@@ -3772,8 +3773,10 @@ function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
 // payload.customer_ids lists EVERY customer the call left owing a first name (a card
 // filed before the list shape carries the scalar customer_id, read as a one-element
 // list). Filed at customer creation AND on the booking path:
-//   - a customer already listed (on any card for the call, open or terminal) is never
-//     duplicated or re-opened;
+//   - a customer already listed on an OPEN card, or on a card the office DISMISSED, is
+//     never duplicated or re-opened; one listed only on a RESOLVED card is owed again (we
+//     file only while the name is blank, so the name was cleared since) and gets a fresh
+//     card (codex #5559 r16);
 //   - while the call's card is open / claimed, a NEW owed customer (a relink or rebook to
 //     another blank-name customer) is APPENDED to its list — never replacing one;
 //   - when the call's cards are all terminal, a new owed customer gets a fresh card.
@@ -3791,7 +3794,8 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
     await lockTriageCall(trx, callLogId);
     const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
       .select('id', 'status', 'payload');
-    if (rows.some((row) => stamp && owedCustomerIds(row.payload).includes(stamp))) return false;
+    if (rows.some((row) => stamp && ['open', 'in_progress', 'dismissed'].includes(row.status)
+      && owedCustomerIds(row.payload).includes(stamp))) return false;
     const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
     if (live) {
       const ids = owedCustomerIds(live.payload);
