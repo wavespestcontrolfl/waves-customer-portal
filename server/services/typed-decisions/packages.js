@@ -87,8 +87,41 @@ const SMS_RESCHEDULE = {
   },
 };
 
+// Evidence for three dark call gates (Clef second wave, idea 8, owner order
+// 2026-10-02): each question is the yes/no a gate acts on, recorded beside
+// that gate's OWN decision (call-self-audit.js gateCheckBaselines), so its
+// flip pack can show how often the rule and the models agree on real calls.
+// The gates' actions never change. Yes/no only: the Clef replay showed
+// multi-way choices are weak, so service clarity is one noul, not a choice.
+const CALL_GATE_CHECKS = {
+  id: 'call_gate_checks.v1',
+  capability: 'call_gate_checks',
+  version: 1,
+  description: 'Three yes/no checks behind dark call gates: unclear service (Assessment), a committed reschedule, an open Waves promise.',
+  stateShape: ['call_direction', 'duration_seconds', 'transcript'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the extraction's ambiguous_pest_or_service flag.
+    service_unclear: noul('Did the caller want service but leave it unclear WHICH service they need (pest, termite, lawn, mosquito, rodent, wildlife or other), so a technician would have to look before it could be named or priced?', {
+      true: 'They describe a problem or ask for help but the service cannot be named from the call (e.g. "something is eating my plants", "bugs, not sure what kind").',
+      false: 'The service is clear from the call, or no service was requested (billing, scheduling an existing visit, spam, voicemail with no request).',
+    }),
+    // GATE_CALL_RESCHEDULE_APPLY: the extraction's committed reschedule (status reschedule_requested + agent_committed_booking + confirmed_start_at).
+    reschedule_committed: noul('Did Waves staff and the caller agree to move an existing, already booked visit to a specific new day and time?', {
+      true: 'An existing visit is moved and both sides settle on the new day and time on the call.',
+      false: 'No existing visit is moved, the new time is only proposed or left open, it is a cancellation, or it is a first booking.',
+    }),
+    // GATE_PROMISE_CHASER_BELL: the extracted Waves commitments (call_commitments, party waves, not stale).
+    promise_open: noul('Did Waves staff promise the caller something to do AFTER this call (call back, send a quote or estimate, text or email information, come out at a time)?', {
+      true: 'Staff commit to a follow-up action that the call itself does not complete.',
+      false: 'Nothing is promised for after the call, or the promise was carried out during the call.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
+  [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
 });
