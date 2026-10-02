@@ -167,12 +167,32 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
   });
 
   test('wiring: creation and the booking hold call the same predicate, a recovery-rewritten input is never exact, and the superseded unit machinery is gone (rule 19)', () => {
-    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
-    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2StatedAddress)');
+    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null)');
+    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2ForAddressCheck ? v2StatedServiceAddressRaw : null)');
     expect(source.match(/!addressRecovery\?\.recovered/g).length).toBeGreaterThanOrEqual(2);
     for (const gone of ['storedAddressMatchesVerdict', 'function addressLineUnit', 'function addressRenderingsAgree', 'addressZip5']) {
       expect(source).not.toContain(gone);
     }
+  });
+
+  test('wiring: the exact match compares against the caller\'s RAW V2 address, frozen before AV and normalization (codex #5559 r12 P1)', () => {
+    const snap = source.indexOf('v2StatedServiceAddressRaw = rawServiceAddress ? Object.freeze({ ...rawServiceAddress }) : null;');
+    expect(snap).toBeGreaterThan(-1);
+    expect(snap).toBeLessThan(source.indexOf('v2AddressValidation = await validateWithOnFileAssist({'));
+    expect(snap).toBeLessThan(source.indexOf('v2Extraction.property.service_address = {'));
+    // a `corrected` verdict that changed the house number: Google's form is stored, the caller said another → hold
+    const raw = { ...V2, street_line_1: '120 Example Loop' };
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected' }, stored, raw)).toBe(false);
+  });
+
+  test('wiring: a fenced first-name hold files its card after the rollback and marks the call for review', () => {
+    const start = source.indexOf('if (schedErr.firstNameHold) {');
+    expect(start).toBeGreaterThan(source.indexOf('} catch (schedErr) {'));
+    const block = source.slice(start, start + 900);
+    expect(block).toContain("skippedReason: 'missing_required_customer_fields', missingFields: ['first_name']");
+    expect(block).toContain('await fileFirstNameAdvisoryCard(db)');
+    expect(block).toContain('await missingFirstNameCardStillOpen(db, call.id)');
+    expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
   test('wiring: the booking path marks the call for review while the first-name card is open', () => {
@@ -191,7 +211,10 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     const block = source.slice(start, start + 900);
     expect(block).toContain('customerValidation: freshValidation');
     expect(block).toContain("freshHoldFields.includes('first_name')");
-    expect(block).toContain('throw new Error(');
+    expect(block).toContain('firstNameErr.firstNameHold = true;');
+    // the card is NOT filed inside the transaction this throw rolls back (codex #5559 r12 P2)
+    const holdBranch = block.slice(block.indexOf("if (freshHoldFields.includes('first_name')) {"), block.indexOf('throw firstNameErr;'));
+    expect(holdBranch).not.toContain('fileFirstNameAdvisoryCard(trx)');
     // the same decision the pre-fence hold makes: a fresh first_name advisory without an exact address holds; with one it does not
     const fresh = { ok: true, missing: [], advisory: ['first_name'] };
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: fresh, avPositiveForBooking: true, exactAddressForBooking: false })).toEqual(['first_name']);
@@ -230,7 +253,7 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
     expect(predicate).toContain('callFirstNameAdvisoryLive()');
     expect(predicate).toContain("String(extracted.last_name || '').trim()");
-    expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
+    expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null)');
   });
 
   test('customer_creation_failed expectation follows the same predicate', () => {

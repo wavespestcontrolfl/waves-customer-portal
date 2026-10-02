@@ -10024,6 +10024,12 @@ const CallRecordingProcessor = {
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
     let v2AddressValidation = null;
+    // The caller's own V2 service address, frozen BEFORE address validation and the
+    // routing-path normalization rewrite v2Result.extraction (and `extracted`) with
+    // Google's form. The first-name advisory exact-match compares against THIS, so a
+    // `corrected` verdict that changed the house number, unit, city or ZIP holds
+    // (codex #5559 r12 P1). Null unless the extraction is valid.
+    let v2StatedServiceAddressRaw = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2StartedAt = Date.now();
@@ -10046,6 +10052,8 @@ const CallRecordingProcessor = {
         // recorded for the promotion-readiness gate and reused by the routing
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
+          const rawServiceAddress = v2Result.extraction.property?.service_address;
+          v2StatedServiceAddressRaw = rawServiceAddress ? Object.freeze({ ...rawServiceAddress }) : null;
           try {
             // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
             // same validateAddress call this site always made. Gate on, a
@@ -12061,7 +12069,7 @@ const CallRecordingProcessor = {
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
       && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
-      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address);
+      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
@@ -16902,7 +16910,7 @@ const CallRecordingProcessor = {
           // (a recovery-rewritten verdict input is never exact); the email advisory keeps its
           // own long-standing validated-address bar above.
           const exactAddressForBooking = !addressRecovery?.recovered
-            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2StatedAddress);
+            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2ForAddressCheck ? v2StatedServiceAddressRaw : null);
           const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking });
           const emailAdvisoryHold = advisoryHoldFields.length > 0;
           if (!customerValidation.ok || emailAdvisoryHold) {
@@ -17319,8 +17327,11 @@ const CallRecordingProcessor = {
                     enforceModeActive, customerValidation: freshValidation, avPositiveForBooking, exactAddressForBooking,
                   });
                   if (freshHoldFields.includes('first_name')) {
-                    await fileFirstNameAdvisoryCard(trx);
-                    throw new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
+                    // The card is filed by the schedErr catch AFTER this transaction rolls
+                    // back — filed here it would roll back with the booking (codex #5559 r12 P2).
+                    const firstNameErr = new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
+                    firstNameErr.firstNameHold = true;
+                    throw firstNameErr;
                   }
                   if (freshValidation.advisory?.includes('first_name')) {
                     await fileFirstNameAdvisoryCard(trx);
@@ -19317,6 +19328,20 @@ const CallRecordingProcessor = {
                   serviceType, bridgeNeedsConfirmation, callSid,
                 });
               }
+            }
+            // A fenced first-name hold is a HOLD too: the booking rolled back, so the
+            // first-name card is filed now on its own connection (no transaction locks
+            // are held any more) and the call goes to review exactly like the
+            // pre-fence hold.
+            if (schedErr.firstNameHold) {
+              appointmentResult = {
+                ...appointmentResult, scheduleCreated: false,
+                skippedReason: 'missing_required_customer_fields', missingFields: ['first_name'],
+              };
+              await fileFirstNameAdvisoryCard(db)
+                .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+              if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+                && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
             }
           }
 
