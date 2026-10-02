@@ -767,11 +767,23 @@ const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:abou
 // same cap as "a maximum of 80°F".
 // It must end the clause: "90°F maximum damage" is not a ceiling.
 const TEMP_POSTFIX_CEILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
-// Temperature wording within the three words before the figure: "highs are
-// 85 or more", "temperatures climb to 85 or higher". "it is estimated that
-// large patch damaged 85 or more properties" has none (codex #5561 round 1).
-const TEMP_CONTEXT_BEFORE = /(?:\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|degrees?)\b|°)\s*(?:\S+\s+){0,3}$/i;
+// Temperature wording earlier in the same clause: "highs are 85 or more",
+// "temperatures are expected to be about 85 or higher". "it is estimated
+// that large patch damaged 85 or more properties" has none (codex #5561
+// rounds 1 and 3). The clause starts after the last punctuation or
+// conjunction, so "temperatures soar in July, and 85 or more lawns" is a
+// count.
+const TEMP_CONTEXT_WORD = /\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|degrees?)\b|°/i;
+const CLAUSE_BREAK_BEFORE = /[,;:.!?()]|\b(?:and|but|while|although|though|whereas|because|since|so)\b/gi;
+function temperatureContextBefore(whole, offset) {
+  const before = whole.slice(0, offset);
+  let start = 0;
+  for (const m of before.matchAll(CLAUSE_BREAK_BEFORE)) start = m.index + m[0].length;
+  return TEMP_CONTEXT_WORD.test(before.slice(start));
+}
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
+const CEILING_WORD = /\b(?:at\s+most|up\s+to|max(?:imum)?|ceiling|cap(?:s|ped|ping)?|limit|tops?\s+out)\b/i;
+const TEMP_FIGURE_WITH_UNIT = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*$`, 'i');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
 function foldTemperatures(sentence) {
@@ -791,11 +803,20 @@ function foldTemperatures(sentence) {
     // No unit: "85 or more" is a temperature only when temperature wording
     // leads into it ("temperatures are 85 or higher"). "damaged 85 or more
     // properties" is a count, whatever the noun (codex #5414 round 7).
-    if (!unit && !TEMP_CONTEXT_BEFORE.test(whole.slice(Math.max(0, offset - 80), offset))) return match;
+    if (!unit && !temperatureContextBefore(whole, offset)) return match;
     const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValueF(figure, unit));
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
-  text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
+  text = text.replace(TEMP_LEADING_DOWN, (match) => {
+    // A CEILING above the line ("at most 90°F", "a maximum of 90°F") still
+    // names heat the lawn is active in, like the postfix form; a comparator
+    // ("below 90°F") keeps the documented cool reading (codex #5561 round 3).
+    if (CEILING_WORD.test(match)) {
+      const fig = match.match(TEMP_FIGURE_WITH_UNIT);
+      if (fig && tempValueF(fig[1], fig[2]) > 80 && isHotValue(tempValueF(fig[1], fig[2]))) return token('hottemp', match);
+    }
+    return token('cooltemp', match);
+  });
   // A ceiling above the line still names heat the lawn is active in:
   // "thrives at a 90°F maximum air temperature" stays hot (codex #5561 round 2).
   text = text.replace(TEMP_POSTFIX_CEILING, (match, figure, unit) => token(tempValueF(figure, unit) > 80 && isHotValue(tempValueF(figure, unit)) ? 'hottemp' : 'cooltemp', match)); // a ceiling AT 80 is the cool side

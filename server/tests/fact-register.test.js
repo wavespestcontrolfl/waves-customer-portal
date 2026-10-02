@@ -669,7 +669,13 @@ describe('findUnverifiedClaims', () => {
       'Large patch cannot be anything but active in summer.',
       'Large patch thrives in anything but dry summers.',
       'Large patch is never anything but active in summer.',
-      // a postfix ceiling above the line is still heat
+      // a ceiling above the line is still heat, prefix or postfix
+      'Large patch thrives when temperatures are at most 90°F.',
+      'Large patch thrives when temperatures have a maximum of 90°F.',
+      'Large patch thrives when temperatures are capped at 95 degrees.',
+      // temperature context earlier in the clause binds a unitless bound
+      'Large patch thrives when temperatures are expected to be about 85 or higher.',
+      'Large patch thrives when daytime highs are forecast to stay 90 or more.',
       'Large patch thrives at a 90°F maximum air temperature.',
       'Large patch is active at 95°F max.',
       'Large patch thrives when temperatures are 85°F, far from the coast.',
@@ -794,6 +800,9 @@ describe('findUnverifiedClaims', () => {
       'Large patch far from homes remains dormant in summer.',
       'It is estimated that large patch damaged 85 or more properties.',
       'Large patch was found on 85 or more lawns last year.',
+      'Temperatures soar in July, and large patch was found on 85 or more lawns.',
+      // a comparator keeps its documented cool reading
+      'Large patch is active when temperatures are below 90°F.',
       // a unitless trailing bound with no temperature wording is a count
       'Large patch damaged 85 or more properties last year.',
       'Large patch showed up in 90 or more neighborhoods this fall.',
