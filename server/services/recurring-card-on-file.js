@@ -1744,11 +1744,8 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // that started after it, sends the job back to wait for the next
       // release pass — never a charge, never a pay link.
       if (deferredToFirstVisit) {
-        const releasedVisit = job.released_for_visit_id
-          ? await db('scheduled_services').where({ id: job.released_for_visit_id }).first('status')
-          : null;
-        const visitStands = !job.released_for_visit_id || String(releasedVisit?.status || '') === 'completed';
         const PafRelease = require('./paf-prepay-release');
+        const visitStands = !job.released_for_visit_id || await PafRelease.visitStillPerformed(job.released_for_visit_id);
         if (!visitStands || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
           await requeueDeferred();
           continue;
