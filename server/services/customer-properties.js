@@ -868,7 +868,8 @@ async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
     .join('customer_properties as p', 'p.id', 'ss.property_id')
     .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
     .where({ 'ss.customer_id': customerId, 'p.customer_id': customerId, 'p.active': true })
-    .whereNotIn('ss.status', ['cancelled', 'skipped'])
+    // A legacy NULL status is a live visit (20260829000050's rule).
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
     .distinct('ss.property_id')
     .limit(2);
   try {
@@ -879,17 +880,45 @@ async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
   }
 }
 
+/** bookingPropertyStamp for a resolved id, or null (incomplete, gone, or a failed read). */
+async function propertyStampOrNull(customerId, propertyId, conn) {
+  try {
+    const read = (c) => bookingPropertyStamp({ customerId, propertyId: String(propertyId) }, c);
+    return await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
+  } catch {
+    return null;
+  }
+}
+
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
-  if (cols.service_address_line1 && target.service_address_line1) return;
   if (cols.source_estimate_id && target.source_estimate_id) return;
+  const stamped = !!(cols.service_address_line1 && target.service_address_line1);
   // A series child follows the house its series is already at, before the
   // sole-property fallback (which only resolves a one-property customer).
   if (target.recurring_parent_id) {
     const agreed = await seriesAgreedPropertyId(target.recurring_parent_id, target.customer_id, conn);
-    if (agreed) { target.property_id = agreed; return; }
+    const stamp = agreed ? await propertyStampOrNull(target.customer_id, agreed, conn) : null;
+    if (stamp) {
+      if (stamped) {
+        // An address copied from the root wins; the property is adopted only
+        // when it is that same address.
+        const copied = {
+          address_line1: target.service_address_line1, address_line2: target.service_address_line2,
+          city: target.service_address_city, zip: target.service_address_zip,
+        };
+        const own = { address_line1: stamp.service_address_line1, address_line2: stamp.service_address_line2, city: stamp.service_address_city, zip: stamp.service_address_zip };
+        if (addressKey(copied) === addressKey(own)) target.property_id = stamp.property_id;
+        return;
+      }
+      // Dispatch reads the visit's stamped address (falling back to the
+      // customer's primary), so the house's address and pin ride with its id.
+      for (const [field, value] of Object.entries(stamp)) if (cols[field]) target[field] = value;
+      return;
+    }
   }
+  if (stamped) return;
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
