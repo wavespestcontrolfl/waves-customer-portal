@@ -502,8 +502,9 @@ describe('Treating-for gate', () => {
     const request = makeRequest();
     await openSheet(request);
     fireEvent.click(tile('Celsius WG'));
-    expect(screen.getByText('Select what you treated for.')).toBeTruthy();
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
     otherTarget('Celsius WG', 'Clover');
+    expect(screen.queryByText('Pick what Celsius WG was for.')).toBeNull();
     expect(screen.queryByText('Select what you treated for.')).toBeNull();
     where('Celsius WG');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
@@ -520,7 +521,7 @@ describe('Treating-for gate', () => {
     otherTarget('Celsius WG', 'Clover');
     where('Celsius WG');
     fireEvent.click(tile('Talak 7.9%'));
-    expect(screen.getByText('Select what you treated for.')).toBeTruthy();
+    expect(screen.getByText('Pick what Talak 7.9% was for.')).toBeTruthy();
     fireEvent.click(issue('Dollarweed'));
     expect(screen.getByText('Pick what Talak 7.9% was for.')).toBeTruthy();
   });
@@ -704,11 +705,12 @@ describe('what the customer said', () => {
 });
 
 describe('required taps', () => {
-  test('Complete waits for a product with an amount, a treating-for chip, where, pressure and condition, in that order', async () => {
+  test('Complete waits for a product with an amount, its target, where, pressure and condition, in that order', async () => {
     await openSheet();
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     fireEvent.click(tile('Celsius WG'));
-    expect(screen.getByText('Select what you treated for.')).toBeTruthy();
+    // Treating for is optional context; the pesticide row's own target is not.
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
     fireEvent.click(issue('Sedge'));
     expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
     forTarget('Celsius WG', 'Sedge');

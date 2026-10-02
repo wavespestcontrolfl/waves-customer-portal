@@ -378,9 +378,10 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
   // A pest-control product needs what it was applied against; nothing else does.
   const pesticideRows = active.filter(isPesticideRow);
   const missingTarget = pesticideRows.find((row) => !rowTargetNames(row, form).length);
-  // The visit-level Treating-for pick is not needed once every pesticide row
-  // already holds a target (an Other target alone is enough).
-  const needsIssues = !form.issues.size && !(pesticideRows.length && !missingTarget);
+  // Treating for (turf_issues) is optional visit context: the server does not
+  // require it, and the application facts it would vouch for are each
+  // pesticide row's own targets, required above. A fertilizer-only visit or
+  // one whose targets come from Other target never has to invent an issue.
   const missingWhere = active.find((row) => !row.areas.length);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
@@ -390,7 +391,6 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [missingMethod, missingMethod && `Pick how ${missingMethod.name} went down.`],
     [missingArea, missingArea && `Enter the square feet treated for ${missingArea.name}.`],
-    [needsIssues, 'Select what you treated for.'],
     [missingTarget, missingTarget && `Pick what ${missingTarget.name} was for.`],
     [missingWhere, missingWhere && `Pick where ${missingWhere.name} went.`],
     [!form.pressure, 'Select the weed pressure.'],
