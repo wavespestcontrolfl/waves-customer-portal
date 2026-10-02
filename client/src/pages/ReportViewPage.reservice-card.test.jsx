@@ -181,9 +181,7 @@ describe('ReserviceReportCard: gate off / not applicable renders nothing new', (
 
 describe('print (Codex r1 on #5542)', () => {
   it('the "Still seeing" action is hidden when the live view is printed', async () => {
-    const fs = await import('node:fs');
-    const path = await import('node:path');
-    const src = fs.readFileSync(new URL('./ReportViewPage.jsx', import.meta.url), 'utf8');
+    const { default: src } = await import('./ReportViewPage.jsx?raw');
     const printBlocks = src.split('@media print').slice(1).map((b) => b.slice(0, 2500));
     expect(printBlocks.some((b) => /\.reservice-card-cta\s*\{\s*display:\s*none;/.test(b))).toBe(true);
   });
