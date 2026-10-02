@@ -254,10 +254,18 @@ function validateVoiceFacts(json, note) {
     if (!name || pests.has(name)) continue;
     if (!deniedInNote(quote, grounding, { assertion: nameAssertion(name), denialAfter: TRAILING_DENIAL.pest })) pests.set(name, quote);
   }
+  // Every product's targets come from these. A pest whose own words deny the
+  // treatment ("didn't treat for roaches") is never one; and with more than
+  // one pest heard, each must be tied to the treatment in its own words
+  // ("treated outside for spiders"), so one only seen ("saw ants inside") is
+  // left out (Codex #5538). A single pest is the note's one subject.
+  const targets = [...pests].filter(([, quote]) => (treatmentAssertion(quote)
+    ? !deniedInNote(quote, grounding, TREATMENT_FACT)
+    : pests.size === 1));
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
-    pests: [...pests].slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
+    pests: targets.slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
     ...readSpray(answer.spray || {}, grounding),
   };
 }

@@ -324,6 +324,30 @@ describe('validateVoiceFacts', () => {
     expect(facts.spray).toMatchObject({ method: 'perimeter' });
   });
 
+  test('with more than one pest heard, only those tied to a treatment are targets (GitHub Codex P1 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('Saw ants inside; treated outside for spiders.', [
+      { name: 'ants', quote: 'Saw ants inside' },
+      { name: 'spiders', quote: 'treated outside for spiders' },
+    ])).toEqual(['spiders']);
+    expect(read('Treated for ants in the kitchen and sprayed the eaves for spiders.', [
+      { name: 'ants', quote: 'Treated for ants in the kitchen' },
+      { name: 'spiders', quote: 'sprayed the eaves for spiders' },
+    ])).toEqual(['ants', 'spiders']);
+    expect(read("Didn't treat for roaches; sprayed outside for ants.", [
+      { name: 'roaches', quote: "Didn't treat for roaches" },
+      { name: 'ants', quote: 'sprayed outside for ants' },
+    ])).toEqual(['ants']);
+  });
+
+  test('a single pest heard stays the target, unless its own words deny the treatment', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('Ghost ants on the kitchen counter, light. Baited the counter edge.', [
+      { name: 'ghost ants', quote: 'Ghost ants on the kitchen counter' },
+    ])).toEqual(['ghost ants']);
+    expect(read("Didn't treat for roaches today.", [{ name: 'roaches', quote: "Didn't treat for roaches" }])).toEqual([]);
+  });
+
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
     const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
