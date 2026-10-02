@@ -45,7 +45,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Wednesday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = 149",
           "scheduled_services[new].property_id = cust-pellham primary"
@@ -62,7 +62,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-07",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "10:00 AM",
           "price": 149
         }
@@ -104,7 +104,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Thursday 16:00 Eastern; window_end = 17:00 (stored flat 60-minute block; the 16:00-18:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = catalog one-time pest price"
         ],
@@ -120,7 +120,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-08",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "4:00 PM"
         }
       },
@@ -345,7 +345,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-07",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "9:00 AM",
           "price": 149
         }
@@ -389,7 +389,7 @@
             "input": {
               "customer_id": "cust-pellham",
               "scheduled_date": "2026-10-07",
-              "service_type": "one-time pest treatment",
+              "service_type": "One-Time Pest Control Service",
               "time_window": "10:00 AM",
               "price": 149
             }
@@ -434,7 +434,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-08",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "10:00 AM"
         }
       },
@@ -475,7 +475,7 @@
             "input": {
               "customer_id": "cust-pellham",
               "scheduled_date": "2026-10-08",
-              "service_type": "one-time pest treatment",
+              "service_type": "One-Time Pest Control Service",
               "time_window": "10:00 AM"
             }
           },
@@ -490,7 +490,7 @@
             "outcome": "completed",
             "changes": [
               "scheduled_services[new].customer_id = cust-pellham",
-              "scheduled_services[new].service_type = one-time pest treatment",
+              "scheduled_services[new].service_type = One-Time Pest Control Service",
               "scheduled_services[new].window_start = Thursday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
               "scheduled_services[new].estimated_price = the new catalog price"
             ],
@@ -506,7 +506,7 @@
             "input": {
               "customer_id": "cust-pellham",
               "scheduled_date": "2026-10-08",
-              "service_type": "one-time pest treatment",
+              "service_type": "One-Time Pest Control Service",
               "time_window": "10:00 AM"
             }
           },
@@ -550,7 +550,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-07",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "10:00 AM"
         }
       },
@@ -596,7 +596,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Tuesday 11:00 Eastern; window_end = 12:00 (stored flat 60-minute block; the 11:00-13:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = 149"
         ],
@@ -612,7 +612,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-06",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "11:00 AM",
           "price": 149
         }
@@ -671,7 +671,7 @@
         "input": {
           "customer_id": "cust-larkspur",
           "scheduled_date": "2026-10-06",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "1:00 PM",
           "property_id": "larkspur-rental"
         }
@@ -701,7 +701,7 @@
             "outcome": "completed",
             "changes": [
               "scheduled_services[new].customer_id = cust-larkspur",
-              "scheduled_services[new].service_type = one-time pest treatment",
+              "scheduled_services[new].service_type = One-Time Pest Control Service",
               "scheduled_services[new].window_start = Wednesday 13:00 Eastern; window_end = 14:00 (stored flat 60-minute block; the 13:00-15:00 arrival range is confirmation-text copy only)",
               "scheduled_services[new].estimated_price = catalog one-time pest price",
               "scheduled_services[new].property_id = cust-larkspur rental 27 Sample Court"
@@ -719,7 +719,7 @@
             "input": {
               "customer_id": "cust-larkspur",
               "scheduled_date": "2026-10-07",
-              "service_type": "one-time pest treatment",
+              "service_type": "One-Time Pest Control Service",
               "time_window": "1:00 PM",
               "property_id": "larkspur-rental"
             }
@@ -751,7 +751,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-ostrander",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Monday 08:00 Eastern; window_end = 09:00 (stored flat 60-minute block; the 08:00-10:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = catalog price less 15% WaveGuard discount via the discount engine"
         ],
@@ -767,7 +767,7 @@
         "input": {
           "customer_id": "cust-ostrander",
           "scheduled_date": "2026-10-05",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "8:00 AM"
         }
       },
@@ -951,7 +951,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-09",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "9:00 AM",
           "price": 149
         }
@@ -995,7 +995,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Monday 13:00 Eastern; window_end = 14:00 (stored flat 60-minute block; the 13:00-15:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = 149"
         ],
@@ -1011,7 +1011,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-05",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "1:00 PM",
           "price": 149
         }
@@ -1108,7 +1108,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-06",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "8:00 AM",
           "price": 149
         }
@@ -1152,7 +1152,7 @@
         "outcome": "completed",
         "changes": [
           "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
           "scheduled_services[new].window_start = Friday 15:00 Eastern; window_end = 16:00 (stored flat 60-minute block; the 15:00-17:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].estimated_price = catalog one-time pest price stated in the answer"
         ],
@@ -1168,7 +1168,7 @@
         "input": {
           "customer_id": "cust-pellham",
           "scheduled_date": "2026-10-09",
-          "service_type": "one-time pest treatment",
+          "service_type": "One-Time Pest Control Service",
           "time_window": "3:00 PM"
         }
       },

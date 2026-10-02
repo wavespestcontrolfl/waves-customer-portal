@@ -48,9 +48,9 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output",
-          "estimates[new].measurement = front lawn"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)",
+          "estimates[new].estimate_data.engineInputs.measuredTurfSf = front lawn measurement"
         ],
         "unchanged": [
           "estimates[sent quotes]"
@@ -105,8 +105,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [
           "estimates[sent quotes]"
@@ -161,8 +161,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [
           "estimates draft count = 1"
@@ -230,8 +230,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 9",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [],
         "sends": 0,
@@ -271,7 +271,7 @@
             "outcome": "unsupported",
             "changes": [],
             "unchanged": [
-              "estimates[draft].lawn_applications = 9"
+              "estimates[draft].estimate_data.engineInputs.services.lawn.lawnFreq = 9"
             ],
             "sends": 0,
             "card": false,
@@ -306,9 +306,9 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output",
-          "estimates[new].measurement = front lawn"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)",
+          "estimates[new].estimate_data.engineInputs.measuredTurfSf = front lawn measurement"
         ],
         "unchanged": [],
         "sends": 0,
@@ -347,8 +347,8 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "estimates[draft].measurement = back lot",
-              "estimates[draft].price = engine output for back lot"
+              "estimates[draft].estimate_data.engineInputs.measuredTurfSf = back lot measurement",
+              "estimates[draft].annual_total = engine output for back lot (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
             ],
             "unchanged": [
               "estimates draft count = 1"
@@ -459,8 +459,8 @@
             "changes": [
               "estimates[new].customer_id = cust-thistledown",
               "estimates[new].status = draft",
-              "estimates[new].lawn_applications = 12",
-              "estimates[new].price = engine output"
+              "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+              "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
             ],
             "unchanged": [],
             "sends": 0,
@@ -546,8 +546,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 9",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [],
         "sends": 0,
@@ -644,8 +644,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [
           "estimates[sent quotes]"
@@ -698,8 +698,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[existing-draft].lawn_applications = 9",
-          "estimates[existing-draft].price = engine output for 9x"
+          "estimates[existing-draft].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[existing-draft].annual_total = engine output for 9x (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [
           "estimates draft count = 1"
@@ -842,8 +842,8 @@
         "changes": [
           "estimates[new].customer_id = cust-thistledown",
           "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 9",
-          "estimates[new].price = engine output"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
         ],
         "unchanged": [
           "estimates[draft].status = draft",
@@ -1027,7 +1027,7 @@
         "outcome": "completed",
         "changes": [
           "estimates[new].customer_id = cust-pellham",
-          "estimates[new].lawn_applications = 12"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12"
         ],
         "unchanged": [],
         "sends": 0,
@@ -1123,7 +1123,7 @@
         "outcome": "completed",
         "changes": [
           "estimates[new].customer_id = cust-pellham",
-          "estimates[new].lawn_applications = 12"
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12"
         ],
         "unchanged": [
           "estimates draft count = 1"

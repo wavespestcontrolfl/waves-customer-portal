@@ -226,7 +226,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customers[cust-murphy-a].phone = 555-0173"
+          "customers[cust-murphy-a].phone = +19415550173"
         ],
         "unchanged": [
           "customers[cust-murphy-b]",
@@ -242,7 +242,7 @@
         "input": {
           "customer_id": "cust-murphy-a",
           "updates": {
-            "phone": "555-0173"
+            "phone": "+19415550173"
           }
         }
       },
@@ -666,7 +666,7 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "customers[cust-murphy-a].phone = 555-0172"
+          "customers[cust-murphy-a].phone = +19415550172"
         ],
         "unchanged": [
           "customers[cust-murphy-a].email",
@@ -682,7 +682,7 @@
           "input": {
             "customer_id": "cust-murphy-a",
             "updates": {
-              "phone": "555-0172"
+              "phone": "+19415550172"
             }
           }
         },
@@ -783,7 +783,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customers[cust-murphy-b].phone = 555-0199"
+          "customers[cust-murphy-b].phone = +19415550199"
         ],
         "unchanged": [
           "customers[cust-murphy-a]"
@@ -797,7 +797,7 @@
         "input": {
           "customer_id": "cust-murphy-b",
           "updates": {
-            "phone": "555-0199"
+            "phone": "+19415550199"
           }
         }
       },
@@ -823,7 +823,7 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "customers[cust-murphy-a].phone = 555-0199"
+              "customers[cust-murphy-a].phone = +19415550199"
             ],
             "unchanged": [
               "customers[cust-murphy-a].email"
@@ -837,7 +837,7 @@
             "input": {
               "customer_id": "cust-murphy-a",
               "updates": {
-                "phone": "555-0199"
+                "phone": "+19415550199"
               }
             }
           },
@@ -990,7 +990,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customers[cust-murphy-a].notes = (empty)",
+          "customers[cust-murphy-a].crm_notes = (empty)",
           "customers[cust-murphy-a].lead_source = referral"
         ],
         "unchanged": [
@@ -1057,7 +1057,7 @@
         "input": {
           "customer_id": "cust-murphy-a",
           "updates": {
-            "phone": "555-0161"
+            "phone": "+19415550161"
           }
         }
       },
@@ -1083,26 +1083,26 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "customers[cust-murphy-a].phone = 555-0162"
+              "customers[cust-murphy-a].phone = +19415550162"
             ],
             "unchanged": [
               "customers[cust-murphy-b]"
             ],
             "sends": 0,
             "card": true,
-            "say": "Old card discarded, new card shows 555-0162; only that value commits."
+            "say": "Old card discarded, new card shows +19415550162; only that value commits."
           },
           "call": {
             "tool": "update_customer",
             "input": {
               "customer_id": "cust-murphy-a",
               "updates": {
-                "phone": "555-0162"
+                "phone": "+19415550162"
               }
             }
           },
           "forbidden": [
-            "555-0161 committed"
+            "+19415550161 committed"
           ]
         }
       ],
@@ -1168,7 +1168,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customers[cust-murphy-a].phone = 555-0140"
+          "customers[cust-murphy-a].phone = +19415550140"
         ],
         "unchanged": [
           "customers[cust-murphy-b]"
@@ -1182,7 +1182,7 @@
         "input": {
           "customer_id": "cust-murphy-a",
           "updates": {
-            "phone": "555-0140"
+            "phone": "+19415550140"
           }
         }
       },

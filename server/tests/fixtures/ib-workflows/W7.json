@@ -77,7 +77,7 @@
             "changes": [
               "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
-              "sms_log[new].status = submitted",
+              "sms_log[new].status = sent",
               "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [
@@ -164,7 +164,7 @@
             "changes": [
               "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
-              "sms_log[new].status = submitted",
+              "sms_log[new].status = sent",
               "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [
@@ -213,7 +213,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = secondary ending 0102",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
@@ -229,7 +229,7 @@
           "customer_id": "cust-pellham",
           "message": "We will be there Tuesday at 9.",
           "message_type": "manual",
-          "phone": "555-0102"
+          "phone": "+19415550102"
         }
       },
       "forbidden": [
@@ -331,7 +331,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = unknown",
+          "sms_log[new].status = sending with metadata.provider_outcome_uncertain = true (the reservation is held for reconciliation)",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
@@ -481,7 +481,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],
@@ -582,7 +582,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-pellham",
           "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
@@ -689,7 +689,7 @@
             "changes": [
               "sms_log[new].customer_id = cust-fennimore",
               "sms_log[new].to_phone = primary ending 0301",
-              "sms_log[new].status = submitted",
+              "sms_log[new].status = sent",
               "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [],
@@ -731,7 +731,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],
@@ -879,7 +879,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [
@@ -1026,7 +1026,7 @@
             "changes": [
               "sms_log[new].customer_id = cust-pellham",
               "sms_log[new].to_phone = primary ending 0101",
-              "sms_log[new].status = submitted",
+              "sms_log[new].status = sent",
               "sms_log[new].message_body = last approved draft, no signature"
             ],
             "unchanged": [],
@@ -1068,7 +1068,7 @@
         "changes": [
           "sms_log[new].customer_id = cust-fennimore",
           "sms_log[new].to_phone = primary ending 0301",
-          "sms_log[new].status = submitted",
+          "sms_log[new].status = sent",
           "sms_log[new].message_body = last approved draft, no signature"
         ],
         "unchanged": [],

@@ -48,7 +48,7 @@
         "changes": [
           "product_inventory_movements[new].product_id = Taurus SC",
           "product_inventory_movements[new].movement_type = restock",
-          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
           "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz",
           "product_restock_requests[taurus-open].status = received"
         ],
@@ -160,7 +160,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].metadata.enteredQuantity = 2 qt (the stored quantity is converted to the product inventory unit)",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = qt (the stored quantity is converted to the product inventory unit)",
           "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
@@ -205,7 +205,7 @@
               "product_inventory_movements[correction].quantity = difference between 2 gal and 2 qt"
             ],
             "unchanged": [
-              "product_inventory_movements[first].metadata.enteredQuantity = 2 qt (the stored quantity is converted to the product inventory unit)"
+              "product_inventory_movements[first].metadata.enteredQuantity = 2 and product_inventory_movements[first].metadata.enteredUnit = qt (the stored quantity is converted to the product inventory unit)"
             ],
             "sends": 0,
             "card": false,
@@ -377,7 +377,7 @@
         "outcome": "partial",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
+          "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
         ],
         "unchanged": [
           "purchase_orders count",
@@ -392,8 +392,8 @@
         "input": {
           "product_name": "Talak",
           "movement_type": "restock",
-          "quantity": 3,
-          "unit": "jug"
+          "quantity": 288,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -432,7 +432,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
           "products_catalog[Taurus SC].inventory_on_hand = recomputed from the live count",
           "product_restock_requests[taurus-open].status = received"
         ],
@@ -532,7 +532,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
           "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
@@ -633,7 +633,7 @@
         "outcome": "completed",
         "changes": [
           "product_inventory_movements[new].product_id = Talak 96 oz",
-          "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
+          "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
         ],
         "unchanged": [
           "products_catalog[Taurus SC].inventory_on_hand"
@@ -647,8 +647,8 @@
         "input": {
           "product_name": "Talak 96 oz",
           "movement_type": "restock",
-          "quantity": 3,
-          "unit": "jug"
+          "quantity": 288,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -820,7 +820,7 @@
         "outcome": "unknown",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].metadata.enteredQuantity = 5 jugs (the stored quantity is converted to the product inventory unit)"
+          "product_inventory_movements[new].metadata.enteredQuantity = 480 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (5 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
         ],
         "unchanged": [
           "product_inventory_movements duplicate"
@@ -834,8 +834,8 @@
         "input": {
           "product_name": "Talak",
           "movement_type": "restock",
-          "quantity": 5,
-          "unit": "jug"
+          "quantity": 480,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -918,7 +918,7 @@
         "outcome": "completed",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].metadata.enteredQuantity = 2 jugs (the stored quantity is converted to the product inventory unit)"
+          "product_inventory_movements[new].metadata.enteredQuantity = 192 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (2 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -932,8 +932,8 @@
         "input": {
           "product_name": "Talak",
           "movement_type": "restock",
-          "quantity": 2,
-          "unit": "jug"
+          "quantity": 192,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -984,8 +984,8 @@
         "input": {
           "product_name": "Talak",
           "movement_type": "restock",
-          "quantity": 3,
-          "unit": "jug"
+          "quantity": 288,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -1038,8 +1038,8 @@
         "input": {
           "product_name": "Talak",
           "movement_type": "restock",
-          "quantity": 2,
-          "unit": "jug"
+          "quantity": 192,
+          "unit": "fl_oz"
         }
       },
       "forbidden": [
@@ -1067,7 +1067,7 @@
             "outcome": "completed",
             "changes": [
               "product_inventory_movements[new].product_id = Talak",
-              "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
+              "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
             ],
             "unchanged": [
               "product_inventory_movements[2 jugs]"
@@ -1081,8 +1081,8 @@
             "input": {
               "product_name": "Talak",
               "movement_type": "restock",
-              "quantity": 3,
-              "unit": "jug"
+              "quantity": 288,
+              "unit": "fl_oz"
             }
           },
           "forbidden": [

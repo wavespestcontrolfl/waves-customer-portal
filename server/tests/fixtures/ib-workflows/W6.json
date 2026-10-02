@@ -45,8 +45,8 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)",
-          "sms_log[new].template = appointment_rescheduled"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)",
+          "sms_log[new].metadata.template_key = appointment_rescheduled"
         ],
         "unchanged": [
           "scheduled_services[other rows]",
@@ -163,7 +163,7 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[other rows]"
@@ -219,7 +219,7 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "scheduled_services[pellham-monday].date_window = Thursday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+              "scheduled_services[pellham-monday].scheduled_date = Thursday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
             ],
             "unchanged": [],
             "sends": 1,
@@ -277,7 +277,7 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[other rows]"
@@ -350,7 +350,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "scheduled_services[wexcombe-series-2].date_window = Friday window_start 09:00 Eastern; window_end = window_start + the visit's stored block length (the 09:00-11:00 arrival range is text copy only)"
+          "scheduled_services[wexcombe-series-2].scheduled_date = Friday; scheduled_services[wexcombe-series-2].window_start = 09:00 Eastern; scheduled_services[wexcombe-series-2].window_end = window_start + the visit's stored block length (the 09:00-11:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[wexcombe-series-1,3,4]",
@@ -415,7 +415,7 @@
         "outcome": "submitted_to_provider",
         "changes": [
           "scheduled_services[wexcombe-series-*].scheduled_date = each Friday; window_start = 09:00 Eastern; window_end = each row's window_start + that row's stored block length (the 09:00-11:00 arrival range is text copy only)",
-          "sms_log[new].template = appointment_series_rescheduled"
+          "sms_log[new].metadata.template_key = appointment_series_rescheduled"
         ],
         "unchanged": [
           "scheduled_services[friday pair]"
@@ -523,7 +523,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[other rows]"
@@ -581,7 +581,7 @@
       "expected": {
         "outcome": "partial",
         "changes": [
-          "scheduled_services[ostrander-visit].date_window = Friday window_start 11:00 Eastern; window_end = window_start + the visit's stored block length (the 11:00-13:00 arrival range is text copy only)"
+          "scheduled_services[ostrander-visit].scheduled_date = Friday; scheduled_services[ostrander-visit].window_start = 11:00 Eastern; scheduled_services[ostrander-visit].window_end = window_start + the visit's stored block length (the 11:00-13:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "sms_log rows"
@@ -645,7 +645,7 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[other rows]"
@@ -719,7 +719,7 @@
         "outcome": "submitted_to_provider",
         "changes": [
           "scheduled_services[fennimore-wednesday].date_window = the same Wednesday, window_start 14:00 Eastern; window_end = window_start + the visit's stored block length (the 14:00-16:00 arrival range is text copy only)",
-          "sms_log[new].template = appointment_rescheduled"
+          "sms_log[new].metadata.template_key = appointment_rescheduled"
         ],
         "unchanged": [
           "scheduled_services[fennimore-wednesday].scheduled_date",
@@ -845,7 +845,7 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "scheduled_services[ostrander-visit].date_window = Friday window_start 11:00 Eastern; window_end = window_start + the visit's stored block length (the 11:00-13:00 arrival range is text copy only)"
+          "scheduled_services[ostrander-visit].scheduled_date = Friday; scheduled_services[ostrander-visit].window_start = 11:00 Eastern; scheduled_services[ostrander-visit].window_end = window_start + the visit's stored block length (the 11:00-13:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "sms_log rows",
@@ -993,7 +993,7 @@
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday window_start 10:00 Eastern; window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
+          "scheduled_services[pellham-monday].scheduled_date = Friday; scheduled_services[pellham-monday].window_start = 10:00 Eastern; scheduled_services[pellham-monday].window_end = window_start + the visit's stored block length (the 10:00-12:00 arrival range is text copy only)"
         ],
         "unchanged": [
           "scheduled_services[other rows]"

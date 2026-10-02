@@ -288,27 +288,41 @@
       ],
       "corrections": [
         {
-          "request": "make that one primary",
+          "request": "they moved into the rental, make it their primary home",
           "expected": {
             "outcome": "completed",
             "changes": [
+              "customer_properties[rental].occupancy_type = owner_occupied",
+              "customer_properties[rental].relationship = own_home",
               "customer_properties[rental].is_primary = true",
               "customer_properties[3 Fixture Row].is_primary = false"
             ],
             "unchanged": [
+              "customer_properties[rental].label",
               "scheduled_services[*].property_id"
             ],
             "sends": 0,
             "card": false,
-            "say": "Separate direct edit with its own receipt; the first receipt is untouched."
+            "say": "Two direct edits, each with its own receipt: the rental is reclassified as their own home (a property recorded as a rental cannot be made primary while it stays one), then promoted; the first add receipt is untouched."
           },
-          "call": {
-            "tool": "set_primary_property",
-            "input": {
-              "customer_id": "cust-larkspur",
-              "property_id": "larkspur-rental"
+          "call": [
+            {
+              "tool": "update_customer_property",
+              "input": {
+                "customer_id": "cust-larkspur",
+                "property_id": "larkspur-rental",
+                "occupancy_type": "owner_occupied",
+                "relationship": "own_home"
+              }
+            },
+            {
+              "tool": "set_primary_property",
+              "input": {
+                "customer_id": "cust-larkspur",
+                "property_id": "larkspur-rental"
+              }
             }
-          },
+          ],
           "forbidden": []
         }
       ],
