@@ -6,8 +6,7 @@
  * Proves: the accept seeds quarterly pest follow-ups on lawn dates and groups
  * them into the lawn visit; rides_parent_id links the two series; the gate off
  * and every other mix (bi-monthly pest) keep today's quarterly walk. Series
- * EXTENSION riding the lawn is a follow-up PR (branch
- * feat/rider-extension-20261001); the gate stays off until it lands.
+ * EXTENSION riding the lawn is proved in rider-extension-path-postgres.test.js.
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
   get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
