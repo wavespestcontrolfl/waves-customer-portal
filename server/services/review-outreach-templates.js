@@ -128,7 +128,7 @@ const OUTREACH_TEMPLATES = [
     id: 'qr_followup',
     name: 'QR Code Follow-Up',
     sentiment: 'happy',
-    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time, for a Google review:\n\n{review_url}",
+    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link again, for a Google review:\n\n{review_url}",
   },
   {
     id: 'first_treatment_ask',

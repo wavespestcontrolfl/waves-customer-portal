@@ -4653,16 +4653,15 @@ const ReviewService = {
     // no record to ground a draft in, so it sends the fixed copy and spends
     // no AI call. (Guessing a visit for it changed its click anchor, request
     // fields and same-day tie-breaks; reviewed and dropped on #5524.)
-    const voiceVisit = !techVoice || !(serviceRecordId || scheduledServiceId) ? null : {
-      serviceRecordId, serviceDate, technicianId,
-      // The record's own service type decides (it gates the termite rule),
-      // never a sequence's cached type, on every touch.
-      serviceType: (serviceRecordId
-        ? await db("service_records").where({ id: serviceRecordId }).first("service_type")
-          .then((sr) => sr?.service_type || null).catch(() => null)
-        : await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type")
-          .then((ss) => ss?.service_type || null).catch(() => null)) || serviceType,
-    };
+    // The visit's own service type decides (it gates the termite rule), read
+    // from its record every touch. If it can't be read, the touch is not
+    // drafted at all: a sequence's cached type is never trusted in its place.
+    const voiceVisitType = !techVoice || !(serviceRecordId || scheduledServiceId) ? null
+      : await (serviceRecordId
+        ? db("service_records").where({ id: serviceRecordId }).first("service_type")
+        : db("scheduled_services").where({ id: scheduledServiceId }).first("service_type"))
+        .then((row) => row?.service_type || null).catch(() => null);
+    const voiceVisit = voiceVisitType ? { serviceRecordId, serviceDate, technicianId, serviceType: voiceVisitType } : null;
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
@@ -4737,7 +4736,7 @@ const ReviewService = {
           serviceDate,
         };
         const drafted = techVoice
-          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType || serviceType, sequenceId, channel: "sms" }) : null)
+          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "sms" }) : null)
           : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
@@ -4800,7 +4799,7 @@ const ReviewService = {
             serviceDate,
           };
           const drafted = techVoice
-            ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType || serviceType, sequenceId, channel: "email" }) : null)
+            ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "email" }) : null)
             : await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
