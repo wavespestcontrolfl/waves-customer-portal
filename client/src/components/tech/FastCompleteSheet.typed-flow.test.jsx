@@ -214,6 +214,18 @@ describe('the typed record on the sheet', () => {
     expect(request.bodies('/complete')[0].structuredFindings.values.species).toBe('American');
   });
 
+  test('a pick drops the words a fill stood on, even when the filled value is picked again', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    pick('Species', 'American');
+    pick('Species', 'German');
+    expect(within(fieldRow('Species (required)')).getByText('German')).toBeTruthy();
+    expect(within(fieldRow('Species (required)')).queryByText('“german roaches”')).toBeNull();
+    // A field nobody touched keeps its words.
+    expect(within(fieldRow('Activity level (required)')).getByText('“heavy behind the fridge”')).toBeTruthy();
+  });
+
   test('a required field the note left unclear asks to be picked and holds the send until it is', async () => {
     const values = { species: 'German', areas_treated: 'Kitchen' };
     const request = makeRequest({ typedFacts: { ...READ, values, unclearFields: ['activity_level'] } });

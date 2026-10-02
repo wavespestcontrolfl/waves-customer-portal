@@ -751,12 +751,16 @@ export function mergeTypedRecord(record, facts) {
   return { ...record, values, heard };
 }
 
-// The tech's own pick: a field set, or cleared ('').
+// The tech's own pick: a field set, or cleared (''). The words a fill stood
+// on go with it, even when the filled value is picked again (Codex P2 r3 on
+// #5632, the office form's same rule).
 export function changeTypedRecord(record, key, value) {
   const values = { ...record.values };
   if (value === '' || value == null) delete values[key];
   else values[key] = value;
-  return { ...record, values, picked: [...new Set([...record.picked, key])] };
+  const heard = { ...record.heard };
+  delete heard[key];
+  return { ...record, values, heard, picked: [...new Set([...record.picked, key])] };
 }
 
 // A chips field's value is its picked options joined ", " in the form's own
