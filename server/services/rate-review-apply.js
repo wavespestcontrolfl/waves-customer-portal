@@ -483,26 +483,15 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
   };
   let visits = [];
   let term = null;
-  if (lane === LANE_PER_APPLICATION) {
+  if (lane === LANE_PER_APPLICATION || lane === LANE_MONTHLY) {
+    // The plan this notice names: its ONE series (the apply never reprices
+    // a replacement accepted after it — assertNoticedSeries), and for dues
+    // the accepted estimate behind the line's ledger slice. A line with no
+    // upcoming plan visit, or running as two series, names no single plan:
+    // no letter goes out for it.
     visits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
-    // The series this notice names: the apply reprices only that series,
-    // never a replacement accepted after it (see lockPerApplicationTargets).
-    const roots = seriesRoots(visits);
-    if (roots.length === 1) metadata.series_root_id = roots[0];
-  } else if (lane === LANE_MONTHLY) {
-    // The plan this notice names, the same way: its series, and the
-    // accepted estimate its ledger slice came from. The apply refuses a
-    // replacement plan accepted for the same line at the same price
-    // (applyMonthly → assertNoticedMonthlyPlan). A line with no upcoming
-    // plan visit, or running as two series, names no single plan — no
-    // letter goes out for it.
-    const lineVisits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
-    const roots = seriesRoots(lineVisits);
-    if (roots.length === 0) throw hold('no_future_visit', { lane });
-    if (roots.length > 1) throw hold('multiple_series', { roots });
-    metadata.series_root_id = roots[0];
-    const slice = primaryFamilySlice(await loadFamilySlices(dbh, row.customer_id, row.family_key));
-    if (slice) metadata.plan_source_estimate_id = slice.source_estimate_id || null;
+    metadata.series_root_id = singleSeriesRoot(visits, { lane });
+    if (lane === LANE_MONTHLY) metadata.plan_source_estimate_id = await planSourceEstimate(dbh, row.customer_id, row.family_key);
   } else if (lane === LANE_PREPAY) {
     const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
     if (!found.term) throw hold(found.reason);
@@ -732,8 +721,19 @@ function primaryFamilySlice({ family, keys }) {
   return primaryKey ? family.find((r) => r.family_key === primaryKey) : null;
 }
 
-function seriesRoots(visits) {
-  return [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
+// The accepted estimate the line's own ledger slice came from (null when
+// it has no slice or its provenance was cleared by a hand edit).
+async function planSourceEstimate(dbh, customerId, familyKey) {
+  const slice = primaryFamilySlice(await loadFamilySlices(dbh, customerId, familyKey));
+  return (slice && slice.source_estimate_id) || null;
+}
+
+// The line's visits must run as exactly ONE series; returns its root.
+function singleSeriesRoot(visits, detail = {}) {
+  if (!visits.length) throw hold('no_future_visit', detail);
+  const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
+  if (roots.length > 1) throw hold('multiple_series', { roots });
+  return roots[0];
 }
 
 // The line's live visits must run as ONE series, the one the notice
@@ -741,13 +741,11 @@ function seriesRoots(visits) {
 // notice (same line, cadence and price) is a new plan, and the old notice
 // never reprices it. A notice that did not record its series fails closed.
 function assertNoticedSeries(notice, visits, detail = {}) {
-  if (!visits.length) throw hold('no_future_visit', detail);
-  const roots = seriesRoots(visits);
-  if (roots.length > 1) throw hold('multiple_series', { roots });
+  const liveRoot = singleSeriesRoot(visits, detail);
   const noticedRoot = parseMetadata(notice.metadata).series_root_id;
   if (!noticedRoot) throw hold('notice_series_unrecorded');
-  if (String(noticedRoot) !== String(roots[0])) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: roots[0] });
-  return roots[0];
+  if (String(noticedRoot) !== String(liveRoot)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: liveRoot });
+  return liveRoot;
 }
 
 // Move the family's slice by `deltaMonthly` (dollars) and the scalar with
@@ -790,7 +788,7 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
 
 async function applyMonthly(trx, ctx) {
   const { notice, customer, today } = ctx;
-  const { all, family, keys } = await loadFamilySlices(trx, customer.id, notice.family_key);
+  const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
   const source = ctx.metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
   const currentCents = source === 'ledger_slice' ? cents(sumSlices(family)) : cents(customer.monthly_rate);
@@ -826,10 +824,10 @@ async function applyMonthly(trx, ctx) {
   // was cleared (a hand edit, a blind scalar write) is not a new accept.
   const lineVisits = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: ctx.cadence, fromDate: today });
   assertNoticedSeries(notice, lineVisits, { today });
-  const liveSlice = primaryFamilySlice({ family, keys });
+  const liveEstimate = await planSourceEstimate(trx, customer.id, notice.family_key);
   const noticedEstimate = ctx.metadata.plan_source_estimate_id || null;
-  if (liveSlice && liveSlice.source_estimate_id && String(liveSlice.source_estimate_id) !== String(noticedEstimate)) {
-    throw hold('plan_replaced', { noticedEstimate, liveEstimate: liveSlice.source_estimate_id });
+  if (liveEstimate && String(liveEstimate) !== String(noticedEstimate)) {
+    throw hold('plan_replaced', { noticedEstimate, liveEstimate });
   }
   const deltaMonthly = dollars(Number(notice.noticed_new_cents) - Number(notice.noticed_current_cents));
   const moved = await moveMonthlySlice(trx, { customer, familyKey: notice.family_key, deltaMonthly, requireSlice: source === 'ledger_slice' });

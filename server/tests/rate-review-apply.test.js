@@ -1079,6 +1079,18 @@ describe('scheduleNoticeRows — monthly_membership records the plan it names', 
   });
 });
 
+describe('scheduleNoticeRows — per_application names one series too', () => {
+  test('a line running as two series gets no letter (held multiple_series at scheduling, not after delivery)', async () => {
+    const book = pestBook();
+    const second = fixture.pestSeries(1, ['2026-12-12']);
+    second.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+    book.scheduled_services.push(...second.all);
+    const out = await scheduleBook(book);
+    expect(out.held.map((h) => h.reason)).toEqual(['multiple_series']);
+    expect(notices()).toHaveLength(0);
+  });
+});
+
 describe('applyDueRateChanges — the series template counts only add-ons that carry forward', () => {
   // Codex r6 P2: a one-time add-on on the parent never reaches a later
   // spawn (admin-schedule.js filterAddonLinesForDate), so it may not mask a
