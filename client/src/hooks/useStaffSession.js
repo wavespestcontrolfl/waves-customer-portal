@@ -79,13 +79,7 @@ export default function useStaffSession() {
     adminFetch("/admin/auth/me", { redirectOn401: false, ...(abort ? { signal: abort.signal } : {}) })
       .then((profile) => {
         if (superseded()) return;
-        // On the field workspace, a verified identity needs an id and a role
-        // (Codex #5573 r18). Any staff role is allowed: /admin/today is the
-        // landing for every non-admin role (CSR included), not only
-        // technicians. Other admin pages keep their existing check.
-        const fieldIdentityInvalid = isFieldPath(locationRef.current.pathname)
-          && (!profile?.id || !profile?.role);
-        if (!profile || fieldIdentityInvalid) {
+        if (!profile) {
           patch({ status: "error" });
           return;
         }
@@ -178,16 +172,23 @@ export default function useStaffSession() {
     });
   }, [navigate, onField]);
 
+  // On the field workspace a ready session needs a verified identity, an id
+  // and a role, however it got ready: verified on Today or on another page
+  // before navigating in (Codex #5573 r18, r19). Any staff role is allowed:
+  // /admin/today is the landing for every non-admin role, CSR included.
+  // Other admin pages keep their existing check.
+  const fieldIdentityInvalid = onField && session.status === "ready" && !(session.user?.id && session.user?.role);
+  const authStatus = fieldIdentityInvalid ? "error" : session.status;
   return {
     user: session.user,
     // The verified account id flags are read for (null until verified).
     userId: session.user?.id ?? null,
-    authStatus: session.status,
+    authStatus,
     // Whether the page is the field workspace (/admin/today).
     onField,
     // Off Today the offline pass is not ready in this very render, before the
     // re-verify effect runs, so no other admin page mounts on it for a frame
     // (pre-push P1).
-    sessionReady: session.status === "ready" && (onField || !session.offline),
+    sessionReady: authStatus === "ready" && (onField || !session.offline),
   };
 }

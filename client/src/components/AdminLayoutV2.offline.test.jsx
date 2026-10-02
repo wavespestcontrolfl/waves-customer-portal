@@ -352,6 +352,29 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
+  it("a malformed profile verified on another page cannot open Today by navigating in (Codex #5573 r19)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { name: "No Id", role: "technician" })));
+    function Go() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/today")}>to today</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/schedule"]}>
+          <Go />
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+              <Route path="/admin/today" element={<div>Saved route content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByText("Schedule content");
+    await act(async () => { screen.getByRole("button", { name: "to today" }).click(); });
+    expect(await screen.findByText(/Unable to verify staff access/i)).toBeInTheDocument();
+    expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);
