@@ -13652,6 +13652,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               ...(prepayDeferredToFirstVisitResult
                 ? { status: 'awaiting_first_visit', deferred_to_first_visit: true }
                 : { status: 'pending' }),
+              // A year routed to a payer though the customer authorized a
+              // charge AFTER the first visit (pre-push audit P0): that timing
+              // stays on the job, so if the payer is gone before the charge,
+              // the homeowner's card is never charged at approval.
+              ...(prepayChargePlan?.afterFirstVisit && !prepayDeferredToFirstVisitResult
+                ? { after_visit_attested: true } : {}),
               created_at: new Date().toISOString(),
             })],
           ),
@@ -14577,6 +14583,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // Pay link stays suppressed, but the copy must not claim a
         // payment attempt is being reconciled.
         prepayAutoCharge = { status: 'deferred', reason: 'payer_unresolved' };
+        invoicePayUrl = null;
+      } else if (prepayChargePlan?.afterFirstVisit && txResult.prepayDeferredToFirstVisit !== true) {
+        // The year was routed to a payer at approval, and that payer is gone
+        // now: the customer authorized a charge only AFTER the first visit,
+        // never now (pre-push audit P0). No charge here; the sweep refuses
+        // it too and hands the year to the office with the pay link.
+        prepayAutoCharge = { status: 'deferred', reason: 'after_visit_authorization' };
         invoicePayUrl = null;
       } else if (txResult.prepayCoveredInTrx) {
         // The in-trx apply fully covered the invoice ('prepaid') — nothing

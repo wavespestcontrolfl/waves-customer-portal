@@ -142,6 +142,11 @@ async function releaseOne(row, now) {
     // never held — it billed on its own (Codex r8).
     // A deleted invoice row also clears the term's prepay_invoice_id (FK), so
     // the term is found by its estimate then (GitHub Codex #5567 r9).
+    // A closeout still finishing may already have held its visit: wait for it
+    // before the terminal classification (pre-push audit P1).
+    const deadCustomerForWait = invoice?.customer_id
+      || (await db('annual_prepay_terms').where({ source_estimate_id: row.id }).first('customer_id'))?.customer_id || null;
+    if (deadCustomerForWait && await planHasUnfinishedCompletion(row.id, deadCustomerForWait)) return null;
     let visit = null;
     const deadTerm = await db('annual_prepay_terms')
       .where(invoice ? { prepay_invoice_id: invoice.id } : { source_estimate_id: row.id }).first('*');
@@ -312,7 +317,11 @@ async function reconcileJobAlerts(estimateId) {
   // voided before it charged) still had its first visit held unbilled. If the
   // year then dies unpaid, that work goes to the unbilled-visits alert below;
   // once it is paid, the check is done.
-  if (job.status === 'skipped' && job.released_for_visit_id && !job.unbilled_check_done_at) {
+  // Same for a released year whose bank debit was initiated ('processing'):
+  // a debit that returns, then a voided year, must still hand the held visit
+  // to the office (pre-push audit P1).
+  const releasedHolders = ['skipped', 'processing'];
+  if (releasedHolders.includes(job.status) && job.released_for_visit_id && !job.unbilled_check_done_at) {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
     const invStatus = String(invoice?.status || '').toLowerCase();
     if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
@@ -320,7 +329,7 @@ async function reconcileJobAlerts(estimateId) {
         status: 'cancelled_after_visit',
         reason: `invoice_${invStatus || 'missing'}_after_release`,
         performed_visit_id: job.released_for_visit_id,
-      }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'skipped'`));
+      }, (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [job.status]));
       return;
     }
     if (['paid', 'prepaid'].includes(invStatus)) {
@@ -357,7 +366,7 @@ async function reconcileAlerts({ pageSize = 200 } = {}) {
           (${JOB} ->> 'stale_alert_reserved_at' IS NOT NULL AND ${JOB} ->> 'stale_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'delivered_fallback' AND ${JOB} ->> 'charge_alert_closed_at' IS NULL)
           OR (${JOB} ->> 'status' = 'cancelled_after_visit' AND ${JOB} ->> 'unbilled_alert_raised_at' IS NULL)
-          OR (${JOB} ->> 'status' = 'skipped' AND ${JOB} ->> 'released_for_visit_id' IS NOT NULL
+          OR (${JOB} ->> 'status' IN ('skipped', 'processing') AND ${JOB} ->> 'released_for_visit_id' IS NOT NULL
               AND ${JOB} ->> 'unbilled_check_done_at' IS NULL)
         )`)
         .modify((q) => { if (afterId) q.where('id', '>', afterId); })

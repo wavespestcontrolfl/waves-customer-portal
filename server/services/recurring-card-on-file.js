@@ -1830,6 +1830,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // method off-session would park again, so route straight to the
       // deterministic pay-link fallback (the customer authenticates by
       // paying on-session).
+      // A year routed to a payer at approval, authorized for a charge only
+      // AFTER the first visit (pre-push audit P0): with the payer gone, the
+      // homeowner's card is never charged at approval timing — pay link and
+      // office alert instead.
+      if (job.after_visit_attested === true && !deferredToFirstVisit) {
+        throw new Error('after-visit authorization only and no payer — delivering pay link');
+      }
       if (job.authentication_required === true) {
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }

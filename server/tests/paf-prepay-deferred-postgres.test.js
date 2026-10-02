@@ -539,6 +539,19 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await release()).toMatchObject({ released: 1 });
     });
 
+    it('a year voided while a held closeout is still finishing waits for it (pre-push audit P1)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.parentId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running' });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      await trx('service_completion_attempts').where({ id: attemptId }).update({ status: 'succeeded' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
     it('a dead year never sends the office a visit already paid another way (Codex r10)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ prepaid_method: 'cash', prepaid_amount: 120 });
@@ -761,6 +774,23 @@ postgres('annual prepay charged after the first visit', () => {
       await release();
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.anything(), { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
+    });
+
+    it('a released bank debit that returns, then a voided year, still hands the held visit to the office (pre-push audit P1)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'processing', released_for_visit_id: null } });
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
+    it('a year routed to a payer, authorized for after the first visit, is never charged to the card once the payer is gone (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', deferred_to_first_visit: false, after_visit_attested: true } });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).not.toBe('paid');
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

@@ -4043,6 +4043,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(res.status).toBe(200);
     expect(res.data.prepayChargeStatus).not.toBe('after_first_visit');
     expect(jobOf()).not.toHaveProperty('deferred_to_first_visit');
+    expect(jobOf()).toMatchObject({ after_visit_attested: true });
     expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
