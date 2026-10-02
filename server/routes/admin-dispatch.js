@@ -503,6 +503,44 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   return output;
 }
 
+// GET /api/admin/dispatch/:serviceId/blog-posts?q= — the completion forms'
+// Waves blog search (GATE_REPORT_BLOG_POST, owner "ok go" 2026-10-01): live
+// hub posts matching every typed word, newest first, at most eight, each as
+// { id, title, url } under the one link rule (report-blog-post.js). The pick
+// rides /complete as blogPostId and is frozen there for every service but
+// WDO, termite pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor,
+// the completion's own rule), so any other visit answers { available: false }
+// too. Read-only; off = the answer is { available: false } with no database
+// read.
+router.get('/:serviceId/blog-posts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportBlogPostLive()) {
+      return res.json({ available: false, posts: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician searches only from their own current visit; admins keep
+    // office-wide reach (the completion routes' rule).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    // The completion's own rule for keeping a pick (complete-scheduled-service).
+    const { blogPostAllowedFor, searchReportBlogPosts } = require('../services/service-report/report-blog-post');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!blogPostAllowedFor({ serviceType: svc.service_type, profile })) return res.json({ available: false, posts: [] });
+    const posts = await searchReportBlogPosts(db, req.query?.q);
+    res.json({ available: true, posts });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
 // tip-picker payload plus the independently gated completion-choice history.
 // When both gates are off this remains a no-read availability probe. Read-only.
@@ -692,6 +730,43 @@ router.get('/:serviceId/promises', async (req, res, next) => {
     const include = String(req.query?.include || '').split(',').map((id) => id.trim()).filter(Boolean);
     const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id, include });
     res.json({ available: true, promises, total });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/voice-facts — voice fill for the Fast
+// Complete report flow (GATE_FAST_COMPLETE_REPORT): where the technician
+// put product down (Inside / Outside / Garage) and the pests they named, read
+// from the note they dictated, each fact quoted word for word
+// (services/visit-voice-facts.js). Writes nothing: the sheet shows what was
+// heard and sends it with the completion. A failed read answers
+// { available: true, status: 'failed' } with no facts, never an error, so
+// the sheet carries on without them. Off = 404 { enabled: false }.
+router.post('/:serviceId/voice-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').fastCompleteReportLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (same rule as the
+    // promise check above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readVoiceFacts } = require('../services/visit-voice-facts');
+    const facts = await readVoiceFacts(note);
+    res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });
 

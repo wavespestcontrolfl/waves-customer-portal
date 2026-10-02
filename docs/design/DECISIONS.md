@@ -3038,3 +3038,56 @@ unchanged. Every new tip passes the same customer-copy screen and
 visit-claim lint as the rest. Two rest on product-label guidance the owner
 approved as written (fire ant bait kept dry; Bora-Care sealed where
 exposed).
+
+## 2026-10-01 — Fast Complete report flow: talk, generate the report, trace, send (dark)
+
+Owner "ok go" on the talk / generate / trace / send mockup. Behind
+`GATE_FAST_COMPLETE_REPORT` (dark), the tech portal opens the one-screen
+Fast Complete sheet for every open untyped pest visit, a re-service or a
+regular visit, in its report flow: the tech talks into the note, adds
+photos (thumbnails), taps whether the customer was home (the full form's
+three choices, "not home, full access" picked every time), the pest activity
+on the 1–5 tracker (a first visit opens at 5, as the full form does), one tip
+and the promise check, then taps Generate AI report (the full form's own
+`POST /admin/schedule/generate-report`). The report the customer will see is
+read on its own step, with Edit and Write again (`fresh: true`, past the
+30-minute draft cache), then the spray is traced (the existing Treatment Zone
+tracer, opened over the sheet) and Complete & send posts `/complete` exactly
+as the full form does: billed at finish, the report text, a pay link and the
+review ask on a regular visit, never on a re-service. The edited-report
+heads-up and a promise changed after the report are confirmed on the sheet
+and resent under the same key.
+
+There are no Pests / Where / How taps (owner ruling 2026-09-30: those facts
+are voice only). `POST /admin/dispatch/:id/voice-facts` reads where product
+went down (Inside / Outside / Garage), the pests named and how the sprays
+went down (around the outside of the home, or spots), each quoted from the
+note word for word (a quote that denies it is dropped in code), and the
+report step shows them as "Heard from you". The note is read first and the
+report is written from exactly what the completion records: the visit's
+areas serviced (a product's area only when one place was heard, as the full
+form fills it), each product's targets and the sprays' method, so an indoor
+treatment keeps its re-entry wait on the customer's report. A perimeter
+spray takes its length from the trace, which never changes the record after
+the report was read; Complete & send waits for where the tech treated and,
+for a perimeter, the trace. Off, the tech portal routes pest visits exactly
+as before.
+
+## 2026-10-01 — "From the Waves blog" on the service report (dark)
+
+Owner "ok go" on the Fast Complete mockup: the technician or the office can
+pick one Waves blog post while completing a visit, searched the way
+Quick Links searches links, and the customer's report shows it at the bottom
+as "From the Waves blog": the post's title as a link and where it lives
+(`wavespestcontrol.com/pest-control/…`). Behind `GATE_REPORT_BLOG_POST`
+(dark). Only a published post that is live on the hub links, at its live
+URL on the site's own host (`server/services/service-report/report-blog-post.js`,
+the share gate's live rule); the pick is frozen on the record at completion
+and checked against the host again when the report renders. The card is a
+glass card with an `h2` title (the glass theme hides `.section-eyebrow`
+outside the hero), live view only, the last card above the footer on every
+layout. Owner ruling 2026-10-02: every service but WDO, termite pre-treat,
+lawn and tree, shrub & palm (another lane owns those completions), and never
+a visit that completes through a project (`blogPostAllowedFor`, the one rule
+the search and the completion share). Off, the search answers unavailable, a
+pick is ignored and no report shows a post.
