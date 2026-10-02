@@ -120,7 +120,8 @@ function kbFtsQuery(q, trustedOnly, limit) {
   return applyKbTrustGate(
     db('knowledge_base')
       .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q])
-      .where({ status: 'active' }),
+      .where({ status: 'active' })
+      .whereRaw('active IS NOT FALSE'), // an admin's active=false hides the row (NULL counts as on)
     trustedOnly,
   )
     .select(...KB_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
@@ -136,7 +137,8 @@ function kbIlikeQuery(term, trustedOnly, limit) {
         this.where('title', 'ilike', term)
           .orWhere('content', 'ilike', term);
       })
-      .where({ status: 'active' }),
+      .where({ status: 'active' })
+      .whereRaw('active IS NOT FALSE'),
     trustedOnly,
   )
     .orderBy('updated_at', 'desc')
@@ -1104,6 +1106,7 @@ const KnowledgeBridge = {
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
+        .whereRaw('active IS NOT FALSE')
         .whereNot(function untrustedWikiMirror() {
           this.where('source', 'wiki-sync').whereIn(
             'wiki_entry_id',
@@ -1555,7 +1558,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+module.exports._test = { kbFtsQuery, kbIlikeQuery, callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;

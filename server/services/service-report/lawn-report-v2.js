@@ -843,4 +843,4 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };
+module.exports = { buildLawnReportV2, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

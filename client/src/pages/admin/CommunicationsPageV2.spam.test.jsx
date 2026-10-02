@@ -4,10 +4,19 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
+
+// Blocking a number is owner-only (2026-10-02): smsIsAdminRole reads the
+// server-verified role via useOutletContext. `mockRole` flips it per test.
+let mockRole = "admin";
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual("react-router-dom");
+  return { ...actual, useOutletContext: () => ({ user: { role: mockRole } }) };
+});
+
 import { SmsTab } from "./CommunicationsPageV2";
 
 const line = "+19415550199";
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); mockRole = "admin"; });
 
 it.each([
   ["+442079460958", "+12079460958"],
@@ -92,4 +101,26 @@ it("does not offer Mark spam on an outbound-only thread", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Back/ }));
   fireEvent.click(await screen.findByText("Unsolicited pitch"));
   expect(await screen.findByRole("button", { name: /Mark spam/ })).toBeInTheDocument();
+});
+
+// Owner 2026-10-02: only an admin blocks a number. A technician still reads
+// the thread; the Mark spam button is not offered (the server would 403).
+it("does not offer Mark spam to a technician", async () => {
+  mockRole = "technician";
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  const spammer = "+15557654321";
+  const messages = [
+    { id: "m1", conversationId: "conv1", from: spammer, to: line, channel: "sms", direction: "inbound", body: "Unsolicited pitch", createdAt: "2024-01-01T12:00:00Z", isRead: false },
+  ];
+  const fetchMock = vi.fn(async (url) => {
+    const path = new URL(String(url), "http://localhost").pathname;
+    const data = path.endsWith("/log") ? { messages } : path.endsWith("/blocked-numbers") ? { numbers: [] } : {};
+    return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(<SmsTab active />, { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByText("Unsolicited pitch"));
+  expect(await screen.findByRole("button", { name: /Back/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Mark spam/ })).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls.some(([, o]) => o?.method === "POST" && String(o?.body || "").includes(spammer))).toBe(false);
 });

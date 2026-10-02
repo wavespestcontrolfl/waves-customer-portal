@@ -17,6 +17,17 @@ const feed = { callbacks_enabled: true, enabled: true, commitments: [row], has_m
 beforeEach(() => { adminFetch.mockReset().mockResolvedValue(feed); });
 afterEach(cleanup);
 describe('callback cards', () => {
+  // Owner 2026-10-02: a technician gets no customer calls, so the tech cards
+  // pass openCall={false}; the promise itself stays visible.
+  it('offers "Open call" by default and omits it when openCall is false', async () => {
+    const first = render(<FollowThroughCards ui={ui} />);
+    await screen.findByText(row.description);
+    expect(screen.getByRole('link', { name: 'Open call' })).toBeInTheDocument();
+    first.unmount();
+    render(<FollowThroughCards ui={ui} openCall={false} />);
+    await screen.findByText(row.description);
+    expect(screen.queryByRole('link', { name: 'Open call' })).not.toBeInTheDocument();
+  });
   it('reads open callback cards Waves owes from the commitments ledger', async () => {
     render(<FollowThroughCards ui={ui} />);
     await screen.findByText(row.description);

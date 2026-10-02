@@ -4,6 +4,10 @@
  *   GET  /api/admin/typed-decisions/reviews        the review queue, each row
  *        joined LIVE to its subject text for display only
  *   POST /api/admin/typed-decisions/reviews/:id/label   a person's verdict
+ *   GET  /api/admin/typed-decisions/status         per-capability evaluation:
+ *        labeled counts, precision/recall with exact-binomial lower bounds,
+ *        the tier they clear and the one blocker to the next
+ *        (services/typed-decisions/eval.js; reads only)
  *
  * Mounted beside /api/admin/agent-decisions. The subject text (a text message
  * and the Waves text before it, or the first part of a call transcript) is
@@ -139,6 +143,17 @@ async function loadSubjects(rows) {
   }
   return subjects;
 }
+
+// Per-capability status (jev scope §9 rule 6). ?days= bounds the window
+// (default 90, max 365). Reads decision_reviews only; nothing here acts.
+router.get('/status', async (req, res, next) => {
+  try {
+    const { evaluateCapabilities } = require('../services/typed-decisions/eval');
+    res.json(await evaluateCapabilities({ days: req.query.days }));
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get('/reviews', async (req, res, next) => {
   try {
