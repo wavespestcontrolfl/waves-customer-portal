@@ -245,7 +245,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
 
 // Same { sent, attempted } contract as the email leg — a phone on file
 // with a template/provider failure is retryable, no phone is not.
-async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false }) {
+async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false, sendOptions }) {
   let attempted = false;
   try {
     const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -279,6 +279,9 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       // 'unreachable' (see validators/send-window.js).
       ...(operatorInitiated ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined },
+      // A caller's own canonical-sender hooks (the rate review letter: its
+      // preDispatchCheck re-reads notice ownership at the last abort point).
+      ...sendOptions,
     });
     // A policy block (sms_enabled=false, STOP suppression, billing pref)
     // is not a provider failure — rerunning cannot deliver it, so it must

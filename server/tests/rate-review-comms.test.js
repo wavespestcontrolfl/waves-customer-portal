@@ -501,6 +501,11 @@ describe('customer surfaces', () => {
     const late = jest.fn(async () => {});
     expect(await handoff(late)).toEqual({ ok: false, reason: 'notice_repointed' });
     expect(late).not.toHaveBeenCalled();
+    // the text leg's last abort point re-reads ownership the same way
+    const check = smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck;
+    expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
+    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
+    expect(await check()).toEqual({ ok: true });
   });
 
   test('portal: a prepaid change whose renewal is already recorded (a successor term) is not upcoming', async () => {
@@ -515,7 +520,9 @@ describe('customer surfaces', () => {
     ];
     mockDb.reset(b);
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
-    mockDb.store.annual_prepay_terms.push({ id: 'term-2', customer_id: CUSTOMER(1), status: 'pending', renewed_from_term_id: 'term-1', term_start: '2027-05-15', coverage_service_type: 'Quarterly Pest Control' });
+    // a legacy unlabeled term: the successor is matched through the notice's own plan line
+    mockDb.store.annual_prepay_terms[0].coverage_service_type = null;
+    mockDb.store.annual_prepay_terms.push({ id: 'term-2', customer_id: CUSTOMER(1), status: 'pending', renewed_from_term_id: null, term_start: '2027-05-15', coverage_service_type: 'Quarterly Pest Control' });
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 

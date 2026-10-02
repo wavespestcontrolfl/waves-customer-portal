@@ -643,12 +643,20 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
       }),
     },
   });
-  const sms = !(await stillOwned(dbh, claimed, entry.customerId)) ? { sent: false, attempted: false } : await PriceChangeNotices.sendNoticeSms({
+  const sms = await PriceChangeNotices.sendNoticeSms({
     customer,
     vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
     actorId,
     hasEmailLeg: email.sent,
     operatorInitiated: true,
+    // The canonical SMS sender's last abort point before the provider (its
+    // locked provider handoff is reserved for invoice delivery): ownership
+    // is re-read there, so a notice repointed meanwhile never texts its
+    // token to the previous customer.
+    sendOptions: {
+      preDispatchCheck: async () => ((await stillOwned(dbh, claimed, entry.customerId))
+        ? { ok: true } : { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer' }),
+    },
   });
   if (!email.sent && !sms.sent) {
     // Never handed to a provider (no contact, every leg policy-blocked):
@@ -869,13 +877,16 @@ async function declinedPrepayTermIds(dbh, rows) {
   // does not renew at the noticed amount — the apply holds on it too
   // (term_not_live).
   const { successorTermExists } = require('./rate-review-apply')._private;
+  // The notice's own plan line is the family fallback for a legacy term
+  // with no coverage label (the apply's own guard passes it too).
+  const familyByTerm = new Map(rows.filter((n) => n.billing_lane === 'annual_prepay').map((n) => [String(parseJson(n.metadata, {}).term_id || ''), n.family_key]));
   const out = new Set();
   for (const t of terms) {
     // A successor term already on the books (a renewal recorded — at the
     // noticed amount or, through the staff override, another) is the
     // renewal: the notice is history, not an upcoming rate.
     if ((t.renewal_decision != null && String(t.renewal_decision) !== '') || String(t.status) === 'cancelled'
-      || await successorTermExists(dbh, t)) out.add(String(t.id));
+      || await successorTermExists(dbh, t, familyByTerm.get(String(t.id)) || null)) out.add(String(t.id));
   }
   return out;
 }
