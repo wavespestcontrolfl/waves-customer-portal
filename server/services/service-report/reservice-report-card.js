@@ -151,6 +151,9 @@ function withPeriod(text) {
 const LOCK_WORD = '(?:lock\\s*box|lockbox|padlock|lock|gate|door|garage|shed|safe)';
 const KEY_LOCATION_RE = new RegExp(
   '\\b(?:keys?|spare\\s+key|key\\s*box|lock\\s*box|lockbox|hide-?a-?key'
+  // Access devices: a remote / fob / clicker / opener / key card says where
+  // the way in is, same as a key (Codex r9).
+  + '|(?:garage|gate|door)\\s+(?:remotes?|openers?|clickers?|fobs?)|remotes?|clickers?|(?:key\\s*)?fobs?|key\\s*cards?|access\\s+cards?'
   + '|(?:gate|door|garage|alarm|entry|access)\\s+codes?'
   + '|(?:under|beneath|behind)\\s+(?:the\\s+)?(?:door\\s*)?mat|doormat'
   + `|${LOCK_WORD}\\s+(?:combination|combo)s?`
@@ -274,11 +277,52 @@ function buildWhatWeDid(service, block, { products, areas, pestPressureScore }) 
   if (block.outcome !== 'treated' || NOT_PERFORMED_OUTCOMES.has(block.outcome)) return null;
   const rows = productRows(products);
   const pests = pestsOf(rows);
-  const where = block.serviceLine === 'lawn' ? lawnWhereOf(asStringArray(areas)) : whereOf(asStringArray(areas));
+  const where = block.serviceLine === 'lawn' ? lawnWhereOf(asStringArray(areas)) : pestWhereOf(asStringArray(areas));
   const found = foundActivity(service, block.serviceLine, pestPressureScore);
   const safetyLine = hasLiquidApplication(rows) ? SAFETY_LINE : null;
   if (!pests.length && !where && !found && !safetyLine) return null;
   return { pests, where: where || null, found, safetyLine };
+}
+
+// Pest closeouts record either Fast Complete's Inside / Outside / Garage
+// (whereOf, shared with the fixed recap text) or the regular completion
+// panel's controlled labels (shared/legacy-completion-areas.json "pest").
+// The card words both; anything else is left out (Codex r9).
+const LEGACY_PEST_AREA_PHRASES = new Map([
+  ['perimeter', 'the perimeter'],
+  ['garage', 'the garage'],
+  ['kitchen', 'the kitchen'],
+  ['bathrooms', 'the bathrooms'],
+  ['bedrooms', 'the bedrooms'],
+  ['living areas', 'the living areas'],
+  ['laundry / utility room', 'the laundry room'],
+  ['pantry', 'the pantry'],
+  ['entry points', 'entry points'],
+  ['eaves / soffits', 'the eaves'],
+  ['attic', 'the attic'],
+  ['crawlspace', 'the crawlspace'],
+  ['lanai / pool cage', 'the lanai'],
+  ['yard', 'the yard'],
+  ['fence line', 'the fence line'],
+  ['trash area', 'the trash area'],
+  ['ornamentals', 'the ornamentals'],
+  ['bedding areas', 'the bedding areas'],
+]);
+
+function pestWhereOf(areas) {
+  const fast = whereOf(areas);
+  if (fast) return fast;
+  const seen = new Set();
+  const phrases = [];
+  for (const area of areas) {
+    const phrase = LEGACY_PEST_AREA_PHRASES.get(String(area || '').replace(/\s+/g, ' ').trim().toLowerCase());
+    if (!phrase || seen.has(phrase)) continue;
+    seen.add(phrase);
+    phrases.push(phrase);
+  }
+  if (!phrases.length) return '';
+  return phrases.length === 1 ? phrases[0]
+    : `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
 }
 
 // Lawn closeouts record yard zones ("Front yard", "Back yard", "Side yards",

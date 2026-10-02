@@ -58,7 +58,7 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // (Codex #5542 r8): for the word-token passes below, combo / combination
 // followed by "of" counts only when a lock word follows ("the combination of
 // the gate is blue"). The digit passes above still key on the bare word.
-const COMBINATION_NOUN = 'combo|combination(?!\\s+of\\b(?!\\s+(?:the\\s+|my\\s+|our\\s+)?(?:lock\\s*box|padlock|lock|gate|garage|door|shed|safe|keypad)))';
+const COMBINATION_NOUN = '(?:combo|combination)(?!\\s+of\\b(?!\\s+(?:the\\s+|my\\s+|our\\s+)?(?:lock\\s*box|padlock|lock|gate|garage|door|shed|safe|keypad)))';
 const TOKEN_CONTEXT_KEYWORDS = ACCESS_CODE_KEYWORDS.replace('combo|combination', COMBINATION_NOUN);
 const ACCESS_CODE_NOUN_RE = new RegExp(`\\b(?:code|pin|${COMBINATION_NOUN}|passcode|password|passphrase)\\b`, 'i');
 const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${TOKEN_CONTEXT_KEYWORDS})\\b`, 'i');

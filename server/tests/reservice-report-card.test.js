@@ -622,3 +622,27 @@ describe('Codex r8 (#5542)', () => {
     expect(words('Roaches inside. Combination of the lockbox is waves.')).toBe('Roaches inside.');
   });
 });
+
+describe('Codex r9 (#5542)', () => {
+  const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+  test.each([
+    ['Ants are in the kitchen and the garage remote is under the planter.', null],
+    ['Ants in the kitchen. The gate fob is in the mailbox.', 'Ants in the kitchen.'],
+    ['Roaches in the garage. The clicker is on the porch shelf.', 'Roaches in the garage.'],
+    ['Spiders by the door. My key card is with the neighbor.', 'Spiders by the door.'],
+  ])('access-device locations never reach the public card: %p -> %p', (text, expected) => {
+    expect(words(text)).toBe(expected);
+  });
+  test('"a combo of ants and roaches" survives the production scrub; a combo credential does not', () => {
+    expect(words('A combo of ants and roaches is in the kitchen.')).toBe('A combo of ants and roaches is in the kitchen.');
+    expect(words('Ants on the patio. The combo is blue.')).toBe('Ants on the patio.');
+  });
+  test('regular completion-panel pest areas word the "Where" row', () => {
+    const where = (areas) => card(frozenService(null, { areas_serviced: areas })).whatWeDid.where;
+    expect(where(['Perimeter', 'Kitchen', 'Bathrooms'])).toBe('the perimeter, the kitchen and the bathrooms');
+    expect(where(['Eaves / soffits', 'Lanai / pool cage'])).toBe('the eaves and the lanai');
+    expect(where(['Inside', 'Outside'])).toBe('inside and outside');
+    expect(where(['Somewhere odd', 'Kitchen'])).toBe('the kitchen');
+    expect(where(['Somewhere odd'])).toBeNull();
+  });
+});
