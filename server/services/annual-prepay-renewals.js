@@ -2921,12 +2921,6 @@ async function termWasPafDeferred(term, prepayInvoiceId, conn) {
   return !!job && job.deferred_to_first_visit === true && String(job.invoice_id || '') === String(prepayInvoiceId);
 }
 
-function invoiceBillsBaseApplication(invoice) {
-  const InvoiceService = require('./invoice');
-  return InvoiceService._parseInvoiceLineItems(invoice?.line_items)
-    .some((li) => Number(li.amount) > 0 && InvoiceService.lineIsBaseApplication(li));
-}
-
 async function reconcilePendingWindowCompletions(term, conn = db) {
   const summary = { settled: 0, credited: 0 };
   try {
@@ -2988,11 +2982,17 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
       // (verified against prod), so the invoice-side check would miss them.
       if (prepayInvoiceId && String(invoice.id) === String(prepayInvoiceId)) continue;
       // A year whose charge waited for the first visit (GATE_PAF_PREPAY) held
-      // its visits' base application unbilled; a completed visit's invoice
-      // with no base-application line is add-ons only (annual-prepay-addon-
-      // billing). The base was this term's, never separately collected: the
-      // slice was delivered, so nothing comes back as credit.
-      if (pafDeferredTerm && !invoiceBillsBaseApplication(invoice)) continue;
+      // its visits' base application unbilled. An invoice POSITIVELY made of
+      // the visit's own add-on lines only (the add-on billing's classifier:
+      // every line an add-on of this visit or a deposit credit) is not the
+      // base: the slice was delivered, so nothing comes back as credit. Any
+      // other invoice (an office invoice with free-text lines included) keeps
+      // the normal reconciliation.
+      if (pafDeferredTerm) {
+        const AddonBilling = require('./annual-prepay-addon-billing');
+        const addons = await AddonBilling.annualPrepayAddonRows(row, conn);
+        if (AddonBilling.classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons) continue;
+      }
       // Payer-billed visit: the money (owed or collected) is the PAYER's AR,
       // not the homeowner's — settling it as homeowner coverage or crediting
       // the homeowner a slice for the payer's money are both wrong. The
