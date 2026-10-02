@@ -1200,7 +1200,14 @@ function retiredIndex() {
       if (key && !byTopic.has(key)) byTopic.set(key, post);
     }
   }
-  retiredIndexCache = { byUrl, byLeaf, byTopic };
+  // Live topic owners also match by containment ("dollar spot management"
+  // contains the owned "dollar spot"): a kept post owns every angle on its
+  // multi-word topic. Retired topics stay exact-only (containment blocked 12
+  // of 82 curated planned topics when tried for them).
+  const liveOwners = [...byTopic]
+    .filter(([key, post]) => post.live && key.includes(' '))
+    .map(([key, post]) => ({ words: key.split(' '), post }));
+  retiredIndexCache = { byUrl, byLeaf, byTopic, liveOwners };
   return retiredIndexCache;
 }
 
@@ -1214,7 +1221,10 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
   if (!hit && !urlOnly) {
     for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
       const key = text ? topicKey(text) : '';
-      const post = key ? idx.byTopic.get(key) : null;
+      const words = new Set(key ? key.split(' ') : []);
+      const post = key
+        ? (idx.byTopic.get(key) || (idx.liveOwners.find((o) => o.words.every((w) => words.has(w))) || {}).post || null)
+        : null;
       // Scoped to the categories the topic was retired from (the post's own
       // and its merge target's): category nouns and framing drop out of the
       // key, so a lawn "rainy season" guide would otherwise read as the
