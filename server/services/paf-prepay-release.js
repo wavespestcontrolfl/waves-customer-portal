@@ -468,10 +468,11 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
     if (!(await pafDeferredPrepayCoversVisit(svc, conn, { throwOnError: true }))) return null;
     // "Being charged now" only when the sweep's automatic charge will really
-    // run (Codex r8): the bound method is still saved, nothing already parked
+    // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
     // it on the pay link, Auto Pay was not turned off or paused since the
     // approval, and no collections hold stops off-session charges. Otherwise
     // the regular text — the customer hears about the pay link separately.
+    if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
     if (job.authentication_required === true || job.charge_returned === true) return null;
     const method = job.payment_method_row_id
       ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('customer_id', 'stripe_payment_method_id', 'method_type')
