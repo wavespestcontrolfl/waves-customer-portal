@@ -61,6 +61,18 @@ describe('labelsToFloor', () => {
     expect(labelsToFloor({ numerator: 70, denominator: 70 }, 0.995)).toBe(528);
     expect(labelsToFloor({ numerator: 0, denominator: 0 }, 0.9)).toBe(29);
   });
+
+  test('a large error count is answered by binary search in milliseconds, and the answer is exact (pre-push audit P1)', () => {
+    const metric = { numerator: 500, denominator: 1000 };
+    const started = Date.now();
+    const more = labelsToFloor(metric, 0.9);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(more).toBeGreaterThan(0);
+    expect(binomialLowerBound(500 + more, 1000 + more)).toBeGreaterThanOrEqual(0.9);
+    expect(binomialLowerBound(500 + more - 1, 1000 + more - 1)).toBeLessThan(0.9);
+    // beyond reach: 5,000 all-correct labels cannot lift 1 of 1,000 to 0.999
+    expect(labelsToFloor({ numerator: 1, denominator: 1000 }, 0.999)).toBeNull();
+  });
 });
 
 describe('scoreRows — tiers from the representative set only', () => {

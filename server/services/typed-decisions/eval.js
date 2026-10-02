@@ -79,7 +79,8 @@ function binomialLowerBound(k, n, { confidence = CONFIDENCE } = {}) {
   // tail(p) rises with p; bisect for tail(p) = alpha.
   let lo = 0;
   let hi = 1;
-  for (let i = 0; i < 80; i += 1) {
+  // 60 halvings put the bound within 1e-18 of exact: far inside any floor.
+  for (let i = 0; i < 60; i += 1) {
     const mid = (lo + hi) / 2;
     if (tail(mid) < alpha) lo = mid; else hi = mid;
   }
@@ -198,14 +199,23 @@ function metricsOf(type, stats) {
 }
 
 // Smallest number of further all-correct labels that would lift the lower
-// bound to the floor, or null when 5,000 would not.
+// bound to the floor, or null when MAX_MORE_LABELS would not. The bound rises
+// monotonically with each all-correct label, so this is a binary search:
+// about a dozen bound evaluations, never a scan (pre-push audit P1: a scan
+// over a large error count took tens of seconds on the event loop).
+const MAX_MORE_LABELS = 5000;
 function labelsToFloor(metric, floor) {
   const k = metric.numerator;
   const n = metric.denominator;
-  for (let more = 1; more <= 5000; more += 1) {
-    if (binomialLowerBound(k + more, n + more) >= floor) return more;
+  const clears = (more) => binomialLowerBound(k + more, n + more) >= floor;
+  if (!clears(MAX_MORE_LABELS)) return null;
+  let lo = 1;
+  let hi = MAX_MORE_LABELS;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (clears(mid)) hi = mid; else lo = mid + 1;
   }
-  return null;
+  return lo;
 }
 
 // Highest tier whose floors every lower bound clears, climbed in order, plus
