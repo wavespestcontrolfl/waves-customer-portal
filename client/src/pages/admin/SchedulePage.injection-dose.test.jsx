@@ -368,6 +368,10 @@ describe('the injection record', () => {
     expect(screen.queryByText(/is not in inches/)).toBeNull();
     // The palm option is only its label, no rate.
     expect(screen.getByLabelText('Plant').selectedOptions[0].textContent).toBe(PHOSPHO_RATE.bands[1].label);
+    // No tree rate per inch of trunk is shown for a palm.
+    expect(screen.getByText("palms are dosed per palm from the label's canopy-spread table")).toBeTruthy();
+    // (Only the picker's Tree option still names the tree rate.)
+    expect(screen.queryAllByText(/per inch of trunk/).every((node) => node.tagName === 'OPTION')).toBe(true);
   });
 
   it('starts the size over when the pick goes from palm back to tree, but not from tree to tree', () => {

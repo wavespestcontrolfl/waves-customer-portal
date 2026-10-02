@@ -10984,12 +10984,21 @@ export function treeShrubCloseoutBlocksClient({
 // pick the label leaves to the tech.
 function InjectionLabelFields({ rate, band, pickKey, onPick, select, colors }) {
   const hint = { fontSize: 14, color: colors.muted };
+  // A palm is dosed from the label's canopy-spread table, never the tree
+  // rate per inch of trunk.
+  const palm = Boolean(pickedBand(rate, pickKey)?.palm);
   return (
     <>
-      <div style={hint}>
-        Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate, band)}</strong>
-        {band && rate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
-      </div>
+      {palm ? (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>palms are dosed per palm from the label's canopy-spread table</strong>
+        </div>
+      ) : (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate, band)}</strong>
+          {band && rate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
+        </div>
+      )}
       {!rate.bands && (
         <div style={hint}>No dose is worked out for this product until its label is checked. Dose from the label.</div>
       )}
