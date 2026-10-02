@@ -197,7 +197,7 @@ async function seedWithRide(conn, parentRow, rider, seed) {
   try {
     const seedResult = await conn.transaction(async (sp) => {
       const result = await seed(sp, rider.overrideDates);
-      if (!(await persistedRiderOnHost(sp, parentRow.id, rider.hostParentId))) {
+      if (!(await persistedRiderOnHost(sp, parentRow.id, rider.hostParentId, rider.overrideDates))) {
         throw new Error('saved follow-ups are not all in the lawn visits');
       }
       return result;
@@ -220,12 +220,20 @@ function liveSeriesRows(conn, parentIds) {
 
 // Every saved rider follow-up sits on a saved lawn date AND is in that lawn
 // row's visit (a seeded row whose grouping failed is a separate stop).
-async function persistedRiderOnHost(conn, riderId, hostId) {
+async function persistedRiderOnHost(conn, riderId, hostId, expectedDates = null) {
   const rows = await liveSeriesRows(conn, [riderId, hostId]);
   const seriesOf = (row) => String(row.recurring_parent_id || row.id);
   const hostVisitByDate = new Map(rows.filter((r) => seriesOf(r) === String(hostId))
     .map((r) => [dateOnly(r.scheduled_date), r.visit_id ? String(r.visit_id) : null]));
   const riderFollowUps = rows.filter((r) => String(r.recurring_parent_id || '') === String(riderId));
+  // The saved plan follow-ups must be EXACTLY the planned lawn-date set: a
+  // non-plan child (booster, callback) can make the seeder insert fewer, and
+  // a partial series is not a ride.
+  if (expectedDates) {
+    const saved = riderFollowUps.map((r) => dateOnly(r.scheduled_date)).sort();
+    const expected = [...new Set(expectedDates.map(dateOnly))].sort();
+    if (saved.length !== expected.length || saved.some((d, k) => d !== expected[k])) return false;
+  }
   return riderFollowUps.length > 0 && riderFollowUps.every((r) => {
     const hostVisit = hostVisitByDate.get(dateOnly(r.scheduled_date));
     return !!hostVisit && !!r.visit_id && String(r.visit_id) === hostVisit;

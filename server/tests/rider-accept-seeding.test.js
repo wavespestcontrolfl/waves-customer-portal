@@ -244,6 +244,22 @@ describe('rider context fall-backs', () => {
     expect(conn.updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
   });
 
+  test('a ride missing one planned follow-up (a booster took its slot) is rolled back, not kept', async () => {
+    seedCalls.length = 0;
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    conn.persisted = [
+      ...lawnRows(8),
+      // Only two of the three planned follow-ups were saved; both are grouped.
+      ...rider.overrideDates.slice(0, 2).map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: `v${d}` })),
+      { id: 'b0', recurring_parent_id: 'pest', is_recurring: false, scheduled_date: rider.overrideDates[2], visit_id: null },
+    ];
+    const ride = await RiderAccept.seedWithRide(conn, pest(), rider, seed);
+    expect(ride.rides).toBe(false);
+    expect(seedCalls).toEqual([rider.overrideDates, null]);
+  });
+
   test('no rider: the plain seed runs once, no savepoint ride', async () => {
     seedCalls.length = 0;
     const ride = await RiderAccept.seedWithRide(conn, pest(), null, seed);
