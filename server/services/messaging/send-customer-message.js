@@ -1607,7 +1607,11 @@ async function sendCustomerMessageCore(input) {
 async function recordSmsOfferAfterSend(input, sendInput, providerOutcome) {
   try {
     const agentDecisionId = input?.metadata?.agentDecisionId;
-    if (!agentDecisionId || providerOutcome?.provider === 'push') return;
+    // Only a text the carrier took is an offer: the gate-, template- and
+    // owner-silence sentinels report sent:true for a message that reached
+    // nobody, and recording one would supersede a real open offer.
+    if (!agentDecisionId || providerOutcome?.sent !== true || providerOutcome.deliveryOutcome !== 'accepted'
+      || providerOutcome.provider !== 'twilio' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerOutcome.providerMessageId || '')) return;
     if (!require('../../config/feature-gates').gateEnvValue('GATE_SMS_OFFER_LEDGER')) return;
     await require('../sms-offers').recordOfferForSend({
       agentDecisionId,
