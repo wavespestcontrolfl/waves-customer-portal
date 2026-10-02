@@ -298,7 +298,10 @@ function numberValues(text, { strictTimes = false } = {}) {
     }
     let values;
     const money = raw.includes(':') ? '' : moneyPrefix(str.slice(0, m.index), after);
-    if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) values = [raw.replace(/[.,]/g, '')];
+    const grouped = /^(\d{1,3}(?:([.,])\d{3})+)([.,])(\d{1,2})$/.exec(raw);
+    // "1,234.56" and "1.234,56" are one amount: thousands groups plus cents, the two separators different
+    if (grouped && grouped[2] !== grouped[3]) values = [`${grouped[1].replace(/[.,]/g, '')}.${grouped[4]}`.replace(/\.0+$/, '')];
+    else if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) values = [raw.replace(/[.,]/g, '')];
     else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
     else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
     else values = raw.split(/[.,:]/);

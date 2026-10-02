@@ -136,6 +136,12 @@ describe('tokenParity', () => {
     expect(tokenParity('The fee is $2.', 'La tarifa es de $14.')).toMatchObject({ ok: false });
   });
 
+  test('a grouped amount with cents is one value with its currency', () => {
+    expect(tokenParity('Your balance is $1,234.56.', 'Su saldo es de €1,234.56.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your balance is $1,234.56.', 'Su saldo es de 1.234,56 dólares.')).toMatchObject({ ok: true });
+    expect(tokenParity('Your balance is $1,234.56.', 'Su saldo es de $1,234.65.')).toMatchObject({ ok: false });
+  });
+
   test('an email\'s local part keeps its case; only the domain may differ in case', () => {
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a casesensitive@custom.example.')).toMatchObject({ ok: false });
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a CaseSensitive@Custom.Example.')).toMatchObject({ ok: true });
