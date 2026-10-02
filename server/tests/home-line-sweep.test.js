@@ -12,17 +12,18 @@ const { addressKey } = require('../services/customer-property-address-keys');
 
 function fakeDb(rows, { updateResult = 1 } = {}) {
   const updates = [];
+  const predicates = [];
   const database = jest.fn(() => {
     const q = {
       whereNull: () => q,
       select: async () => rows,
       where: (w) => { q._id = w.id; return q; },
-      whereRaw: () => q,
+      whereRaw: (sql, bindings) => { predicates.push([sql, bindings]); return q; },
       update: async (patch) => { updates.push({ id: q._id, ...patch }); return updateResult; },
     };
     return q;
   });
-  return { database, updates };
+  return { database, updates, predicates };
 }
 
 describe('stampHomeLines', () => {
@@ -59,5 +60,12 @@ describe('stampHomeLines', () => {
     process.env.GATE_HOME_LINE = 'true';
     const { database } = fakeDb([parrish], { updateResult: 0 });
     expect(await stampHomeLines({ now, database })).toEqual({ stamped: 0, unchanged: 0, lostRace: 1 });
+  });
+
+  test('the compare-and-set covers every input the line is derived from', async () => {
+    process.env.GATE_HOME_LINE = 'true';
+    const { database, predicates } = fakeDb([parrish]);
+    await stampHomeLines({ now, database });
+    expect(predicates).toEqual(expect.arrayContaining(['address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key'].map((c) => [`${c} IS NOT DISTINCT FROM ?`, [parrish[c] ?? null]])));
   });
 });

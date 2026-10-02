@@ -40,13 +40,14 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
       unchanged += 1;
       continue;
     }
-    // Compare-and-set on the key the row was read with: an address edit or a
-    // staff pick that landed since this read is left for the next run.
-    const updated = await database('customers')
-      .where({ id: row.id })
-      .whereRaw('home_line_address_key IS NOT DISTINCT FROM ?', [row.home_line_address_key ?? null])
-      .whereRaw('home_line_location_id IS NOT DISTINCT FROM ?', [row.home_line_location_id ?? null])
-      .update({
+    // Compare-and-set on every column the line was derived from: an address
+    // or geocode edit, or a staff pick, that landed since this read leaves the
+    // row for the next run instead of stamping a line from stale inputs.
+    let update = database('customers').where({ id: row.id });
+    for (const column of COLUMNS.slice(1)) {
+      update = update.whereRaw(`${column} IS NOT DISTINCT FROM ?`, [row[column] ?? null]);
+    }
+    const updated = await update.update({
         home_line_location_id: resolveServiceLocation(row).id,
         home_line_address_key: key,
         home_line_source: 'derived',
