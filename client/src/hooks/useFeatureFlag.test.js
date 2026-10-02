@@ -40,3 +40,25 @@ it('resolves to no flags, without a network read, when nobody is signed in', asy
   await expect(refetchFlags()).resolves.toEqual({});
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+// A long-lived shell keeps its hook mounted across a login switch: with a
+// refreshKey (the verified account) it re-reads the refetched flags.
+it('useFeatureFlagReady re-reads when its refreshKey changes after refetchFlags', async () => {
+  const React = await import('react');
+  const { render, screen, act, cleanup } = await import('@testing-library/react');
+  localStorage.setItem('waves_admin_token', 'fixture-only');
+  let answer = { 'tech-field-workspace': true };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ flags: answer }) })));
+  const mod = await import('./useFeatureFlag');
+  function Probe({ who }) {
+    const { enabled, ready } = mod.useFeatureFlagReady('tech-field-workspace', false, who);
+    return React.createElement('output', null, `${who}:${ready}:${enabled}`);
+  }
+  const view = render(React.createElement(Probe, { who: 'a' }));
+  expect(await screen.findByText('a:true:true')).toBeTruthy();
+  answer = { 'tech-field-workspace': false };
+  await act(async () => { await mod.refetchFlags(); });
+  view.rerender(React.createElement(Probe, { who: 'b' }));
+  expect(await screen.findByText('b:true:false')).toBeTruthy();
+  cleanup();
+});

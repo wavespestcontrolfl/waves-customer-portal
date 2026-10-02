@@ -80,7 +80,9 @@ export function useFeatureFlag(key, defaultValue = false) {
 // fetch has resolved, `true` after. Gates use this to defer rendering
 // until the flag is known, avoiding a V1→V2 remount flash (which double-
 // fires any fetches the V1 component does on mount).
-export function useFeatureFlagReady(key, defaultValue = false) {
+// refreshKey (optional): re-read when it changes, e.g. the verified staff
+// account, so a long-lived shell follows refetchFlags() after a login switch.
+export function useFeatureFlagReady(key, defaultValue = false, refreshKey = undefined) {
   const [state, setState] = useState(() => ({
     enabled: cache
       ? (Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue)
@@ -106,7 +108,7 @@ export function useFeatureFlagReady(key, defaultValue = false) {
     return () => {
       mounted = false;
     };
-  }, [key, defaultValue]);
+  }, [key, defaultValue, refreshKey]);
   return state;
 }
 
