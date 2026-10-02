@@ -16,6 +16,11 @@ const ok = (p = 0.9) => ({
   answers: Object.fromEntries(Object.keys(pkg.questions).map((id) => [id, noul(p)])),
 });
 
+// A lone write proposes its cohort as a SQL CASE (the sibling's current value,
+// else the computed one, carried as the last binding); read the computed value.
+const cohort = (row) => (row && row.sampled_for && typeof row.sampled_for === 'object' ? row.sampled_for.bindings.at(-1) : row?.sampled_for);
+const proposesSiblingCohort = (row) => !!(row && row.sampled_for && typeof row.sampled_for === 'object' && /CASE WHEN EXISTS \(SELECT 1 FROM decision_reviews s WHERE .*s\.provider <> \?\) THEN \(SELECT s\.sampled_for FROM decision_reviews s WHERE .* ORDER BY s\.created_at LIMIT 1\) ELSE \? END/.test(row.sampled_for.sql));
+
 function stubConn() {
   const calls = { inserted: null, conflict: null, merge: null, where: null, table: null };
   const builder = {
@@ -23,7 +28,8 @@ function stubConn() {
     onConflict(key) { calls.conflict = key; return builder; },
     merge(cols) { calls.merge = cols; return builder; },
     where(...args) { calls.where = args; return builder; },
-    whereRaw(sql) { calls.whereRaw = sql; return Promise.resolve([]); },
+    whereRaw(sql) { calls.whereRaw = sql; return builder; },
+    returning(col) { calls.returning = col; return Promise.resolve((calls.inserted || []).map((r) => ({ sampled_for: cohort(r) }))); },
   };
   const conn = (table) => { calls.table = table; return builder; };
   conn.raw = (sql, bindings) => ({ sql, bindings });
@@ -87,10 +93,10 @@ describe('recordDecisions', () => {
     expect(row).toMatchObject({ capability: 'call_judge', package_id: 'call_judge.v2', package_hash: packageHash(pkg), served_model: 'jev-1.13.0', subject_type: 'call_log', subject_id: '11111111-1111-4111-8111-111111111111' });
     expect(JSON.parse(row.jev_answer)).toEqual(noul(0.9));
     expect(JSON.parse(row.baseline_answers)).toEqual({ production: false, deep_judge: false });
-    expect(row.sampled_for).toBe('disagreement'); // Jev yes vs production no
+    expect(cohort(row)).toBe('disagreement'); // Jev yes vs production no
     expect(row.subject_hash).toBe(digest);
     const quote = calls.inserted.find((r) => r.question_id === 'quote_promised');
-    expect(quote.sampled_for).toBeNull(); // agrees, draw 0.99
+    expect(cohort(quote)).toBeNull(); // agrees, draw 0.99
     const bare = calls.inserted.find((r) => r.question_id === 'complaint');
     expect(bare.baseline_answers).toBeNull();
     expect(out.sampled).toEqual({ disagreement: 1 });
@@ -107,12 +113,11 @@ describe('recordDecisions', () => {
     await recordDecisions({ provider: 'typesafe', capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
-    expect(Object.keys(calls.merge)).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
-    expect(MERGE_COLUMNS).toEqual(Object.keys(calls.merge));
-    expect(calls.merge.jev_answer.sql).toBe('EXCLUDED.jev_answer');
-    // a write for one provider alone (no sibling answers) leaves sampled_for alone while a sibling row exists
-    expect(calls.merge.sampled_for.sql).toMatch(/^CASE WHEN EXISTS \(SELECT 1 FROM decision_reviews s WHERE .*s\.provider <> EXCLUDED\.provider\) THEN decision_reviews\.sampled_for ELSE EXCLUDED\.sampled_for END$/);
-    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at', 'outcome_evidence']) expect(Object.keys(calls.merge)).not.toContain(forbidden);
+    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash']);
+    expect(MERGE_COLUMNS).toEqual(calls.merge);
+    // a write for one provider alone proposes its cohort in SQL: the sibling row's current value, else the computed one
+    expect(proposesSiblingCohort(calls.inserted[0])).toBe(true);
+    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at', 'outcome_evidence']) expect(calls.merge).not.toContain(forbidden);
     expect(calls.whereRaw).toMatch(/sampled_for IS DISTINCT FROM 'heldout'/);
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });
@@ -123,7 +128,8 @@ describe('recordDecisions', () => {
     const result = { ok: true, packageHash: packageHash(sms), servedModel: null, answers: { is_courtesy_only: noul(0.95) } };
     const out = await recordDecisions({ provider: 'typesafe', capability: 'sms_courtesy', pkg: sms, subjectType: 'sms_log', subjectId: 's1', result, baselines: { is_courtesy_only: { rules: false } }, random: () => 0.5, conn });
     expect(out.recorded).toBe(1);
-    expect(calls.inserted[0]).toMatchObject({ question_id: 'is_courtesy_only', served_model: null, sampled_for: 'disagreement' });
+    expect(calls.inserted[0]).toMatchObject({ question_id: 'is_courtesy_only', served_model: null });
+    expect(cohort(calls.inserted[0])).toBe('disagreement');
   });
 
   test('without a test draw, the random audit is a stable per-row hash: re-recording never re-rolls it', async () => {
@@ -135,15 +141,15 @@ describe('recordDecisions', () => {
     };
     const first = await run(0.9, true);
     const again = await run(0.9, true);
-    expect(again.sampled_for).toBe(first.sampled_for);
+    expect(cohort(again)).toBe(cohort(first));
     const draw = stableDraw(first);
     expect(draw).toBeGreaterThanOrEqual(0);
     expect(draw).toBeLessThan(1);
-    expect(first.sampled_for).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : null);
+    expect(cohort(first)).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : null);
     // the answer changed to disagree: sampled_for moves with it (and merges, see
     // above) — unless the stable draw already holds this row in the audit, which
     // is drawn first and keeps it there whatever the baselines say.
-    expect((await run(0.2, true)).sampled_for).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : 'disagreement');
+    expect(cohort(await run(0.2, true))).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : 'disagreement');
   });
 
   test('gate off: nothing written', async () => {
@@ -199,19 +205,25 @@ describe('provider (one row per provider per subject and question; Codex r1 on #
     };
     const [jev, clef] = [await record('typesafe'), await record('cloudflare')];
     expect(clef.map((r) => stableDraw(r))).toEqual(jev.map((r) => stableDraw(r)));
-    expect(clef.map((r) => r.sampled_for)).toEqual(jev.map((r) => r.sampled_for));
+    expect(clef.map(cohort)).toEqual(jev.map(cohort));
   });
 });
 
 describe('review cohort is paired across provider siblings (Codex r1 on #5555)', () => {
-  test('a coordinated write (sibling answers present) lets sampled_for follow the new verdict; a write for one provider alone leaves sampled_for untouched while a sibling row exists (Codex r7-r9, #5555)', async () => {
+  test('a coordinated write proposes the computed cohort; a write for one provider alone proposes the sibling row\'s current cohort in SQL, else the computed one (Codex r7-r10, #5555)', async () => {
+    const result = { ok: true, packageHash: packageHash(packageFor('sms_courtesy.v1')), servedModel: 'jev-1.13.0', answers: { is_courtesy_only: noul(0.9) } };
     const paired = stubConn();
-    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result: { ok: true, packageHash: packageHash(packageFor('sms_courtesy.v1')), servedModel: 'jev-1.13.0', answers: { is_courtesy_only: noul(0.9) } }, siblingAnswers: { is_courtesy_only: noul(0.9) }, random: () => 0.99, conn: paired.conn });
-    expect(paired.calls.merge.sampled_for.sql).toBe('EXCLUDED.sampled_for');
+    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result, siblingAnswers: { is_courtesy_only: noul(0.1) }, random: () => 0.99, conn: paired.conn });
+    expect(paired.calls.inserted[0].sampled_for).toBe('disagreement'); // a plain value: the pair's answers were in hand
+    expect(paired.calls.merge).toEqual(MERGE_COLUMNS);
     const alone = stubConn();
-    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result: { ok: true, packageHash: packageHash(packageFor('sms_courtesy.v1')), servedModel: 'jev-1.13.0', answers: { is_courtesy_only: noul(0.9) } }, random: () => 0.99, conn: alone.conn });
-    // alone: with a sibling row the stored verdict stays (the pair's cohort); without one the new verdict applies in both directions
-    expect(alone.calls.merge.sampled_for.sql).toMatch(/^CASE WHEN EXISTS \(SELECT 1 FROM decision_reviews s WHERE .* THEN decision_reviews\.sampled_for ELSE EXCLUDED\.sampled_for END$/);
+    await recordDecisions({ capability: 'sms_courtesy', pkg: packageFor('sms_courtesy.v1'), provider: 'typesafe', subjectType: 'sms_log', subjectId: 's-coord', result, baselines: { is_courtesy_only: { rules: false } }, random: () => 0.99, conn: alone.conn });
+    const proposal = alone.calls.inserted[0].sampled_for;
+    expect(proposesSiblingCohort(alone.calls.inserted[0])).toBe(true);
+    // bindings: the sibling key twice (capability, package, subject type, subject id, question, this provider), then the computed cohort
+    expect(proposal.bindings).toEqual(['sms_courtesy', 'sms_courtesy.v1', 'sms_log', 's-coord', 'is_courtesy_only', 'typesafe', 'sms_courtesy', 'sms_courtesy.v1', 'sms_log', 's-coord', 'is_courtesy_only', 'typesafe', 'disagreement']);
+    // recorded counts what the statement returned, not what was proposed
+    expect(alone.calls.returning).toBe('sampled_for');
   });
 
   const sms = packageFor('sms_courtesy.v1');
@@ -220,7 +232,7 @@ describe('review cohort is paired across provider siblings (Codex r1 on #5555)',
     const { conn, calls } = stubConn();
     await recordDecisions({ capability: 'sms_courtesy', pkg: sms, provider, subjectType: 'sms_log', subjectId: 's-pair', result: result(p),
       baselines, siblingAnswers: sibling === undefined ? {} : { is_courtesy_only: noul(sibling) }, random: () => draw, conn });
-    return calls.inserted[0].sampled_for;
+    return cohort(calls.inserted[0]);
   };
 
   test('a low audit draw never splits the pair: the shared subject-keyed draw puts BOTH siblings in the audit, whatever they answered', async () => {

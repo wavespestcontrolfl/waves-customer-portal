@@ -16,9 +16,9 @@
  * labeled row keeps the answers its label was given against. sampled_for moves
  * WITH the answers (a re-run that turns an agreement into a disagreement puts
  * the row in the queue, and the reverse takes it out), except that a write for
- * one provider alone leaves it untouched while a sibling provider's row exists
- * for the case: the cohort is then the pair's and only a coordinated write,
- * one carrying every sibling's answers, moves it; its random-audit draw is
+ * one provider alone takes the sibling row's current cohort while one exists
+ * for the case (insert or update): the cohort is then the pair's and only a
+ * coordinated write, one carrying every sibling's answers, moves it; its random-audit draw is
  * a stable hash of the row's key, drawn before the disagreement check, so
  * re-running never re-rolls it and the audit stays a population sample.
  *
@@ -174,25 +174,25 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
  * Gate off, a failed answer or a bad subject returns early with no write.
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
-// What a re-record writes over an unlabeled row. Every answer column follows
-// the new write. sampled_for does too when the write is coordinated, that is,
-// it carries the other providers' answers for this subject, so the queue
-// verdict was computed with complete sibling results and every sibling row is
-// written the same way in the same run. A write for one provider alone (its
-// sibling failed, or there is only one provider) changes sampled_for ONLY
-// while no sibling row exists for the case: a single provider's verdict moves
-// with its answers in both directions, but with a sibling on record the
-// cohort is the pair's, and a lone write can neither clear the pair's
-// disagreement nor open a new one on one side only (Codex r7-r9, #5555); the
-// next coordinated write settles both rows.
-const SIBLING_ROW_EXISTS = `EXISTS (SELECT 1 FROM ${TABLE} s WHERE s.capability = EXCLUDED.capability AND s.package_id = EXCLUDED.package_id`
-  + ' AND s.subject_type = EXCLUDED.subject_type AND s.subject_id = EXCLUDED.subject_id AND s.question_id = EXCLUDED.question_id AND s.provider <> EXCLUDED.provider)';
-function mergeSet(conn, coordinated) {
-  const set = Object.fromEntries(MERGE_COLUMNS.map((column) => [column, conn.raw(`EXCLUDED.${column}`)]));
-  if (!coordinated) {
-    set.sampled_for = conn.raw(`CASE WHEN ${SIBLING_ROW_EXISTS} THEN ${TABLE}.sampled_for ELSE EXCLUDED.sampled_for END`);
-  }
-  return set;
+// The cohort a write proposes for its row. A coordinated write (one that
+// carries the other providers' answers for this subject) proposes the value
+// computed with complete sibling results, and every sibling row is written the
+// same way in the same run. A write for one provider alone (its sibling
+// failed, or there is only one provider) proposes, while a sibling row exists
+// for the case, that sibling's CURRENT cohort, decided in the statement
+// itself: the cohort is the pair's, so a lone write can neither clear the
+// pair's disagreement, open a new one on one side, nor queue a first-time row
+// by itself (Codex r7-r10, #5555); the next coordinated write settles both.
+// With no sibling on record the computed value stands, so a single provider's
+// verdict moves with its answers in both directions. The same proposal feeds
+// the INSERT and, through EXCLUDED, the conflict UPDATE.
+const SIBLING_KEY = `s.capability = ? AND s.package_id = ? AND s.subject_type = ? AND s.subject_id = ? AND s.question_id = ? AND s.provider <> ?`;
+function cohortProposal(conn, row) {
+  const key = [row.capability, row.package_id, row.subject_type, row.subject_id, row.question_id, row.provider];
+  return conn.raw(
+    `CASE WHEN EXISTS (SELECT 1 FROM ${TABLE} s WHERE ${SIBLING_KEY}) THEN (SELECT s.sampled_for FROM ${TABLE} s WHERE ${SIBLING_KEY} ORDER BY s.created_at LIMIT 1) ELSE ? END`,
+    [...key, ...key, row.sampled_for],
+  );
 }
 
 async function recordDecisions({ capability, pkg, provider, subjectType, subjectId, result, baselines = {}, siblingAnswers = {}, subjectHash = null, random = null, conn = db } = {}) {
@@ -207,16 +207,22 @@ async function recordDecisions({ capability, pkg, provider, subjectType, subject
   if (!DECISION_PROVIDERS.includes(provider)) return { recorded: 0, skipped: 'bad_provider' };
   const rows = buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, siblingAnswers, subjectHash, random });
   if (!rows.length) return { recorded: 0, skipped: 'no_answers' };
-  await conn(TABLE)
-    .insert(rows)
+  const coordinated = Object.keys(siblingAnswers || {}).length > 0;
+  const proposals = coordinated ? rows : rows.map((row) => ({ ...row, sampled_for: cohortProposal(conn, row) }));
+  // What the statement actually wrote: a labeled or held-out row is passed
+  // over (never returned), and a lone write's cohort is decided in SQL.
+  const written = await conn(TABLE)
+    .insert(proposals)
     .onConflict(CONFLICT_KEY)
-    .merge(mergeSet(conn, Object.keys(siblingAnswers || {}).length > 0))
+    .merge(MERGE_COLUMNS)
     .where(`${TABLE}.label_status`, 'unreviewed')
     // A held-out row is a frozen measurement: never re-answered.
-    .whereRaw(`${TABLE}.sampled_for IS DISTINCT FROM 'heldout'`);
+    .whereRaw(`${TABLE}.sampled_for IS DISTINCT FROM 'heldout'`)
+    .returning('sampled_for');
   const sampled = {};
-  for (const row of rows) if (row.sampled_for) sampled[row.sampled_for] = (sampled[row.sampled_for] || 0) + 1;
-  return { recorded: rows.length, sampled };
+  for (const row of written || []) if (row.sampled_for) sampled[row.sampled_for] = (sampled[row.sampled_for] || 0) + 1;
+  // passedOver: rows the statement left alone (labeled or held out).
+  return { recorded: (written || []).length, passedOver: rows.length - (written || []).length, sampled };
 }
 
 module.exports = { recordDecisions, sampleFor, siblingDisagrees, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };
