@@ -675,7 +675,9 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r]);
     for (const [customerId, props] of byCustomer) if (props.length === 1) customerNeighborhood.set(customerId, props[0]);
   }
-  const zip5 = (z) => String(z || '').trim().slice(0, 5);
+  // A real five-digit ZIP or nothing: two blank or malformed ZIPs never
+  // "match" (the street alone does not establish the town).
+  const zip5 = (z) => { const m = /^(\d{5})(?:-?\d{4})?$/.exec(String(z || '').trim()); return m ? m[1] : null; };
   const visitNeighborhood = new Map();
   for (const v of visits) {
     let n = null;
@@ -684,7 +686,8 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
       const p = customerNeighborhood.get(v.customer_id);
       const stamped = String(v.service_address_line1 || '').trim();
       const atProperty = !stamped
-        || (sameStreetLine(stamped, p?.address_line1) && zip5(v.service_address_zip) === zip5(p?.zip));
+        || (sameStreetLine(stamped, p?.address_line1) && zip5(v.service_address_zip) !== null
+          && zip5(v.service_address_zip) === zip5(p?.zip));
       n = p && atProperty ? p.neighborhood_id : null;
     }
     if (n) visitNeighborhood.set(v.id, n);

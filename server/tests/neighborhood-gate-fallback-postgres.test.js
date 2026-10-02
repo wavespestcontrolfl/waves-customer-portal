@@ -94,6 +94,18 @@ postgres('neighborhood gate entries for the day feed', () => {
     expect(map.has('other-zip')).toBe(false);
   });
 
+  test('a stamped address with no valid ZIP on both sides never matches the sole property', async () => {
+    const n = await neighborhood('Zip Check');
+    await entry(n, { code: '5757', status: 'active' });
+    const c = await customer([n]);
+    await trx('customer_properties').where({ customer_id: c.id }).update({ zip: '' });
+    const map = await neighborhoodGateEntriesForVisits(trx, [
+      { id: 'blank', customer_id: c.id, property_id: null, service_address_line1: '100 Synthetic Way', service_address_zip: '' },
+      { id: 'junk', customer_id: c.id, property_id: null, service_address_line1: '100 Synthetic Way', service_address_zip: '3420' },
+    ]);
+    expect(map.size).toBe(0);
+  });
+
   test('no neighborhood link = no entry', async () => {
     const c = await customer([null]);
     const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);
