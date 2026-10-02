@@ -4947,6 +4947,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'tv-8', first_name: 'Ravi', last_name: 'P', phone: '+19410000089', nearest_location_id: 'venice' }],
         scheduled_services: [{ id: 'ss-tv-8', customer_id: 'tv-8', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: null }],
+        // The service record the visit has by now (enrolled before it existed).
+        service_records: [{ id: 'sr-tv-8', customer_id: 'tv-8', scheduled_service_id: 'ss-tv-8', service_type: 'Quarterly Pest Control', status: 'completed', service_date: new Date(), created_at: new Date() }],
       });
       db.mockImplementation(mock);
       await ReviewService.sendOutreachTouch({
@@ -4955,6 +4957,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       });
       expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
       expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Quarterly Pest Control');
+      // #5524 r12: the visit's report is read through its record, linked by scheduled_service_id.
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceRecordId).toBe('sr-tv-8');
     });
 
     test('#5524 r9: a visit whose service type cannot be read is not drafted (a stale cached type is never trusted)', async () => {

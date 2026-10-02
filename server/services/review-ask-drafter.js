@@ -851,8 +851,11 @@ function withoutNames(body, { firstName, techName }) {
 // ("Adam found ants") it is third-person narration. Office / team narration
 // is not the technician's voice either.
 const OFFICE_NARRATION_RE = /\b(?:our|the|your)\s+(?:team|office|crew|staff|technicians?|tech|company)\b|\bwaves\s+(?:team|technicians?|staff)\b/i;
+// "Waves" may appear only after a preposition ("Adam from Waves", "a review
+// of Waves"); anywhere else it narrates as the company ("Waves found ants").
+const COMPANY_NARRATION_RE = /(?<!\b(?:with|from|at|of|for|to|by)\s+)\bwaves\b/i;
 function notTechVoice(body, techName) {
-  if (OFFICE_NARRATION_RE.test(body)) return true;
+  if (OFFICE_NARRATION_RE.test(body) || COMPANY_NARRATION_RE.test(body)) return true;
   const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
   return names.some((n) => {
     const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

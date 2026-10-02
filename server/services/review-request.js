@@ -4661,7 +4661,14 @@ const ReviewService = {
         ? db("service_records").where({ id: serviceRecordId }).first("service_type")
         : db("scheduled_services").where({ id: scheduledServiceId }).first("service_type"))
         .then((row) => row?.service_type || null).catch(() => null);
-    const voiceVisit = voiceVisitType ? { serviceRecordId, serviceDate, technicianId, serviceType: voiceVisitType } : null;
+    // A cadence anchored only to its scheduled visit (enrolled before the
+    // service record existed) reads the report from the record that visit has
+    // by now, linked by scheduled_service_id.
+    const voiceRecordId = serviceRecordId || (!voiceVisitType || !scheduledServiceId ? null
+      : await db("service_records").where({ scheduled_service_id: scheduledServiceId })
+        .orderBy("created_at", "desc").first("id")
+        .then((sr) => sr?.id || null).catch(() => null));
+    const voiceVisit = voiceVisitType ? { serviceRecordId: voiceRecordId, serviceDate, technicianId, serviceType: voiceVisitType } : null;
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)

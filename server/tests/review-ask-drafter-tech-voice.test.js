@@ -565,6 +565,9 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(v('Adam knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
     expect(v('Our team knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
     expect(v("It's Adam, I know you had to get to work. A Google review would help: {review_url}")).toBeNull();
+    // #5524 r12: the company as narrator is not the tech's voice; "from Waves" is fine.
+    expect(v('Waves knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
+    expect(v("It's Adam from Waves, I know you had to get to work. A Google review would help: {review_url}")).toBeNull();
   });
 
   test('a bare link after a question stays with its sentence', () => {
