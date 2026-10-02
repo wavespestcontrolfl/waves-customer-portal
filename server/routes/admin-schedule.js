@@ -24499,6 +24499,12 @@ router.post('/generate-report', async (req, res) => {
     const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
+    // A technician writes a report only for a visit of their own: the id-less
+    // legacy path (notes/products only) stays for admins, since it would let
+    // any technician run the paid writer chain with no visit (codex #5568 r6 P1).
+    if (!scheduledServiceId && req.techRole !== 'admin') {
+      return res.status(400).json({ error: 'scheduledServiceId required' });
+    }
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }

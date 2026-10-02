@@ -9,7 +9,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer, TECH_DEAD_ASSIGNMENT_STATUSES } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
@@ -369,6 +369,19 @@ async function attachOutcomePhotoRefs(outcome, assessmentId) {
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
 
+// The analysis above is long-running (photo checks + model calls): dispatch
+// can reassign or cancel the visit meanwhile. Re-check the canonical
+// assignment under a row lock inside the insert transaction so persistence
+// and reassignment serialize (codex #5568 r6 P1). Admins pass.
+async function assertVisitStillOwned(req, trx, serviceId) {
+  if (!serviceId || !isTechnicianRequest(req)) return;
+  const owned = await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where('scheduled_services.id', serviceId),
+  ).forUpdate().first('scheduled_services.id');
+  if (!owned) throw Object.assign(new Error('serviceId not found'), { status: 404 });
+}
+
 // =========================================================================
 // GET /customers — list lawn care customers (active lawn service)
 // =========================================================================
@@ -382,7 +395,9 @@ router.get('/customers', async (req, res, next) => {
     // #5568 r1 P1): the unscoped list handed every technician the name,
     // phone, email and address of every lawn customer scheduled that day,
     // and the no-schedule fallback was the whole lawn customer directory.
-    const ownRoute = (q) => (isTechnicianRequest(req) ? q.where('ss.technician_id', req.technicianId) : q);
+    const ownRoute = (q) => (isTechnicianRequest(req)
+      ? q.where('ss.technician_id', req.technicianId).whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      : q);
     const hasScheduled = await ownRoute(applyLawnServiceFilter(
       db('scheduled_services as ss')
         .where('ss.scheduled_date', today)
@@ -878,11 +893,13 @@ router.post('/assess', async (req, res, next) => {
     let visitRun = null;
     const [assessment] = visitAssessmentEnabled
       ? await db.transaction(async (trx) => {
+        await assertVisitStillOwned(req, trx, serviceId);
         const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
         visitRun = await visitRuns.recordRun({ assessment: rows[0], analysis: visitAnalysis, adjustedScores }, trx);
         return rows;
       })
       : await db.transaction(async (trx) => {
+        await assertVisitStillOwned(req, trx, serviceId);
         // Legacy (property history off): the baseline decision and the insert
         // under the customer's baseline lock — the one a run-backed confirm's
         // legacy baseline check takes — so a legacy row replacing a pending

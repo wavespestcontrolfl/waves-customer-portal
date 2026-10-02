@@ -24,6 +24,7 @@ jest.mock('../services/technician-visit-scope', () => ({
   isTechnicianRequest: (req) => req.techRole === 'technician',
   technicianServicesCustomer: jest.fn(async (req) => (req.techRole !== 'technician' ? true : mockServices)),
   technicianCurrentVisitFilter: jest.fn((req, q) => q),
+  TECH_DEAD_ASSIGNMENT_STATUSES: ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'],
 }));
 const mockGetCustomerHistory = jest.fn(async () => [{ id: 'a1' }]);
 const mockGetBaseline = jest.fn(async () => ({ id: 'b1' }));
@@ -122,6 +123,9 @@ describe('GET /customers', () => {
       expect(await res.json()).toEqual({ customers: [] });
     });
     expect(chain.where).toHaveBeenCalledWith('ss.technician_id', 'tech-1');
+    // A rescheduled/skipped/no-show stop no longer belongs to the former
+    // technician (codex #5568 r6 P1).
+    expect(chain.whereNotIn).toHaveBeenCalledWith('ss.status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
     expect(chain.limit).toBeUndefined();
   });
 });
