@@ -13809,6 +13809,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 const keptReview = reviewSuffix && sentSmsBody.includes(reviewSuffix.trim());
                 sentSmsType = 'service_complete_annual_prepay';
                 sentSmsBody = `${firstChargeFallbackBase}${keptReview ? reviewSuffix : ''}`.trim();
+                // The service record's history says what was actually queued
+                // (GitHub Codex #5640 r4): written with the queue row below.
+                deferredDelta.completionSmsType = sentSmsType;
+                deferredDelta.completionSmsBody = sentSmsBody;
               }
               const deferredReplayBody = require('../services/open-balance')
                 .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);

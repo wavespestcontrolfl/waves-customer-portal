@@ -438,6 +438,11 @@ postgres('annual prepay charged after the first visit', () => {
       expect(queued.length).toBeGreaterThan(0);
       expect(queued.map((r) => r.message_body).join('\n')).not.toMatch(/being charged/);
       expect(queued.map((r) => r.message_body).join('\n')).toMatch(/nothing (is )?due today/);
+      // The service record's history matches what was queued (Codex r4).
+      const record = await trx('service_records').where({ scheduled_service_id: f.parentId }).first('structured_notes');
+      const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record.structured_notes;
+      expect(notes.completionSmsType).toBe('service_complete_annual_prepay');
+      expect(notes.completionSmsBody).not.toMatch(/being charged/);
       send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
     });
 
