@@ -5893,6 +5893,17 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // the shared entry for a visit whose customer has no gate code. A failed
+    // read just shows no fallback.
+    let neighborhoodGateByVisit = new Map();
+    try {
+      if (require('../config/feature-gates').neighborhoodAccessLive()) {
+        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+      }
+    } catch (err) {
+      logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
+    }
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6068,6 +6079,7 @@ router.get('/', async (req, res, next) => {
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
+        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
