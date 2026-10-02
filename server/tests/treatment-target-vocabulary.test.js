@@ -9,7 +9,12 @@ const path = require('path');
 const vocabulary = require('../config/treatment-target-vocabulary');
 const { canonicalTargetVocabulary } = require('../services/email-division/area-intel');
 
-const schedulePage = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
+// The lawn and nutrition lists moved to client/src/lib/lawn-targets.js (shared
+// by SchedulePage and the lawn re-service Fast Complete sheet); the pest and
+// ornamental lists stay in SchedulePage. Parse both as one source.
+const schedulePage = ['../../client/src/pages/admin/SchedulePage.jsx', '../../client/src/lib/lawn-targets.js']
+  .map((file) => fs.readFileSync(path.join(__dirname, file), 'utf8'))
+  .join('\n');
 
 // Every `const XYZ_TARGET_SUGGESTIONS = [ ... ];` array in the file, parsed
 // as {name -> string[]}.

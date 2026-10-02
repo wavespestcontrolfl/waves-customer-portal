@@ -48,7 +48,9 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import { isSendableRateUnit } from './FastCompleteSheet';
 import { prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
-import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productTargetsNutrition } from '../../lib/lawn-targets';
+import {
+  LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
+} from '../../lib/lawn-targets';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
@@ -80,16 +82,13 @@ const TARGET_NAME_BY_ISSUE = {
   Crabgrass: 'Crabgrass',
   'Broadleaf weeds': 'Broadleaf weeds',
 };
-// products_catalog categories that are pest-control applications: each needs
-// what it was applied against. A fertilizer, surfactant or anything else
-// records no target.
-const PESTICIDE_CATEGORIES = new Set([
-  'herbicide', 'pre-emergent', 'post-emergent', 'insecticide', 'fungicide', 'igr', 'bait',
-  'miticide', 'nematicide', 'termiticide / insecticide',
-]);
-const categoryKeyOf = (product) => String(product?.category || '').trim().toLowerCase()
-  .replace(/_/g, ' ').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ');
-const isPesticideRow = (row) => PESTICIDE_CATEGORIES.has(categoryKeyOf(row.product));
+// The full completion form's own rules (lib/lawn-targets.js), never a second
+// category policy: a fertilizer-family row records optional nutrition goals;
+// any other target-bearing product (herbicide, insecticide, termiticide, bait,
+// a product with no category, ...) must record what it was applied against;
+// adjuvants, surfactants, soil products and growth regulators record none.
+const isNutritionRow = (row) => productTargetsNutrition(row.product);
+const isPesticideRow = (row) => !isNutritionRow(row) && productControlsTargets(row.product);
 // The visit's selected issues a product can target, in option order.
 const targetIssuesOf = (form) => TURF_ISSUE_OPTIONS.filter((issue) => TARGET_NAME_BY_ISSUE[issue] && form.issues.has(issue));
 // A row's targets as sent: only issues still selected for the visit (a chip
@@ -102,9 +101,6 @@ const rowTargetNames = (row, form) => [...new Set([
   ...(row.otherTargets || []),
 ])];
 
-// A fertilizer-family row (the full form's productTargetsNutrition) records its
-// nutrition goals as targets instead; they are optional there, so here too.
-const isNutritionRow = (row) => !isPesticideRow(row) && productTargetsNutrition(row.product);
 // The targets a row sends: a pesticide row's required targets, a fertilizer
 // row's optional purposes, nothing for anything else.
 const rowSentTargets = (row, form) => {

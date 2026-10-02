@@ -61,3 +61,17 @@ export function productTargetsNutrition(product) {
   return /(fert|micronutrient|biostimulant)/.test(category);
 }
 
+// Whether a product's application records what it was applied against (the
+// full completion form's own rule): everything except adjuvants, surfactants,
+// soil/moisture products and growth regulators. A product with no category
+// counts. Fertilizer-family products record nutrition goals instead
+// (productTargetsNutrition).
+export function productControlsTargets(product) {
+  const category = String(
+    product?.category || product?.product_category || "",
+  ).toLowerCase();
+  if (!category) return true;
+  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
+    category,
+  );
+}
