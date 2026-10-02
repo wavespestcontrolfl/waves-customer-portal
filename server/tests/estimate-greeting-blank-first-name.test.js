@@ -101,6 +101,12 @@ describe('greeting sites route through the shared helper', () => {
     expect(src).toContain('const greetingFirstName = await estimateGreetingFirstToken(database, estimate);');
   });
 
+  test('the accept contact patch re-resolves the greeting instead of taking the surname (codex #5612 r4)', () => {
+    const src = read('routes/estimate-public.js');
+    expect(src).toContain('|| await estimateGreetingFirstName(trx, { ...estimate, customer_id: customerId || estimate.customer_id });');
+    expect(src).not.toContain('contactGapNameTokens(estimate.customer_name)[0] || firstName');
+  });
+
   test('the public payload change is documented (codex #5612 r1)', () => {
     const doc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'public-route-contracts.md'), 'utf8');
     expect(doc).toContain('`estimate.customerFirstName` is the greeting token');

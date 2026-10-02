@@ -11921,7 +11921,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // contact values.
       if (acceptContactView) {
         Object.assign(estimate, acceptContactView);
-        firstName = contactFillFirstName || contactGapNameTokens(estimate.customer_name)[0] || firstName;
+        // A supplied first name wins; otherwise re-resolve through the shared greeting rule on the
+        // patched name and the customer the accept landed on, so a fill of only an email never
+        // turns a blank first name into the surname (codex #5612 r4).
+        firstName = contactFillFirstName
+          || await estimateGreetingFirstName(trx, { ...estimate, customer_id: customerId || estimate.customer_id });
       }
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
