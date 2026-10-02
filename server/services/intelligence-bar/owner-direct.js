@@ -61,12 +61,19 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
   'cancel_queued_message',
 ]);
 
-// update_customer also carries money and billing fields (waveguard_tier,
-// monthly_rate, active — deactivation winds billing down). Only an edit made
-// entirely of these contact / address / pipeline / note fields skips the
-// card; any other key, known or not, keeps it.
-const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'email', 'phone', 'city', 'state', 'zip',
+// update_customer also carries money, billing and comms fields. Only an edit
+// made entirely of these contact / address / pipeline / note fields skips
+// the card; any other key, known or not, keeps it:
+//   - waveguard_tier, monthly_rate, active: money (active=false winds
+//     billing down)
+//   - email: a changed email re-sends the pending double-opt-in
+//     confirmation to the customer (customer-email-fanout) — a customer
+//     message, so it keeps its card (pre-push P1)
+//   - pipeline_stage = 'churned': the churn guard winds billing down on the
+//     same write (pre-push P0); every other stage is a label
+const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'phone', 'city', 'state', 'zip',
   'address_line1', 'address_line2', 'pipeline_stage', 'lead_source', 'notes']);
+const CARDED_CUSTOMER_VALUES = { pipeline_stage: new Set(['churned']) };
 
 // Read at call time: a flip or an unset needs no redeploy.
 function ownerDirectLive(req) {
@@ -79,7 +86,8 @@ function executesWithoutCard(toolName, input = {}) {
     const updates = input?.updates;
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
     const keys = Object.keys(updates);
-    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
+    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key)
+      && !CARDED_CUSTOMER_VALUES[key]?.has(String(updates[key] ?? '').trim().toLowerCase()));
   }
   return true;
 }
@@ -111,7 +119,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, contact, address, pipeline, lead source and notes; a tier, rate or active change still shows a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, pipeline stage, lead source and notes; an email, tier, rate, active or Churned change still shows a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.

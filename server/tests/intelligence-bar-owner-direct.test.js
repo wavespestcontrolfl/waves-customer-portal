@@ -83,11 +83,17 @@ describe('which writes skip the card', () => {
     }
   });
 
-  test('update_customer skips the card only for contact, address, pipeline and note fields', () => {
+  test('update_customer skips the card only for name, phone, address, pipeline, source and note fields', () => {
     const run = updates => OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates });
     expect(run({ first_name: 'Jay' })).toBe(true);
     expect(run({ phone: '9415550100', notes: 'gate code moved' })).toBe(true);
+    expect(run({ pipeline_stage: 'active' })).toBe(true);
+    // Money, a customer message, and the churn wind-down keep the card.
     expect(run({ monthly_rate: 49 })).toBe(false);
+    expect(run({ email: 'new@example.test' })).toBe(false);
+    expect(run({ first_name: 'Jay', email: 'new@example.test' })).toBe(false);
+    expect(run({ pipeline_stage: 'churned' })).toBe(false);
+    expect(run({ pipeline_stage: ' Churned ' })).toBe(false);
     expect(run({ first_name: 'Jay', waveguard_tier: 'Gold' })).toBe(false);
     expect(run({ active: false })).toBe(false);
     expect(run({ some_new_field: 1 })).toBe(false);

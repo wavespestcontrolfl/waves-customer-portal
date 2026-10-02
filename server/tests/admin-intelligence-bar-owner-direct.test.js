@@ -284,7 +284,7 @@ describe('owner-direct in /query', () => {
     });
   });
 
-  test('owner + gate: a billing field on update_customer keeps the card; a contact field commits', async () => {
+  test('owner + gate: a billing or email field on update_customer keeps the card; a contact field commits', async () => {
     // The update_customer proposal resolves the target to a name for the card.
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Fixture' });
     mockCreatePendingAction.mockResolvedValue(pendingRow('update_customer'));
@@ -296,6 +296,18 @@ describe('owner-direct in /query', () => {
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'set the monthly rate to 49', context: 'customers' }, 'owner');
       expect(body.pendingActions).toHaveLength(1);
+      expect(mockClaimForConfirm).not.toHaveBeenCalled();
+
+      // An email change can re-send the customer's opt-in confirmation: card.
+      jest.clearAllMocks();
+      mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Fixture' });
+      mockCreatePendingAction.mockResolvedValue(pendingRow('update_customer'));
+      scriptModelTurns([
+        [{ type: 'tool_use', id: 'tu_3', name: 'update_customer', input: { customer_id: 'c1', updates: { email: 'new@example.test' } } }],
+        [{ type: 'text', text: 'Tap Confirm.' }],
+      ]);
+      const emailEdit = await postQuery(baseUrl, { prompt: 'change the email', context: 'customers' }, 'owner');
+      expect(emailEdit.body.pendingActions).toHaveLength(1);
       expect(mockClaimForConfirm).not.toHaveBeenCalled();
 
       jest.clearAllMocks();
