@@ -183,6 +183,8 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
     // an uncleared street-level address hold was never dispatched (the tech-late
     // detector resolves its alert on its next sweep): no delay in the meantime
     .whereNotExists(function unclearedAddressHold() { require('./street-level-hold').heldVisitSubquery(this, 'ss'); })
+    // a service record is definitive completion, stop key or not (an unassigned legacy row has none)
+    .whereNotExists(function recorded() { this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = ss.id'); })
     .orderBy('a.created_at', 'desc')
     .select('a.type', 'a.severity', 'a.payload', 'ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.status', 'ss.track_state', 'ss.scheduled_date',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type');

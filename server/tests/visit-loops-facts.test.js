@@ -241,6 +241,18 @@ describe('lateAlert', () => {
     expect(inner).toEqual(expect.arrayContaining(['whereIn', 'orWhereIn', 'orWhereExists']));
   });
 
+  test('an alert on a visit with a service record is excluded in the query (no stop key needed)', async () => {
+    const conn = fakeConn({ dispatch_alerts: () => [], scheduled_services: () => [] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    const q = conn.calls.find((c) => c.table === 'dispatch_alerts');
+    const tables = [];
+    for (const o of q.ops.filter((x) => x.op === 'whereNotExists')) {
+      const b = new Proxy({}, { get: (_t, prop) => (...args) => { if (prop === 'from') tables.push(args[0]); return b; } });
+      try { o.args[0].call(b); } catch { /* the hold subquery needs a real builder */ }
+    }
+    expect(tables).toContain('service_records as sr');
+  });
+
   test('an alert on an uncleared street-level hold is excluded in the query', async () => {
     const conn = fakeConn({ dispatch_alerts: (ops) => (hasOp(ops, 'whereNotExists') ? [] : [{ type: 'tech_late' }]), scheduled_services: () => [] });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).lateAlert).toBeNull();
