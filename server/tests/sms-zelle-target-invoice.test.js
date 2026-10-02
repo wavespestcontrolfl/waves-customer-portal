@@ -542,3 +542,13 @@ test.each([
   expect(resolveZelleTargetInvoice(billing([MIDDLE]), inbound).invoiceId).toBe(id);
 });
 
+
+// Codex round-77 P2: a figure in the SAME SENTENCE as an invoice number must be that invoice's (no character window)
+test.each([
+  ['Can I Zelle $200 toward the outstanding balance on invoice #0123?', null],
+  ['Can I Zelle invoice #0123? I paid $200 last time.', 'a'],
+  ['Can I Zelle $100 for invoice 0123?', 'a'],
+])('number + same-sentence figure: %s => %s', (inbound, id) => {
+  const b = { openInvoices: [{ id: 'a', invoiceNumber: 'WPC-2026-0123', amountDue: 100 }, { id: 'b', invoiceNumber: 'WPC-2026-0124', amountDue: 300 }] };
+  expect(resolveZelleTargetInvoice(b, inbound).invoiceId).toBe(id);
+});

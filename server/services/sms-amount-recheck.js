@@ -330,6 +330,11 @@ async function outgoingAmountsStale({
     const verdict = await paymentStatusVerdict({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
     return verdict.reason ? { stale: true, reason: verdict.reason } : { stale: false, ...(verdict.zelle ? { zelle: verdict.zelle } : {}) };
   }
+  // Codex round-77 P1: an UNEDITED pre-v12 AI draft that says anything about Zelle without a contact ("Yes, Zelle is available", "We don't
+  // take Zelle") cannot be re-checked against today's configuration or invoice (v11 never had Zelle facts) - held, never sent. Only a
+  // staff member's own wording carries the staff exemption.
+  // (an AI draft = a prompt version on the decision; a hand-typed body with none is the staff member's own wording)
+  if (promptVersion && humanEditedBody !== true && ZELLE_WORD_RE.test(text) && !zelleBodyContacts(text).length) return { stale: true, reason: 'zelle_claim_unverifiable' };
   const zelle = await staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh });
   if (zelle.stale) return { stale: true, reason: zelle.reason };
   const amounts = trustOwedAmounts ? { stale: false } : await ownedAmountsStale({ customerId, text, dbh });

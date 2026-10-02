@@ -143,6 +143,17 @@ function resolveByAmount(open, billing, namedAmounts, bareAmounts, { figuresIden
   return { invoiceId: null, reason: bareAmounts.length ? 'ambiguous_amount' : 'multiple_open_unreferenced' };
 }
 
+// Codex round-77 P2: every figure in a SENTENCE that names an invoice number is checked against that invoice (no character window) -
+// "Can I Zelle $200 toward the outstanding balance on invoice #0123?" contradicts a $100 #0123. A figure in another sentence ("Zelle
+// invoice 0202. I sent $95 last month") is not.
+function amountsInNumberSentences(text) {
+  const out = [];
+  for (const sentence of String(text || '').split(/(?<=[.!?;])\s+|\n+/)) {
+    const n = invoiceNumbersNamed(sentence);
+    if (n.full.length || n.tail.length) for (const m of sentence.matchAll(AMOUNT_RE)) out.push(centsOf(m[0]));
+  }
+  return out;
+}
 function resolveZelleTargetInvoice(billing, inboundMessage, { figuresIdentify = false } = {}) {
   const open = openInvoicesOf(billing);
   // An own partially_paid invoice with an amount due is open to the customer (the pay page collects it and may show Zelle for it), but
@@ -158,7 +169,7 @@ function resolveZelleTargetInvoice(billing, inboundMessage, { figuresIdentify = 
   }
   const namedAmounts = invoiceAmountsNamed(inboundMessage);
   const bareAmounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
-  return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), namedAmounts)
+  return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), [...new Set([...namedAmounts, ...amountsInNumberSentences(inboundMessage)])])
     // Codex round-64 P2: an unmodeled own invoice may be payable too - the lone MODELED row is not "the" open invoice, and only an
     // explicit identification (a number above, or an amount tied to an invoice) selects a modeled row; anything else is unresolved
     || (billing?.hasUnmodeledInvoice === true && !namedAmounts.length ? { invoiceId: null, reason: 'unmodeled_invoice' } : null)

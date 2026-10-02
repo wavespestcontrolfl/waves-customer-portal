@@ -90,8 +90,9 @@ describe('a staff Zelle contact is rechecked against the decision\'s target invo
     expect(checked).toEqual([]);
   });
   test('a Zelle mention with NO contact is the staff member\'s own wording: it passes with no reads', async () => {
-    await expect(run('Yes, we take Zelle - just put your name in the memo.', null)).resolves.toEqual({ stale: false });
-    await expect(run('We do not take Zelle for that one.', 'inv-A')).resolves.toEqual({ stale: false });
+    // (a STAFF edit - Codex round-77 P1: an unedited AI draft saying this would be held, see 'legacy (pre-v12) contactless Zelle claims')
+    await expect(run('Yes, we take Zelle - just put your name in the memo.', null, { humanEditedBody: true })).resolves.toEqual({ stale: false });
+    await expect(run('We do not take Zelle for that one.', 'inv-A', { humanEditedBody: true })).resolves.toEqual({ stale: false });
     expect(checked).toEqual([]);
   });
 });
@@ -123,5 +124,17 @@ describe('staff Zelle edit re-targeting by figure (round 73)', () => {
     const { explicitInvoiceReference } = require('../services/zelle-target-invoice');
     expect(explicitInvoiceReference('You can use Zelle to send $200 to pay@example.com.')).toBe(true);
     expect(explicitInvoiceReference('Make a $200 Zelle payment to pay@example.com.')).toBe(true);
+  });
+});
+
+// Codex round-77 P1: an UNEDITED pre-v12 AI draft's contactless Zelle claim is held; a staff member's own wording is not
+describe('legacy (pre-v12) contactless Zelle claims', () => {
+  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const legacy = (body, humanEditedBody) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', humanEditedBody, trustOwedAmounts: true, dbh: () => { throw new Error('no read expected'); } });
+  test.each(['Yes, Zelle is available.', "We don't take Zelle."])('unedited: %s => held', async (body) => {
+    await expect(legacy(body, false)).resolves.toEqual({ stale: true, reason: 'zelle_claim_unverifiable' });
+  });
+  test('the same words as a staff edit keep the staff exemption', async () => {
+    await expect(legacy("We don't take Zelle.", true)).resolves.toEqual({ stale: false });
   });
 });
