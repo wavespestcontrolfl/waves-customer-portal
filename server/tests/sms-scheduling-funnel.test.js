@@ -69,3 +69,17 @@ test('offers are counted by kind and state, and an unresolved slot is called out
 test('an empty window reports zeros, not errors', () => {
   expect(summarizeFunnel({})).toMatchObject({ inbound_total: 0, scheduling_flagged: 0, person_replied: 0, person_reply_median_minutes: null, offers: null });
 });
+
+describe('report boundaries', () => {
+  const { parseReportInstant } = require('../services/sms-scheduling-funnel');
+  test('a bare date is Eastern midnight, in daylight and standard time', () => {
+    expect(parseReportInstant('2026-10-01').toISOString()).toBe('2026-10-01T04:00:00.000Z');
+    expect(parseReportInstant('2026-12-01').toISOString()).toBe('2026-12-01T05:00:00.000Z');
+  });
+  test('Nd counts back from now; absent uses the fallback; nonsense throws', () => {
+    const now = new Date('2026-10-02T12:00:00Z');
+    expect(parseReportInstant('7d', null, now).toISOString()).toBe('2026-09-25T12:00:00.000Z');
+    expect(parseReportInstant(undefined, now)).toBe(now);
+    expect(() => parseReportInstant('soon')).toThrow(/cannot read the date/);
+  });
+});

@@ -22,15 +22,6 @@ const ARGS = Object.fromEntries(
   }),
 );
 
-function parseInstant(value, fallback) {
-  if (value === undefined || value === true) return fallback;
-  const days = /^(\d{1,3})d$/.exec(String(value));
-  if (days) return new Date(Date.now() - Number(days[1]) * 86400000);
-  const parsed = new Date(String(value));
-  if (Number.isNaN(parsed.getTime())) throw new Error(`cannot read the date "${value}" (use 14d or YYYY-MM-DD)`);
-  return parsed;
-}
-
 function printReport(since, until, f) {
   const pct = (n, of) => (of ? ` (${Math.round((n / of) * 100)}%)` : '');
   const lines = [
@@ -60,8 +51,9 @@ function printReport(since, until, f) {
 (async function main() {
   let db = null;
   try {
-    const until = parseInstant(ARGS.until, new Date());
-    const since = parseInstant(ARGS.since, new Date(until.getTime() - 7 * 86400000));
+    const { parseReportInstant } = require('../services/sms-scheduling-funnel');
+    const until = parseReportInstant(ARGS.until, new Date());
+    const since = parseReportInstant(ARGS.since, new Date(until.getTime() - 7 * 86400000));
     if (since >= until) throw new Error('--since must be before --until');
     db = require('../models/db');
     const funnel = await require('../services/sms-scheduling-funnel').loadFunnel({ since, until, dbh: db });

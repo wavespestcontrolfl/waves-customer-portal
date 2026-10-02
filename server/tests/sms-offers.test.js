@@ -146,6 +146,18 @@ describe('recordOfferForSend', () => {
     await expect(offers.recordOfferForSend({ agentDecisionId: DECISION_ID, outgoingBody: BODY, to: '9415550100', dbh })).resolves.toEqual({ recorded: false, reason: 'error' });
   });
 
+  test('gate on: the warning carries the error code, never the message (a Knex error embeds the phone)', async () => {
+    process.env[GATE] = 'true';
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+    const err = Object.assign(new Error('insert into sms_offers values (9415550100)'), { code: '23505' });
+    const dbh = jest.fn(() => { throw err; });
+    await offers.recordOfferForSend({ agentDecisionId: DECISION_ID, outgoingBody: BODY, to: '9415550100', dbh });
+    const logged = warn.mock.calls.map((c) => c[0]).join('\n');
+    expect(logged).toContain('23505');
+    expect(logged).not.toContain('9415550100');
+    warn.mockRestore();
+  });
+
   test('gate on: a send with no decision records nothing', async () => {
     process.env[GATE] = 'true';
     const dbh = jest.fn();

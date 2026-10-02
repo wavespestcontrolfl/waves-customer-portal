@@ -83,6 +83,18 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     expect(byId[other.id]).toMatchObject({ kind: 'book_new', status: 'open' });
   }));
 
+  test('a late record of an OLDER text stays superseded; the newest sent offer stays open', () => inTrx(async (trx) => {
+    const phone = '9415550104';
+    const visit = { scheduledServiceId: '11111111-1111-4111-8111-111111111111' };
+    const newer = await offers.recordOfferForSend({ agentDecisionId: await insertDecision(trx, { lookup: visit }), outgoingBody: BODY, to: phone, sentAt: new Date(SENT_AT.getTime() + 3600000), dbh: trx });
+    const older = await offers.recordOfferForSend({ agentDecisionId: await insertDecision(trx, { lookup: visit }), outgoingBody: BODY, to: phone, sentAt: SENT_AT, dbh: trx });
+    expect(older).toMatchObject({ recorded: true, superseded: 0, late: true });
+    const rows = await trx('sms_offers').where({ phone_last10: phone }).select('id', 'status', 'superseded_by');
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId[newer.id]).toMatchObject({ status: 'open', superseded_by: null });
+    expect(byId[older.id]).toMatchObject({ status: 'superseded', superseded_by: newer.id });
+  }));
+
   test('the database refuses a second open offer for one phone and kind', () => inTrx(async (trx) => {
     const base = { phone_last10: '9415550103', kind: 'move_visit', slots: '[]', sent_at: SENT_AT, expires_at: SENT_AT, status: 'open' };
     await trx('sms_offers').insert({ ...base, agent_decision_id: await insertDecision(trx) });

@@ -165,6 +165,19 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['sms_offers', row.phone_last10]);
       const existing = await trx('sms_offers').where({ agent_decision_id: row.agent_decision_id }).first('id');
       if (existing) return { recorded: false, reason: 'already_recorded', id: existing.id };
+      // The lock orders the writes, not the sends: a record can land after a
+      // newer text's. The open offer is always the latest SENT one, so a late
+      // record of an older text is kept as already superseded.
+      const newer = await trx('sms_offers')
+        .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
+        .where('sent_at', '>', row.sent_at)
+        .first('id');
+      if (newer) {
+        const [late] = await trx('sms_offers')
+          .insert({ ...row, status: 'superseded', superseded_by: newer.id, closed_at: trx.fn.now() })
+          .returning('id');
+        return { recorded: true, id: late?.id || late, superseded: 0, late: true };
+      }
       const prior = await trx('sms_offers')
         .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
         .update({ status: 'superseded', closed_at: trx.fn.now(), updated_at: trx.fn.now() })
@@ -177,7 +190,8 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       return { recorded: true, id, superseded: prior.length };
     });
   } catch (err) {
-    logger.warn(`[sms-offers] offer not recorded for decision ${agentDecisionId}: ${err.message}`);
+    // Code only, never the message: a Knex error embeds the bound phone.
+    logger.warn(`[sms-offers] offer not recorded for decision ${agentDecisionId}: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
     return { recorded: false, reason: 'error' };
   }
 }

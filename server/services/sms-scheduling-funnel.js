@@ -13,6 +13,7 @@
  */
 
 const { hasSchedulingIntent, hasRescheduleOrAwayIntent } = require('./sms-intent');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const FOLLOW_WINDOW_MS = 48 * 3600000;
 // A reply a person typed or approved (never a reminder or another automated text).
@@ -135,6 +136,21 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
   };
 }
 
+/**
+ * A report boundary from the command line: "14d" (that many days before now),
+ * a bare YYYY-MM-DD (Eastern midnight, matching the Eastern weeks), or any
+ * other instant Date can read. `fallback` when the flag is absent.
+ */
+function parseReportInstant(value, fallback, now = new Date()) {
+  if (value === undefined || value === true) return fallback;
+  const days = /^(\d{1,3})d$/.exec(String(value));
+  if (days) return new Date(new Date(now).getTime() - Number(days[1]) * 86400000);
+  const text = /^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? `${value}T00:00` : String(value);
+  const parsed = parseETDateTime(text);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`cannot read the date "${value}" (use 14d or YYYY-MM-DD)`);
+  return parsed;
+}
+
 /** Read the rows for [since, until) and summarise them. `dbh` is a knex handle. */
 async function loadFunnel({ since, until = new Date(), dbh = require('../models/db') } = {}) {
   const from = new Date(since);
@@ -169,4 +185,4 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   return summarizeFunnel({ inbound, moves, cancels, bookings, personReplies, offers, now: to });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, isSchedulingText, weekOf, PERSON_REPLY_TYPES, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, PERSON_REPLY_TYPES, FOLLOW_WINDOW_MS };
