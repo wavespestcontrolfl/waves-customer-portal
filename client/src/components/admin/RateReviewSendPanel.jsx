@@ -42,6 +42,7 @@ function SendRow({ customer }) {
           <div key={l.noticeId} className="text-ui-caption text-ink-secondary">Held: {l.service} · {l.label}</div>
         ))}
         {customer.alreadySent > 0 && <div className="text-ui-caption text-ink-tertiary">{plural(customer.alreadySent, "line")} already sent</div>}
+        {customer.lastAttemptUnreachable && <div className="text-ui-caption text-ink-secondary">Last send reached no channel: fix the contact or notification preferences first</div>}
       </TD>
       <TD data-label="Channels">{channelText(customer)}</TD>
       <TD data-label="Status" align="right">

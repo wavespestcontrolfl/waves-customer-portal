@@ -352,7 +352,9 @@ function sendOutcomeUncertain(notice, now) {
 function hasContact(customer, prefs) {
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
   const email = String(recipient?.email || '').trim();
-  return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() };
+  // A customer who turned texts off (notification_prefs.sms_enabled false)
+  // has no text channel: the canonical sender would block it.
+  return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() && prefs?.sms_enabled !== false };
 }
 
 // The notices' stored first visits (rate checks read their stamped price).
@@ -501,6 +503,9 @@ async function sendPreview(batchKey, { dbh = db, now = new Date() } = {}) {
       lines: e.lines.map((l) => ({ noticeId: l.noticeId, service: l.service, now: l.now, new: l.new, effectiveDate: l.effectiveDate })),
       suppressedLines: e.suppressedLines,
       alreadySent: e.alreadySent.length,
+      // The last attempt reached no channel (every leg blocked or no
+      // contact): sendable again once the contact or preferences are fixed.
+      lastAttemptUnreachable: e.lines.some((l) => String(l.notice.status) === 'unreachable'),
     })),
   };
 }

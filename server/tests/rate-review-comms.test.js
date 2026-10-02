@@ -229,6 +229,14 @@ describe('sendPreview', () => {
     expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('rate_moved');
   });
 
+  test('a customer who turned texts off has no text channel; a last unreachable attempt is flagged', async () => {
+    const b = book({ customers: [customer(1, { email: null })], notices: [draft(1, { status: 'unreachable' })] });
+    b.notification_prefs = [{ customer_id: CUSTOMER(1), sms_enabled: false }];
+    mockDb.reset(b);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0]).toMatchObject({ reason: 'no_contact', lastAttemptUnreachable: true });
+  });
+
   test('the digest moves with the cost block, not only the list', async () => {
     mockDb.reset(book());
     const a = await previewDigest();
