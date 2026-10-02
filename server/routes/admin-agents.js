@@ -1100,7 +1100,7 @@ function opsQueueGateOn() {
 router.get('/control/hub', (_req, res) => {
   res.json({
     features: {
-      queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false,
+      queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: require('../config/feature-gates').llmCostTrackingLive(), verification: false,
       // GATE_TYPED_DECISIONS: the Typed review tab exists only while the lane is live.
       typed: require('../config/feature-gates').typedDecisionsLive(),
     },
