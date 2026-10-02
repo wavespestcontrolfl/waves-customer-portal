@@ -1202,6 +1202,12 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     });
     expect(await renew(468)).toBeNull();
   });
+  test('a term re-labelled for another plan after its notice applied (pest → lawn) carries no enforceable amount for either plan — the frozen amount belongs to the noticed plan, which the term no longer covers', async () => {
+    const notice = { id: 'n-relabel', customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-02-01T08:00:00Z'), metadata: JSON.stringify({ term_id: TERM(1) }) };
+    mockDb.reset({ annual_prepay_terms: [term({ coverage_service_type: 'Lawn Care Program' })], price_change_notices: [notice] });
+    expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull();
+    expect(await renew(468)).toBeNull();
+  });
   test('a term cancelled, switched or decided away, or one with no noticed amount, is no predecessor', async () => {
     mockDb.reset({ annual_prepay_terms: [term({ status: 'cancelled' })] });
     expect(await renew(468)).toBeNull();

@@ -1234,8 +1234,11 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .filter((t) => {
       const labeled = familyOfCoverage(t.coverage_service_type);
       const noticedFamily = familyByTerm.get(String(t.id)) || null;
-      if (family) return labeled === family || (!labeled && noticedFamily === family);
-      return !labeled && !noticedFamily;
+      // The frozen amount is the noticed plan's: a term re-labelled for
+      // another plan since its notice applied carries it for neither.
+      if (noticedFamily && labeled && labeled !== noticedFamily) return false;
+      const attributed = noticedFamily || labeled;
+      return family ? attributed === family : !attributed;
     })
     .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
   const term = candidates[0];
