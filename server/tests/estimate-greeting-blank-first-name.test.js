@@ -90,6 +90,17 @@ describe('greeting sites route through the shared helper', () => {
     expect(click).not.toContain('firstNameOf(est.customer_name)');
   });
 
+  test('Ask Waves addresses a blank-first-name customer by no name, never the surname (codex #5612 r3)', () => {
+    const { buildEstimateAssistantContext } = require('../services/estimate-assistant');
+    const ctx = (estimate, greetingFirstName) => buildEstimateAssistantContext({ estimate, greetingFirstName });
+    expect(ctx({ customer_name: 'Sample' }, '').customerFirstName).toBeNull();
+    expect(ctx({ customer_name: 'Example Sample' }, 'Example').customerFirstName).toBe('Example');
+    expect(ctx({ customer_name: 'Example Sample' }).customerFirstName).toBe('Example'); // legacy callers
+    expect(ctx({ customer_name: '', customerFirstName: 'Example' }, '').customerFirstName).toBe('Example');
+    const src = read('services/estimate-assistant.js');
+    expect(src).toContain('const greetingFirstName = await estimateGreetingFirstToken(database, estimate);');
+  });
+
   test('the public payload change is documented (codex #5612 r1)', () => {
     const doc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'public-route-contracts.md'), 'utf8');
     expect(doc).toContain('`estimate.customerFirstName` is the greeting token');
