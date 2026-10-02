@@ -170,7 +170,8 @@ describe('resolveZelleTargetInvoice with ONE open invoice', () => {
     expect(resolveZelleTargetInvoice(only, 'Can I Zelle invoice WPC-2026-0202?').invoiceId).toBe('inv-2');
     expect(resolveZelleTargetInvoice(only, 'Zelle for invoice 202?').invoiceId).toBe('inv-2');
     expect(resolveZelleTargetInvoice(only, 'Can I Zelle the $120 invoice?').invoiceId).toBe('inv-2');
-    expect(resolveZelleTargetInvoice(only, 'I paid $50 last time — can I Zelle this time?').invoiceId).toBe('inv-2'); // a bare unrelated amount
+    // hold when ambiguous (Codex round-73): ANY figure that is not this invoice's leaves the target unresolved - no grammar of which figures count
+    expect(resolveZelleTargetInvoice(only, 'I paid $50 last time — can I Zelle this time?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
   });
   test('a DIFFERENT (or settled) invoice number => abstain', () => {
     expect(resolveZelleTargetInvoice(only, 'Can I Zelle invoice WPC-2026-0101?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
@@ -530,10 +531,11 @@ test('"100 dollars" for an invoice contradicts the lone $120 open invoice; a mat
   expect(resolveZelleTargetInvoice(only, 'Can I Zelle 120 dollars for my invoice?').invoiceId).toBe('inv-2');
 });
 
-// Codex round-70 P2: an amount tied to the Zelle transfer itself must match the lone open invoice; an unrelated one need not
+// Codex rounds 70/73: any figure in the message must be the lone open invoice's amount, however it is phrased
 test.each([
   ['Can I Zelle $200?', null], ['Can I Zelle 200 dollars?', null], ['Can I send $200 by Zelle?', null],
-  ['Can I Zelle $120?', 'inv-2'], ['I paid $50 last time — can I Zelle this time?', 'inv-2'],
+  ['Can I use Zelle to send $200?', null], ['Can I make a $200 Zelle payment?', null], ['I paid $50 last time — can I Zelle this time?', null],
+  ['Can I Zelle $120?', 'inv-2'], ['Can I use Zelle to send $120?', 'inv-2'], ['Can I use Zelle?', 'inv-2'],
 ])('lone $120 invoice: %s => %s', (inbound, id) => {
   expect(resolveZelleTargetInvoice(billing([MIDDLE]), inbound).invoiceId).toBe(id);
 });

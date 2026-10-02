@@ -730,9 +730,39 @@ function inboundNamesSpecifics(inboundText) {
   return named.full.length > 0 || named.tail.length > 0 || (inbound.match(INBOUND_NAMED_AMOUNT_RE) || []).length > 0
     || inboundDates(inbound, today).length > 0 || INBOUND_TENDER_RES.some(([, re]) => re.test(inbound)) || CARD_SUBTYPE_RE.test(inbound);
 }
+// STRUCTURAL form of the same ruling (Codex round-73, after rounds 66-73 kept finding one more tender / brand / amount / date word):
+// instead of listing what makes a question SPECIFIC, an ALLOW-list says what a GENERIC one is. A copied receipt / invoice / balance line
+// auto-sends only when every clause of the customer's message is a generic status question or inert (greeting, thanks); anything
+// else - Venmo, "the one from last week", a wire, a card nickname - goes to Agent Review, where a person picks the record.
+const GENERIC_STATUS_QUESTION_RES = [
+  /^(?:(?:i'?m |i am |just )?(?:checking|wondering|wanted to (?:check|see|make sure|confirm)|wanted to know|can you (?:check|confirm|tell me|let me know)|could you (?:check|confirm|tell me|let me know)|please (?:check|confirm|let me know))\s+)?(?:if |whether |that )?(?:you (?:guys )?|y'?all )?(?:did |have |got |received |get |receive )?(?:you (?:guys )?)?(?:get|got|receive|received)\s+(?:my|the|our)\s+payment$/,
+  /^(?:(?:i'?m |just )?(?:checking|wondering)\s+)?(?:if |whether )?(?:did\s+)?(?:my|the|our)\s+payment\s+(?:go|went|gone)\s+through$/,
+  /^(?:did|has|have)\s+(?:my|the|our)\s+payment\s+(?:go through|gone through|been (?:received|processed|posted|applied)|(?:get|got) (?:received|processed|posted|applied))$/,
+  /^(?:was|is)\s+(?:my|the|our)\s+payment\s+(?:received|processed|posted|applied|through)$/,
+  /^did\s+(?:it|that)\s+go\s+through$/,
+  /^did\s+(?:you|y'?all)\s+(?:guys\s+)?(?:get|receive)\s+it$/,
+  /^(?:is|was)\s+(?:my|the|our)\s+(?:invoice|bill|account|balance)\s+(?:paid(?: up| off| in full)?|settled|current|up to date|cleared)$/,
+  /^(?:am i|are we)\s+(?:all\s+)?(?:paid up|caught up|current|up to date|all set|good|square)(?: on (?:my|our) (?:bill|account|invoice|balance))?$/,
+  /^do\s+(?:i|we)\s+(?:still\s+)?owe\s+(?:you\s+)?(?:anything|any money|anything else)$/,
+  /^(?:is there|do i have|do we have)\s+(?:a|any)\s+balance(?: (?:due|on (?:my|our) account|left))?$/,
+  /^what(?:'s| is)\s+(?:my|our)\s+balance$/,
+];
+const GENERIC_INERT_RES = [...INERT_CLAUSE_RES, /^(?:ok(?:ay)?|hi there|good (?:morning|afternoon|evening)|quick question)$/];
+function inboundIsGenericStatusQuestion(inboundText) {
+  const clauses = String(inboundText || '').replace(/[’‘]/g, "'").toLowerCase().split(/[.?!;\n]+|,\s*(?=(?:thanks|thank you)\b)/)
+    .map((c) => c.replace(/^\s*(?:hi|hello|hey)(?: [a-z'.-]+){0,2}\s*,\s*/, '').replace(/[,\s]+$/g, '').replace(/^[,\s]+/, '').replace(/\s+/g, ' '))
+    .filter(Boolean);
+  if (!clauses.length) return false;
+  let asked = false;
+  for (const c of clauses) {
+    if (GENERIC_STATUS_QUESTION_RES.some((re) => re.test(c))) { asked = true; continue; }
+    if (!GENERIC_INERT_RES.some((re) => re.test(c))) return false;
+  }
+  return asked;
+}
 function copiesAnswerNamedSpecifics(copied, inboundText) {
   const answers = copied.some((t) => sentenceFamily(String(t)) || ACCOUNT_SUMMARY_RE.test(String(t)));
-  return answers && inboundNamesSpecifics(inboundText);
+  return answers && (inboundNamesSpecifics(inboundText) || !inboundIsGenericStatusQuestion(inboundText));
 }
 function copiesAmbiguousFamily(copied, snapshot) {
   const counts = snapshot?.family_counts && typeof snapshot.family_counts === 'object' ? snapshot.family_counts : {};
@@ -776,6 +806,7 @@ module.exports = {
   hasOutstandingObligation,
   RESOLVED_PAYMENT_STATUSES,
   withoutSnapshotCopies,
+  inboundIsGenericStatusQuestion,
   canonText,
   copiedSentences,
   withoutCopies,

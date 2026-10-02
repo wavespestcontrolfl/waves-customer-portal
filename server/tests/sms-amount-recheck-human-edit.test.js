@@ -111,3 +111,12 @@ describe('staff-edited real-answers bodies: amounts judged against live billing'
     await expect(staff('Thanks, we received your $150.00 payment.')).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 });
+
+// Codex round-73: verb-led figures re-target a staff edit too; a figure that matches no invoice keeps the decision's target
+describe('staff Zelle edit re-targeting by figure (round 73)', () => {
+  test('explicitInvoiceReference: any dollar figure counts', () => {
+    const { explicitInvoiceReference } = require('../services/zelle-target-invoice');
+    expect(explicitInvoiceReference('You can use Zelle to send $200 to pay@example.com.')).toBe(true);
+    expect(explicitInvoiceReference('Make a $200 Zelle payment to pay@example.com.')).toBe(true);
+  });
+});

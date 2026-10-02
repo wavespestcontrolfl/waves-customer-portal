@@ -988,3 +988,20 @@ describe('assertsPaymentStatus: a non-money "we owe you ..." promise is not paym
     'We owe you a refund.', 'We owe you a callback about your $40 refund.', 'You still owe a balance.', 'You owe $50.', 'We owe you $20.',
   ])('still status: %s', (t) => { expect(asserts(t)).toBe(true); });
 });
+
+// Codex round-73 (structural): an ALLOW-list defines a generic status question; anything else is specific => Agent Review
+describe('inboundIsGenericStatusQuestion', () => {
+  test.each([
+    'Did you get my payment?', 'Did my payment go through?', 'Hi Sam, did you receive my payment? Thanks!', 'Is my invoice paid?',
+    'Am I paid up?', 'Do I owe anything?', 'Just checking if you got my payment', 'Did you get it?', 'What is my balance?',
+  ])('generic: %s', (t) => { expect(c.inboundIsGenericStatusQuestion(t)).toBe(true); });
+  test.each([
+    'Did you receive my Venmo payment?', 'Did you get my PayPal payment?', 'Did my wire go through?', 'Did you get my payment from last week?',
+    'did you get my $200 payment', 'Did my payment go through? I paid by check.', 'Thanks!', '', null,
+  ])('specific or not a question => review: %s', (t) => { expect(c.inboundIsGenericStatusQuestion(t)).toBe(false); });
+  test('a copied receipt answering a Venmo question is held for a person (auto-send)', () => {
+    const S = 'We received your $120.00 card payment on Sep 12, 2026.';
+    expect(c.autoSendScopeBlock({ reply: S, inboundText: 'Did you receive my Venmo payment?', snapshot: { sentences: [S], family_counts: { payment: 1 } } })).toBe('payment_status_ambiguous');
+    expect(c.autoSendScopeBlock({ reply: S, inboundText: 'Did you receive my payment?', snapshot: { sentences: [S], family_counts: { payment: 1 } } })).toBeNull();
+  });
+});

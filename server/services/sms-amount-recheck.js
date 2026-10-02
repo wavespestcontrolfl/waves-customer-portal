@@ -265,13 +265,16 @@ async function staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessag
   if (!zelleBodyContacts(text).length) return { stale: false, zelle: null };
   const recipient = outgoingZelleStale(text);
   if (recipient.stale) return { ...recipient, zelle: null };
-  const { resolveZelleTargetInvoice, explicitInvoiceReference } = require('./zelle-target-invoice');
+  const { resolveZelleTargetInvoice, explicitInvoiceReference, namesInvoiceNumber } = require('./zelle-target-invoice');
   let invoiceId = zelleInvoiceId || null;
   const bodyNamesInvoice = explicitInvoiceReference(text);
   if (customerId && (bodyNamesInvoice || !invoiceId)) {
     try {
       const ctx = await loadCustomerContext(customerId, dbh);
-      invoiceId = resolveZelleTargetInvoice(ctx?.billing, bodyNamesInvoice ? text : inboundMessage).invoiceId || null;
+      const resolved = resolveZelleTargetInvoice(ctx?.billing, bodyNamesInvoice ? text : inboundMessage).invoiceId || null;
+      // a NUMBER re-targets firmly (unresolved => blocked); a figure re-targets only when it points at one invoice (Codex rounds 71/73:
+      // "use Zelle to send $210" checks the $210 invoice) - a figure matching none (a staff-typed balance) keeps the decision's target
+      invoiceId = resolved || (bodyNamesInvoice && !namesInvoiceNumber(text) && invoiceId) || null;
     } catch (err) {
       logger.warn(`[sms-amount-recheck] Zelle target lookup failed for customer ${customerId}: ${err.message}; blocking send`);
       return { stale: true, reason: 'zelle_recheck_failed', zelle: null };
