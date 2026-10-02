@@ -538,12 +538,13 @@ function isCorrectingNo(tokens, j) {
   while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
   return Boolean(readSpokenNumber(tokens, k));
 }
-function isRetracted(tokens, breaks, start, end) {
+function isRetracted(tokens, breaks, start, end, stops = []) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
     if (isNegationAt(tokens, j) && !isCorrectingNo(tokens, j)) return true;
     if (breaks[j]) break;
   }
-  for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER; j += 1) {
+  // (never past a sentence stop: "four ounces. Actually, the customer was home.")
+  for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER && !stops[j]; j += 1) {
     if (isCorrectingNo(tokens, j)) return true;
     if (readSpokenNumber(tokens, j)) break;
     if (CORRECTION_CUES.some((cue) => cue.every((w, k) => tokens[j + k] === w))) return true;
@@ -572,7 +573,7 @@ function quantitiesIn(text) {
     // "three or four", "three to four", "between three and four": a range, so
     // neither number is the one that was meant.
     const joiner = tokens[end] === 'or' || tokens[end] === 'to' || tokens[end] === 'through' || tokens[end] === 'thru' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
-    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit, stops), retracted: isRetracted(tokens, breaks, i, end) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
+    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit, stops), retracted: isRetracted(tokens, breaks, i, end, stops) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
   // "three or four": neither number is the one that was meant. "four ounces of
@@ -1264,7 +1265,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|access|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
@@ -1306,7 +1307,10 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   // aside: their audience is unclear, so they never go to the customer unasked.
   let afterOffice = false;
   const spoken = String(transcript).split(SENTENCE_SPLIT_RE).filter((t) => t.trim()).map((t) => {
-    const entry = { ...tokenize(t), office: isOfficeSentence(t, COMPLETION_ACCESS_CODE_RE), afterOffice };
+    // Only a LABELED sentence (to the office, or naming an entry code) makes every
+    // clause of it office-only; an internal topic in one clause ("..., gate was
+    // locked") is judged on that clause's own words by the caller.
+    const entry = { ...tokenize(t), office: OFFICE_ADDRESSED_RE.test(t) || COMPLETION_ACCESS_CODE_RE.test(t), afterOffice };
     if (OFFICE_ADDRESSED_RE.test(t)) afterOffice = true;
     return entry;
   });
@@ -1348,7 +1352,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     const text = sentence.trim();
     if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
     // kept only when the notes carry ALL of its words (a shared "gate" is not "gate code 1234")
-    const words = norm(text).split(' ').filter((w) => (w.length >= 4 || /\d/.test(w)) && !/^(office|dispatch|note|tell|that|this|with|from)$/.test(w));
+    const words = norm(text).split(' ').filter((w) => (w.length >= 3 || /\d/.test(w)) && !/^(office|dispatch|note|tell|that|this|with|from|the|and|for|was|were|has|had)$/.test(w));
     if (words.length && !keptClauses.some((kept) => words.every((w) => kept.includes(` ${w} `)))) pushUnclear(unclear, text, 'office_said_not_filled');
   }
   return {

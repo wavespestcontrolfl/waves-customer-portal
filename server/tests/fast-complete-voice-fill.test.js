@@ -1437,3 +1437,29 @@ describe('Codex #5580 round 12', () => {
     expect(out.officeNote).toBe('PIN is four four one two.');
   });
 });
+
+describe('Codex #5580 round 13', () => {
+  test('a correction word in the next sentence does not retract the dose', () => {
+    const t = 'Used Taurus, four ounces. Actually, the customer was home.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus, four ounces' }] }), ctx, t);
+    expect(out.products[0].amount).toBe(4);
+  });
+
+  test('a mixed sentence: the treatment clause stays customer copy, the gate clause goes to the office', () => {
+    const t = 'Treated the exterior for ants, gate was locked.';
+    const out = validateFill(answer({ customerNote: 'Treated the exterior for ants.', officeNote: 'gate was locked.' }), ctx, t);
+    expect(out.customerNote).toBe('Treated the exterior for ants.');
+    expect(out.officeNote).toBe('gate was locked.');
+  });
+
+  test('"Dog is out." left out of both notes is a Check', () => {
+    const out = validateFill(answer({}), ctx, 'Treated outside. Dog is out.');
+    expect(out.unclear).toContainEqual({ heard: 'Dog is out.', reason: 'office_said_not_filled' });
+  });
+
+  test('"Treated pest access points" stays customer copy', () => {
+    const t = 'Treated pest access points around the foundation.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe(t);
+  });
+});
