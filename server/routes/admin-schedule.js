@@ -2998,6 +2998,19 @@ function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDat
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
 }
 
+// Can this add-on line land on ANY occurrence after the one it was sold on?
+// lineDueOnRecurringDate's two date-independent exits: a one-time service
+// key (due on the anchor only) and a 'one_time' pattern (never due on a
+// recurring date). Every other line is due on at least some later
+// occurrence. The rate-review apply reads this to judge what a series'
+// later spawns will carry without walking their dates.
+function addonLineRecursAfterAnchor(line) {
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  const pattern = line?.recurringPattern || line?.recurring_pattern || null;
+  return pattern !== 'one_time';
+}
+
 // GitHub round 2 on PR #4654 (P1): reconcileRecurringSeriesVisitCount and
 // both runRecurringAlertAction loops (slice 4 of #4405) hoist their own
 // per-date `loadDiscountCapsById` read to ONCE per call, keyed off
@@ -26908,6 +26921,7 @@ router._test = {
   RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
   filterAddonLinesForDate,
+  addonLineRecursAfterAnchor,
   ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,
   discountChangeWithoutPricePosted,

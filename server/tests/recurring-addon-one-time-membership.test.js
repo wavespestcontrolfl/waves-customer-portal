@@ -14,7 +14,7 @@ jest.mock('../middleware/admin-auth', () => {
   return { ...actual, adminAuthenticate: (req, _res, next) => next() };
 });
 
-const { lineDueOnRecurringDate, filterAddonLinesForDate } = require('../routes/admin-schedule')._test;
+const { lineDueOnRecurringDate, filterAddonLinesForDate, addonLineRecursAfterAnchor } = require('../routes/admin-schedule')._test;
 
 const BASE = '2026-09-12';
 const LATER = '2026-12-10';
@@ -48,5 +48,19 @@ describe('one-time WaveGuard Membership add-on', () => {
 
   test('later-visit filtering drops only the membership line', () => {
     expect(filterAddonLinesForDate([storedMembership, storedBait], BASE, LATER)).toEqual([storedBait]);
+  });
+
+  // The rate-review apply asks the same question without a date: may this
+  // parent add-on land on a LATER spawned visit at all?
+  test('addonLineRecursAfterAnchor: only lines lineDueOnRecurringDate keeps off every later occurrence are excluded', () => {
+    expect(addonLineRecursAfterAnchor(storedMembership)).toBe(false);
+    expect(addonLineRecursAfterAnchor(pricedMembership)).toBe(false);
+    expect(addonLineRecursAfterAnchor({ ...storedBait, recurring_pattern: 'one_time' })).toBe(false);
+    expect(addonLineRecursAfterAnchor({ ...pricedBait, recurringPattern: 'one_time' })).toBe(false);
+    expect(addonLineRecursAfterAnchor(storedBait)).toBe(true);
+    expect(addonLineRecursAfterAnchor({ ...storedBait, recurring_pattern: 'quarterly' })).toBe(true);
+    for (const line of [storedMembership, storedBait, { ...storedBait, recurring_pattern: 'one_time' }]) {
+      if (!addonLineRecursAfterAnchor(line)) expect(lineDueOnRecurringDate(line, BASE, LATER)).toBe(false);
+    }
   });
 });
