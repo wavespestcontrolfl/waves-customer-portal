@@ -1156,15 +1156,37 @@ describe('retireDraftNotices and the rebuild guard', () => {
     mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(4, { customer_id: CUSTOMER(1), status: 'approved', family_key: 'tree_shrub', notice_id: 'n-sending-4' }));
     mockDb.store.price_change_notices.push(fixture.noticeRow(4, { id: 'n-sending-4', customer_id: CUSTOMER(1), family_key: 'tree_shrub', status: 'sending', sent_at: null, email_sent: false, sms_sent: false, current_amount_cents: 6500, new_amount_cents: 7000, noticed_current_cents: 6500, noticed_new_cents: 7000 }));
     const out = await apply.retireDraftNotices(BATCH_KEY);
-    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 2 });
+    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 2, revoked: 2 });
     expect(notices().map((n) => n.id).sort()).toEqual(['n-sending-4', 'n-sent-2']);
     expect(snapshots().map((r) => [r.family_key, r.notice_id])).toEqual([['pest_control', null], ['mosquito', null], ['lawn_care', 'n-sent-2'], ['tree_shrub', 'n-sending-4']]);
+    // the retired rows' approval goes with their drafts; the delivered and in-flight rows keep theirs
+    expect(snapshots().map((r) => [r.family_key, r.status])).toEqual([['pest_control', 'green'], ['mosquito', 'green'], ['lawn_care', 'sent'], ['tree_shrub', 'approved']]);
+    expect(snapshots().filter((r) => r.status === 'green').every((r) => r.approved_at == null && r.approved_by == null)).toBe(true);
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'price_change_notices')).toBe(true);
-    // and the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked; the in-flight one stays linked)
+    // and once the owner approves again the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked; the in-flight one stays linked)
+    for (const r of snapshots()) if (r.status === 'green') r.status = 'approved';
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
     expect(again).toMatchObject({ created: 1, alreadyScheduled: 1 });
     expect(again.held.map((h) => [h.familyKey, h.reason])).toEqual([['mosquito', 'no_future_visit']]);
     expect(snapshots().find((r) => r.family_key === 'pest_control').notice_id).not.toBeNull();
+  });
+  test('retire → rebuild: retiring a scheduled batch\'s drafts returns its approved rows to green, so the rebuild is no longer refused', async () => {
+    const rateReview = require('../services/rate-review');
+    const book = pestBook();
+    book.rate_review_config = [];
+    await scheduleBook(book);
+    expect(await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW })).toMatchObject({ ok: false, reason: 'batch_has_scheduled_rows' });
+    expect(await apply.retireDraftNotices(BATCH_KEY)).toMatchObject({ ok: true, retired: 1, revoked: 1 });
+    expect(snapshots()[0]).toMatchObject({ status: 'green', notice_id: null, approved_at: null, approved_by: null });
+    // an empty book from here: the rebuild runs to its write and replaces the undecided row
+    mockDb.rawHandlers.push([/WITH ov AS|AS first_visit|WITH te AS|WaveGuard Monthly/, () => ({ rows: [] })]);
+    const out = await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW });
+    expect(out).toMatchObject({ ok: true, batchKey: BATCH_KEY });
+  });
+  test('retire with nothing scheduled still returns an approved-but-unscheduled row to green', async () => {
+    mockDb.reset(pestBook(1, { snapshot: { status: 'approved', approved_at: NOW, approved_by: 'tech-1' } }));
+    expect(await apply.retireDraftNotices(BATCH_KEY)).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 0, keptDelivered: 0, revoked: 1 });
+    expect(snapshots()[0]).toMatchObject({ status: 'green', approved_at: null, approved_by: null });
   });
   test('gate off → retires nothing', async () => {
     process.env.GATE_RATE_REVIEW = 'false';

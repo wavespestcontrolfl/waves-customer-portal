@@ -18,8 +18,9 @@
  *        { plannedSendDate?: 'YYYY-MM-DD' } (default today) — the 30-day
  *        rule is measured from it
  *   DELETE /api/admin/rate-review/batches/:key/schedule    retire the batch's DRAFT
- *        (never delivered) notice rows and unlink their ranking rows — the undo
- *        before the send, and what a rebuild of a scheduled batch needs first
+ *        (never delivered) notice rows, unlink their ranking rows and return
+ *        every approved row left without a notice to green — the undo before
+ *        the send, and what an edit or rebuild of a scheduled batch needs first
  *   GET  /api/admin/rate-review/apply-holds                rate-review notices the nightly
  *        apply refused, with the reason
  *
@@ -248,7 +249,7 @@ router.delete('/batches/:key/schedule', async (req, res) => {
   try {
     const result = await rateReviewApply.retireDraftNotices(key);
     if (!result.ok) return res.status(409).json({ error: 'Draft notice rows could not be retired', reason: result.reason });
-    return res.json({ ok: true, batchKey: key, retired: result.retired, keptDelivered: result.keptDelivered });
+    return res.json({ ok: true, batchKey: key, retired: result.retired, keptDelivered: result.keptDelivered, revoked: result.revoked });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] retire drafts failed for ${key}: ${err.message}`);

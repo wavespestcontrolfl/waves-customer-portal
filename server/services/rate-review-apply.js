@@ -1176,7 +1176,12 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
 // touched (reported as kept). The notices are locked, judged by the same
 // delivery evidence the apply uses (wasDelivered), deleted under those
 // same guards in the DELETE's own predicate, and unlinked — one
-// transaction under the batch lock.
+// transaction under the batch lock. The approval goes with them: every
+// approved row left with no notice returns to green (approved_at /
+// approved_by cleared), since a rebuild (batch_has_approved_rows) and a
+// row edit (row_locked) both refuse approved rows — the owner edits or
+// rebuilds, then approves again. A row still linked to a kept (delivered
+// or in-flight) notice keeps its approval.
 async function retireDraftNotices(batchKey, { dbh = db } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   if (!BATCH_KEY_RE.test(String(batchKey || ''))) throw badInput('batchKey must be YYYY-MM');
@@ -1184,7 +1189,9 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     await lockBatch(trx, batchKey);
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
-    if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
+    const revokeApprovals = () => trx('rate_review_snapshots').where({ batch_key: batchKey, status: 'approved' }).whereNull('notice_id')
+      .update({ status: 'green', approved_at: null, approved_by: null, updated_at: new Date() });
+    if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0, revoked: await revokeApprovals() };
     // Retirable = exactly what the DELETE below accepts: a draft, or a
     // previewed draft ('viewed') with no sent_at and no delivered leg. A
     // 'sending' claim or an 'unreachable' attempt is in flight and is kept
@@ -1200,8 +1207,9 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
       await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', candidateIds).update({ notice_id: null, updated_at: new Date() });
     }
     const kept = noticeIds.length - candidateIds.length;
-    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${kept} delivered or in-flight kept`);
-    return { ok: true, batchKey, retired, keptDelivered: kept };
+    const revoked = await revokeApprovals();
+    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${kept} delivered or in-flight kept, ${revoked} approvals returned to green`);
+    return { ok: true, batchKey, retired, keptDelivered: kept, revoked };
   });
 }
 
