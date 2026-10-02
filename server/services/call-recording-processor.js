@@ -3729,6 +3729,19 @@ async function avAddressUniqueOwner(matches, opts) {
 // and read by every customer-field backfill, so a reprocess, a retry or a
 // later pass that only sees call_log.customer_id can never write the caller's
 // phone, email or name onto the account holder (codex pre-push P1). Pure.
+// GATE_CALL_HOUSEHOLD_ADDRESS_MATCH: the caller's number sits ONLY in one of the
+// account's service-contact slots (not the primary or secondary phone) — they are
+// a household / service contact, never the account holder, so their email, name
+// and number are never backfilled onto the account on ANY call (the first call
+// stamped household_link; every later call from the saved number has no stamp).
+// Pure.
+function serviceContactOnlyPhone(customer, phone) {
+  if (!customer || !phone) return false;
+  if (samePhone(phone, customer.phone) || samePhone(phone, customer.secondary_phone)) return false;
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  return SERVICE_CONTACT_SLOTS.some((slot) => samePhone(phone, customer[slot.phone]));
+}
+
 function householdLinkCompleted(call) {
   let meta = call?.metadata;
   if (typeof meta === 'string') {
@@ -3781,9 +3794,11 @@ async function findHouseholdCustomerByAddress({ phone, address = {}, alternateAd
     const zip5 = normalizeZip(address.zip);
     if (!key || !street || !zip5) return refuse('no_phone_or_address');
 
+    // secondary_phone is deliberately outside ordinary matching but IS identity
+    // evidence: a number stored there already belongs to an account.
     const phoneHit = await conn('customers').whereNull('deleted_at')
       .where(function orPhones() {
-        for (const col of CONTACT_MATCH_PHONE_COLS) {
+        for (const col of [...CONTACT_MATCH_PHONE_COLS, 'secondary_phone']) {
           this.orWhereRaw(key.length === 10
             ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
             : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`, [key]);
@@ -12130,6 +12145,9 @@ const CallRecordingProcessor = {
     // Seeded from the persisted household_link stamp so a reprocess / retry that
     // arrives with call.customer_id already set stays household-protected.
     let householdLinkedThisPass = householdLinkFromCall(call, customerId);
+    // The caller's number is only a service-contact slot on the matched account
+    // (a later call from a saved household contact): same identity protection.
+    let slotOnlyCaller = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -12190,13 +12208,16 @@ const CallRecordingProcessor = {
         householdLinkedThisPass = true;
         logger.info(`[call-proc] ${maskSid(callSid)} re-linked to household account ${customerId}; no contact backfill`);
       } else if (existing) {
+        // A caller whose number is only a service-contact slot is not the
+        // account holder: link, never backfill (see serviceContactOnlyPhone).
         customerId = existing.id;
         phoneMatchedThisPass = true;
-        // Update with any new info (email + address; shared with the
-        // pre-linked path below).
-        await backfillLinkedCustomerFromExtraction({
-          customerId, existing, extracted, source: 'call-extraction-backfill',
-        });
+        slotOnlyCaller = require('../config/feature-gates').callHouseholdAddressMatchLive() && serviceContactOnlyPhone(existing, phone);
+        if (!slotOnlyCaller) {
+          await backfillLinkedCustomerFromExtraction({
+            customerId, existing, extracted, source: 'call-extraction-backfill',
+          });
+        }
       } else if (householdMatch?.customer) {
         // Link only: NO email/address/phone backfill onto the account holder
         // from a different person's call. The caller's name + number go to a
@@ -12453,6 +12474,21 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A pre-linked / reprocessed call (call.customer_id already set) whose caller
+    // number is only a service-contact slot on that account is the same case.
+    if (!slotOnlyCaller && !householdLinkedThisPass && customerId && !createdCustomerFromCall && !isOutboundCall(call)
+      && require('../config/feature-gates').callHouseholdAddressMatchLive()) {
+      const identityAni = firstExternalPhone(call.from_phone);
+      if (identityAni) {
+        const slotRow = await db('customers').where({ id: customerId })
+          .first(['phone', 'secondary_phone', ...CONTACT_MATCH_PHONE_COLS.filter((c) => c !== 'phone')]).catch(() => null);
+        slotOnlyCaller = serviceContactOnlyPhone(slotRow, identityAni);
+      }
+    }
+    // Every customer-field backfill below honours this: the caller is not the
+    // account holder (household link, or a saved service-contact number).
+    const householdIdentityProtected = householdLinkedThisPass || slotOnlyCaller;
+
     // Household completion (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH): save the caller as
     // a service contact and file the "new household contact" card. Idempotent and
     // RESUMABLE — it runs for the first pass AND for any retry / reprocess of a
@@ -12567,7 +12603,7 @@ const CallRecordingProcessor = {
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
     const prelinkedGate = prelinkedBackfillGate({
-      call, customerId, createdCustomerFromCall, phoneMatchedThisPass: phoneMatchedThisPass || householdLinkedThisPass, extracted, explicitUnlink,
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass: phoneMatchedThisPass || householdIdentityProtected, extracted, explicitUnlink,
       thirdPartyCallNature: v2ThirdPartyCallNature,
     });
     if (prelinkedGate.eligible) {
@@ -16952,7 +16988,7 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, householdContact: householdLinkedThisPass });
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, householdContact: householdIdentityProtected });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the
@@ -20512,7 +20548,7 @@ const CallRecordingProcessor = {
     // the only thing the release paths read.
     let dripHoldRecorded = null;
     let newsletterHoldRecorded = null;
-    if (customerId && householdLinkedThisPass) {
+    if (customerId && householdIdentityProtected) {
       // The caller's email is a household contact's, not the account holder's:
       // never enroll it against the account's customer id.
       beehiivResult = { skipped: 'household_contact' };
@@ -22607,6 +22643,7 @@ CallRecordingProcessor._test = {
   findHouseholdCustomerByAddress,
   householdLinkFromCall,
   householdLinkCompleted,
+  serviceContactOnlyPhone,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

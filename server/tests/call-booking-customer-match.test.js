@@ -32,7 +32,7 @@ const { _test } = require('../services/call-recording-processor');
 
 const {
   validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
-  backfillCustomerFromAppointmentContact, prelinkedBackfillGate,
+  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
@@ -126,8 +126,8 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(completion).toContain('persistCallSecondaryContact(customerId, householdContact');
     expect(completion).toContain("flag: 'household_contact_linked'");
     expect(completion).not.toContain('backfillLinkedCustomerFromExtraction');
-    expect(source).toContain('phoneMatchedThisPass: phoneMatchedThisPass || householdLinkedThisPass');
-    expect(source).toContain('householdContact: householdLinkedThisPass');
+    expect(source).toContain('phoneMatchedThisPass: phoneMatchedThisPass || householdIdentityProtected');
+    expect(source).toContain('householdContact: householdIdentityProtected');
   });
 
   test('the confirmation greeting falls back to "there"', () => {
@@ -177,6 +177,35 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
     await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', {}).catch(() => {});
     expect(mockApplyUpdates).toHaveBeenCalled();
     expect(mockCaptured).toMatchObject({ first_name: 'Sally', phone: '+19415550177', email: 'sally@example.com' });
+  });
+
+  test('SECOND CALL: a number saved only as a service-contact slot is a household contact, never the account holder', async () => {
+    const SALLY = '+19415550177';
+    const holder = { id: ACCOUNT, phone: '+19415550100', secondary_phone: null, service_contact_phone: SALLY, service_contact2_phone: null, service_contact3_phone: null };
+    expect(serviceContactOnlyPhone(holder, SALLY)).toBe(true);
+    expect(serviceContactOnlyPhone(holder, '(941) 555-0177')).toBe(true);
+    expect(serviceContactOnlyPhone(holder, '+19415550100')).toBe(false); // the holder's own number
+    expect(serviceContactOnlyPhone({ ...holder, secondary_phone: SALLY }, SALLY)).toBe(false); // an account-holder number
+    expect(serviceContactOnlyPhone({ ...holder, phone: SALLY }, SALLY)).toBe(false);
+    expect(serviceContactOnlyPhone(holder, '+19415550999')).toBe(false);
+    expect(serviceContactOnlyPhone(holder, null)).toBe(false);
+    expect(serviceContactOnlyPhone(null, SALLY)).toBe(false);
+    // The second call has NO household_link stamp, yet the protected flag still closes every backfill:
+    const secondCall = { customer_id: ACCOUNT, from_phone: SALLY, direction: 'inbound', metadata: {} };
+    expect(householdLinkFromCall(secondCall, ACCOUNT)).toBe(false);
+    const protectedNow = serviceContactOnlyPhone(holder, SALLY);
+    mockApplyUpdates.mockClear();
+    const out = await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, SALLY, { householdContact: protectedNow });
+    expect(out).toBe(account);
+    expect(mockApplyUpdates).not.toHaveBeenCalled();
+    expect(prelinkedBackfillGate({ call: secondCall, customerId: ACCOUNT, createdCustomerFromCall: false, extracted, thirdPartyCallNature: false, phoneMatchedThisPass: protectedNow }).eligible).toBe(false);
+  });
+
+  test('wiring: the phone-match branch and the pre-linked path both derive slot-only protection (gated), and every backfill reads it', () => {
+    expect(source).toContain('serviceContactOnlyPhone(existing, phone)');
+    expect(source).toContain('slotOnlyCaller = serviceContactOnlyPhone(slotRow, identityAni);');
+    expect(source).toContain('const householdIdentityProtected = householdLinkedThisPass || slotOnlyCaller;');
+    expect(source).toContain('if (customerId && householdIdentityProtected) {');
   });
 
   test('RETRY: a persisted link whose contact/card writes never finished is resumed; a completed one is not repeated', () => {
@@ -378,6 +407,12 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').del();
     await trx('customers').insert(member({ pipeline_stage: 'new_lead' }));
     expect((await lookup()).reason).toBe('not_established_customer');
+  });
+
+  test('a number stored only in secondary_phone is identity evidence, never "unknown"', async () => {
+    await trx('customers').insert(member());
+    await trx('customers').insert(member({ id: randomUUID(), phone: '+19415550110', address_line1: '7 Elsewhere Way', zip: '34241', secondary_phone: NOT_ON_FILE }));
+    expect((await lookup()).reason).toBe('phone_on_file');
   });
 
   test('a number already on file (primary or service-contact slot) is a phone match, not a household match', async () => {
