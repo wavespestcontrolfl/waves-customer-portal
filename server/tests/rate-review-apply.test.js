@@ -1182,10 +1182,13 @@ describe('retireDraftNotices and the rebuild guard', () => {
     const book = pestBook();
     book.rate_review_config = [];
     mockDb.reset(book);
+    // undecided when the ranking starts (an approved row is refused up
+    // front); the draft — and its approval — land during the ranking
+    mockDb.store.rate_review_snapshots[0].status = 'green';
     // an empty book: every ranking loader answers nothing, so the only
     // thing left to the write is the lock + the re-checked guards
     mockDb.rawHandlers.push([/WITH ov AS|AS first_visit|WITH te AS|WaveGuard Monthly/, () => ({ rows: [] })]);
-    mockDb.rawHandlers.push([/pg_advisory_xact_lock/, () => { mockDb.store.rate_review_snapshots[0].notice_id = 'n-landed-during-ranking'; return { rows: [] }; }]);
+    mockDb.rawHandlers.push([/pg_advisory_xact_lock/, () => { Object.assign(mockDb.store.rate_review_snapshots[0], { status: 'approved', notice_id: 'n-landed-during-ranking' }); return { rows: [] }; }]);
     const out = await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW });
     expect(out).toEqual({ ok: false, reason: 'batch_has_scheduled_rows', batchKey: BATCH_KEY });
     // the refusal came from INSIDE the write (after the lock), and nothing was deleted or rewritten
