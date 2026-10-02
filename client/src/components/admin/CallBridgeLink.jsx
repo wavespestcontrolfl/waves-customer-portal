@@ -10,7 +10,9 @@ const DEFAULT_FROM = "+19412975749";
 // customerId: the customer whose number this is (primary, secondary or a
 // service contact) — the server validates it and picks the caller ID from it
 // (their home line under GATE_HOME_LINE), so pass it whenever it is known.
-export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM, customerId = null) {
+// customerIdHint: a customer the number is probably theirs (a lead's linked
+// customer) — linked only if the number matches, never refused.
+export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM, customerId = null, customerIdHint = null) {
   if (!phone) return;
   const who = (customerName || "").trim() || "this number";
   const confirmMsg = `Call ${who} at ${phone}?\n\nWaves will call your phone first — press 1 to connect.`;
@@ -22,7 +24,7 @@ export async function callViaBridge(phone, customerName = "", fromNumber = DEFAU
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM, ...(customerId ? { customerId } : {}) }),
+      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM, ...(customerId ? { customerId } : {}), ...(!customerId && customerIdHint ? { customerIdHint } : {}) }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.success) {

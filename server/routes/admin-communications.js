@@ -216,6 +216,18 @@ async function customerOfSourceCall(callId, to) {
   return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
 }
 
+// The customer `customerId` when `to` is one of their known-caller numbers;
+// null otherwise (deleted, unknown, or a number they are not known by).
+async function customerKnownByNumber(customerId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first()
+    .catch((e) => { logger.warn(`[admin-call] hinted customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
 async function findSingleCustomerForPhone(phone) {
   // Full-digit match on every stored format the number could plausibly be
   // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
@@ -1775,7 +1787,7 @@ router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    const { to, fromNumber, customerId, customerIdHint, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
     if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
       return res.status(400).json({ error: 'Invalid callback id' });
     }
@@ -1861,6 +1873,10 @@ router.post('/call', async (req, res, next) => {
       // number is one they are known by. Otherwise the phone-only lookup
       // below decides, as for any click-to-call.
       if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      // A soft link (Leads: lead.customer_id): used only when the dialed
+      // number is one that customer is known by; otherwise the call proceeds
+      // on the phone-only lookup, never refused.
+      if (!customer && customerIdHint && UUID_RE.test(String(customerIdHint))) customer = await customerKnownByNumber(customerIdHint, to);
       if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;

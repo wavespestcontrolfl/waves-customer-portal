@@ -172,7 +172,25 @@ describe('homeLineOfficeId / matchServiceLocation (no default office)', () => {
   test('a matched office or a current stamp is returned as-is', () => {
     expect(matchServiceLocation({ zip: '34219' }).id).toBe('parrish');
     expect(matchServiceLocation(NEAR_VENICE).id).toBe('venice');
-    const address = { address_line1: '1 A St', city: '' };
-    expect(homeLineOfficeId({ ...address, home_line_location_id: 'sarasota', home_line_address_key: addressKey(address) })).toBe('sarasota');
+    // A derived stamp holds while the address still names an office (here
+    // Parrish by ZIP) — the stored line wins over today's derivation.
+    const address = { address_line1: '1 A St', city: '', zip: '34219' };
+    expect(homeLineOfficeId({ ...address, home_line_location_id: 'sarasota', home_line_address_key: addressKey(address), home_line_source: 'derived' })).toBe('sarasota');
+  });
+});
+
+describe('homeLineOfficeId: a derived stamp never outlives a matched office', () => {
+  const { homeLineOfficeId, homeLineLocationId } = require('../config/locations');
+  const { addressKey } = require('../services/customer-property-address-keys');
+  const blank = { address_line1: '', city: '', zip: '' };
+  const stampedDefault = { ...blank, home_line_location_id: 'bradenton', home_line_address_key: addressKey(blank), home_line_source: 'derived' };
+
+  test('an old derived default on an address with no office is ignored (calls → main)', () => {
+    expect(homeLineOfficeId(stampedDefault)).toBeNull();
+    expect(homeLineLocationId(stampedDefault)).toBe('bradenton'); // texts keep the default office
+  });
+
+  test('a staff pick holds even when the address names no office', () => {
+    expect(homeLineOfficeId({ ...stampedDefault, home_line_location_id: 'venice', home_line_source: 'staff' })).toBe('venice');
   });
 });

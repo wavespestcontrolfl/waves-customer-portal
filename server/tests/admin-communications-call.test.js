@@ -236,6 +236,43 @@ describe('admin communications voice route', () => {
       expect(mockCallCreate).not.toHaveBeenCalled();
     });
 
+    test('customerIdHint (Leads): linked when the number is that customer\'s', async () => {
+      homeLineLive.mockReturnValue(true);
+      db.mockImplementation((table) => {
+        if (table === 'customers') return query({ result: { ...parrishCustomer, phone: '+15550000001', secondary_phone: '+15551234567' } });
+        if (table === 'call_log') return query({ returning: [{ id: 'call-log-1' }] });
+        throw new Error(`Unexpected table ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        await fetch(`${baseUrl}/admin/communications/call`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', customerIdHint: '11111111-1111-4111-8111-111111111111' }),
+        });
+      });
+      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
+    });
+
+    test('customerIdHint with a number that is not theirs: never refused, main line', async () => {
+      homeLineLive.mockReturnValue(true);
+      let customerReads = 0;
+      db.mockImplementation((table) => {
+        // 1st read: the hinted customer (other number); 2nd: the phone-only lookup (none).
+        if (table === 'customers') return query({ result: customerReads++ === 0 ? { ...parrishCustomer, phone: '+15550000001' } : [] });
+        if (table === 'call_log') return query({ returning: [{ id: 'call-log-1' }] });
+        throw new Error(`Unexpected table ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/call`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', customerIdHint: '11111111-1111-4111-8111-111111111111' }),
+        });
+        expect(res.status).not.toBe(400);
+      });
+      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: MAIN }));
+    });
+
     test('gate off: the main line, as before', async () => {
       const call = await callFor(parrishCustomer);
       expect(call.from).toBe(MAIN);

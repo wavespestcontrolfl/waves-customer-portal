@@ -411,11 +411,15 @@ function homeLineLocationId(customer = {}) {
  */
 function homeLineOfficeId(customer = {}) {
   const stored = customer.home_line_location_id;
-  if (stored && customer.home_line_address_key != null && WAVES_LOCATIONS.some((l) => l.id === stored)) {
+  const matched = matchServiceLocation(customer);
+  // A staff pick always holds for its address; a derived stamp only while the
+  // address still names an office, so a stamped default never outlives it.
+  const trusted = customer.home_line_source === 'staff' || !!matched;
+  if (trusted && stored && customer.home_line_address_key != null && WAVES_LOCATIONS.some((l) => l.id === stored)) {
     const { addressKey } = require('../services/customer-property-address-keys');
     if (customer.home_line_address_key === addressKey(customer)) return stored;
   }
-  return matchServiceLocation(customer)?.id || null;
+  return matched?.id || null;
 }
 
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
