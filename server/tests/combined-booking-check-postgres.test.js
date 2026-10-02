@@ -467,6 +467,31 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a booking on ONE combined-route series (lawn + T&S) is still a price-check candidate', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      // Leave a single series and make it the lawn + tree & shrub combined route.
+      const pestIds = rows.filter((row) => /pest/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', pestIds).del();
+      const lawnIds = rows.filter((row) => /lawn/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds).update({ service_id: null, service_key_snapshot: 'lawn_tree_shrub_combo' });
+      const child = rows.find((row) => row.recurring_parent_id && lawnIds.includes(row.id));
+      await trx('scheduled_services').where({ id: child.id }).update({ estimated_price: 1 });
+      const result = await runCombinedBookingCheck({ conn: trx });
+      expect(result.candidates).toBeGreaterThanOrEqual(1);
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.problemCodes).toContain('price_mismatch');
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

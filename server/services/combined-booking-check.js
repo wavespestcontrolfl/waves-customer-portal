@@ -188,6 +188,15 @@ function acceptedFamilies(estimate) {
   return acceptedPlan(estimate)?.families || null;
 }
 
+// The catalog keys of combined routes that perform two services (from the
+// converter's own route table; the bait + bond routes are one service plus a
+// rider).
+function multiServiceRouteKeys() {
+  const converter = require('./estimate-converter');
+  return [...new Set(converter.COMBINED_SERVICE_ROUTES.map((route) => route.catalogServiceKey)
+    .filter((key) => converter.comboRouteFamiliesFromCatalogKey(key).length >= 2))];
+}
+
 /** Service families a scheduled row performs (a combined route spans two). */
 function rowFamilies(row) {
   const converter = require('./estimate-converter');
@@ -583,13 +592,17 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
             this.whereNull('s.window_start').orWhereNull('s.technician_id');
             // The daily run also judges every upcoming PRICED series child
             // (checkPrices), but only on a booking whose series come from two or
-            // more services (decided in SQL, so the large single-service
-            // population is never loaded); the urgent pass is about time and
-            // technician only.
+            // more services, or one combined route that performs two (pest +
+            // termite bait, lawn + T&S), decided in SQL so the large
+            // single-service population is never loaded; the urgent pass is
+            // about time and technician only.
             if (!lastDay) {
               this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id').where('s.estimated_price', '>', 0)
-                .whereRaw(`(SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
-                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2`));
+                .whereRaw(`((SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
+                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2
+                  OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id
+                    WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
+                      AND COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?)))`, [multiServiceRouteKeys()]));
             }
           });
       });
