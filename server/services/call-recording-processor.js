@@ -3483,10 +3483,15 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // Whether or not the row was stamped before (this same write may stamp
     // it for the caller's explicit consent), the inferred phone is held —
     // unless it already confirmed its own opt-in on this account (holdPhone).
+    // A kept stamp also records the phones it covers right now (grandfathered
+    // contacts often have no opt-in row): if a later edit clears the stamp,
+    // the held person's YES can still restore it.
     ...((contact.phone && holdPhone) ? {
       service_preferences: db.raw(
-        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text))",
-        [last10(contact.phone)],
+        "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
+        [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
+          ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
+          : [])],
       ),
     } : {}),
     ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
@@ -18806,7 +18811,10 @@ const CallRecordingProcessor = {
                       // that already went out keeps its marker (never re-sent).
                       dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),
                       updated_at: new Date(),
-                    }).catch(() => {});
+                    });
+                    // (A failure of THIS write propagates: the call-processing
+                    // pass fails and retries rather than finalizing with no
+                    // retry row for the confirmed visit.)
                     await markOptinAsk(entry, 'not_sent:claim_failed_retrying');
                     logger.warn(`[call-proc] on-site opt-in ask failed for ${maskSid(callSid)}: ${safeErrorToken(askErr)}`);
                   }

@@ -533,7 +533,8 @@ describe('persistCallSecondaryContact', () => {
     // ...and the new phone goes on the account's unconsented list (held out of
     // every text resolver until its own YES, whatever the opt-in gate does).
     expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
-    expect(writes.updates[0].service_preferences.binds).toEqual(['9542901693']);
+    // ...and the kept stamp's currently covered slot phones are recorded as covered.
+    expect(writes.updates[0].service_preferences.binds).toEqual(['9542901693', JSON.stringify(['9415557777'])]);
   });
 
   test('keepConsentStamp on a row with NO prior stamp (this write stamps it for the caller\'s explicit consent): the inferred phone is still held', async () => {

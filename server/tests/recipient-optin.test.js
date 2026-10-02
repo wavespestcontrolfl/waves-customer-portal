@@ -281,12 +281,6 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     // An on-site visit ask is tagged on the row, and the undispatched-ask
     // recovery sweep releases it instead of re-sending it without its visit.
     // dispatch re-checks an on-site ask's visit at the provider boundary.
-    const dispatchSrc = src.slice(src.indexOf('async function dispatchRecipientOptins'));
-    expect(dispatchSrc.indexOf("const asked = await visitAskState(claim.visitId, claim.customerId)")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
-    expect(dispatchSrc).toContain("if (asked.state !== 'live') continue;");
-    // ...only while the row is still this claim's undispatched ask (a newer booking that rebound it owns the send).
-    expect(dispatchSrc).toContain(".where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending', visit_id: claim.visitId })");
-    expect(dispatchSrc.indexOf("if (!(await ownRow().first('phone_key'))) continue;")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
     // A newer booked visit supersedes an undispatched ask still waiting on an earlier visit.
     expect(src).toContain('.whereNot({ visit_id: visitId });');
     // The visit is stored on the row (fresh claim and re-claim alike).
@@ -370,6 +364,75 @@ describe('visitAskState: whether an on-site ask can go out for its visit (#5467)
 
     arrival.mockRejectedValueOnce(new Error('db down'));
     await expect(visitAskState('v1', 'c1')).rejects.toThrow('db down');
+  });
+});
+
+describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
+  function load({ leaseCount = 1, visitState = 'live', sendResult = { sent: true, sid: 'SM1' } } = {}) {
+    jest.resetModules();
+    const writes = [];
+    const dbMock = jest.fn((table) => {
+      const ctx = { table, filter: {}, nulls: [] };
+      const q = {
+        where: jest.fn((f) => { if (typeof f === 'function') f(q); else Object.assign(ctx.filter, f); return q; }),
+        whereNull: jest.fn((c) => { ctx.nulls.push(c); return q; }),
+        whereNotNull: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'scheduled_services' && visitState !== 'dead' ? { id: 'v1' } : null)),
+        update: jest.fn(async (patch) => {
+          writes.push({ table, filter: { ...ctx.filter }, nulls: [...ctx.nulls], patch });
+          // The lease CAS (dispatched_at set while still null) answers leaseCount.
+          if ('dispatched_at' in patch && patch.dispatched_at instanceof Date && ctx.nulls.includes('dispatched_at') && !patch.provider_sid) return leaseCount;
+          return 1;
+        }),
+        insert: jest.fn(async (row) => { writes.push({ table, insert: row }); return [1]; }),
+      };
+      return q;
+    });
+    dbMock.transaction = jest.fn(async (fn) => fn(dbMock));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => visitState === 'wait') }));
+    jest.doMock('../services/appointment-reminders', () => ({
+      scheduledServiceApptTime: jest.fn(async () => new Date(Date.now() + (visitState === 'dead' ? -3600000 : 3600000))),
+    }));
+    const send = jest.fn(async () => sendResult);
+    jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: send }));
+    const optin = require('../services/recipient-optin');
+    return { optin, writes, send };
+  }
+  const claim = { key: '9415550123', customerId: 'c1', phone: '+19415550123', body: 'ASK', visitId: 'v1' };
+
+  test('takes a visit-bound lease, sends, and stamps the provider sid on the SAME visit-bound row', async () => {
+    const { optin, writes, send } = load();
+    const { requested } = await optin.dispatchRecipientOptins([claim], { id: 'c1' });
+    expect(requested).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    const lease = writes.find((w) => w.patch && w.nulls.includes('dispatched_at'));
+    expect(lease.filter).toMatchObject({ phone_key: '9415550123', customer_id: 'c1', status: 'pending', visit_id: 'v1' });
+    const done = writes.find((w) => w.patch && w.patch.provider_sid === 'SM1');
+    expect(done.filter).toMatchObject({ visit_id: 'v1' });
+  });
+
+  test('no lease (a newer booking owns the row) = nothing sent', async () => {
+    const { optin, send } = load({ leaseCount: 0 });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  test('a quiet-hours hold returns the lease and never queues an overnight sms_log row', async () => {
+    const { optin, writes } = load({ sendResult: { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: new Date().toISOString() } });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
+    expect(writes.some((w) => w.table === 'sms_log' && w.insert)).toBe(false);
+    const returned = writes.filter((w) => w.patch && w.patch.dispatched_at === null);
+    expect(returned.length).toBe(1);
+    expect(returned[0].patch).not.toHaveProperty('status');
+  });
+
+  test('an office-review hold returns the lease (pending, for the sweep); nothing sent', async () => {
+    const { optin, writes, send } = load({ visitState: 'wait' });
+    await optin.dispatchRecipientOptins([claim], { id: 'c1' });
+    expect(send).not.toHaveBeenCalled();
+    expect(writes.some((w) => w.patch && w.patch.dispatched_at === null && !w.patch.status)).toBe(true);
   });
 });
 

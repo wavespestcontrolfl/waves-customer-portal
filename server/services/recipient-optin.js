@@ -459,22 +459,30 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
 async function dispatchRecipientOptins(claims = [], customer = null) {
   let requested = 0;
   for (const claim of claims) {
+    // This claim's row. An on-site ask (visitId) is bound to its visit: every
+    // write below is scoped to it, so a newer booking that rebound the row to
+    // another visit is never touched.
+    const claimRow = () => db('recipient_optin')
+      .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+      .where((q) => { if (claim.visitId) q.where({ visit_id: claim.visitId }); });
     try {
-      // An on-site ask (visitId) is re-checked at the provider boundary: a
-      // visit cancelled / moved / under way since the claim releases the ask;
-      // a hold or an unreadable check leaves it pending for the recovery sweep.
+      // An on-site ask takes a DISPATCH LEASE first (dispatched_at set while
+      // still undispatched and bound to this visit): a newer booking can no
+      // longer rebind it, and only one claim sends. The visit is re-checked at
+      // the provider boundary under the lease: dead releases the ask
+      // (ask_failed); a hold or an unreadable check returns the lease (the
+      // recovery sweep retries).
       if (claim.visitId) {
-        // The row must still be THIS claim's undispatched ask: a newer booking
-        // that superseded it (rebinding visit_id) owns the send now.
-        const ownRow = () => db('recipient_optin')
-          .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending', visit_id: claim.visitId })
-          .whereNull('dispatched_at');
-        if (!(await ownRow().first('phone_key'))) continue;
+        const leased = await claimRow().whereNull('dispatched_at').update({ dispatched_at: new Date(), updated_at: new Date() });
+        if (!leased) continue;
         const asked = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
-        if (asked.state === 'dead') {
-          await ownRow().update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        if (asked.state !== 'live') {
+          await claimRow().update({
+            ...(asked.state === 'dead' ? { status: 'ask_failed' } : {}),
+            dispatched_at: null, updated_at: new Date(),
+          }).catch(() => {});
+          continue;
         }
-        if (asked.state !== 'live') continue;
       }
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
       const result = await sendCustomerMessage({
@@ -499,6 +507,14 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // 8:00 AM instead — the queued row owns the ask, the row stays
       // pending (dispatched), and the recipient's YES reply flips it
       // through the normal inbound path.
+      // An on-site visit ask never rides the deferred queue (owner 10-02): its
+      // lease is returned and the row stays pending, so the recovery sweep
+      // sends it for its visit once the window opens.
+      if (claim.visitId && result.blocked && result.code === 'QUIET_HOURS_HOLD') {
+        await claimRow().update({ dispatched_at: null, updated_at: new Date() }).catch(() => {});
+        logger.info(`[recipient-optin] on-site ask for ***${claim.key.slice(-4)} held outside the send window — the recovery sweep sends it later`);
+        continue;
+      }
       if (result.blocked
         && result.code === 'QUIET_HOURS_HOLD'
         && result.deferred
@@ -554,12 +570,11 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —
         // deleting it would grandfather a phone that never got the ask.
-        await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await claimRow().update({ status: 'ask_failed', dispatched_at: null, updated_at: new Date() }).catch(() => {});
         logger.warn(`[recipient-optin] request blocked for ***${claim.key.slice(-4)}: ${result.code || 'unknown'}`);
         continue;
       }
-      await db('recipient_optin')
-        .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+      await claimRow()
         .update({
           dispatched_at: new Date(),
           // Provider context ON the row: the /status failure hook can flip
@@ -570,7 +585,7 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         .catch(() => {});
       requested += 1;
     } catch (err) {
-      await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' }).update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+      await claimRow().update({ status: 'ask_failed', dispatched_at: null, updated_at: new Date() }).catch(() => {});
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }
   }
@@ -609,10 +624,20 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
   if (!isDoubleOptinEnabled()) return { swept: 0 };
   let rows = [];
   try {
+    const staleCutoff = new Date(Date.now() - 10 * 60 * 1000);
     rows = await db('recipient_optin')
       .where({ status: 'pending' })
-      .whereNull('dispatched_at')
-      .where('requested_at', '<', new Date(Date.now() - 10 * 60 * 1000))
+      .where(function undispatchedOrStaleLease() {
+        this.where(function undispatched() {
+          this.whereNull('dispatched_at').where('requested_at', '<', staleCutoff);
+        })
+          // An on-site ask whose dispatch lease was taken but never finished
+          // (the process died before the provider accepted it): the lease is
+          // returned below, after the accepted-send reconcile.
+          .orWhere(function staleLease() {
+            this.whereNotNull('visit_id').whereNull('provider_sid').where('dispatched_at', '<', staleCutoff);
+          });
+      })
       // Least-recently looked-at first: an on-site ask waiting out an office
       // review is touched each pass, so it never starves the rest.
       .orderBy('updated_at', 'asc')
@@ -672,6 +697,15 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
             updated_at: new Date(),
           }).catch(() => {});
         continue;
+      }
+      // A stale on-site dispatch lease (nothing accepted per the reconcile):
+      // return it — only if it is still that same lease — before retrying.
+      if (row.dispatched_at) {
+        const returned = await db('recipient_optin')
+          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending', visit_id: row.visit_id, dispatched_at: row.dispatched_at })
+          .whereNull('provider_sid')
+          .update({ dispatched_at: null, updated_at: new Date() });
+        if (!returned) continue;
       }
       // An on-site visit ask (visit_id) not yet sent (its dispatch died, its
       // visit check was unreadable, or its visit is an office-review hold):
