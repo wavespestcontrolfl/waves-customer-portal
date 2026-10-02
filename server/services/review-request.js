@@ -382,7 +382,7 @@ async function stampWithRetry(makeQuery, label) {
   }
 }
 
-const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
+const GENERIC_EMAIL_INTRO = OUTREACH.GENERIC_EMAIL_INTRO;
 
 /**
  * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
@@ -4633,12 +4633,94 @@ const ReviewService = {
     // before the change still name friendly_ask at step 0; they get the same
     // body. Operator-provided copy still wins; first_treatment_ask keeps its
     // own template.
-    const day0Controlled = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
+    // Tech voice (GATE_REVIEW_ASK_TECH_VOICE, owner rulings 2026-09-30/10-01):
+    // no general texts, so the Day-0 touch is drafted like every other touch.
+    const techVoice = sequenceId != null && require("../config/feature-gates").isEnabled("reviewAskTechVoice");
+    // The Day-0 template stays the fallback either way; tech voice only
+    // means the touch is drafted first (a failed draft still sends day0_ask).
+    const day0Template = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
       && !canonicalTemplate
       && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
+    const day0Controlled = day0Template && !techVoice;
+    // The tech-voice writer speaks AS the technician, so it gets the one the
+    // RECORD resolves to (same rule as the {tech} sign-off below: the name
+    // cached on the sequence can be a newer visit's technician).
+    // A record technician whose name will not resolve gets NO name, never the
+    // sequence's cached one (that cache can be a newer visit's technician).
+    // A record-scoped cadence whose visit has no technician also gets no name.
+    // The visit a tech-voice draft is about: the cadence's own visit. A
+    // cadence with no visit (the admin page's manual "start sequence") has
+    // no record to ground a draft in, so it sends the fixed copy and spends
+    // no AI call. (Guessing a visit for it changed its click anchor, request
+    // fields and same-day tie-breaks; reviewed and dropped on #5524.)
+    // The visit's own service type decides (it gates the termite rule), read
+    // from its record every touch. If it can't be read, the touch is not
+    // drafted at all: a sequence's cached type is never trusted in its place.
+    const voiceAnchor = !techVoice || !(serviceRecordId || scheduledServiceId) ? null
+      : await (serviceRecordId
+        ? db("service_records").where({ id: serviceRecordId }).first("service_type", "technician_id")
+        : db("scheduled_services").where({ id: scheduledServiceId }).first("service_type", "technician_id"))
+        .catch(() => null);
+    const voiceVisitType = voiceAnchor?.service_type || null;
+    // A cadence anchored only to its scheduled visit (enrolled before the
+    // service record existed) reads the report from the record that visit has
+    // by now, linked by scheduled_service_id.
+    // Record first, like the visit-context recovery above: the completed
+    // record's date, technician and type win over the scheduled row's.
+    // service_records.scheduled_service_id is one-to-many: the CANONICAL
+    // sibling is the record the visit's committed completion attempt pinned,
+    // else the newest (the same rule closeout-status.js reads).
+    const linkedRecord = serviceRecordId || !voiceVisitType || !scheduledServiceId ? null
+      : await (async () => {
+        const rows = await db("service_records").where({ scheduled_service_id: scheduledServiceId })
+          .orderBy("created_at", "desc").select("id", "service_date", "technician_id", "service_type");
+        const attempt = await require("./completion-attempts").completionStatusForService({ serviceId: scheduledServiceId }).catch(() => null);
+        return (attempt?.serviceRecordId && rows.find((r) => r.id === attempt.serviceRecordId)) || rows[0] || null;
+      })().catch(() => null);
+    const voiceVisit = !voiceVisitType ? null : {
+      serviceRecordId: serviceRecordId || linkedRecord?.id || null,
+      serviceDate: linkedRecord?.service_date || serviceDate,
+      // A linked record's technician wins even when it has none: the scheduled
+      // technician was never verified on the completed visit.
+      // A record-anchored cadence speaks only as that record's technician
+      // (none = no name), never one the earlier recovery fell back to.
+      technicianId: linkedRecord ? (linkedRecord.technician_id || null)
+        : serviceRecordId ? (voiceAnchor?.technician_id || null) : technicianId,
+      serviceType: linkedRecord?.service_type || voiceVisitType,
+    };
+    // The request row (rate page name / photo / date, tech attribution) must
+    // describe the same visit the text speaks about: the linked record's
+    // fields replace the scheduled row's before the row is written.
+    // Same for a cadence anchored to its record from the start: the record's
+    // own type and technician replace the sequence's cached ones.
+    if (voiceVisit && serviceRecordId && !linkedRecord && voiceAnchor) {
+      serviceType = voiceVisit.serviceType;
+      if ((voiceVisit.technicianId || null) !== (technicianId || null)) {
+        technicianId = voiceVisit.technicianId || null;
+        techName = null;
+      }
+    }
+    if (linkedRecord) {
+      serviceRecordId = linkedRecord.id;
+      serviceDate = voiceVisit.serviceDate;
+      serviceType = voiceVisit.serviceType;
+      if ((linkedRecord.technician_id || null) !== (technicianId || null)) {
+        technicianId = linkedRecord.technician_id || null;
+        techName = null; // resolved from technicianId below, never the scheduled tech's name
+      }
+    }
+    const voiceTechId = voiceVisit?.technicianId || null;
+    const voiceTechName = !techVoice ? techName
+      : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
+        : null;
+    // The request row carries the same technician's name the text speaks as
+    // (the rate page shows it next to their photo).
+    // ...whenever the visit is authoritative, including no name at all: a
+    // sequence's cached name never rides along beside another tech's photo.
+    if (voiceVisit) techName = voiceTechName;
     const smsTemplateId = canonicalTemplate
       ? null
-      : day0Controlled
+      : day0Template
         ? OUTREACH.DAY0_ASK_TEMPLATE_KEY
         : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     let recordedTemplateKey = actualChannel === "email"
@@ -4679,19 +4761,48 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          // A tech-voice draft speaks about its own day ("this morning",
+          // "today"), so it is reused only on the ET calendar day it was
+          // written; a retry that crosses midnight drafts afresh.
+          const { etCalendarDayOf } = require("../utils/datetime-et");
+          // Reused only in the mode that wrote it: under tech voice, a draft
+          // the tech-voice writer made (fact-checked) on this same ET day;
+          // with the switch off, never a tech-voice draft (it may say
+          // "today" and would be recorded as personalized).
+          const priorTechVoice = /_tech_voice$/.test(String(prior?.template_key || ""));
+          const sameDay = techVoice
+            ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
+            : !priorTechVoice;
+          // A draft from the older personalized writer is re-checked against
+          // today's rules before reuse (neutral wording, Google named): one
+          // saved before them ("Reply if anything's off") is dropped and the
+          // step drafts afresh.
+          // A tech-voice draft speaks as a technician about a visit type: it is
+          // reused only while the row's attribution still matches the visit.
+          const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
+            && (prior.service_type || null) === (serviceType || null)
+            && (prior.service_record_id || null) === (serviceRecordId || null)
+            && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
+          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
+            || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
+              { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
+          if (reusable) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
 
       if (!persistedBody && recipientIsAccountHolder) {
-        const drafted = await require("./review-ask-drafter").draftAskBody({
+        const Drafter = require("./review-ask-drafter");
+        const draftInput = {
           customer,
           recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
           serviceType,
           techName,
           sequenceStep,
           serviceDate,
-        });
+        };
+        const drafted = techVoice
+          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "sms" }) : null)
+          : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
       // Analytics provenance (Codex P1, r1): personalized touches must not be
@@ -4700,7 +4811,7 @@ const ReviewService = {
       // variant key. Body resolution is unaffected (custom_body wins first;
       // _sendOutreachSms renders from the real templateId param).
       if (persistedBody) {
-        recordedTemplateKey = `${smsTemplateId || "custom"}_personalized`;
+        recordedTemplateKey = `${smsTemplateId || "custom"}_${techVoice ? "tech_voice" : "personalized"}`;
       }
     }
 
@@ -4715,7 +4826,12 @@ const ReviewService = {
     // P2): an operator-edited/republished version without the variable would
     // silently ignore the draft — paying for the LLM call and crediting
     // control copy to the personalized variant.
-    if (actualChannel === "email" && !persistedBody && sequenceId != null
+    // Tech voice drafts the review TEXTS only (owner ruling 2026-10-02): the
+    // review email keeps its fixed company-voice copy, since a drafted tech
+    // paragraph inside a company-signed email reads as two voices. A
+    // tech-voice email (its own closing and sign-off) comes with the review
+    // page work.
+    if (actualChannel === "email" && !persistedBody && sequenceId != null && !techVoice
       && await this._emailIntroVariableActive()) {
       const recipientIsAccountHolder = !!(emailContact?.email && customer.email
         && String(emailContact.email).trim().toLowerCase() === String(customer.email).trim().toLowerCase());
@@ -4730,17 +4846,26 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          // Never a tech-voice draft (it may say "today" and would be
+          // recorded as personalized), and an older personalized intro only
+          // if it still passes today's checks (neutral wording, Google named).
+          const priorTechVoice = /_tech_voice$/.test(String(prior?.template_key || ""));
+          const reusable = prior?.custom_body && !priorTechVoice
+            && require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
+              { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null;
+          if (reusable) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
-          const drafted = await require("./review-ask-drafter").draftEmailIntro({
+          const Drafter = require("./review-ask-drafter");
+          const draftInput = {
             customer,
             recipientFirstName: firstNameFrom(emailContact.name) || customer.first_name || "",
             serviceType,
             techName,
             sequenceStep,
             serviceDate,
-          });
+          };
+          const drafted = await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
         if (persistedBody) {
@@ -4971,8 +5096,42 @@ const ReviewService = {
     // The canonical fallback arrives fully rendered by getTemplate (its own
     // placeholder set incl. reservice_line) — never re-run the outreach
     // renderer over it.
-    const body = prerendered
+    let body = prerendered
       ?? OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+    // A tech-voice draft is verified to fit two segments around the SHORT
+    // link. When the shortener degrades to the full tokenized URL, the draft
+    // could render to three; send the step's fixed template instead and
+    // record it as such (the template copy is short enough to absorb the
+    // long link within the existing one-extra-segment trade below).
+    if (/_tech_voice$/.test(String(request.template_key || "")) && customBody && !isNoLink) {
+      const { countSegments } = require("./messaging/segment-counter");
+      // Counted as delivered: sendCustomerMessage strips the URL scheme.
+      const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
+      const rendered = require("./messaging/gsm-normalize").normalizeGsmPunctuation(stripSmsUrlScheme(body));
+      if (countSegments(rendered).segmentCount > 2) {
+        // The step's own template, else the standard ask when the plan named
+        // a key the registry does not have.
+        const fallbackId = tpl ? templateId : "friendly_ask";
+        const fallbackTpl = tpl || OUTREACH.getOutreachTemplate(fallbackId);
+        body = OUTREACH.renderOutreachBody(fallbackTpl.body, renderVars, { requireLink: true });
+        logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${fallbackId})`);
+        // The row must say what is actually sent: if the stamp can't be
+        // written, send nothing now and retry the step (nothing reserved or
+        // sent yet), rather than send the template under a tech-voice row.
+        try {
+          await db("review_requests").where({ id: request.id }).update({ template_key: fallbackId, custom_body: null });
+        } catch (err) {
+          logger.warn(`[review] tech-voice long-link fallback stamp failed — retrying the step (requestId=${request.id}): ${err.message}`);
+          // The canonical outcome routing keeps retry ownership right: a
+          // cadence touch goes back to the SEQUENCE runner (row failed, step
+          // retryable), never to processScheduled, which would resend the
+          // row's stale draft and bypass this fallback.
+          return this._applyOutreachSendResult(request,
+            { deliveryOutcome: "not_sent", retryable: true, code: "FALLBACK_STAMP_FAILED" }, manageRetryVia, "sms");
+        }
+        request.template_key = fallbackId;
+      }
+    }
 
     // Segment observability (codex #3235 r3): the one-segment contract is
     // enforced on template copy and drafter output against the SHORT link;

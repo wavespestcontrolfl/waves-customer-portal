@@ -981,6 +981,14 @@ const gates = {
   // text → explicit opt-in in EVERY env.
   reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
 
+  // Review asks in the technician's voice (owner rulings 2026-09-30/10-01):
+  // EVERY cadence touch is drafted, the Day-0 SMS included, from the visit's
+  // service report, the customer's texts, calls and own emails, and what this
+  // cadence already sent; every detail must trace to that record or the draft
+  // falls back to the fixed template. Off = today's personalized drafter and
+  // the fixed Day-0 ask. Customer-facing generated text → opt-in in EVERY env.
+  reviewAskTechVoice: process.env.GATE_REVIEW_ASK_TECH_VOICE === 'true',
+
   // Review ask texts/emails link STRAIGHT to the tracked /api/rate/:token/go
   // redirect (which 302s to the Google review form) instead of the /rate/<token>
   // thank-you page. Off = every ask body resolves {review_url} to /rate/<token>.
