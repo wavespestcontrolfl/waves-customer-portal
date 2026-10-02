@@ -145,6 +145,8 @@ describe('rankCitedPages', () => {
       'https://www.bobvila.com/articles/how-to-choose-a-pest-control-company/', // how-to article → not
       'https://localsite.example/pest-control-parrish', // unknown site, no best word → not (looks like a company page)
       'https://localsite.example/best-pest-control-companies-parrish', // unknown site WITH best word → list
+      'https://todayshomeowner.com/articles/pest-control-identification/', // identification article → not
+      'https://patch.com/florida/sarasota/business/listing/123/acme-pest-control-services', // directory route on an editorial host → not
     ];
     const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
     expect(byKey).toEqual({
@@ -152,6 +154,8 @@ describe('rankCitedPages', () => {
       'bobvila.com/articles/how-to-choose-a-pest-control-company': false,
       'localsite.example/pest-control-parrish': false,
       'localsite.example/best-pest-control-companies-parrish': true,
+      'todayshomeowner.com/articles/pest-control-identification': false,
+      'patch.com/florida/sarasota/business/listing/123/acme-pest-control-services': false,
     });
   });
 

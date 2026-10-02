@@ -78,9 +78,12 @@ const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|
 const PRODUCT_PATH_RE = /\b(products?|killers?|sprays?|repellents?|traps?|baits?|granules|fertilizers?|herbicides?|insecticides?|pesticides?|seeds?|mowers?|spreaders?|tools|equipment|devices?|gear|kits?|brands?|reviews?)\b/;
 // …and never a how-to, cost or identification article ("pest control cost",
 // "how to choose a pest control company", "signs of termites").
-const ARTICLE_PATH_RE = /\b(costs?|prices?|pricing|how|what|why|when|diy|signs|identify|tips|vs|versus)\b/;
+const ARTICLE_PATH_RE = /\b(costs?|prices?|pricing|how|what|why|when|diy|signs|identif(y|ying|ication|ied)|tips|vs|versus)\b/;
+// …and never a directory route on an editorial host (patch.com/…/business/
+// listing/…): a directory is joined by signing up, not by a pitch.
+const DIRECTORY_PATH_RE = /\b(business|businesses|listing|listings|directory|biz|profile|profiles|claim)\b/;
 function isProviderListPath(words) {
-  return PROVIDER_LIST_PATH_RE.test(words) && !PRODUCT_PATH_RE.test(words) && !ARTICLE_PATH_RE.test(words);
+  return PROVIDER_LIST_PATH_RE.test(words) && ![PRODUCT_PATH_RE, ARTICLE_PATH_RE, DIRECTORY_PATH_RE].some((re) => re.test(words));
 }
 
 /**
