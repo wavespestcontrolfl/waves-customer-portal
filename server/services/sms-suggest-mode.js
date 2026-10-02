@@ -19,7 +19,10 @@
  *
  * HARD RULES (code, not config):
  *   - Escalation intents never become suggestions, whatever the mode row says.
- *   - scheduling_intent=true drafts never become suggestions in Phase D.
+ *   - scheduling_intent=true drafts never become suggestions in Phase D,
+ *     except (GATE_SMS_SCHEDULING_SUGGEST, dark) a draft whose offered times
+ *     came from a booking picker: it becomes a SUGGESTION only, never an
+ *     auto-send, whatever its intent's rung (schedulingOfferSuggestible).
  *   - Fail closed: any lookup error resolves to 'shadow'.
  *
  * Suggested drafts get message_drafts status='suggested'. The nightly judge
@@ -237,10 +240,40 @@ function isEscalationIntent(intent) {
  * because the composer card and the send-handler ownership check both match
  * on them; without either, the card could never surface or be verified.
  */
-function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent }) {
+// The pickers an SMS offer can come from (sms-shadow-drafter *_OFFER_SOURCE)
+// and the id each one's send-time recheck asks it about.
+const PICKER_OFFER_ID_FIELD = Object.freeze({ scheduler: 'scheduledServiceId', estimate: 'estimateId', book: 'serviceKey' });
+
+/**
+ * GATE_SMS_SCHEDULING_SUGGEST (dark), read at call time. Owner 2026-10-02:
+ * scheduling drafts that carry a picker snapshot reach the staff card; staff
+ * still press send.
+ */
+function schedulingSuggestLive() {
+  return require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST');
+}
+
+/**
+ * Pure: does this open_times_snapshot prove the draft's offered times came
+ * from a booking picker? Quoted windows, a picker source, and the id that
+ * picker rechecks with at send time. A legacy zone-finder snapshot (no
+ * source) or one missing its id does not count.
+ */
+function isPickerOfferSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.quotedWindows) || !snapshot.quotedWindows.length) return false;
+  const field = PICKER_OFFER_ID_FIELD[snapshot.lookup?.source];
+  return Boolean(field && snapshot.lookup[field]);
+}
+
+/** A scheduling-intent draft that may take the suggestion card. */
+function schedulingOfferSuggestible({ schedulingIntent, openTimesSnapshot }) {
+  return Boolean(schedulingIntent) && isPickerOfferSnapshot(openTimesSnapshot) && schedulingSuggestLive();
+}
+
+function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null }) {
   if (!reply || !String(reply).trim()) return false;
   if (!customerId || !smsLogId) return false;
-  if (schedulingIntent) return false;
+  if (schedulingIntent && !schedulingOfferSuggestible({ schedulingIntent, openTimesSnapshot })) return false;
   if (isEscalationIntent(intent)) return false;
   return true;
 }
@@ -289,9 +322,12 @@ async function getIntentMode(intent) {
 // requireReview (PR #5499): a draft that must reach a person whatever its intent's
 // rung — a "thanks" that arrived while something is still owed. Suggest when the
 // suggestion surface is on, never auto-send.
-async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent, requireReview = false }) {
-  if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
-  if (requireReview) return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
+// openTimesSnapshot (GATE_SMS_SCHEDULING_SUGGEST): a scheduling draft whose
+// times came from a booking picker is a suggestion at most — the card and the
+// staff send's recheck are the whole path; it never rides the auto-send rung.
+async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null, requireReview = false }) {
+  if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot })) return 'shadow';
+  if (requireReview || schedulingIntent) return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
   // Gratitude is always inert shadow storage for the drafter, whatever its
   // rung or gate: never an immediate send (the quiet window forbids it) and
@@ -1329,6 +1365,8 @@ module.exports = {
   suggestionAnchorIsStale,
   supersedeStaleDecision,
   suggestionEligible,
+  isPickerOfferSnapshot,
+  schedulingOfferSuggestible,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
