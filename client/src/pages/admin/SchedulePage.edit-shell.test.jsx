@@ -6,7 +6,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { EditServiceModal } from './SchedulePage';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
-vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
+const bestTimesState = vi.hoisted(() => ({ availability: undefined }));
+vi.mock('../../components/schedule/useBestTimes', () => ({
+  useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [], availability: bestTimesState.availability }),
+}));
 const service = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
 // Structural round 3 on #4657: the debounced money preview is a
 // non-GET call too (POST .../update-details/preview) but never
@@ -21,7 +24,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
 
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); bestTimesState.availability = undefined; });
 
 function Harness({ onSaved = vi.fn() }) {
   const [open, setOpen] = React.useState(false);
@@ -132,4 +135,21 @@ it('keeps a failed cancellation open for retry and blocks duplicate cancellation
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
   expect(attempts).toBe(2);
   expect(screen.queryByRole('dialog', { name: 'Cancel appointment' })).not.toBeInTheDocument();
+});
+
+it('a verified route miss relabels both save paths as overrides', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  cleanup();
+  bestTimesState.availability = {
+    pickedDate: '2035-01-02',
+    picked: { start: '08:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+    days: [{ date: '2035-01-02', status: 'open', hours: [{ date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 3, technicianId: 't1', technicianName: null }] }],
+  };
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(screen.getByRole('button', { name: 'Save anyway' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save & take payment anyway' })).toBeInTheDocument();
+  expect(writes()).toHaveLength(0);
 });
