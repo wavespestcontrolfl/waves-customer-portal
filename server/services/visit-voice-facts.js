@@ -238,17 +238,23 @@ function validateVoiceFacts(json, note) {
     if (!name || pests.has(name)) continue;
     if (!deniedInNote(quote, grounding, { assertion: nameAssertion(name), denialAfter: TRAILING_DENIAL.pest })) pests.set(name, quote);
   }
-  // How the sprays went down: only a grounded quote the note does not deny.
-  const spray = answer.spray || {};
-  const sprayRead = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
     pests: [...pests].slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
-    spray: sprayRead && !sprayRead.denied ? { method: spray.method, quote: sprayRead.quote } : null,
-    // A perimeter spray decides the trace and the sprays' method, so one the
-    // note does not hold up is never silently a spot treatment.
-    unclearSpray: spray.method === 'perimeter' && (!sprayRead || sprayRead.denied),
+    ...readSpray(answer.spray || {}, grounding),
+  };
+}
+
+// How the sprays went down: only a grounded quote the note does not deny. A
+// perimeter spray decides the trace and the sprays' method, so one the note
+// does not hold up is unclear, never silently a spot treatment.
+function readSpray(spray, grounding) {
+  const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
+  const holds = !!read && !read.denied;
+  return {
+    spray: holds ? { method: spray.method, quote: read.quote } : null,
+    unclearSpray: spray.method === 'perimeter' && !holds,
   };
 }
 
