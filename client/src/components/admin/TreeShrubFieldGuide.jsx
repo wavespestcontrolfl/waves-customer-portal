@@ -33,9 +33,15 @@ function ProductDetails({ product, equipment, mode, tank, onTankChange }) {
 
 function amountFor(product, gallons) {
   if (!product.mix) return product.summary;
-  return product.mix[0] === product.mix[1]
-    ? formatMeasuredAmount(product.mix[0] * gallons, 'fl oz', { truckMeasures: true })
-    : formatMeasuredRange(product.mix[0] * gallons, product.mix[1] * gallons, 'fl oz', { truckMeasures: true });
+  if (product.mix[0] === product.mix[1]) {
+    // A fixed guide dose is the label minimum (TriTek 1% = 1.28 fl oz/gal):
+    // round UP to a measurable quarter ounce so the tank never mixes under it.
+    const exact = product.mix[0] * gallons;
+    const up = Math.ceil(exact * 4 - 1e-9) / 4;
+    const text = formatMeasuredAmount(up, 'fl oz', { truckMeasures: true });
+    return up > exact + 1e-9 ? `≈ ${text}` : text;
+  }
+  return formatMeasuredRange(product.mix[0] * gallons, product.mix[1] * gallons, 'fl oz', { truckMeasures: true });
 }
 
 export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules = [] }) {

@@ -25,18 +25,19 @@ test('expands one product at a time and never offers the soil kit for granules',
 
 test('truck amounts switch with equipment and palm quantities remain pounds', () => {
   render(<TreeShrubFieldGuide guide={guide} mode="tech" />);
-  expect(screen.getByText('≈ 5 fl oz')).toBeTruthy();
+  expect(screen.getByText('≈ 5¼ fl oz')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /TriTek/ }));
   const equipment = screen.getByLabelText('Equipment for TriTek 1%');
   expect(equipment.value).toBe('flowzone');
   fireEvent.change(equipment, { target: { value: 'bg' } });
   expect(screen.getByLabelText('Mix size').value).toBe('bg');
-  expect(screen.getByText('≈ 1¼ fl oz')).toBeTruthy();
+  expect(screen.getByText('≈ 1½ fl oz')).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Mix size'), { target: { value: 'bg' } });
-  expect(screen.getByText('≈ 1¼ fl oz')).toBeTruthy();
+  expect(screen.getByText('≈ 1½ fl oz')).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Mix size'), { target: { value: 'rig' } });
   expect(equipment.value).toBe('rig');
-  expect(screen.getByText('≈ 140¾ fl oz')).toBeTruthy();
+  // Fixed label-minimum doses round up, never below the 1% minimum.
+  expect(screen.getByText('≈ 141 fl oz')).toBeTruthy();
   expect(screen.getByText('3.8 lb')).toBeTruthy();
   expect(screen.queryByText(/6x only|9x only|Look for scale/)).toBeNull();
 });

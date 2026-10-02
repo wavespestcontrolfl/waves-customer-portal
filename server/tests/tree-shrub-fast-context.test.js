@@ -221,13 +221,16 @@ describe('buildTreeShrubWarnings', () => {
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
   });
 
-  test('a palm fertilizer within 75 days warns on palm fertilizer candidates only', () => {
+  test('a palm fertilizer within three months warns on palm fertilizer candidates only', () => {
     const warnings = buildTreeShrubWarnings({ catalogRows, applications: [app(70, palm)], visitDate });
     expect(warnings).toEqual([{
-      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 75,
+      type: 'palm_fertilizer_spacing', productId: 'palm', productName: palm.name, windowDays: 92,
       daysAgo: 70, appliedProductName: palm.name, appliedOn: '2026-07-23',
     }]);
-    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toEqual([]);
+    // Day 76 is still inside three calendar months (the full form agrees).
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(76, palm)], visitDate })).toHaveLength(1);
+    // Three full calendar months later (2026-07-01 → 2026-10-01) it is due again.
+    expect(buildTreeShrubWarnings({ catalogRows, applications: [app(92, palm)], visitDate })).toEqual([]);
   });
 
   test('an ornamental (non-palm) fertilizer does not trigger the palm spacing warning', () => {

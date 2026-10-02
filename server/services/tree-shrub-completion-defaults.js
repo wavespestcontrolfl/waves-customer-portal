@@ -22,6 +22,38 @@ function monthsAfter(value, count) {
   return next.getTime() / 86400000;
 }
 
+// One palm-spacing rule for every completion surface (full form defaults
+// and Fast Complete warnings): a feeding is too soon until three calendar
+// months after the last one. The longest three-month span is 92 days, so a
+// history read needs no further lookback than this.
+const PALM_SPACING_LOOKBACK_DAYS = 92;
+function palmFeedingTooSoon(lastApplicationDate, visitDate) {
+  const today = dayNumber(visitDate);
+  if (!Number.isFinite(today) || !Number.isFinite(dayNumber(lastApplicationDate))) return false;
+  return today < monthsAfter(lastApplicationDate, 3);
+}
+
+// lb/1,000 sq ft for one recorded Snapshot application. The full form saves
+// the rate; Fast Complete saves only the applied total (and the bed area when
+// known), so derive the rate from total ÷ area, or reserve the label maximum
+// when the area is missing. A row with neither a rate nor an amount stays
+// unreviewable.
+const SNAPSHOT_LABEL_MAX_LB_PER_1000 = 4.6;
+function snapshotRatePer1000(row) {
+  const unit = String(row.rate_unit || '').toLowerCase().replace(/\s/g, '');
+  const rate = Number(row.application_rate);
+  if (row.application_rate != null && row.application_rate !== '') {
+    return ['lb', 'lb/1000sf', 'lb/1000sqft'].includes(unit) && Number.isFinite(rate) && rate > 0 ? rate : null;
+  }
+  const total = Number(row.total_amount);
+  const totalUnit = String(row.amount_unit || '').toLowerCase().replace(/\s|\./g, '');
+  if (!['lb', 'lbs'].includes(totalUnit) || !Number.isFinite(total) || total <= 0) return null;
+  const area = Number(row.area_value);
+  const areaUnit = String(row.area_unit || '').toLowerCase().replace(/\s|\./g, '');
+  if (Number.isFinite(area) && area > 0 && ['sqft', 'sf', 'ft2'].includes(areaUnit)) return (total / area) * 1000;
+  return SNAPSHOT_LABEL_MAX_LB_PER_1000;
+}
+
 function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
@@ -42,20 +74,17 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
     if (annual.some(row => quarter(row.application_date) === quarter(scheduledDate))) return 'Snapshot is already recorded for this quarter.';
     let total = 0;
     for (const row of annual) {
-      const unit = String(row.rate_unit || '').toLowerCase().replace(/\s/g, '');
-      const rate = Number(row.application_rate);
-      if (!['lb', 'lb/1000sf', 'lb/1000sqft'].includes(unit) || !Number.isFinite(rate) || rate <= 0) {
-        return 'Review prior Snapshot rates before adding another application.';
-      }
+      const rate = snapshotRatePer1000(row);
+      if (rate == null) return 'Review prior Snapshot rates before adding another application.';
       total += rate;
     }
     // A weed-specific rate has not been selected yet. Reserve the label's
     // highest possible rate instead of assuming the low end is appropriate.
-    if (total + 4.6 > MAX_SNAPSHOT_LB_PER_1000) return 'Select a weed rate and review Snapshot’s rolling annual limit.';
+    if (total + SNAPSHOT_LABEL_MAX_LB_PER_1000 > MAX_SNAPSHOT_LB_PER_1000) return 'Select a weed rate and review Snapshot’s rolling annual limit.';
   } else {
     const latest = annual.sort((a, b) => dayNumber(b.application_date) - dayNumber(a.application_date))[0];
     if (latest) {
-      if (today < monthsAfter(latest.application_date, 3)) return 'The last palm feeding was less than three months ago.';
+      if (palmFeedingTooSoon(latest.application_date, scheduledDate)) return 'The last palm feeding was less than three months ago.';
     }
   }
   return null;
@@ -71,7 +100,8 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
     .leftJoin('products_catalog as product', 'product.id', 'history.product_id')
     .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at')
     .select('history.application_date', 'history.application_rate', 'history.rate_unit', 'visit.property_id',
-      'product.name as catalog_name', 'applied.product_name');
+      'product.name as catalog_name', 'applied.product_name',
+      'applied.total_amount', 'applied.amount_unit', 'applied.area_value', 'applied.area_unit');
   const normalized = history.map(row => ({ ...row, product_name: row.product_name || row.catalog_name }));
   if (normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id))) {
     return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: 'Review an application with an unidentified product.' })) };
@@ -86,4 +116,4 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
   return { entries: allowed, holds };
 }
 
-module.exports = { treeShrubDueReason, filterTreeShrubDefaults };
+module.exports = { treeShrubDueReason, filterTreeShrubDefaults, palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS };
