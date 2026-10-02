@@ -51,6 +51,11 @@ const PROMPT_VERSION = 'photo-id-v2-pest-1';
 // (gemini_incomplete, 2026-10-01), so the read fell to OpenAI alone and
 // climbed to "a true bug". Same cap as the v1 engine's vision leg.
 const MAX_OUTPUT_TOKENS = 8192;
+// Gemini thinks at MEDIUM by default. On the same chinch bug photo
+// (2026-10-01) MEDIUM spent 5–7k reasoning tokens and ~30 s on the
+// candidates leg alone; LOW answered in ~2 s with the same top read. The
+// customer waits on every leg, and OpenAI escalation is the second look.
+const GEMINI_THINKING_LEVEL = 'LOW';
 const SITE_BASE_URL = 'https://www.wavespestcontrol.com/pest-identifier/';
 const PRETTY_SURE_MIN = 0.80;
 const HARMLESS_PRETTY_SURE_MIN = 0.70;
@@ -508,6 +513,7 @@ async function callCandidatesModel(images, catalogEntries, timeoutMs) {
     jsonSchema: CANDIDATES_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
+    thinkingLevel: GEMINI_THINKING_LEVEL,
     laneId: 'photo_id_v2_candidates',
     promptVersion: PROMPT_VERSION,
   });
@@ -523,6 +529,7 @@ async function callVerifyModel(images, candidateContext, timeoutMs) {
     jsonSchema: VERIFY_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
+    thinkingLevel: GEMINI_THINKING_LEVEL,
     laneId: 'photo_id_v2_verify',
     promptVersion: PROMPT_VERSION,
   });
