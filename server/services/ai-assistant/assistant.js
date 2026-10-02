@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, PORTAL_TOOLS, executeToolCall } = require('./tools');
+const { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, executeToolCall } = require('./tools');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
@@ -85,6 +85,26 @@ const PORTAL_CHAT = 'portal_chat';
 // Off, portal chat runs exactly as the other channels do.
 const portalSelfServe = (channel) => channel === PORTAL_CHAT
   && require('../../config/feature-gates').portalChatSelfServeLive();
+// Prompt, tools and the reply extras a channel gets. Portal chat gets its
+// own prompt and button tools, plus the payment card under
+// GATE_PORTAL_CHAT_FACTS; every other channel (and the portal with its
+// switch off) keeps the original pair and no extras.
+// The buttons and cards a turn's tools produced, as reply fields (absent
+// when there are none). Shared by the normal reply and the hand-off reply.
+function laneExtras(lane) {
+  return {
+    ...(lane.actions?.length ? { actions: lane.actions } : {}),
+    ...(lane.cards?.length ? { cards: lane.cards } : {}),
+  };
+}
+
+function portalLane(channel) {
+  if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null };
+  if (require('../../config/feature-gates').portalChatFactsLive()) {
+    return { prompt: PORTAL_FACTS_PROMPT, tools: PORTAL_FACTS_TOOLS, actions: [], cards: [] };
+  }
+  return { prompt: PORTAL_SYSTEM_PROMPT, tools: PORTAL_TOOLS, actions: [], cards: null };
+}
 
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
 
@@ -196,6 +216,24 @@ function escalationReply({ isPortal, teamNotified, firstName }) {
 // The topic comes from the model's escalate call, or from the keyword group
 // that forced the hand-off — never from classifyEscalation, whose broad
 // "change"/"charge" matches would call an email change a schedule change.
+// GATE_PORTAL_CHAT_FACTS: the portal prompt with the billing section replaced
+// by the payment card. Built from PORTAL_SYSTEM_PROMPT so the two can never
+// drift apart anywhere else.
+const PORTAL_BILLING_SECTION = PORTAL_SYSTEM_PROMPT.slice(
+  PORTAL_SYSTEM_PROMPT.indexOf('BILLING, PLAN, REPORTS, PAPERWORK, REFERRALS:'),
+  PORTAL_SYSTEM_PROMPT.indexOf('WHAT YOU MUST ESCALATE'),
+);
+const PORTAL_FACTS_PROMPT = PORTAL_SYSTEM_PROMPT
+  .replace('- Show a button that opens a page of the portal (open_portal_section)\n', '- Show a button that opens a page of the portal (open_portal_section)\n- Show a card of the customer\'s recent payments (show_recent_payments)\n')
+  .replace('You cannot see charges, balances, cards, plan details, past visits, or documents.', 'You cannot see balances, cards, plan details, past visits, or documents. For payments you can show a card, but you are never given the figures on it.')
+  .replace(PORTAL_BILLING_SECTION, `CHARGES AND PAYMENTS:
+For any question about a charge, a payment, a receipt, or whether a payment went through, call show_recent_payments. Tell the customer the card below lists their recent payments with receipts, and use the status you are given to say whether the latest one went through. Never state an amount, date or description yourself; they are on the card. If the customer asks why a charge is what it is, says a charge is wrong, or asks for a refund, use the escalate tool.
+
+PLAN, REPORTS, PAPERWORK, REFERRALS:
+Call open_portal_section for the matching page and say in one sentence what the customer will find there.
+
+`);
+
 const TOPIC_WORDING = {
   cancellation: 'a cancellation',
   schedule_change: 'a schedule change',
@@ -238,9 +276,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalSelfServe(channel)
-      ? { prompt: PORTAL_SYSTEM_PROMPT, tools: PORTAL_TOOLS, actions: [] }
-      : { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null };
+    const lane = portalLane(channel);
     const trigger = this.matchedEscalationTrigger(message, channel);
 
     // 3. Save the user message
@@ -262,7 +298,15 @@ class WavesAssistant {
 
     // 4. If escalation trigger detected, escalate immediately
     if (trigger) {
-      return this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic: topicOfTrigger(trigger) });
+      const topic = topicOfTrigger(trigger);
+      // A billing keyword ("refund", "dispute") hands off, but under the facts
+      // lane the customer still gets the payment card and Open Billing
+      // button under the hand-off reply, as a model-led hand-off would give.
+      if (topic === 'billing' && lane.cards) {
+        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
+      }
+      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
+      return { ...escResult, ...laneExtras(lane) };
     }
 
     // 5. Build conversation history for Claude
@@ -282,7 +326,9 @@ class WavesAssistant {
       return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
+      // A card or button a tool already built this turn still shows under
+      // the fallback text.
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) };
     }
   }
 
@@ -356,15 +402,22 @@ class WavesAssistant {
 
       // Execute tool calls
       const toolResults = [];
-      for (const toolUse of toolUses) {
+      // Every other tool in this response runs before a hand-off, so a card
+      // or button the model asked for in the same breath is on the hand-off
+      // reply whatever order the blocks came in.
+      const ordered = [...toolUses].sort((a, b) => (a.name === 'escalate') - (b.name === 'escalate'));
+      for (const toolUse of ordered) {
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
             { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
-          return escResult;
+          // A card or button an earlier tool in this turn produced still shows
+          // under the hand-off reply (a charge question shows the card AND
+          // hands off the "why").
+          return { ...escResult, ...laneExtras(lane) };
         }
 
-        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions);
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards);
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
 
         // Log tool usage
@@ -394,7 +447,7 @@ class WavesAssistant {
       // one that answered nothing (Codex r12 on #4884).
       if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
       logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
     }
 
     // Save the assistant reply
@@ -412,7 +465,7 @@ class WavesAssistant {
     return {
       reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
       // Buttons the portal tools asked for, shown under the reply.
-      ...(lane.actions?.length ? { actions: lane.actions } : {}),
+      ...laneExtras(lane),
     };
 
   }

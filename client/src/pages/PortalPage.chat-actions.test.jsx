@@ -7,6 +7,10 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', async (importOriginal) => ({ ...await importOriginal(), isNativeApp: () => native.enabled }));
+vi.mock('../native/nativeFile', () => ({ canSaveNative: () => false, canShareNative: () => true, saveBlobNative: vi.fn(), saveUrlNative: vi.fn(), shareUrlNative: vi.fn(async () => true) }));
+
 vi.mock('../utils/api', () => {
   const target = {};
   const proxy = new Proxy(target, {
@@ -29,6 +33,7 @@ const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)
 
 beforeEach(() => {
   vi.clearAllMocks();
+  native.enabled = false;
   Element.prototype.scrollIntoView = vi.fn();
   window.scrollTo = vi.fn();
   window.matchMedia = window.matchMedia || (() => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -68,6 +73,39 @@ describe('assistant reply buttons', () => {
     await ask({ reply: 'Ghost ants follow moisture.' });
     expect(screen.getByText('Ghost ants follow moisture.')).toBeInTheDocument();
     expect(screen.queryByRole('link')).toBeNull();
+  });
+});
+
+describe('payment card', () => {
+  it('renders the server-rendered rows and only Waves receipt links', async () => {
+    await ask({
+      reply: 'The card below has your recent payments.',
+      cards: [{ type: 'payments', title: 'Your last 2 payments', rows: [
+        { id: 'p1', description: 'Invoice WV-1042', dateLabel: 'Sep 28, 2026', amountLabel: '$129.00', statusLabel: 'Paid', methodLabel: 'Visa ending in 4242', receiptUrl: '/receipt/tok_abc' },
+        { id: 'p2', description: 'Silver WaveGuard Monthly', dateLabel: 'Aug 28, 2026', amountLabel: '$1,250.50', statusLabel: 'Failed', methodLabel: '', receiptUrl: 'https://evil.example/receipt/x' },
+      ] }, { type: 'unknown', rows: [{ id: 'z' }] }],
+    });
+    expect(screen.getByText('Your last 2 payments')).toBeInTheDocument();
+    expect(screen.getByText('$129.00')).toBeInTheDocument();
+    expect(screen.getByText('Sep 28, 2026 · Visa ending in 4242 · Paid')).toBeInTheDocument();
+    expect(screen.getByText('Aug 28, 2026 · Failed')).toBeInTheDocument();
+    const links = screen.getAllByRole('link', { name: 'View receipt' });
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toMatch(/\/receipt\/tok_abc$/);
+  });
+});
+
+describe('payment card in the native app', () => {
+  it('hands the receipt to the share sheet instead of a blank-target link', async () => {
+    native.enabled = true;
+    const { shareUrlNative } = await import('../native/nativeFile');
+    await ask({ reply: 'Here.', cards: [{ type: 'payments', title: 'Your most recent payment', rows: [
+      { id: 'p1', description: 'Invoice WV-1', dateLabel: 'Sep 28, 2026', amountLabel: '$129.00', statusLabel: 'Paid', methodLabel: '', receiptUrl: '/receipt/tok_abc' },
+    ] }] });
+    expect(screen.queryByRole('link', { name: 'View receipt' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View receipt' }));
+    await settle();
+    expect(shareUrlNative).toHaveBeenCalledWith(expect.stringMatching(/\/receipt\/tok_abc$/), 'Waves receipt');
   });
 });
 
