@@ -181,3 +181,53 @@ describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => 
     expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
   });
 });
+
+describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)', () => {
+  const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+  const savedTyped = process.env.GATE_TYPED_VOICE_FILL;
+  const savedTrace = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (savedTyped === undefined) delete process.env.GATE_TYPED_VOICE_FILL; else process.env.GATE_TYPED_VOICE_FILL = savedTyped;
+    if (savedTrace === undefined) delete process.env.GATE_TRACE_ELIGIBILITY; else process.env.GATE_TRACE_ELIGIBILITY = savedTrace;
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'pest_control' });
+  });
+  const roach = { ...visit, service_type: 'Cockroach Control' };
+  const ROACH = { category: 'pest_control', serviceKey: 'cockroach_control', findingsType: 'cockroach' };
+
+  test('gate on: a typed visit the reader reads carries its form, and whether a saved trace would show on its report', async () => {
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+    expect(await buildRecapContext(roach.id, contextDb(roach))).toMatchObject({ typedType: 'cockroach', traceOnReport: true, lane: null });
+    // An inspection's report carries no map.
+    const inspection = { ...visit, service_type: 'Rodent Inspection' };
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'rodent', serviceKey: 'rodent_inspection', findingsType: 'rodent_inspection' });
+    expect(await buildRecapContext(inspection.id, contextDb(inspection))).toMatchObject({ typedType: 'rodent_inspection', traceOnReport: false });
+  });
+
+  test.each([
+    ['completes through a project', { ...ROACH, requiresProject: true }],
+    ['is project-backed', { ...ROACH, projectBacked: true }],
+    ['is a combined visit, whose companion sections the sheet has none of', { ...ROACH, companions: [{ type: 'rodent_bait_station' }] }],
+    ['is a form the reader does not read', { category: 'tree_shrub', serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' }],
+    ['is untyped', { category: 'pest_control', serviceKey: 'pest_general_quarterly' }],
+  ])('never for a visit that %s', async (_label, profile) => {
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
+    const result = await buildRecapContext(roach.id, contextDb(roach));
+    expect(result).not.toHaveProperty('typedType');
+    expect(result).not.toHaveProperty('traceOnReport');
+  });
+
+  test('a profile that could not be read is no typed form', async () => {
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('profile store down'));
+    expect(await buildRecapContext(roach.id, contextDb(roach))).not.toHaveProperty('typedType');
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no typed form', async (value) => {
+    if (value === undefined) delete process.env.GATE_TYPED_VOICE_FILL; else process.env.GATE_TYPED_VOICE_FILL = value;
+    resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+    expect(await buildRecapContext(roach.id, contextDb(roach))).not.toHaveProperty('typedType');
+  });
+});

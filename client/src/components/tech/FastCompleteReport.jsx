@@ -16,6 +16,7 @@ import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
 import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
 import { reconcileDependentFindingSelections, specialtyCompletedWorkWithoutAction } from '../../lib/service-completion-presets';
+import { typedFieldRequiredNow } from '../../lib/typed-findings-rules';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -715,6 +716,168 @@ export function LaneRecordCard({ lane, preset, record, unclear = [], readFailed 
           )}
         </div>
       ))}
+    </section>
+  );
+}
+
+// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
+// visit's own record, its typed form's values as the note filled them and
+// the tech confirmed them, with the activity score for a form whose score
+// the tech sets. A read fills only a field still empty that nobody picked
+// (the server judged each fill beside the record's values); Change is the
+// tech's own pick and the words it came from no longer show beside it.
+export const EMPTY_TYPED_RECORD = Object.freeze({ values: {}, heard: {}, picked: [], score: null });
+
+// The fields the card shows, as the office form shows them: never one
+// filled from the products (autoFilled) or a companion's. A pesticide
+// compliance field (pesticideOnly) is left to the completion, which refuses
+// a visit that needs it, as the office form's own note says.
+export const typedCardFields = (schema) => (schema?.fields || []).filter((field) => !field.autoFilled && !field.pesticideOnly && !field.companionOnly);
+
+// The form's activity score is the tech's to set (no field derives it).
+export const typedScoreIsTechs = (schema) => !!schema?.activity && !schema.activity.deriveField;
+
+export function mergeTypedRecord(record, facts) {
+  if (facts?.status !== 'read') return record;
+  const picked = new Set(record.picked);
+  const values = { ...record.values };
+  const heard = { ...record.heard };
+  for (const [key, value] of Object.entries(facts.values || {})) {
+    if (typeof value !== 'string' || !value || picked.has(key) || String(values[key] ?? '').trim()) continue;
+    values[key] = value;
+    heard[key] = { value, quotes: (facts.heard?.[key] || []).map((entry) => entry?.quote).filter(Boolean) };
+  }
+  return { ...record, values, heard };
+}
+
+// The tech's own pick: a field set, or cleared ('').
+export function changeTypedRecord(record, key, value) {
+  const values = { ...record.values };
+  if (value === '' || value == null) delete values[key];
+  else values[key] = value;
+  return { ...record, values, picked: [...new Set([...record.picked, key])] };
+}
+
+// A chips field's value is its picked options joined ", " in the form's own
+// order, as the full form stores it.
+function toggleChip(field, current, option) {
+  const chosen = new Set(String(current || '').split(',').map((part) => part.trim()).filter(Boolean));
+  if (chosen.has(option)) chosen.delete(option);
+  else chosen.add(option);
+  return field.options.filter((item) => chosen.has(item)).join(', ');
+}
+
+function TypedRecordRow({ field, record, unclear, readFailed, locked, open, onOpen, onChange }) {
+  const value = record.values[field.key] ?? '';
+  const required = typedFieldRequiredNow(field, record.values);
+  const heard = record.heard[field.key];
+  const quotes = heard && heard.value === value ? heard.quotes : [];
+  const label = `${field.label}${required ? ' (required)' : ''}`;
+  if (field.type === 'text' || field.type === 'count') {
+    return (
+      <div className="tech-lane-row">
+        <Field label={label} className="tech-visit-field">
+          <Input
+            className="tech-visit-control"
+            value={value}
+            disabled={locked}
+            {...(field.type === 'count' ? { inputMode: 'numeric', pattern: '[0-9]*', maxLength: 4 } : {})}
+            onChange={(event) => onChange(field.key, field.type === 'count' ? event.target.value.replace(/\D/g, '').slice(0, 4) : event.target.value)}
+          />
+        </Field>
+      </div>
+    );
+  }
+  const ask = field.type === 'chips' ? 'Not clear from your note. Pick what applies.' : 'Not clear from your note. Pick one.';
+  let shown = <p className="tech-lane-value tech-lane-value--empty">{readFailed ? 'Not picked' : 'Not said'}</p>;
+  if (value) shown = <p className="tech-lane-value">{value}</p>;
+  else if (unclear.includes(field.key)) shown = <p className="tech-lane-value tech-lane-value--empty tech-visit-status--warn">{ask}</p>;
+  return (
+    <div className="tech-lane-row">
+      <div className="tech-visit-section-head">
+        <span className="tech-lane-label">{label}</span>
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={open} aria-label={`Change ${field.label}`} disabled={locked} onClick={onOpen}>
+          Change
+        </Button>
+      </div>
+      {shown}
+      {quotes.length > 0 && <p className="tech-visit-muted">{quotes.map((quote) => `“${quote}”`).join(' · ')}</p>}
+      {open && (
+        <div className="tech-visit-tile-grid" role="group" aria-label={field.label}>
+          {field.options.map((option) => {
+            const pressed = field.type === 'chips'
+              ? String(value).split(',').map((part) => part.trim()).includes(option)
+              : value === option;
+            return (
+              <Chip
+                key={option}
+                label={option}
+                disabled={locked}
+                pressed={pressed}
+                onClick={() => onChange(field.key, field.type === 'chips' ? toggleChip(field, value, option) : (pressed ? '' : option), field.type !== 'chips')}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "<Form> record heard from you": the typed form's fields with what was
+// heard, a Change (or a box for a count or free text), the optional ones
+// behind "More detail" unless they hold a value, are required now or the
+// note left them unclear, and the activity score when it is the tech's.
+export function TypedRecordCard({ schema, record, unclear = [], readFailed = false, locked, onChange, onScore }) {
+  const [open, setOpen] = useState(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const titleId = useId();
+  const fields = typedCardFields(schema);
+  const primary = (field) => !field.detail || typedFieldRequiredNow(field, record.values)
+    || String(record.values[field.key] ?? '').trim() !== '' || unclear.includes(field.key);
+  const hidden = fields.filter((field) => !primary(field)).length;
+  const scoreLabels = schema?.activity?.techScoreLabels || {};
+  return (
+    <section className="tech-visit-card tech-lane-record" aria-labelledby={titleId}>
+      <h3 id={titleId} className="tech-visit-section-title">{`${schema?.label || 'Visit'} record heard from you`}</h3>
+      {readFailed && <p className="tech-visit-muted tech-visit-status--warn" role="status">Couldn’t read your note for this just now. Pick each one, or write the report again.</p>}
+      {fields.filter((field) => showDetail || primary(field)).map((field) => (
+        <TypedRecordRow
+          key={field.key}
+          field={field}
+          record={record}
+          unclear={unclear}
+          readFailed={readFailed}
+          locked={locked}
+          open={open === field.key}
+          onOpen={() => setOpen(open === field.key ? null : field.key)}
+          onChange={(key, value, closes) => {
+            onChange(key, value);
+            if (closes) setOpen(null);
+          }}
+        />
+      ))}
+      {!showDetail && hidden > 0 && (
+        <Button type="button" variant="ghost" className="tech-visit-action" disabled={locked} onClick={() => setShowDetail(true)}>
+          {`More detail (${hidden})`}
+        </Button>
+      )}
+      {typedScoreIsTechs(schema) && (
+        <div className="tech-lane-row">
+          <span className="tech-lane-label">{`${schema.activity.label || 'Activity'} (required)`}</span>
+          <div className="tech-visit-tile-grid" role="group" aria-label={schema.activity.label || 'Activity'}>
+            {[0, 1, 2, 3, 4, 5].map((score) => (
+              <Chip
+                key={score}
+                label={scoreLabels[score] ? `${score} ${scoreLabels[score]}` : String(score)}
+                disabled={locked}
+                pressed={record.score === score}
+                onClick={() => onScore(record.score === score ? null : score)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

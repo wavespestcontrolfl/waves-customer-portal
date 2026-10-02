@@ -5153,6 +5153,16 @@ async function loadProjectCompletionContextByServiceId(services) {
       // voiceTypeFor).
       typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
+      // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
+      // opens a typed visit the reader reads in the Fast Complete sheet's
+      // report flow, its record read from the note, in place of the typed
+      // form (fastCompleteReportEnabled above stays off for typed forms). Not
+      // a combined service: its companion sections are required at
+      // completion and the sheet has none.
+      typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null
+        && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6313,6 +6323,7 @@ router.get('/', async (req, res, next) => {
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
         typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+        typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6909,6 +6920,7 @@ router.get('/week', async (req, res, next) => {
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+          typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

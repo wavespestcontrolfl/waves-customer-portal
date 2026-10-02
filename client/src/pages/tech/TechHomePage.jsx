@@ -139,28 +139,54 @@ function isFastCompleteReportEligible(service) {
 // and so does a visit that completes through a project (its profile says
 // so, a project is already linked, or the profile could not be read).
 function isLaneReportEligible(service) {
-  const profile = service?.completionProfile;
   return service?.laneVoiceFillEnabled === true
     && service?.fastCompleteReportEnabled === true
-    && service?.completionProfileLookupFailed !== true
+    && completesOnOwnRecord(service);
+}
+// A visit the report-flow sheet may complete on its own record: open, its
+// profile read, and not completing through a project.
+function completesOnOwnRecord(service) {
+  const profile = service?.completionProfile;
+  return service?.completionProfileLookupFailed !== true
     && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
+// visit whose form the reader reads (cockroach, the roach knockdowns, flea,
+// pest inspection, mosquito event, wildlife trapping, rodent exclusion,
+// sanitation and inspection; the schedule row's `typedReportFlowEnabled`)
+// opens the one-screen sheet in the report flow, its own record read from
+// the note, in place of the Dispatch typed form. Off, it opens the typed
+// form as before, and so does a visit closed out as a whole visit (its
+// packet completes every service on it), a visit that completes through a
+// project, a row whose profile or form could not be read, or a closed visit.
+function isTypedReportEligible(service) {
+  const type = service?.completionProfile?.findingsType;
+  return service?.typedReportFlowEnabled === true
+    && !!type && service?.findingsSchema?.type === type
+    && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
+    && completesOnOwnRecord(service);
 }
 const laneKeyOf = (service) => resolveSpecialtyServiceKey({
   serviceKey: service?.completionProfile?.serviceKey,
   serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
 });
 
-// What the sheet reads of the report flow from the row: whether it runs, and
-// for a lane visit its lane, read from the note, and no trace on the sheet
-// (an outline trace stays on the full form).
+// What the sheet reads of the report flow from the row: whether it runs, for
+// a lane visit its lane and for a typed visit its form (each read from the
+// note), and no trace on the sheet for either (a trace stays on the full
+// form).
 function reportFlowFields(service) {
   const laneFlow = isLaneReportEligible(service);
+  const typedFlow = isTypedReportEligible(service);
   return {
-    reportFlow: isFastCompleteReportEligible(service) || laneFlow,
+    reportFlow: isFastCompleteReportEligible(service) || laneFlow || typedFlow,
     laneFlow,
     laneKey: laneFlow ? laneKeyOf(service) : null,
-    traceEligible: service.traceEligible !== false && !laneFlow,
+    typedFlow,
+    typedType: typedFlow ? service.completionProfile.findingsType : null,
+    typedSchema: typedFlow ? service.findingsSchema : null,
+    traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
   };
 }
 
@@ -193,8 +219,11 @@ function isLawnReserviceFastCompleteEligible(service) {
 // the recap modal (no findings/billing gate) nor project creation (server
 // 422s appointment-managed types) is the right surface.
 function usesDispatchCompletion(service) {
-  return !!service?.completionProfile?.findingsType
-    || !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
+  return !!service?.completionProfile?.findingsType || closesOutAsVisit(service);
+}
+// A visit closed out as a whole (every service on it in one packet).
+function closesOutAsVisit(service) {
+  return !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling
@@ -832,11 +861,13 @@ export default function TechHomePage({ section = 'today' }) {
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
   // a lawn re-service under its gate, or a tree & shrub visit under its gate and
-  // the tech's flag, opens its Fast Complete sheet first; everything else is the
-  // deep link, as before.
+  // the tech's flag, opens its Fast Complete sheet first, and a typed visit the
+  // reader reads opens the report-flow sheet; everything else is the deep
+  // link, as before.
   const openTypedVisit = useCallback((service) => {
     if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
     else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
+    else if (isTypedReportEligible(service)) setFastCompleteService(service);
     else openTypedCompletion(service);
   }, []);
   const handleProjectQuickAction = useCallback(() => {
