@@ -86,6 +86,7 @@ import {
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
+import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
@@ -947,6 +948,10 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneA
   const areaTrace = AREA_CAPTURES.has(traceMode);
   const areaRow = active.find((row) => AREA_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
   const unusedTrace = draft && traceRead.zone && (areaTrace ? !areaRow : !perimeterRow);
+  // An "Interior spray too" trace claims indoor treatment on the customer's
+  // map, so the record must list a place inside (the pest sheet asks the
+  // note for Inside; codex local r4 on #5629).
+  const interiorUnbacked = draft && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
   return [
     ...ready.report,
     // The record's places are the visit's treated side on the report: with
@@ -960,6 +965,7 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneA
     [unusedTrace, areaTrace
       ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
       : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
+    [interiorUnbacked, 'Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.', null, 'remove_trace'],
   ];
 }
 

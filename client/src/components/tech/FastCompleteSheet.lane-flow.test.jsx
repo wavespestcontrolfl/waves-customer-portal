@@ -325,6 +325,37 @@ describe('a saved outline on a lane visit (codex local r2 on #5629)', () => {
   });
 });
 
+describe('an "Interior spray too" trace on a lane visit (codex local r4 on #5629)', () => {
+  const INTERIOR = { enabled: true, treatmentZone: { capture_mode: 'interior', linear_ft: 150, updated_at: '2026-10-02T14:00:00Z' } };
+  const TICK_VISIT = { ...VISIT, serviceType: 'Tick Control', serviceKey: 'tick_control' };
+  const tickRead = (areas) => ({ available: true, status: 'read', lane: 'tick_control', areas, findings: [], unclearGroups: [] });
+  const TICK_SERVICE = { ...SERVICE, serviceType: 'Tick Control', laneKey: 'tick_control' };
+
+  test('holds while the record lists no place inside: the map would claim indoor treatment the record does not', async () => {
+    const request = makeRequest({ visit: TICK_VISIT, lane: 'tick_control', trace: INTERIOR, laneFacts: tickRead([{ area: 'Front lawn', quote: 'front lawn' }]) });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Perimeter spray');
+    await generate('Sprayed around the house and the front lawn.');
+    expect(await screen.findByText('Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('sends once the record lists a place inside, with the trace\'s length on the perimeter spray', async () => {
+    const request = makeRequest({
+      visit: TICK_VISIT, lane: 'tick_control', trace: INTERIOR,
+      laneFacts: tickRead([{ area: 'Front lawn', quote: 'front lawn' }, { area: 'Interior pet areas', quote: 'the pet areas inside' }]),
+    });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Perimeter spray');
+    await generate('Sprayed around the house, the front lawn and the pet areas inside.');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].products[0]).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150, areaUnit: 'linear_ft' });
+  });
+});
+
 describe('the visit the tech tapped', () => {
   test('a visit that no longer reads as the lane it was routed as needs the full form', async () => {
     const request = makeRequest({ lane: null });
