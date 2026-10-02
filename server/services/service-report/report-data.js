@@ -2882,6 +2882,18 @@ function ymd(value) {
   return String(value).slice(0, 10);
 }
 
+// A read that is allowed to fail soft (the render still serves) but must not be
+// mistaken for a legitimate absence by the treatment-memory freeze: the catch
+// handler records WHICH read failed in the build's `readFailures` set and
+// returns the same fallback it always did. Any entry in the set blocks the
+// first (first-writer-wins) memory freeze.
+function failSoft(readFailures, name, fallback) {
+  return () => {
+    if (readFailures) readFailures.add(name);
+    return fallback;
+  };
+}
+
 function frozenWeekMatches(frozen, assessment) {
   return !!frozen && typeof frozen === 'object'
     && frozen.assessmentId === assessment?.id
@@ -3176,7 +3188,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3201,6 +3213,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
     .limit(5)
+    // read-failure-exempt: gallery photos only; no insight or memory entry reads them
     .catch(() => []);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
@@ -3246,6 +3259,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       .orderBy('is_best_photo', 'desc')
       .orderBy('quality_score', 'desc')
       .orderBy('photo_order', 'asc')
+      // read-failure-exempt: before/after photo pair only
       .catch(() => []);
     const [beforeCandidates, afterCandidates] = await Promise.all([
       photosFor(initialRow.id),
@@ -3286,7 +3300,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   const turfProfile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
     .first()
-    .catch(() => null);
+    .catch(failSoft(readFailures, 'customer_turf_profiles', null));
   // A FAILED prefs read is not a missing row: the cache signature stamps the
   // portal irrigation state from its own (successful) prefs read, so a render
   // whose prefs read blipped would fall back to tech/assessment values and
@@ -3296,7 +3310,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   const propertyPrefs = await knex('property_preferences')
     .where({ customer_id: service.customer_id })
     .first()
-    .catch(() => { prefsReadFailed = true; return null; });
+    .catch(() => { prefsReadFailed = true; if (readFailures) readFailures.add('property_preferences'); return null; });
   const trend = historyRows.map((row) => ({
     date: row.service_date,
     overallScore: calculateLawnOverallScore(row),
@@ -3472,6 +3486,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         weekWeatherUnfrozen = true;
       }
     } catch (e) {
+      if (readFailures) readFailures.add('week_weather');
       // The fetch itself threw — transient by definition, and no week was
       // resolved. Render soft, cache nothing.
       weekWeatherUnfrozen = true;
@@ -3521,7 +3536,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   if (featureGates.isEnabled('irrigationWeekPlan')) {
     // Pinned renders are STRICT: a failed lookup must refuse the render
     // rather than cache a plan-less page under a plan-present key.
-    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedAvailableAt: pinnedWeekPlanAvailableAt, strict: typeof pinnedWeekPlanAvailableAt === 'string' });
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, {
+      pinnedAvailableAt: pinnedWeekPlanAvailableAt,
+      strict: typeof pinnedWeekPlanAvailableAt === 'string',
+      onFailure: () => { if (readFailures) readFailures.add('week_plan'); },
+    });
     // The plan binds to the HOME the sweep decided it for: the serviced
     // address (stamped, else the customer's current mirror) must be that
     // home — a mid-week move makes the stamp match the NEW address while
@@ -3557,6 +3576,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     }
   }
 
+  // The week's rain / ET₀ (water insights) could not be fetched or frozen.
+  if (readFailures && weekWeatherUnfrozen) readFailures.add('week_weather');
   const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
   return {
     assessmentId: assessment.id,
@@ -3983,6 +4004,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // legitimately returned no rows — an outage-empty product list would let
   // stale recommendation copy publish unreconciled (codex P1 r25).
   let productsLoadFailed = false;
+  // Every input read that feeds the lawn treatment-memory entry reports its
+  // failure here (see failSoft); one entry blocks the first freeze.
+  const readFailures = new Set();
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
@@ -4011,6 +4035,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     && rawProducts.some((p) => p.product_id && !String(p.product_category || '').trim())) {
     productsLoadFailed = true;
   }
+  if (productsLoadFailed) readFailures.add('service_products');
+  if (products.catalogEnrichmentFailed) readFailures.add('catalog_enrichment');
 
   const areaLabels = locationAreaLabels([
     ...parseJsonArray(service.areas_serviced),
@@ -4120,6 +4146,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // undefined = unpinned (live snapshot); null = the signature saw none.
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
+    readFailures,
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
@@ -4238,9 +4265,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let mowingHeight = null;
   let mowingTrendFallback = null;
   if (serviceLine === 'lawn') {
-    const turfReading = await getTurfHeightForVisit(service.id, knex);
+    const turfFailed = () => readFailures.add('turf_height_readings');
+    const turfReading = await getTurfHeightForVisit(service.id, knex, { onFailure: turfFailed });
     const turfTrend = turfReading
-      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at, { eligibleVisitIds: lawnEligibleVisitIds })
+      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at, { eligibleVisitIds: lawnEligibleVisitIds, onFailure: turfFailed })
       : [];
     mowingHeight = buildMowingHeightContext(turfReading, turfTrend);
     // No gauge reading THIS visit → the trends grid can still show the mowing
@@ -4248,7 +4276,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (!mowingHeight) {
       const historyCap = validTimestamp(service.completed_at) || validTimestamp(service.updated_at) || null;
       const priorTrend = historyCap
-        ? await getTurfHeightTrend(service.customer_id, 12, knex, historyCap, { eligibleVisitIds: lawnEligibleVisitIds })
+        ? await getTurfHeightTrend(service.customer_id, 12, knex, historyCap, { eligibleVisitIds: lawnEligibleVisitIds, onFailure: turfFailed })
         : [];
       const withHeights = priorTrend.filter((r) => r && r.manual_height_in != null
         && Number.isFinite(Number(r.manual_height_in)));
@@ -5239,7 +5267,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       try {
         const { computeLawnWaterIntakeSnapshot } = require('../lawn-water-area');
         const snapDate = lawnAssessment.assessmentDate || service.service_date || null;
-        waterSnapshot = await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(() => null);
+        waterSnapshot = await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(failSoft(readFailures, 'water_snapshot', null));
         if (!waterSnapshot) {
           waterSnapshot = await computeLawnWaterIntakeSnapshot({
             customerId: service.customer_id,
@@ -5249,9 +5277,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             irrigationInchesPerWeek: lawnAssessment.waterContext?.irrigationInchesPerWeek,
             targetWaterInchesPerWeek: lawnAssessment.waterContext?.targetInchesPerWeek,
             signals: { overwatering: !!lawnAssessment.overwateringSignal },
-          }, knex).catch(() => null);
+          }, knex).catch(failSoft(readFailures, 'water_snapshot', null));
         }
-      } catch { /* area calibration optional (tables may be unmigrated/unseeded) */ }
+      } catch { readFailures.add('water_snapshot'); /* area calibration optional (tables may be unmigrated/unseeded) */ }
 
       // Water-gap trend — every persisted per-visit snapshot up to and including
       // this visit (capped so a permanent report token can't expose later visits).
@@ -5276,7 +5304,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             waterGapInches: r.water_gap_inches,
           }));
         }
-      } catch { /* snapshots table optional — trend simply doesn't render */ }
+      } catch { readFailures.add('water_gap_history'); /* snapshots table optional — trend simply doesn't render */ }
 
       // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
       // byte-identical to before.
@@ -5293,13 +5321,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           wateringInstruction = readFrozenWateringInstruction(structured)
             || (rulesUnknown ? null
               : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
-        } catch { wateringInstruction = null; wateringInputsFailed = true; }
+        } catch { wateringInstruction = null; wateringInputsFailed = true; readFailures.add('watering_inputs'); }
         // An UNFROZEN render whose inputs could not be read omits the customer's
         // watering direction: serve it, never cache it, and let a pinned delivery
         // defer (the week-weather / prefs-read flags pdf-queue and reports-public
         // already gate on). A frozen render read nothing and is unaffected.
         if (!readFrozenWateringInstruction(structured)
           && (wateringInputsFailed || rulesUnknown || productsLoadFailed)) {
+          readFailures.add('watering_inputs');
           lawnAssessment.wateringInputsUnavailable = true;
           lawnAssessment.weekWeatherUncacheable = true;
           lawnAssessment.weekWeatherPendingReason = lawnAssessment.weekWeatherPendingReason || 'unfrozen';
@@ -5377,14 +5406,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             assessmentId: lawnAssessment.assessmentId,
             serviceDate: visitMemoryOut.serviceDate,
             priorVisit: visitMemoryOut.priorVisit || null,
-            // Never CREATE the first-writer-wins entry from a degraded read: a
-            // failed service_products load (applications [] would freeze as
-            // "applied nothing"), a failed or partial catalog enrichment (the
-            // watering freeze's own guard) or a failed prefs / week-weather
-            // freeze (the water insights the checks come from). A frozen
-            // entry still replays.
-            degraded: !!(productsLoadFailed || products.catalogEnrichmentFailed
-              || lawnAssessment.portalPrefsReadFailed || lawnAssessment.weekWeatherUnfrozen),
+            // Never CREATE the first-writer-wins entry from a degraded read: any
+            // input read that failed (service_products, catalog enrichment,
+            // turf profile, prefs, turf height, week weather / plan, water
+            // snapshot...) is in readFailures. A frozen entry still replays.
+            degraded: readFailures.size > 0,
             knex,
           });
           visitMemorySinceLast = outcome.sinceLast;

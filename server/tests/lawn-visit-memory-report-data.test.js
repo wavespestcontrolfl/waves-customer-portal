@@ -12,9 +12,22 @@ jest.mock('../services/lawn-assessment-history', () => ({
   installedForVisit: jest.fn(),
   historyForReport: jest.fn(),
   historyForAssessment: jest.fn(),
+  restrictVisitHistory: (query) => query,
 }));
 
+jest.mock('../services/service-report/application-conditions', () => {
+  const actual = jest.requireActual('../services/service-report/application-conditions');
+  return { ...actual, fetchServiceWeekWeather: jest.fn(actual.fetchServiceWeekWeather) };
+});
+jest.mock('../services/irrigation-week-plan', () => {
+  const actual = jest.requireActual('../services/irrigation-week-plan');
+  return { ...actual, loadCurrentWeekPlan: jest.fn(actual.loadCurrentWeekPlan) };
+});
+
 const history = require('../services/lawn-assessment-history');
+const featureGates = require('../config/feature-gates');
+const conditions = require('../services/service-report/application-conditions');
+const weekPlan = require('../services/irrigation-week-plan');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { storedVisitMemoryFor } = require('../services/service-report/lawn-visit-memory');
 
@@ -170,9 +183,10 @@ const setHistory = (rows, current = CUR) => {
 };
 
 describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
-  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY'];
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN'];
   const saved = {};
   beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); jest.clearAllMocks(); });
+  afterEach(() => { if (featureGates.isEnabled.mockRestore) featureGates.isEnabled.mockRestore(); });
   afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
   // The week's weather is frozen on the record so the baseline render is
   // cacheable and the memory's own effect on cacheability is visible.
@@ -353,6 +367,92 @@ describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
     expect(later.log.updates).toHaveLength(0);
     expect(JSON.stringify(later.data.reportV2.sinceLast)).toBe(JSON.stringify(first.reportV2.sinceLast));
     expect(applied(recs)).toEqual(['Test Herbicide B']);
+  });
+
+  // ── every input read reports failure; any failure blocks the FIRST freeze ────
+  const TURF_READING = {
+    id: 'th-1', service_record_id: 'svc-cur', customer_id: CUSTOMER, manual_height_in: 1.5, range_status: 'below',
+    target_min_in: 3.5, target_max_in: 4.0, measured_at: '2026-09-30T17:00:00Z',
+  };
+  const PRODUCT_ID = '11111111-2222-4333-8444-555555555555';
+  const CATALOG_PRODUCTS = [{ id: 'sp-1', service_record_id: 'svc-cur', product_id: PRODUCT_ID, product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' }];
+
+  test('a failed turf-height read writes nothing; the recovery render freezes WITH the mowing check', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    const failed = await withFixtures(recs, { turf_height_readings: FAIL });
+    expect(failed.log.updates).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    expect(failed.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    // Delivery is not blocked: the report still renders without the mowing card.
+    expect(failed.data.reportV2.mowing).toBeFalsy();
+    expect(failed.data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+
+    const ok = await withFixtures(recs, { turf_height_readings: [TURF_READING] });
+    expect(ok.data.reportV2.mowing).toBeTruthy();
+    expect(storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur').checks).toContainEqual({ key: 'mowing', status: 'watch' });
+    expect(ok.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+  });
+
+  // Each audited input read, run as a failure: no freeze, uncacheable, report still served.
+  const FAILING_READS = [
+    ['service_products', () => ({ service_products: FAIL })],
+    ['catalog enrichment', () => ({ service_products: CATALOG_PRODUCTS, products_catalog: FAIL })],
+    ['customer_turf_profiles', () => ({ customer_turf_profiles: FAIL })],
+    ['property_preferences', () => ({ property_preferences: FAIL })],
+    ['turf_height_readings', () => ({ turf_height_readings: FAIL })],
+    ['lawn_water_intake_snapshots (area snapshot and gap history)', () => ({ lawn_water_intake_snapshots: FAIL })],
+    ['week weather fetch', () => {
+      conditions.fetchServiceWeekWeather.mockRejectedValueOnce(new Error('provider down'));
+      return {};
+    }, { customer_latitude: 27.5, customer_longitude: -82.5 }, true],
+    ['week plan lookup', () => {
+      const real = featureGates.isEnabled.bind(featureGates);
+      jest.spyOn(featureGates, 'isEnabled').mockImplementation((name) => (name === 'irrigationWeekPlan' ? true : real(name)));
+      weekPlan.loadCurrentWeekPlan.mockImplementationOnce(async (_id, opts) => { opts.onFailure(new Error('db down')); return null; });
+      return {};
+    }],
+  ];
+  test.each(FAILING_READS)('failing read: %s writes nothing and is uncacheable; recovery freezes', async (_name, arrange, serviceExtra = {}, unfrozenWeek = false) => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    // The frozen week replays instead of fetching; this case needs a live fetch.
+    if (unfrozenWeek) delete recs['svc-cur'].structured_notes.lawnWeekWeather;
+    const svc = { ...service(recs['svc-cur'].structured_notes), ...serviceExtra };
+    const patch = arrange();
+    const failed = await withFixtures(recs, patch, svc);
+    expect(failed.data.reportV2).toBeTruthy();
+    expect(failed.log.updates).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    expect(failed.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+
+    // Recovery: the same record, every read healthy this time.
+    if (featureGates.isEnabled('irrigationWeekPlan')) weekPlan.loadCurrentWeekPlan.mockResolvedValueOnce(null);
+    const recovered = await withFixtures(recs, patch.service_products && patch.products_catalog
+      ? { service_products: CATALOG_PRODUCTS, products_catalog: [{ id: PRODUCT_ID, name: 'Test Herbicide B', category: 'herbicide' }] }
+      : {});
+    expect(recovered.log.updates).toHaveLength(1);
+    expect(applied(recs)).toEqual(['Test Herbicide B']);
+  });
+
+  test('a degraded read never blocks delivery: only caching (the delivery flags stay clear)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const { data } = await withFixtures(records(), { turf_height_readings: FAIL });
+    expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(false);
+    expect(data.lawnAssessment.portalPrefsReadFailed).toBe(false);
+  });
+
+  test('the first (no turf-height) freeze is never repaired by a later render, which is why a failed read must not create it', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    await withFixtures(recs, {}); // a HEALTHY read with no reading: a legitimate absence freezes
+    expect(storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur').checks.find((c) => c.key === 'mowing')).toBeUndefined();
+    await withFixtures(recs, { turf_height_readings: [TURF_READING] });
+    expect(storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur').checks.find((c) => c.key === 'mowing')).toBeUndefined();
   });
 
   test('a frozen render is cacheable and never re-reads the prior record', async () => {

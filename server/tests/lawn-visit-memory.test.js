@@ -508,3 +508,22 @@ describe('GATE_LAWN_VISIT_MEMORY reader', () => {
     expect(featureGates.lawnVisitMemoryLive()).toBe(false);
   });
 });
+
+describe('fail-soft reads can report a failure without changing what they return', () => {
+  const { getTurfHeightForVisit, getTurfHeightTrend } = require('../services/turf-height-service');
+  const failing = () => jest.fn(() => { throw new Error('read failed'); });
+  const returning = (row) => jest.fn(() => ({ where: () => ({ first: async () => row, orderBy: () => ({ limit: () => ({ select: async () => [row] }) }) }) }));
+
+  test('turf height: a failure still returns null / [] and calls onFailure; an absence does not', async () => {
+    const onFailure = jest.fn();
+    await expect(getTurfHeightForVisit('svc-1', failing(), { onFailure })).resolves.toBeNull();
+    await expect(getTurfHeightTrend('cust-1', 12, failing(), null, { onFailure })).resolves.toEqual([]);
+    expect(onFailure).toHaveBeenCalledTimes(2);
+    const quiet = jest.fn();
+    await expect(getTurfHeightForVisit('svc-1', returning(null), { onFailure: quiet })).resolves.toBeNull();
+    expect(quiet).not.toHaveBeenCalled();
+    // The default call shape (no options) is unchanged.
+    await expect(getTurfHeightForVisit('svc-1', failing())).resolves.toBeNull();
+    await expect(getTurfHeightTrend('cust-1', 12, failing())).resolves.toEqual([]);
+  });
+});
