@@ -190,6 +190,8 @@ describe('gate on — pending campaign drafts', () => {
     // toGsm7Safe: em-dash → '-', ellipsis → '...'
     expect(payload.draft_response).toBe('Hi Dana - we miss you... call us at (941) 318-7612');
     expect(mockDeriveOutboundNumber).toHaveBeenCalledWith({ customerId: expect.anything() });
+    // The named line is pinned on the draft so approval sends from it.
+    expect(JSON.parse(payload.flags)).toEqual({ fromNumber: '+19413187612' });
     expect(payload.draft_response).toMatch(/^[\x20-\x7E]*$/);
   });
 

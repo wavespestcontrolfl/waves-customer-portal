@@ -97,10 +97,14 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
     : 'customer' in preloaded ? preloaded.customer
       : await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first();
   const metadataPhone = normalizeE164(flags.toPhone || flags.phone || flags.leadPhone);
+  // A line pinned when the draft was written (seasonal win-back names it in
+  // the body) — honored only if it is one of our numbers.
+  const pinnedFrom = flags.fromNumber && TWILIO_NUMBERS.findByNumber(flags.fromNumber) ? flags.fromNumber : undefined;
   if (metadataPhone) {
     const customerMatches = customer?.phone && samePhone(metadataPhone, customer.phone);
     return {
       toPhone: metadataPhone,
+      fromNumber: pinnedFrom,
       customerId: customerMatches ? customer.id : null,
       identityTrustLevel: customerMatches ? 'phone_matches_customer' : 'phone_provided_unverified',
     };
@@ -110,6 +114,7 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
     if (customer?.phone) {
       return {
         toPhone: customer.phone,
+        fromNumber: pinnedFrom,
         customerId: customer.id,
         identityTrustLevel: 'phone_matches_customer',
       };

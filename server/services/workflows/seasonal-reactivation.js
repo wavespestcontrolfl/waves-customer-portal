@@ -160,6 +160,10 @@ class SeasonalReactivation {
           purpose: 'marketing_seasonal',
           source_ref: `customers:${customer.id}`,
           context_summary: `Seasonal reactivation (${seasonal.type}): ${hookText}`,
+          // The line the body's call-us number names: approval sends FROM it
+          // (resolveDraftRecipient), so a home-line change or gate flip while
+          // the draft waits never splits the two.
+          flags: JSON.stringify({ fromNumber: locationPhone }),
         });
 
         drafted++;
