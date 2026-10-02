@@ -4286,7 +4286,9 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               // GATE_PAF_PREPAY: approved, nothing charged yet. The cited
               // amount is the ACKNOWLEDGED total that will be charged (a
               // credit may lower it, never raise it); absent, name no number.
-              return `Your plan is approved. Nothing was charged today — your annual prepay${chargedText} is charged to your saved card (or debited from your saved bank account) after your first visit.`;
+              // "up to": the acknowledged total is a ceiling (GitHub Codex #5595 r1).
+              const ceilingText = chargedText ? ` of up to ${fmtMoney(chargedTotal)}` : '';
+              return `Your plan is approved. Nothing was charged today — your annual prepay${ceilingText} is charged to your saved card (or debited from your saved bank account) after your first visit. Any account credit lowers it.`;
             }
             if (acceptResult.prepayChargeStatus === 'processing') {
               return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;
@@ -5832,6 +5834,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is the render-time promise the capture surfaces are currently showing.
   const recurringCardRenderedConsentRef = useRef(null);
   const afterVisitRenderedRef = useRef({ afterVisit: false, version: AFTER_VISIT_CONSENT_VERSION });
+  // GATE_PAF_PREPAY: whether the capture surfaces currently render the
+  // after_visit_prepay timing (GitHub Codex #5595 r1): a capture only stands in
+  // for the quote's consent when it showed the same charge timing.
+  const prepayAfterVisitRenderedRef = useRef(false);
   // The accept's in-transaction promise can be narrower than /data's best
   // case for reasons the page cannot see (an existing customer whose series
   // already exists gets an UNATTACHED first invoice, paid by link at accept).
@@ -5852,6 +5858,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     recurringCardRenderedConsentRef.current = {
       tender: t,
       variant: afterVisit ? 'after_visit_card' : null,
+      prepayAfterVisit: prepayAfterVisitRenderedRef.current === true,
       // The base card / ACH text this bundle rendered carries its own version
       // (GitHub Codex #5481 r5 P1), attested like the after-visit one.
       version: afterVisit ? cur.version : CONSENT_VERSION,
@@ -8516,6 +8523,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // GATE_PAF_PREPAY: the in-lane annual prepay is charged after the first
   // visit (server implies prepayInLane). Absent = today's charge-at-confirm copy.
   const prepayAfterVisit = !!data?.recurringCardPolicy?.prepayAfterFirstVisit;
+  prepayAfterVisitRenderedRef.current = prepayAfterVisit;
   const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
     enabled: setupFeePromiseEnabled,
     serviceMode,
@@ -9326,16 +9334,25 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // enabled in another tab between capture and requote) must
             // render its own quote-step authorization — the capture
             // checkbox authorized "this card", not that one.
-            const captureConsentLive = (prepayChargeQuote.capturedMethod === true)
+            // GATE_PAF_PREPAY: the server deferred the charge to after the
+            // first visit — the quote step must not say "due today"/"pay".
+            const afterVisitQuote = prepayChargeQuote.consentVariant === 'after_visit_prepay';
+            // The capture authorized the charge TIMING it showed (GitHub Codex
+            // #5595 r1): a gate change between capture and quote, or a capture
+            // whose rendering is unknown (a redirect), needs the quote's own
+            // checkbox for the timing the quote names.
+            const captureRenderedAfterVisit = (inlineAutoPayActive && inlineCardIntent)
+              ? prepayAfterVisit
+              : (recurringCardRenderedConsentRef.current
+                ? recurringCardRenderedConsentRef.current.prepayAfterVisit === true
+                : null);
+            const captureConsentLive = (prepayChargeQuote.capturedMethod === true && captureRenderedAfterVisit === afterVisitQuote)
               ? ((inlineAutoPayActive && inlineCardIntent)
                 ? inlineCardState.agreed === true
                 : (recurringCardSetupIntentIdRef.current ? true : null))
               : null;
             const quoteCheckboxNeeded = captureConsentLive === null;
             const consentSatisfied = quoteCheckboxNeeded ? prepayConsentChecked === true : captureConsentLive === true;
-            // GATE_PAF_PREPAY: the server deferred the charge to after the
-            // first visit — the quote step must not say "due today"/"pay".
-            const afterVisitQuote = prepayChargeQuote.consentVariant === 'after_visit_prepay';
             const quoteBank = ['us_bank_account', 'ach'].includes(prepayChargeQuote.methodType);
             return (
             <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, textAlign: 'center' }}>

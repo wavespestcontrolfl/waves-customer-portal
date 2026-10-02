@@ -28924,9 +28924,12 @@ async function composeEstimateDataPayload(estimate, {
         // render the after_visit_prepay wording, and the confirm step attests
         // it (prepayChargeConsentVariant) — the same predicate the accept's
         // quote uses (prepayChargeAfterFirstVisit). Present only when true.
+        // Never for a termite annual sign-before-pay plan: that accept parks
+        // for signature and never enters the deferred prepay job.
         ...(recurringCardLaneActiveForData && RecurringCards.isPrepayCardAndChargeEnabled()
           && recurringCardPolicyForData.afterVisitCard !== true
           && require('../config/feature-gates').pafPrepayLive()
+          && !require('../services/estimate-converter').isTermiteAnnualSignBeforePayAccept(estimate, depositEstData, 'prepay_annual')
           ? { prepayAfterFirstVisit: true } : {}),
         // GATE_PAY_AFTER_FIRST_VISIT (owner ruling 2026-09-30): this customer
         // is on the card rail AND the gate is on — the same predicate that

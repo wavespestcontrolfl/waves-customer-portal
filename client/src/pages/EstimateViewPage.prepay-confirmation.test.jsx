@@ -290,8 +290,47 @@ describe('annual prepay charged after the first visit (GATE_PAF_PREPAY)', () => 
     });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
-    expect(await screen.findByText(/Nothing was charged today — your annual prepay of \$600\.00 is charged to your saved card \(or debited from your saved bank account\) after your first visit\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Nothing was charged today — your annual prepay of up to \$600\.00 is charged to your saved card \(or debited from your saved bank account\) after your first visit\. Any account credit lowers it\./)).toBeInTheDocument();
     expect(screen.queryByText(/went through/)).not.toBeInTheDocument();
+  });
+});
+
+const quoteCheckbox = (text) => screen.getAllByText(text)
+  .map((el) => el.closest('label')?.querySelector('input[type="checkbox"]'))
+  .find(Boolean);
+describe('a capture only consents to the charge timing it showed (GitHub Codex #5595 r1)', () => {
+  it('captured under after-visit wording, quoted for an immediate charge: the quote asks again', async () => {
+    const fetchMock = await reachAfterVisitPrepayQuote({ quoteExtra: {} });
+    expect(screen.getByText('$600.00 due today')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm & pay $600.00' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(quoteCheckbox(PREPAY_CARD_CONSENT_TEXT));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).not.toHaveProperty('prepayChargeConsentVariant');
+  });
+
+  it('captured under charge-now wording, quoted for after the first visit: the quote asks again', async () => {
+    stubLocalStorage();
+    const fetchMock = prepayFetch(prepayPayload(), { quoteExtra: AFTER_VISIT_QUOTE });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Arrival window/i }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /Switch to annual prepay/ }));
+    fireEvent.click(await screen.findByRole('checkbox'));
+    const first = await screen.findByRole('button', { name: 'Confirm & pay the 12-month plan' });
+    await waitFor(() => expect(first).toBeEnabled());
+    fireEvent.click(first);
+    await screen.findByText('Confirm your annual prepay total');
+    expect(screen.getByText('$600.00 after your first visit')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Confirm' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(quoteCheckbox(AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(acceptBodies(fetchMock)).toHaveLength(2));
+    expect(acceptBodies(fetchMock)[1]).toMatchObject({ prepayChargeConsentVariant: 'after_visit_prepay' });
   });
 });
 
