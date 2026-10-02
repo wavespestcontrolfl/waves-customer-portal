@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C;
+  let A; let B; let H; let C; let D;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -48,12 +48,12 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const json = (value) => JSON.stringify(value);
 
   async function snapshot() {
-    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C]).count('* as n').first();
+    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C, D]).count('* as n').first();
     return {
-      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
+      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C, D]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
       payments: await q('payments'), attempts: await db('stripe_invoice_charge_attempts').count('* as n').first(),
       ledger: await q('customer_credit_ledger'), notifications: await db('notifications').count('* as n').first(),
-      credits: await db('customers').whereIn('id', [A, B, H, C]).select('id', 'account_credits').orderBy('id'),
+      credits: await db('customers').whereIn('id', [A, B, H, C, D]).select('id', 'account_credits').orderBy('id'),
     };
   }
 
@@ -102,7 +102,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('draft', A, { total: 40, status: 'draft', due_date: null });
     await invoice('archived', A, { total: 33, archived_at: new Date() });
     await invoice('orphan', A, { total: 60, due_date: day(5) });
-    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_orphan_${run}`, customer_id: A, invoice_id: inv.orphan.id, amount: 60, source: 'synthetic', original_db_error: 'synthetic ledger failure' });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_orphan_${run}`, customer_id: A, invoice_id: inv.orphan.id, amount: 60, source: 'invoice_payment_webhook', original_db_error: 'synthetic ledger failure' });
     await invoice('voided', A, { total: 77, status: 'void' });
     // Pagination filler so A has more than one page at a small limit.
     for (let n = 0; n < 4; n += 1) await invoice(`fill${n}`, A, { total: 10 + n, due_date: day(20 + n) });
@@ -122,6 +122,19 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('c3', C, { total: 45, status: 'processing' });
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_ach_${run}:${inv.c3.id}`, customer_id: C, invoice_id: inv.c3.id, amount: 45,
       source: 'combined_pay_processing', original_db_error: 'synthetic provisional residual' });
+    // Saved-card payments that were later refunded and disputed, and a saved-bank (ACH) orphan that may still be pending.
+    D = await customer(`Reversal${run}`, `Ledger${run}`);
+    const refunded = await invoice('d_ref', D, { total: 50, status: 'refunded', stripe_payment_intent_id: `pi_ref_${run}` });
+    const disputed = await invoice('d_dis', D, { total: 60, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_dis_${run}` });
+    for (const [row, status, refund] of [[refunded, 'refunded', 50], [disputed, 'disputed', 0]]) {
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${row.id}`,
+        status: 'succeeded', stripe_payment_intent_id: row.stripe_payment_intent_id, amount: row.total, resolved_at: new Date(), submitted_at: new Date() });
+      await db('payments').insert({ customer_id: D, payment_date: day(-3), amount: row.total, status, refund_amount: refund, processor: 'stripe',
+        stripe_payment_intent_id: row.stripe_payment_intent_id, description: 'Stripe card payment', metadata: JSON.stringify({ invoice_id: row.id }) });
+    }
+    await invoice('d_ach', D, { total: 25, due_date: day(5) });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_bank_${run}`, customer_id: D, invoice_id: inv.d_ach.id, amount: 25,
+      source: 'invoice_card_on_file', original_db_error: 'synthetic ledger failure' });
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -261,7 +274,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('a provisional ACH residual is a processing attempt, not received; processing invoices owe nothing yet', async () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.c3.id });
     const provisional = detail.payments_timeline.find((e) => e.type === 'stripe_unreconciled_charge');
-    expect(provisional).toMatchObject({ received: false, provisional: true, source: 'combined_pay_processing' });
+    expect(provisional).toMatchObject({ received: false, unconfirmed: true, source: 'combined_pay_processing' });
     expect(provisional.state).toMatch(/processing/);
     expect(provisional.stripe_payment_intent_id).toBe(`pi_ach_${run}`);
     expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, stripe_succeeded_not_in_ledger: 0, attempts_in_flight_or_unknown: 1 });
@@ -269,6 +282,30 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.invoice).toMatchObject({ status: 'processing', balance_due: 0 });
     const { account_summary: summary } = await read('get_customer_invoices', { customer_id: C });
     expect(summary).toMatchObject({ total_due: 0, outstanding_count: 0, processing: { count: 1, amount: 45 } });
+  });
+
+  test('a refunded or disputed card payment matches its historical attempt: no phantom unreconciled charge, a dispute is not paid', async () => {
+    const refunded = await read('get_invoice_detail', { invoice_id: inv.d_ref.id });
+    expect(refunded.payment_summary).toMatchObject({ received: true, recorded_payments_net: 0, stripe_succeeded_not_in_ledger: 0 });
+    expect(refunded.payment_summary.statement).toMatch(/\$50\.00 refunded/);
+    expect(refunded.payments_timeline.find((e) => e.type === 'stripe_charge_attempt')).toMatchObject({ ledger_recorded: true, ledger_state: 'refunded' });
+    const disputed = await read('get_invoice_detail', { invoice_id: inv.d_dis.id });
+    const attempt = disputed.payments_timeline.find((e) => e.type === 'stripe_charge_attempt');
+    expect(attempt).toMatchObject({ state: 'succeeded', received: false, ledger_recorded: true, ledger_state: 'disputed' });
+    expect(attempt.state_note).toMatch(/dispute/);
+    expect(disputed.payments_timeline.find((e) => e.type === 'recorded_payment')).toMatchObject({ status: 'disputed', received: false });
+    expect(disputed.payment_summary).toMatchObject({ received: false, disputed_payments: 1, stripe_succeeded_not_in_ledger: 0 });
+    expect(disputed.payment_summary.statement).toMatch(/not counted as received/);
+    expect(disputed.payment_summary.statement).toMatch(/Say the payment evidence is unknown/);
+  });
+
+  test('an orphan from a saved-bank charge is unconfirmed, never received (it can still be a pending ACH payment)', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.d_ach.id });
+    const orphan = detail.payments_timeline.find((e) => e.type === 'stripe_unreconciled_charge');
+    expect(orphan).toMatchObject({ received: false, unconfirmed: true, source: 'invoice_card_on_file', stripe_payment_intent_id: `pi_bank_${run}` });
+    expect(orphan.state_note).toMatch(/not confirmed received/i);
+    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, attempts_in_flight_or_unknown: 1 });
+    expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
   });
 
   test('applied credit: lines, discounts and the credit movement stay separate from payments', async () => {

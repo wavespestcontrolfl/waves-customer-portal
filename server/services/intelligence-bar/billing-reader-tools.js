@@ -311,18 +311,25 @@ const ATTEMPT_STATE_NOTES = {
   succeeded: 'Stripe reports this charge succeeded.',
 };
 
-function attemptEntry(row, ledgerIntents) {
-  const succeeded = row.status === 'succeeded';
+function attemptEntry(row, ledgerStates) {
   const inFlight = row.status === 'claimed' && Boolean(row.submitted_at);
+  const ledgerState = row.stripe_payment_intent_id ? ledgerStates.get(row.stripe_payment_intent_id) || null : null;
+  // The payment's CURRENT recorded state governs: a succeeded attempt whose
+  // ledger row is now disputed is not "paid", and one whose ledger row is
+  // refunded or disputed is not a charge missing from the ledger.
+  const succeeded = row.status === 'succeeded' && ledgerState !== 'disputed';
   return {
     type: 'stripe_charge_attempt',
     id: row.id,
     at: iso(row.created_at),
     state: row.status,
     state_label: inFlight ? 'processing (submitted to Stripe, no result recorded yet)' : row.status,
-    state_note: ATTEMPT_STATE_NOTES[row.status] || 'Unrecognized attempt state: treat as not received.',
+    state_note: row.status === 'succeeded' && ledgerState === 'disputed'
+      ? 'Stripe reported this charge succeeded, but a dispute is now recorded on the matching payment: do not call it paid.'
+      : ATTEMPT_STATE_NOTES[row.status] || 'Unrecognized attempt state: treat as not received.',
     received: succeeded,
-    ...(succeeded ? { received_basis: 'Stripe attempt state succeeded', ledger_recorded: Boolean(row.stripe_payment_intent_id && ledgerIntents.has(row.stripe_payment_intent_id)) } : {}),
+    ...(row.status === 'succeeded' ? { ledger_recorded: Boolean(ledgerState), ledger_state: ledgerState } : {}),
+    ...(succeeded ? { received_basis: 'Stripe attempt state succeeded' } : {}),
     amount: money(row.amount),
     credit_applied_with_attempt: money(row.credit_applied_delta) || 0,
     submitted_at: iso(row.submitted_at),
@@ -562,24 +569,26 @@ function paymentPlanDetail(rows) {
   };
 }
 
-// A residual the combined pay page could not settle onto its invoice. Source
-// combined_pay_processing is PROVISIONAL: it is written at the processing
-// stage of an ACH payment, before the bank cash has arrived, so it is an
-// attempt in flight and never received. Every other source is a charge Stripe
-// accepted that the portal failed to record.
-const PROVISIONAL_ORPHAN_SOURCES = ['combined_pay_processing'];
+// A charge Stripe accepted that the portal did not record. Only a source that
+// states the PaymentIntent SUCCEEDED counts as received; every other source
+// (combined_pay_processing is an ACH residual written before the cash arrives;
+// invoice_card_on_file is written after a DB failure and can still be a pending
+// bank payment) is unconfirmed: an attempt, never received.
+const SUCCEEDED_ORPHAN_SOURCES = ['combined_pay_webhook', 'invoice_payment_webhook', 'autopay_charge', 'manual_charge'];
 function orphanEntry(row) {
-  const provisional = PROVISIONAL_ORPHAN_SOURCES.includes(row.source);
+  const confirmed = SUCCEEDED_ORPHAN_SOURCES.includes(row.source);
   return {
     type: 'stripe_unreconciled_charge',
     id: row.id,
     at: iso(row.created_at),
-    state: provisional ? 'processing (bank payment pending, funds not settled)' : 'succeeded in Stripe, not recorded in the portal ledger',
-    state_note: provisional
-      ? 'A bank (ACH) payment is still pending: the cash has not arrived. Not received.'
-      : 'Stripe charged the customer but the portal failed to record it. Received per Stripe; the ledger needs reconciling. Do not retry the charge.',
-    received: !provisional,
-    ...(provisional ? { provisional: true } : { received_basis: 'Stripe state succeeded', ledger_recorded: false }),
+    state: confirmed ? 'succeeded in Stripe, not recorded in the portal ledger'
+      : row.source === 'combined_pay_processing' ? 'processing (bank payment pending, funds not settled)'
+        : 'accepted by Stripe, not recorded in the portal ledger, settlement unconfirmed',
+    state_note: confirmed
+      ? 'Stripe charged the customer but the portal failed to record it. Received per Stripe; the ledger needs reconciling. Do not retry the charge.'
+      : 'Stripe accepted this payment but the portal did not record it, and the portal has no proof it settled (it can be a bank payment still pending). Not confirmed received: do not call it paid, and do not retry the charge.',
+    received: confirmed,
+    ...(confirmed ? { received_basis: 'Stripe state succeeded', ledger_recorded: false } : { unconfirmed: true }),
     amount: money(row.amount),
     source: row.source || null,
     // Combined-payment residuals key the PaymentIntent as "<pi>:<invoice id>".
@@ -592,14 +601,15 @@ function summarizePayments(entries, invoice) {
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
   const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received);
   const disputed = entries.filter((entry) => entry.status === 'disputed');
-  const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous' || entry.provisional === true);
+  const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous' || entry.unconfirmed === true);
   const failed = notReceived.filter((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed');
   const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
   const netRecorded = fromCents(recorded.reduce((total, entry) => total + cents(entry.net_received), 0));
   const receivedAny = recorded.length > 0 || stripeConfirmed.length > 0;
 
   const parts = [];
-  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, net $${netRecorded.toFixed(2)}`);
+  const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
+  if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, net $${netRecorded.toFixed(2)}${refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded but are not in the payments table (needs reconciling)`);
   if (inFlight.length) parts.push(`${inFlight.length} attempt(s) still in flight or with an unknown outcome (NOT received)`);
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
@@ -662,10 +672,15 @@ async function getInvoiceDetail(input, actionContext) {
     prepayTerm = await db('annual_prepay_terms').where({ id: termId }).first('id', 'status', 'term_start', 'term_end', 'prepay_amount');
   }
 
-  const ledgerIntents = new Set(linked.filter((row) => row.status === 'paid' && row.stripe_payment_intent_id).map((row) => row.stripe_payment_intent_id));
+  // Every recorded ledger state for a PaymentIntent (paid, refunded, disputed), so a historical
+  // succeeded attempt matches its payment whatever became of it; a dispute outranks the rest.
+  const ledgerStates = new Map();
+  for (const row of linked.filter((r) => ['paid', 'refunded', 'disputed'].includes(r.status) && r.stripe_payment_intent_id)) {
+    if (ledgerStates.get(row.stripe_payment_intent_id) !== 'disputed') ledgerStates.set(row.stripe_payment_intent_id, row.status);
+  }
   const entries = [
     ...linked.map((row) => paymentEntry(row, invoice)),
-    ...attempts.map((row) => attemptEntry(row, ledgerIntents)),
+    ...attempts.map((row) => attemptEntry(row, ledgerStates)),
     ...orphans.map(orphanEntry),
     ...credits.map((row) => ({
       type: 'credit_movement',
