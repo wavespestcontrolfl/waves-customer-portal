@@ -73,15 +73,11 @@ function baseCtx(overrides = {}) {
 
 const CURRENT_MONTH = 6; // June — inside every fixture entry's active_months
 
-// This suite pins the full Gemini → verify → OpenAI ladder (the 2026-09-26
-// contract); the owner's 2026-10-01 Gemini-only default has its own block.
+// The default (no ladder option) is the full Gemini → verify → OpenAI
+// ladder (the 2026-09-26 contract); the app route's Gemini-only read
+// (owner 2026-10-01) has its own block below.
 beforeEach(() => {
   dispatch.mockReset();
-  process.env.PHOTO_ID_V2_LADDER = 'full';
-});
-
-afterAll(() => {
-  delete process.env.PHOTO_ID_V2_LADDER;
 });
 
 // ── buildAnswer: naming thresholds ─────────────────────────────────────────
@@ -1542,17 +1538,18 @@ describe('L1: pest engine reads only the pest section', () => {
   });
 });
 
-// Owner 2026-10-01: "lets just use Gemini for this". Default ladder: one
-// Gemini read answers; OpenAI only stands in when Gemini returns nothing.
-describe('Gemini-only ladder (default)', () => {
-  beforeEach(() => {
+// Owner 2026-10-01: "lets just use Gemini for this". The app route asks
+// for a Gemini-only read: OpenAI only stands in when Gemini returns nothing.
+describe('Gemini-only ladder (app route)', () => {
+  const GEMINI_ONLY = { ladder: 'gemini_only' };
+  afterEach(() => {
     delete process.env.PHOTO_ID_V2_LADDER;
   });
 
   test('a confident Gemini read is the answer: one call, no verify, no escalation', async () => {
     dispatch.mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]));
 
-    const result = await identifyPestV2([PHOTO]);
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'photo_id_v2_candidates', thinkingLevel: 'LOW' });
     expect(result.internal).toMatchObject({ ladder: 'gemini_only', escalation_triggered: false, escalation_reasons: [] });
@@ -1563,7 +1560,7 @@ describe('Gemini-only ladder (default)', () => {
   test('a low-confidence Gemini read does not escalate; it climbs on its own', async () => {
     dispatch.mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant', confidence: 0.35 }, { slug: 'white-footed-ant', confidence: 0.3 }]));
 
-    const result = await identifyPestV2([PHOTO]);
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.internal.escalation_triggered).toBe(false);
     expect(result.v2.answer.level).not.toBe('entry');
@@ -1580,11 +1577,45 @@ describe('Gemini-only ladder (default)', () => {
         },
       });
 
-    const result = await identifyPestV2([PHOTO]);
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch).toHaveBeenCalledTimes(2);
     expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_escalation');
     expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
     expect(result.ok).toBe(true);
+  });
+
+  test('a reply whose candidate items are all malformed hands off to OpenAI', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [{ slug: 'fire-ant' }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+  });
+
+  test('a valid empty Gemini read stays a genuine unknown without OpenAI', async () => {
+    dispatch.mockResolvedValueOnce(candidatesReply([]));
+
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.v2.answer.wording).toBe('unknown');
+  });
+
+  test('callers that do not ask (visit prep) keep the full ladder', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.92, traits_visible: [1, 2], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_verify');
+    expect(result.internal.ladder).toBe('full');
   });
 
   test('PHOTO_ID_V2_LADDER=full restores the verify leg', async () => {
@@ -1593,7 +1624,7 @@ describe('Gemini-only ladder (default)', () => {
       .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.92 }]))
       .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.92, traits_visible: [1, 2], traits_not_visible: [] }] } });
 
-    const result = await identifyPestV2([PHOTO]);
+    const result = await identifyPestV2([PHOTO], GEMINI_ONLY);
     expect(dispatch.mock.calls[1][1].laneId).toBe('photo_id_v2_verify');
     expect(result.internal.ladder).toBe('full');
   });

@@ -284,14 +284,18 @@ function derivedNodeCompatibility(nodeId) {
 // customer never gets an error for a Gemini miss. Without a trait check the
 // answer tops out at "Likely". PHOTO_ID_V2_LADDER=full restores the
 // 2026-09-26 Gemini → verify → OpenAI ladder without a deploy.
-// The app engine's own policy; photoIdVision (v1 surfaces) is the fallback
-// only when photoIdPestV2 is not registered.
-function photoIdPolicy() {
-  return MODELS.TEXT_POLICIES?.photoIdPestV2 || MODELS.TEXT_POLICIES?.photoIdVision;
+// A Gemini-only read uses the app engine's own policy (photoIdPestV2, else
+// photoIdVision when it is not registered); the full ladder keeps
+// photoIdVision, so visit-prep reads are unchanged (Codex #5560 r3 P1).
+function photoIdPolicy(singleRead) {
+  return (singleRead && MODELS.TEXT_POLICIES?.photoIdPestV2) || MODELS.TEXT_POLICIES?.photoIdVision;
 }
 
-function geminiOnly() {
-  return process.env.PHOTO_ID_V2_LADDER !== 'full';
+// Only a caller that asks for it (the customer app route) gets the
+// Gemini-only read; PHOTO_ID_V2_LADDER=full puts that caller back on the
+// full ladder too. Every other caller keeps the full ladder.
+function geminiOnly(ladder) {
+  return ladder === 'gemini_only' && process.env.PHOTO_ID_V2_LADDER !== 'full';
 }
 
 function escalateBelow() {
@@ -530,8 +534,8 @@ function totalBudgetMs() {
 // all" — the opposite of what an exhausted budget should mean).
 const MIN_LEG_TIMEOUT_MS = 1000;
 
-async function callCandidatesModel(images, catalogEntries, timeoutMs) {
-  const route = photoIdPolicy()?.primary;
+async function callCandidatesModel(images, catalogEntries, timeoutMs, singleRead = false) {
+  const route = photoIdPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildCandidatesSystemPrompt(buildCatalogIndexText(catalogEntries)),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it.`,
@@ -547,7 +551,7 @@ async function callCandidatesModel(images, catalogEntries, timeoutMs) {
 }
 
 async function callVerifyModel(images, candidateContext, timeoutMs) {
-  const route = photoIdPolicy()?.primary;
+  const route = photoIdPolicy(false)?.primary;
   return callWithProvider(route, {
     system: buildVerifySystemPrompt(candidateContext),
     text: 'Check each candidate above against these same photos.',
@@ -562,8 +566,8 @@ async function callVerifyModel(images, candidateContext, timeoutMs) {
   });
 }
 
-async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs) {
-  const route = photoIdPolicy()?.fallback;
+async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs, singleRead = false) {
+  const route = photoIdPolicy(singleRead)?.fallback;
   return callWithProvider(route, {
     system: buildEscalationSystemPrompt(buildCatalogIndexText(catalogEntries), candidateContext),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it and check any candidates already raised.`,
@@ -1550,7 +1554,7 @@ function legInfo(result) {
  * `internal` (which models answered, escalation reasons) must never reach
  * the customer.
  */
-async function identifyPestV2(photos = []) {
+async function identifyPestV2(photos = [], { ladder = 'full' } = {}) {
   const images = toImages(photos);
   if (!images.length) return { ok: false, reason: 'no_photos' };
 
@@ -1561,7 +1565,8 @@ async function identifyPestV2(photos = []) {
   const deadline = Date.now() + totalBudgetMs();
   const legTimeoutMs = (legsRemaining) => Math.max(MIN_LEG_TIMEOUT_MS, Math.ceil((deadline - Date.now()) / legsRemaining));
 
-  const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3));
+  const singleRead = geminiOnly(ladder);
+  const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3), singleRead);
   // An `ok:true` response whose shape doesn't match what was requested is
   // treated the same as a failed leg — see `hasCandidatesArray`.
   const candidatesJson = validLegJson(candidatesResult, 'candidates');
@@ -1570,7 +1575,6 @@ async function identifyPestV2(photos = []) {
   const candidatesFromCall1 = candidatesJson ? dedupeCandidates(sanitizedCandidatesOf(candidatesJson).map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
-  const singleRead = geminiOnly();
   let verifyResult = null;
   let verifiedCandidates = candidatesFromCall1;
   if (catalogCandidates1.length && !singleRead) {
@@ -1599,7 +1603,12 @@ async function identifyPestV2(photos = []) {
   const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
-  const escalationReasons = (singleRead ? [[!candidatesJson, 'gemini_missed']] : [
+  // Gemini-only: a reply whose candidate items were all malformed is a miss
+  // too, not an unknown; a valid empty list is still a genuine unknown
+  // (Codex #5560 r3 P2).
+  const rawCandidateCount = hasCandidatesArray(candidatesResult?.json) ? candidatesResult.json.candidates.length : 0;
+  const noUsableRead = !candidatesJson || (rawCandidateCount > 0 && candidatesFromCall1.length === 0);
+  const escalationReasons = (singleRead ? [[noUsableRead, 'gemini_missed']] : [
     [geminiMissed, 'gemini_missed'],
     [contradicted, 'self_contradiction'],
     [lookAlikeClose, 'consequential_lookalike_close'],
@@ -1621,7 +1630,7 @@ async function identifyPestV2(photos = []) {
   let openaiStoodInAlone = false;
 
   if (escalationTriggered) {
-    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
+    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1), singleRead);
     escalationJson = validLegJson(escalationResult, 'escalation');
     escalationShows = (escalationJson || {}).shows;
     evidenceKind = normalizeEvidenceKind(candidatesShows, escalationShows);

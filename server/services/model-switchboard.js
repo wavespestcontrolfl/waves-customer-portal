@@ -377,6 +377,9 @@ const LANES = [
   // TEXT_POLICIES.photoIdVision): identifyPest's analyzePhoto tries Gemini,
   // then the prior Gemini, and reaches ChatGPT's best vision model when both
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
+  // Customer app Photo ID (owner 2026-10-01, TEXT_POLICIES.photoIdPestV2):
+  // one Gemini read answers; OpenAI only when Gemini returns nothing usable.
+  L('pest_id_app', 'Pest identification (customer app Photo ID)', 'photo-id-v2/pest-engine.js, routes/photo-id.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss · PHOTO_ID_V2_LADDER=full restores the verify + escalation ladder' }),
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
   // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
