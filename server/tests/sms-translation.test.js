@@ -20,7 +20,11 @@ jest.mock('../config/feature-gates', () => {
 jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: jest.fn(async () => ({ customer: { id: 'c1' } })) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ classifyCustomerSmsTriageIntent: jest.fn(() => ({ intent: 'GENERAL', confidence: 0.9 })) }));
 const mockUngrounded = jest.fn(() => false);
-jest.mock('../services/sms-shadow-drafter', () => ({ generateGroundedDraft: (...a) => mockDraft(...a), replyQuotesUngroundedAmount: (...a) => mockUngrounded(...a) }));
+jest.mock('../services/sms-shadow-drafter', () => ({
+  generateGroundedDraft: (...a) => mockDraft(...a),
+  replyQuotesUngroundedAmount: (...a) => mockUngrounded(...a),
+  hasBannedCustomerCopy: (t) => /pet[- ]safe/i.test(t),
+}));
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
 
@@ -32,12 +36,12 @@ const REPLY = 'Thanks for asking! Your technician will text you about 30 minutes
 const REPLY_ES = '¡Gracias por preguntar! Su técnico le enviará un mensaje unos 30 minutos antes de llegar. Su próxima visita es el martes 14 de octubre a las 14 h.';
 const customer = { id: 'c1', city: 'Parrish' };
 
-function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, meaning = { same_meaning: true, differences: [] } }) {
+function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, backLang = 'es', meaning = { same_meaning: true, differences: [] } }) {
   mockDispatch.mockImplementation(async (policy, payload) => {
     const sys = payload.system;
     if (sys.startsWith('You read text messages')) return { ok: true, json: inbound };
     if (sys.startsWith('Translate a text message from a pest control company')) return { ok: true, json: { text: translated } };
-    if (sys.startsWith('Translate this')) return { ok: true, json: { text: back } };
+    if (sys.startsWith('Say what language this text message')) return { ok: true, json: { language_code: backLang, text: back } };
     if (sys.startsWith('Compare two English versions')) return { ok: true, json: meaning };
     throw new Error(`unexpected prompt: ${sys.slice(0, 40)}`);
   });
@@ -87,6 +91,11 @@ describe('tokenParity', () => {
     expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:45.')).toMatchObject({ ok: false });
   });
 
+  test('a phone number is one value: reordered groups fail, spacing may differ', () => {
+    expect(tokenParity('Call us at 941-555-1234.', 'Llámenos al 555-941-1234.')).toMatchObject({ ok: false });
+    expect(tokenParity('Call us at 941-555-1234.', 'Llámenos al (941) 555 1234.')).toMatchObject({ ok: true });
+  });
+
   test('links and emails must come through exactly', () => {
     const en = 'Pick a time here: https://portal.example.com/l/abc12 or email contact@example.com.';
     expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc12 o escriba a contact@example.com.').ok).toBe(true);
@@ -130,20 +139,23 @@ describe('runTranslationTrial', () => {
     const live = { customer: { id: 'c1' }, smsHistory: [
       { direction: 'inbound', body: SPANISH, fromPhone: '+19415550100' },
       { direction: 'outbound', body: 'Thanks, we will check.' },
+      { direction: 'outbound', body: '¿Quiere que pasemos el jueves por la mañana?' },
       { direction: 'inbound', body: OLDER, fromPhone: '+19415550100' },
     ] };
     ctx.getContextForCustomer.mockResolvedValueOnce(live);
     scriptModels({ inbound: SPANISH_INBOUND });
     const base = mockDispatch.getMockImplementation();
-    mockDispatch.mockImplementation(async (policy, payload) => (payload.text.includes(OLDER)
-      ? { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Thanks, can the cats go out too?' } }
-      : base(policy, payload)));
+    mockDispatch.mockImplementation(async (policy, payload) => {
+      if (payload.text.includes(OLDER)) return { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Thanks, can the cats go out too?' } };
+      if (payload.text.includes('jueves')) return { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Would you like us to come Thursday morning?' } };
+      return base(policy, payload);
+    });
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     const seen = mockDraft.mock.calls[0][0].context.smsHistory;
-    expect(seen.map((m) => m.body)).toEqual([ENGLISH_IN, 'Thanks, we will check.', 'Thanks, can the cats go out too?']);
+    expect(seen.map((m) => m.body)).toEqual([ENGLISH_IN, 'Thanks, we will check.', 'Would you like us to come Thursday morning?', 'Thanks, can the cats go out too?']);
     expect(seen[0].translatedFrom).toBe(SPANISH);
     expect(live.smsHistory[0].body).toBe(SPANISH);
-    expect(row.checks.thread_rows_translated).toBe(2);
+    expect(row.checks.thread_rows_translated).toBe(3);
   });
 
   test('scheduling intent is read off the English translation', async () => {
@@ -181,13 +193,25 @@ describe('runTranslationTrial', () => {
   });
 
   test('the meaning check reads the whole back-translation; one too long to compare is held', async () => {
-    const longBack = `${REPLY} ${'Also, we promise a free visit. '.repeat(10)}`;
+    const longBack = `${REPLY} ${'We look forward to seeing you. '.repeat(10)}`;
     scriptModels({ inbound: SPANISH_INBOUND, back: longBack });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     const meaningCall = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'));
     expect(meaningCall[1].text).toContain(longBack.trim());
     scriptModels({ inbound: SPANISH_INBOUND, back: 'x '.repeat(1700) });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_too_long' });
+  });
+
+  test('a translation into another language than the customer\'s is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, backLang: 'pt' });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_in_other_language' });
+    scriptModels({ inbound: SPANISH_INBOUND, backLang: 'es-MX' });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'ready' });
+  });
+
+  test('the copy rules run on the back-translation: a translation that adds a pet-safe claim is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, back: `${REPLY} The product is pet-safe.` });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_banned_copy' });
   });
 
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {

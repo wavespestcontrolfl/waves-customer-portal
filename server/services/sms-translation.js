@@ -60,6 +60,13 @@ const TRANSLATE_SCHEMA = {
   properties: { text: { type: 'string' } },
 };
 
+const BACK_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['language_code', 'text'],
+  properties: { language_code: { type: 'string' }, text: { type: 'string' } },
+};
+
 const MEANING_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -91,7 +98,7 @@ function clip(text) {
 async function translateInbound(inbound) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `You read text messages a pest control company receives. Say what language the message is written in and translate it into plain English, keeping every name, number, time, date, address, price and link exactly as written. Do not answer the message. If the message is already English (including short replies, names, addresses or emoji), set is_english true and copy it unchanged. ${DATA_NOTE}`,
+    system: `You read text messages from a pest control company's customer thread. Say what language the message is written in and translate it into plain English, keeping every name, number, time, date, address, price and link exactly as written. Do not answer the message. If the message is already English (including short replies, names, addresses or emoji), set is_english true and copy it unchanged. ${DATA_NOTE}`,
     text: `<text>\n${clip(inbound)}\n</text>`,
     jsonSchema: INBOUND_SCHEMA,
   });
@@ -117,18 +124,26 @@ async function translateReply({ englishReply, language }) {
   return text ? { ok: true, text, model: out.model } : { ok: false, reason: 'reply_translation_empty' };
 }
 
-// The back-translation sees only the translated text, never the English reply,
-// so it cannot copy the original back; meaningCheck compares the two.
-async function backTranslate({ translated, language }) {
+// The back-translation sees only the translated text, never the English reply
+// or the language it was meant to be in, so it cannot copy the original back
+// and it names the language it actually read; meaningCheck compares the two.
+async function backTranslate({ translated }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate this ${language} text message into English, word for word as far as natural English allows. Keep every number, time, date, price, phone number, link, email and name exactly as written. Do not fix, soften or add anything. ${DATA_NOTE}`,
+    system: `Say what language this text message is written in (its ISO 639-1 code, e.g. "es") and translate it into English, word for word as far as natural English allows. Keep every number, time, date, price, phone number, link, email and name exactly as written. Do not fix, soften or add anything. ${DATA_NOTE}`,
     text: `<text>\n${translated}\n</text>`,
-    jsonSchema: TRANSLATE_SCHEMA,
+    jsonSchema: BACK_SCHEMA,
   });
   if (!out.ok) return out;
   const text = typeof out.json.text === 'string' ? out.json.text.trim() : '';
-  return text ? { ok: true, text, model: out.model } : { ok: false, reason: 'back_translation_empty' };
+  const languageCode = languageCodeOf(out.json.language_code);
+  return text ? { ok: true, text, languageCode, model: out.model } : { ok: false, reason: 'back_translation_empty' };
+}
+
+// "es", "es-MX", "PT_br" -> "es" / "pt"; anything else -> null
+function languageCodeOf(value) {
+  const m = /^([a-z]{2,3})(?:[-_][a-z0-9]+)?$/i.exec(String(value || '').trim());
+  return m ? m[1].toLowerCase() : null;
 }
 
 async function meaningCheck({ englishReply, backTranslation }) {
@@ -163,9 +178,17 @@ function trimZeros(n) {
   return n.replace(/^0+(?=\d)/, '');
 }
 
+// A phone number is one value, its groups in order ("941-555-1234" never
+// matches "555-941-1234"); spacing and punctuation may differ.
+const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
+
 function numberValues(text) {
-  const str = String(text || '').replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
   const out = [];
+  const withoutPhones = String(text || '').replace(PHONE_RE, (p) => {
+    out.push({ value: `tel:${p.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')}`, pm: false, time: false });
+    return ' ';
+  });
+  const str = withoutPhones.replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
@@ -237,10 +260,12 @@ function tokenParity(englishReply, translated) {
 }
 
 // The drafter's guards read the recent thread too (readInboundThread: the last
-// 10 rows, the current inbound among them), so a foreign row left there keeps
-// the English-only restriction on the translated question. The trial drafts on
-// a COPY of the context whose foreign inbound rows carry their English
-// translation (the original kept beside it); the real context is untouched.
+// 10 rows, the current inbound among them), and the model sees every one of
+// them, staff replies included. A foreign row left there keeps the English-only
+// restriction on the translated question, or hides what a short "Si" answers.
+// The trial drafts on a COPY of the context whose foreign rows (either
+// direction) carry their English translation (the original kept beside it);
+// the real context is untouched.
 async function translateThread(context, inboundMessage, inboundEnglish) {
   const rows = Array.isArray(context?.smsHistory) ? context.smsHistory : [];
   const cache = new Map([[String(inboundMessage).trim(), inboundEnglish]]);
@@ -248,7 +273,7 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
   const out = [];
   for (const [i, m] of rows.entries()) {
     // (a row over the cap stays as written: a clipped translation would hide its tail, and the guards hold a foreign row)
-    if (i >= 10 || !m || m.direction !== 'inbound' || typeof m.body !== 'string' || m.body.length > MAX_TEXT || !needsTranslation(m.body)) { out.push(m); continue; }
+    if (i >= 10 || !m || typeof m.body !== 'string' || m.body.length > MAX_TEXT || !needsTranslation(m.body)) { out.push(m); continue; }
     const key = m.body.trim();
     if (!cache.has(key)) {
       const t = await translateInbound(m.body);
@@ -274,22 +299,30 @@ async function recordTrial(row) {
   }
 }
 
-// The checks draftShadowReply runs on a converged draft before it may leave
-// the shadow lane: a copied redaction placeholder, an amount the billing facts
-// do not hold, and the deterministic comms-lint verdict (same options).
-function postDraftFault(englishReply, context) {
-  const suggestMode = require('./sms-suggest-mode');
-  if (suggestMode.hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
-  if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
+// The copy rules: the deterministic comms-lint verdict (draftShadowReply's
+// options) and the drafter's banned-customer-copy guard (pet-safe claims,
+// fixed re-entry times). Run on the English reply and on the back-translation.
+function copyFault(text, context = null, { ignoreRules = [] } = {}) {
+  if (require('./sms-shadow-drafter').hasBannedCustomerCopy(text)) return 'banned_copy';
   const billingLane = context?.customer?.billingLane;
-  const lint = require('./comms-lint').lintComms(englishReply, {
+  const lint = require('./comms-lint').lintComms(text, {
     channel: 'sms',
     audience: 'customer',
     stopExpected: false,
     monthlyBilled: billingLane ? Boolean(billingLane.monthlyBilled) : undefined,
     billingMode: billingLane?.mode,
   });
-  return lint.pass ? null : 'reply_failed_comms_lint';
+  return lint.failures.some((f) => !ignoreRules.includes(f.rule)) ? 'failed_comms_lint' : null;
+}
+
+// The checks draftShadowReply runs on a converged draft before it may leave
+// the shadow lane: a copied redaction placeholder, an amount the billing facts
+// do not hold, and the copy rules above.
+function postDraftFault(englishReply, context) {
+  if (require('./sms-suggest-mode').hasRedactionPlaceholder(englishReply)) return 'reply_has_placeholder';
+  if (require('./sms-shadow-drafter').replyQuotesUngroundedAmount(englishReply, context)) return 'reply_has_ungrounded_amount';
+  const fault = copyFault(englishReply, context);
+  return fault ? `reply_${fault}` : null;
 }
 
 // Steps 1-2: the customer's text in English, then the English draft.
@@ -334,11 +367,11 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
   const fault = postDraftFault(englishReply, liveContext);
   if (fault) return { stop: fault, fields, checks };
-  return { englishReply, language: inbound.language, fields, checks };
+  return { englishReply, language: inbound.language, languageCode: languageCodeOf(inbound.languageCode), fields, checks };
 }
 
 // Steps 3-4: translate, then check the exact stored text.
-async function translateAndCheck({ englishReply, language }) {
+async function translateAndCheck({ englishReply, language, languageCode }) {
   const translated = await translateReply({ englishReply, language });
   if (!translated.ok) return { stop: `reply_translation_failed:${translated.reason}` };
   const fields = { reply_translated: translated.text };
@@ -348,11 +381,17 @@ async function translateAndCheck({ englishReply, language }) {
   if (translated.text === englishReply || !needsTranslation(translated.text)) return { stop: 'translation_not_in_customer_language', fields };
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(translated.text)) return { stop: 'translation_has_placeholder', fields };
   const parity = tokenParity(englishReply, translated.text);
-  const back = await backTranslate({ translated: translated.text, language });
+  const back = await backTranslate({ translated: translated.text });
   fields.back_translation = back.ok ? back.text : null;
   if (!back.ok) return { stop: `back_translation_failed:${back.reason}`, fields, checks: { token_parity: parity } };
   // every model input is compared whole, never clipped (the reply and its translation are capped above)
   if (back.text.length > 2 * MAX_TEXT) return { stop: 'back_translation_too_long', fields, checks: { token_parity: parity } };
+  // the translation must be in the customer's language, not merely "not English" (Spanish asked, Portuguese written)
+  if (!languageCode || back.languageCode !== languageCode) return { stop: 'translation_in_other_language', fields, checks: { token_parity: parity, language: { asked: languageCode, written: back.languageCode } } };
+  // the copy rules run on what the translation actually says, read back in English (its length is
+  // not the SMS's: the translated text is what would send, and the English reply passed the segment rule)
+  const backFault = copyFault(back.text, null, { ignoreRules: ['sms-segment-limit'] });
+  if (backFault) return { stop: `back_translation_${backFault}`, fields, checks: { token_parity: parity } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
   if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };
@@ -383,7 +422,7 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     if (en.english) return null;
     if (en.skip) return await save('skipped', en.skip, en.fields, en.checks);
     if (en.stop) return await save('held', en.stop, en.fields, en.checks);
-    const tr = await translateAndCheck({ englishReply: en.englishReply, language: en.language });
+    const tr = await translateAndCheck({ englishReply: en.englishReply, language: en.language, languageCode: en.languageCode });
     const fields = { ...en.fields, ...tr.fields };
     const checks = { ...en.checks, ...tr.checks };
     if (tr.stop) return await save('held', tr.stop, fields, checks);
