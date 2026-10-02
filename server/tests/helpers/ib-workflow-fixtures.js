@@ -68,7 +68,7 @@ class Cast {
   }
 
   /** Register cleanup for rows a case seeded outside the shared tables above. */
-  onRetire(fn) { this.cleanups.push(fn); }
+  onRetire(fn) { this.cleanups.push(fn); } // fn(db, failed): a cleanup that swallows per-row errors pushes them onto `failed`
 
   async customer(over = {}) {
     const id = over.id || uuid();
@@ -171,31 +171,38 @@ class Cast {
     return { ...row, call_log_id: callId };
   }
 
-  /** Retire everything this cast created. Soft delete keeps foreign keys intact. */
+  /**
+   * Retire everything this cast created. Soft delete keeps foreign keys intact. Cleanup is best-effort (every step runs even
+   * when an earlier one fails) but never silent: the steps that failed are returned as [{ step, error }] and the runner records
+   * them as a harness failure, because a case that leaves rows or shared configuration behind makes the next case order-dependent.
+   */
   async retire() {
     const now = new Date();
-    for (const fn of this.cleanups.reverse()) await Promise.resolve(fn(this.db)).catch(() => {});
-    if (this.customers.length) await removeBillingRows(this.db, this.customers).catch(() => {});
+    const failed = [];
+    const step = async (name, fn) => { try { await fn(); } catch (err) { failed.push({ step: name, error: String(err && err.message || err).split('\n')[0].slice(0, 160) }); } };
+    const cleanups = this.cleanups.slice().reverse();
+    for (let i = 0; i < cleanups.length; i += 1) await step(`registered cleanup ${i + 1}`, () => cleanups[i](this.db, failed));
+    if (this.customers.length) await step('billing rows', () => removeBillingRows(this.db, this.customers, failed));
     if (this.customers.length) {
       // Bookings made during the case must not crowd the next case's calendar.
-      await this.db('scheduled_services').whereIn('customer_id', this.customers).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now }).catch(() => {});
-      await this.db('customers').whereIn('id', this.customers).update({ deleted_at: now, active: false });
+      await step('cancel bookings', () => this.db('scheduled_services').whereIn('customer_id', this.customers).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now }));
+      await step('retire customers', () => this.db('customers').whereIn('id', this.customers).update({ deleted_at: now, active: false }));
     }
-    if (this.leads.length) await this.db('leads').whereIn('id', this.leads).update({ deleted_at: now });
-    if ((this.commitmentIds || []).length) await this.db('call_commitments').whereIn('id', this.commitmentIds).update({ status: 'dismissed' }).catch(() => {});
-    if (this.insertedServiceId) await this.db('services').where({ id: this.insertedServiceId }).update({ is_active: false }).catch(() => {});
-    if (this.restoreService) await this.db('services').where({ id: this.restoreService.id })
-      .update({ base_price: this.restoreService.base_price, price_range_min: this.restoreService.price_range_min }).catch(() => {});
-    if (this.notificationIds.length) await this.db('notifications').whereIn('id', this.notificationIds).update({ done_at: now, done_by: MARK });
-    if (this.technicians.length) await this.db('technicians').whereIn('id', this.technicians).update({ active: false, employment_status: 'inactive' }).catch(() => {});
+    if (this.leads.length) await step('retire leads', () => this.db('leads').whereIn('id', this.leads).update({ deleted_at: now }));
+    if ((this.commitmentIds || []).length) await step('dismiss commitments', () => this.db('call_commitments').whereIn('id', this.commitmentIds).update({ status: 'dismissed' }));
+    if (this.insertedServiceId) await step('deactivate seeded service', () => this.db('services').where({ id: this.insertedServiceId }).update({ is_active: false }));
+    if (this.restoreService) await step('restore catalog service', () => this.db('services').where({ id: this.restoreService.id }).update({ base_price: this.restoreService.base_price, price_range_min: this.restoreService.price_range_min }));
+    if (this.notificationIds.length) await step('close notifications', () => this.db('notifications').whereIn('id', this.notificationIds).update({ done_at: now, done_by: MARK }));
+    if (this.technicians.length) await step('retire technicians', () => this.db('technicians').whereIn('id', this.technicians).update({ active: false, employment_status: 'inactive' }));
+    return failed;
   }
 }
 
 const STOCK_SKU_PREFIX = 'IBWF-';
 
 /** Billing and estimate rows the baseline seeded for customers: removed outright so account-wide readers never see them. */
-async function removeBillingRows(db, customerIds) {
-  const step = (fn) => Promise.resolve(fn()).catch(() => {});
+async function removeBillingRows(db, customerIds, failed = []) {
+  const step = (fn) => Promise.resolve().then(fn).catch((err) => { failed.push({ step: 'billing row delete', error: String(err && err.message || err).split('\n')[0].slice(0, 160) }); });
   await step(() => db('customer_credit_ledger').whereIn('customer_id', customerIds).del());
   await step(() => db('collections_flags').whereIn('customer_id', customerIds).del());
   await step(() => db('payments').whereIn('customer_id', customerIds).del());
@@ -204,8 +211,8 @@ async function removeBillingRows(db, customerIds) {
 }
 
 /** Stock products, their requests and movements, removed outright (the catalog is searched by name and is not filtered by active). */
-async function removeStockRows(db, productIds) {
-  const step = (fn) => Promise.resolve(fn()).catch(() => {});
+async function removeStockRows(db, productIds, failed = []) {
+  const step = (fn) => Promise.resolve().then(fn).catch((err) => { failed.push({ step: 'stock row delete', error: String(err && err.message || err).split('\n')[0].slice(0, 160) }); });
   await step(() => db('vendor_orders').whereIn('restock_request_id', db('product_restock_requests').whereIn('product_id', productIds).select('id')).del());
   await step(() => db('product_restock_requests').whereIn('product_id', productIds).del());
   await step(() => db('product_inventory_movements').whereIn('product_id', productIds).del());

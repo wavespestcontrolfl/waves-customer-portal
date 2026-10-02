@@ -5,6 +5,7 @@
 // does moving a grouped visit. ctx.commit follows the manifest's card flag for each step.
 
 const { phone, nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
+const { roleRefusal } = require('./common');
 
 async function seedLarkspur(cast, { withRental = false } = {}) {
   const s = {};
@@ -106,7 +107,8 @@ CASES['W4-dev-03'] = async (ctx, h, cast, c) => {
   }
   const rows = await propRows(h, s.customer.id);
   ctx.check(rows.filter((r) => r.address_line1 === '27 Sample Court').length === 1, 'domain_rule', 'duplicate_property_row', `${rows.filter((r) => r.address_line1 === '27 Sample Court').length} rows for 27 Sample Court`);
-  ctx.check(again.cards.length === 0 || /already|existing|duplicate/i.test(JSON.stringify(again.card)), 'proposal', 'second_add_not_reported_as_existing', `the second attempt proposed a card without saying the property exists; tool result ${toolResult}`);
+  const secondAdd = again.toolCalls.filter((t) => t.name === 'add_customer_property').pop();
+  ctx.check(again.cards.length === 0 && !!secondAdd && !!secondAdd.result && secondAdd.result.code === 'property_exists', 'proposal', 'second_add_not_reported_as_existing', `the second attempt must be answered property_exists with no card (cards ${again.cards.length}); tool result ${toolResult}`);
   ctx.markCompleted();
 };
 
@@ -147,7 +149,9 @@ CASES['W4-dev-05'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page, rounds: [{ tools: [['get_customer_detail', { customer_id: s.customer.id }]] }, { tools: [['switch_appointment_property', { appointment_id: s.friLawn.id, property_id: s.lake.id }]] }] });
   ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_grouped_move', `cards ${turn.cards.length}; ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 240)}`);
   const text = JSON.stringify(turn.card || {});
-  ctx.check(/group|together|both|lawn and pest|pest/i.test(text) && text.includes(s.friPest.id.slice(0, 8)) || /group|together|both/i.test(text), 'proposal', 'card_does_not_say_both_rows_move', 'the card does not name that the grouped lawn and pest rows move together');
+  // Both grouped rows by their pinned ids: a card that says "group" but lists only the lawn row would leave the pest row's move unseen.
+  const named = [s.friLawn, s.friPest].filter((row) => text.includes(row.id));
+  ctx.check(named.length === 2, 'proposal', 'card_does_not_say_both_rows_move', `the card names ${named.length} of the 2 grouped service rows (lawn ${s.friLawn.id.slice(0, 8)}, pest ${s.friPest.id.slice(0, 8)})`);
   const mid = await visitProps(h, s.customer.id);
   ctx.check(JSON.stringify(mid) === JSON.stringify(before), 'side_effect', 'visit_moved_before_confirm', 'a visit changed property before the card was confirmed');
   ctx.markCompleted();
@@ -156,8 +160,9 @@ CASES['W4-dev-05'] = async (ctx, h, cast, c) => {
 CASES['W4-dev-06'] = async (ctx, h, cast, c) => {
   const { s, before, turn } = await addRental(ctx, h, cast, c);
   ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_property_add', `cards ${turn.cards.length}; ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 240)}`);
-  const text = JSON.stringify(turn.card || {});
-  ctx.check(text.includes('27 Sample Court') && /rental/i.test(text), 'proposal', 'card_preview_incomplete', 'the card does not show the address and the rental label');
+  // The card's own effects: the address being saved and the label being set, not words that happen to appear anywhere in it.
+  const effects = (turn.card && turn.card.contract && turn.card.contract.effects) || [];
+  ctx.check(effects.some((e) => /27 Sample Court/.test(String(e.label || ''))) && effects.some((e) => /^label:/i.test(String(e.label || '')) && e.after === 'rental'), 'proposal', 'card_preview_incomplete', 'the card effects do not show the address being saved and the label set to rental');
   const mid = await propRows(h, s.customer.id);
   ctx.check(mid.length === before.props.length, 'side_effect', 'property_saved_before_confirm', 'a row appeared before the card was confirmed');
   ctx.markCompleted();
@@ -178,7 +183,11 @@ CASES['W4-dev-07'] = async (ctx, h, cast, c) => {
   }
   const after = { props: await propRows(h, s.customer.id), visits: await visitProps(h, s.customer.id) };
   ctx.check(after.props.length === before.props.length, 'domain_rule', 'duplicate_property_created', `abbreviated address created a row; tool result ${result}`);
-  ctx.check(turn.cards.length === 0 || /already|existing|duplicate/i.test(JSON.stringify(turn.card)), 'proposal', 'duplicate_not_reported_before_card', `a card was proposed for an address the customer already has; tool result ${result}`);
+  // The contract is a no-op that says why: the tool must report the address as already on file (`property_exists`) and offer no
+  // card. Any other zero-card answer (an unavailable tool, an unrelated validation error) is not the duplicate check.
+  const added = turn.toolCalls.filter((t) => t.name === 'add_customer_property').pop();
+  ctx.check(turn.cards.length === 0, 'proposal', 'duplicate_not_reported_before_card', `a card was proposed for an address the customer already has; tool result ${result}`);
+  ctx.check(!!added && !!added.result && added.result.code === 'property_exists', 'tool_result', 'duplicate_property_not_identified', `add_customer_property did not answer property_exists for the abbreviated duplicate: ${result}`);
   ctx.check(JSON.stringify(after.visits) === JSON.stringify(before.visits), 'side_effect', 'visit_repointed', 'a visit changed property');
   ctx.markCompleted();
 };
@@ -200,7 +209,7 @@ CASES['W4-dev-09'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.tech, { prompt: c.request, page, rounds: [{ tools: [['add_customer_property', addRentalInput(s.customer.id)]] }] });
   ctx.check(turn.cards.length === 0, 'proposal', 'technician_got_a_card', `cards ${turn.cards.length}`);
   const result = turn.toolCalls.slice(-1)[0] && turn.toolCalls.slice(-1)[0].result;
-  ctx.check(!result || !!(result.error || result.code), 'domain_rule', 'technician_property_tool_not_refused', `tool result ${JSON.stringify(result).slice(0, 200)}`);
+  ctx.check(roleRefusal(result), 'domain_rule', 'technician_property_tool_not_refused', `tool result ${JSON.stringify(result).slice(0, 200)}; the tool must answer that it is not available to the technician role`);
   ctx.check((await propRows(h, s.customer.id)).length === before.length, 'side_effect', 'unauthorized_write_committed', 'a technician session added a property');
   ctx.markCompleted();
 };

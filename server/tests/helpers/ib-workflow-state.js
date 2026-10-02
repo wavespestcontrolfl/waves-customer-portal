@@ -13,7 +13,7 @@ async function scoped(h, table, column, values, orderBy = 'id') {
   if (!values.length) return [];
   try {
     return await h.db(table).whereIn(column, values).orderBy(orderBy).select('*');
-  } catch (err) {
+  } catch {
     try { return await h.db(table).whereIn(column, values).select('*'); } catch (inner) { return [`unreadable: ${String(inner.message).split('\n')[0]}`]; }
   }
 }
@@ -64,7 +64,8 @@ async function sendState(h, cast) {
     sendgrid_provider: callsOf(providers.sendgrid),
     gmail_provider: callsOf(providers.gmail),
     outbound_sms_rows: customers.length ? await count(h.db('sms_log').whereIn('customer_id', customers).where({ direction: 'outbound' })) : 0,
-    audit_rows: customers.length ? await count(h.db('messaging_audit_log').whereIn('customer_id', customers)) : 0,
+    // Accepted attempts only: a blocked attempt (blocked_code set) is a refusal the audit log records, not a send.
+    audit_rows: customers.length ? await count(h.db('messaging_audit_log').whereIn('customer_id', customers).whereNull('blocked_code')) : 0,
     email_rows: customers.length ? await count(h.db('emails').whereIn('customer_id', customers)) : 0,
     email_message_rows: customers.length ? await count(h.db('email_messages').whereIn('recipient_id', customers)) : 0,
     email_automation_rows: customers.length ? await count(h.db('email_automation_sends').whereIn('customer_id', customers)) : 0,
@@ -77,15 +78,18 @@ async function sendState(h, cast) {
  * compared with the baseline the harness took at the case's first turn (rows the seed itself holds are not sends).
  * `codes` names the failure per channel so a workflow keeps its own wording: { sms, email }.
  */
-async function noSends(ctx, h, cast, { what = 'a read', codes = {} } = {}) {
-  const settled = await h.settle();
-  const base = ctx.sendBaseline || {};
+async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null, settle = true, rowsMayShrink = false } = {}) {
+  if (settle) await h.settle();
+  const base = since || ctx.sendBaseline || {};
   const now = await sendState(h, cast);
+  // The provider stubs are compared with `since` when given (taken right after a mid-case mockClear), else with zero.
+  const was = (k) => (since ? since[k] : 0);
   const smsCode = codes.sms || 'read_sent_a_text';
   const emailCode = codes.email || 'read_sent_an_email';
-  ctx.check(settled === 0 && now.sms_provider === 0, 'side_effect', smsCode, `${now.sms_provider} SMS provider submissions for ${what}`);
-  ctx.check(now.outbound_sms_rows === (base.outbound_sms_rows ?? now.outbound_sms_rows) && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
-  ctx.check(now.sendgrid_provider === 0 && now.gmail_provider === 0 && now.blocked_sender_hosts === (base.blocked_sender_hosts ?? now.blocked_sender_hosts), 'side_effect', emailCode, () => `${what}: SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider}, unstubbed sender calls ${base.blocked_sender_hosts} -> ${now.blocked_sender_hosts}`);
+  ctx.check(now.sms_provider === was('sms_provider'), 'side_effect', smsCode, `${now.sms_provider - was('sms_provider')} SMS provider submissions for ${what}`);
+  const outboundBase = base.outbound_sms_rows ?? now.outbound_sms_rows;
+  ctx.check((rowsMayShrink ? now.outbound_sms_rows <= outboundBase : now.outbound_sms_rows === outboundBase) && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
+  ctx.check(now.sendgrid_provider === was('sendgrid_provider') && now.gmail_provider === was('gmail_provider') && now.blocked_sender_hosts === (base.blocked_sender_hosts ?? now.blocked_sender_hosts), 'side_effect', emailCode, () => `${what}: SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider}, unstubbed sender calls ${base.blocked_sender_hosts} -> ${now.blocked_sender_hosts}`);
   const rows = ['email_rows', 'email_message_rows', 'email_automation_rows'].filter((k) => now[k] !== (base[k] ?? now[k]));
   ctx.check(rows.length === 0, 'side_effect', codes.emailRows || `${emailCode}_row`, () => `${what}: ${rows.map((k) => `${k} ${base[k]} -> ${now[k]}`).join('; ')}`);
 }

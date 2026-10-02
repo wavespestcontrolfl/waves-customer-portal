@@ -8,7 +8,7 @@
 // The calendar is the manifest's: Monday 2026-10-05 is the Pellham visit, Friday 2026-10-09 the day it moves to.
 
 const { phone, clockDate } = require('../ib-workflow-fixtures');
-const { pick, sameDay, ymdAdd } = require('./common');
+const { pick, sameDay, ymdAdd, noSends, sendState, optOutRefusal } = require('./common');
 
 async function seedMoveSet(cast) {
   const monday = clockDate('2026-10-05');
@@ -90,6 +90,7 @@ async function moveThenNotice(ctx, h, cast, c) {
 
 /** The notice as a plain text on its own card: one card, one confirm, one provider submission carrying the approved text. */
 async function confirmedNotice(ctx, h, customer, body, sessionId) {
+  const auditBefore = (await sendState(h, ctx.cast)).audit_rows;
   const notice = await sendNotice(ctx, h, customer, body, { sessionId });
   ctx.check(notice.cards.length === 1, 'proposal', 'no_card_for_notice', `cards ${notice.cards.length}`);
   if (notice.card) {
@@ -97,6 +98,9 @@ async function confirmedNotice(ctx, h, customer, body, sessionId) {
     ctx.check(sent.status === 200 && sent.body && sent.body.success === true, 'confirm', 'notice_confirm_failed', `confirm ${sent.status} ${JSON.stringify(sent.body).slice(0, 200)}`);
     const count = await h.settle({ expect: 1 });
     ctx.check(count === 1, 'side_effect', 'notice_send_count_wrong', `${count} provider submissions`);
+    const after = await sendState(h, ctx.cast);
+    ctx.check(after.audit_rows - auditBefore === 1, 'side_effect', 'notice_audit_row_count_wrong', `${after.audit_rows - auditBefore} accepted messaging audit rows for one approved notice`);
+    ctx.check(after.sendgrid_provider === 0 && after.gmail_provider === 0, 'side_effect', 'notice_sent_an_email', `SendGrid ${after.sendgrid_provider}, Gmail ${after.gmail_provider} for a text notice`);
     const call = h.providers.sms.mock.calls[0] && h.providers.sms.mock.calls[0][0];
     ctx.check(call && String(call.body) === body, 'read_back', 'notice_text_not_the_approved_text', `sent ${call && call.body}`);
   }
@@ -152,8 +156,7 @@ CASES['W6-dev-05'] = async (ctx, h, cast, c) => {
   h.providers.sms.mockClear();
   const after0 = await moveVisit(ctx, h, s, { visit: target, customer: s.wexcombe, date: s.friday, time: '9:00 AM', prompt: c.request, page: { appointmentId: target.id, customerId: s.wexcombe.id }, ids, expectEnd: '11:00', card: c.expected.card });
   void after0;
-  const sent = await h.settle();
-  ctx.check(sent === 0, 'side_effect', 'unrequested_customer_text', `${sent} submissions for a move with no notice requested`);
+  await noSends(ctx, h, cast, { what: 'a move with no notice requested', codes: { sms: 'unrequested_customer_text', smsRows: 'unrequested_outbound_row' } });
   const series = await h.db('scheduled_services').whereIn('id', s.series.map((v) => v.id)).select('id', 'is_recurring', 'recurring_pattern', 'recurring_parent_id');
   ctx.check(series.every((r) => r.is_recurring === true && r.recurring_pattern === 'quarterly'), 'side_effect', 'series_recurrence_changed', 'a series row lost its recurrence');
   ctx.markCompleted();
@@ -185,10 +188,13 @@ CASES['W6-dev-07'] = async (ctx, h, cast, c) => {
   const page = { customerId: s.wexcombe.id };
   const est = await ctx.establish({ prompt: c.request, page, customer: s.wexcombe });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: moveRounds(s.friLawn.id, ymdAdd(s.friday, 3), '9:00 AM') });
-  const refused = turn.cards.length === 0 && /group|together|both|one stop/i.test(JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)));
+  // Refused is the move tool's own grouped-stop answer with no card, not any zero-card turn that mentions a group.
+  const moveCall = turn.toolCalls.filter((t) => t.name === 'reschedule_appointment').pop();
+  const refused = turn.cards.length === 0 && !!moveCall && !!moveCall.result && /grouped with another service/i.test(String(moveCall.result.error || ''));
   if (!refused) {
     ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_grouped_move', `cards ${turn.cards.length}; ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 260)}`);
-    ctx.check(/group|together|both|pair|one stop|pest/i.test(JSON.stringify(turn.card || {})), 'proposal', 'card_does_not_say_both_rows_move', 'the card does not say the grouped lawn and pest rows move together');
+    const cardText = JSON.stringify(turn.card || {});
+    ctx.check([s.friLawn, s.friPest].every((row) => cardText.includes(row.id)), 'proposal', 'card_does_not_say_both_rows_move', 'the card does not name both grouped service rows (lawn and pest) by their pinned ids');
   }
   ctx.check(JSON.stringify(await snapshotRows(h, ids)) === JSON.stringify(before), 'side_effect', 'moved_before_confirm', 'a visit changed before confirm');
   if (turn.card) {
@@ -211,8 +217,7 @@ CASES['W6-dev-08'] = async (ctx, h, cast, c) => {
   h.providers.sms.mockClear();
   const out = await moveVisit(ctx, h, s, { visit: s.pellhamVisit, customer: s.pellham, date: s.friday, time: '10:00 AM', prompt: c.request, ids, expectEnd: '12:00', card: c.expected.card });
   void out;
-  const sent = await h.settle();
-  ctx.check(sent === 0, 'side_effect', 'unrequested_customer_text', `${sent} submissions for a move with no notice requested`);
+  await noSends(ctx, h, cast, { what: 'a move with no notice requested', codes: { sms: 'unrequested_customer_text', smsRows: 'unrequested_outbound_row' } });
   ctx.markCompleted();
 };
 
@@ -224,8 +229,10 @@ CASES['W6-dev-09'] = async (ctx, h, cast, c) => {
   const notice = await sendNotice(ctx, h, s.ostrander, noticeBody(s.friday, '11:00-13:00'), { sessionId: turn.sessionId });
   let sent;
   if (notice.card) sent = await h.confirm(h.actors.owner, notice.card);
-  const count = await h.settle();
-  ctx.check(count === 0, 'side_effect', 'text_sent_to_opted_out_number', `${count} provider submissions to a STOP number`);
+  // With no card the refusal has to be the send tool's own opt-out answer; the absence of a card alone is not evidence.
+  if (!notice.card) ctx.check(optOutRefusal(pick(notice, 'send_sms')), 'tool_result', 'opt_out_refusal_not_reported', `send_sms answered ${JSON.stringify(pick(notice, 'send_sms')).slice(0, 200)}`);
+  // Provider submissions AND the customer's outbound sms_log / audit rows (a queued row a later worker could send), and email.
+  await noSends(ctx, h, cast, { what: 'a notice to a STOP number', codes: { sms: 'text_sent_to_opted_out_number', smsRows: 'outbound_row_for_opted_out_number' } });
   ctx.check(!sent || !(sent.body && sent.body.success === true), 'domain_rule', 'opt_out_not_honored', `the notice to an opted-out number confirmed: ${sent && JSON.stringify(sent.body).slice(0, 200)}`);
   ctx.check(notice.cards.length === 0, 'proposal', 'card_shown_for_a_send_that_will_be_blocked', 'the notice card was offered although the number is opted out');
   ctx.markCompleted();

@@ -4,8 +4,8 @@
 // reads detail, schedule, thread and open promises; every fact in the results is checked against
 // the rows this case seeded, and nothing may be written.
 
-const { phone, uuid, nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
-const { sameDay, pick, picks, lookupThen, has, rowState, noWrites } = require('./common');
+const { phone, nextWeekdayET, plusDaysET } = require('../ib-workflow-fixtures');
+const { sameDay, pick, lookupThen, has, rowState, noWrites } = require('./common');
 
 async function seedBriefSet(cast) {
   const set = {};
@@ -73,6 +73,16 @@ function checkCommitments(ctx, result, expected) {
 // Row VALUES, not counts: a status flipped, a message marked read or a promise edited in place must fail a read.
 const snapshot = (h, cast) => rowState(h, cast);
 
+/** No other seeded customer's id, number or name appears in any reader result of the turn (a brief is one account). */
+function noOtherAccounts(ctx, turn, set, others) {
+  const results = turn.toolCalls.map((t) => t.result);
+  for (const other of others) {
+    const found = [other.id, other.phone, `${other.first_name} ${other.last_name}`].filter((needle) => has(results, needle));
+    const tools = [...new Set(turn.toolCalls.filter((t) => has(t.result, other.id) || has(t.result, other.phone) || has(t.result, `${other.first_name} ${other.last_name}`)).map((t) => t.name))];
+    ctx.check(found.length === 0, 'target_resolution', 'other_account_facts_in_brief', `${other.last_name} (${found.length} of id, phone, name) appears in the result of ${tools.join(', ')} for a brief of ${set.fennimore.last_name}`);
+  }
+}
+
 const CASES = {};
 
 async function fennimoreBrief(ctx, h, cast, c, page) {
@@ -83,7 +93,7 @@ async function fennimoreBrief(ctx, h, cast, c, page) {
   checkDetail(ctx, pick(turn, 'get_customer_detail'), set.fennimore, { properties: [set.fennimoreHome] });
   checkCommitments(ctx, pick(turn, 'get_open_commitments'), [set.promise]);
   checkThread(ctx, pick(turn, 'get_conversation_thread'), set);
-  ctx.check(!has(turn.toolCalls.map((t) => t.result), set.murphyA.id) || true, 'tool_result', 'noop', '');
+  noOtherAccounts(ctx, turn, set, [set.ostrander, set.pellham, set.murphyA, set.murphyB]);
   await noWrites(ctx, h, cast, before);
   ctx.markCompleted();
   return { set, turn };

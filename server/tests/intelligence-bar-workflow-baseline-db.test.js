@@ -66,8 +66,8 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
 
   beforeAll(async () => {
     const parsed = new URL(databaseUrl);
-    const ciDatabase = process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.pathname === '/waves_test';
-    if (!ciDatabase && !/^\/waves_ib_(platform|workflow)_[a-z0-9_]+$/.test(parsed.pathname)) throw new Error('An isolated IB development database is required');
+    // Always a dedicated database, in CI too: the suite changes the shared service catalog, books and cancels visits and reads account-wide lists.
+    if (!/^\/waves_ib_(platform|workflow)_[a-z0-9_]+$/.test(parsed.pathname)) throw new Error('An isolated IB development database (waves_ib_platform_* or waves_ib_workflow_*) is required');
     h = await bootHarness({ databaseUrl, mockModel, providers: { sms: mockSendViaTwilio, sendgrid: mockSendgrid } });
     // The Gmail client loads the database, so it is required only after the harness has pointed the environment at the isolated one.
     h.providers.gmail = require('../services/email/gmail-client').sendMessage;
@@ -104,7 +104,9 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
     } catch (err) {
       ctx.fail('harness', 'contract_check_threw', `${err.message}`.split('\n')[0]);
     } finally {
-      await cast.retire().catch(() => {});
+      // Cleanup is best-effort but never silent: a step that failed leaves rows or shared configuration for the next case.
+      const leftovers = await cast.retire().catch((err) => [{ step: 'retire', error: String(err && err.message).split('\n')[0] }]);
+      if (leftovers.length) ctx.fail('harness', 'cleanup_failed', leftovers.map((f) => `${f.step}: ${f.error}`).join('; '));
     }
     const first = ctx.failures[0];
     return { outcome: ctx.failures.length ? 'fail' : 'pass', ...(first ? { point: first.point, code: first.code } : {}), failures: ctx.failures, timings: ctx.timings, notes: ctx.notes, strength: ctx.strength || null, contract_calls: ctx.contract ? ctx.contract.compared : null };

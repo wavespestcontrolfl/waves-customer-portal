@@ -32,10 +32,20 @@
       "outcome": "pass"
     },
     "W2-dev-01": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "other_account_facts_in_brief",
+      "failures": [
+        "target_resolution:other_account_facts_in_brief"
+      ]
     },
     "W2-dev-02": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "other_account_facts_in_brief",
+      "failures": [
+        "target_resolution:other_account_facts_in_brief"
+      ]
     },
     "W2-dev-03": {
       "outcome": "pass"
@@ -168,6 +178,8 @@
       "code": "commercial_booking_carded",
       "failures": [
         "proposal:commercial_booking_carded",
+        "side_effect:text_sent_for_commercial_booking",
+        "side_effect:audit_row_for_commercial_booking",
         "domain_rule:commercial_account_booked_on_price"
       ]
     },

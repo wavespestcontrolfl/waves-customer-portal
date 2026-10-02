@@ -15,7 +15,7 @@ async function addProduct(h, cast, over) {
   const id = uuid();
   const row = { id, name: 'Synthetic Product', category: 'insecticide', sku: `${STOCK_SKU_PREFIX}${id.slice(0, 8)}`, formulation: 'SC', inventory_unit: 'fl_oz', inventory_on_hand: 0, best_vendor: 'Synthetic supplier', active: true, ...over };
   await h.db('products_catalog').insert(row);
-  cast.onRetire((db) => removeStockRows(db, [id]));
+  cast.onRetire((db, failed) => removeStockRows(db, [id], failed));
   return row;
 }
 async function addRequest(h, product, over) {

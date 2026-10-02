@@ -5,7 +5,7 @@
 // would; the case verifies the saved row, the sends, and the recovery behaviour against the database.
 
 const { phone, uuid, clockDate, plusDaysET } = require('../ib-workflow-fixtures');
-const { pick } = require('./common');
+const { pick, sendState, noSends } = require('./common');
 
 const SERVICE = 'One-Time Pest Control Service';
 
@@ -34,6 +34,16 @@ function checkCard(ctx, turn, { confirmationDisclosed = true, priceText } = {}) 
   if (priceText) ctx.check(text.includes(priceText), 'proposal', 'card_price_missing', `the card does not show ${priceText}`);
 }
 
+/** The customer was texted exactly `expect` times: provider submissions, accepted audit rows, and no email on any channel. */
+async function checkConfirmationTexts(ctx, h, s, expect) {
+  const sent = await h.settle({ expect });
+  ctx.check(sent === expect, 'side_effect', expect ? 'confirmation_text_count_wrong' : 'unexpected_text_sent', `${sent} provider submissions, expected ${expect}`);
+  const audit = await h.db('messaging_audit_log').where({ customer_id: s.pellham.id }).count('* as n').first();
+  ctx.check(Number(audit.n) === expect, 'side_effect', 'message_audit_rows_wrong', `${audit.n} messaging audit rows, expected ${expect}`);
+  const state = await sendState(h, ctx.cast);
+  ctx.check(state.sendgrid_provider === 0 && state.gmail_provider === 0, 'side_effect', 'booking_sent_an_email', `SendGrid ${state.sendgrid_provider}, Gmail ${state.gmail_provider} for a text confirmation`);
+}
+
 /** The saved row and its sends against the contract: right customer, service, window, price, property, one row, one text. */
 async function checkBooked(ctx, h, s, { date, start, end, expectPrice, expectTexts = 1 }) {
   const rows = await newRows(h, s.pellham.id, s.existing.id);
@@ -49,10 +59,7 @@ async function checkBooked(ctx, h, s, { date, start, end, expectPrice, expectTex
     ctx.check(row.service_id === s.service.id, 'read_back', 'service_id_not_stamped', `service_id ${row.service_id}`);
     ctx.check(!!row.service_address_line1 || row.property_id === s.pellhamHome.id, 'read_back', 'service_address_not_stamped', 'no service address stamp');
   }
-  const sent = await h.settle({ expect: expectTexts });
-  ctx.check(sent === expectTexts, 'side_effect', expectTexts ? 'confirmation_text_count_wrong' : 'unexpected_text_sent', `${sent} provider submissions, expected ${expectTexts}`);
-  const audit = await h.db('messaging_audit_log').where({ customer_id: s.pellham.id }).count('* as n').first();
-  ctx.check(Number(audit.n) === expectTexts, 'side_effect', 'message_audit_rows_wrong', `${audit.n} messaging audit rows, expected ${expectTexts}`);
+  await checkConfirmationTexts(ctx, h, s, expectTexts);
   const existing = await h.db('scheduled_services').where({ id: s.existing.id }).first();
   ctx.check(String(existing.property_id) === String(s.existing.property_id) && existing.status === s.existing.status && price(existing.estimated_price) === price(s.existing.estimated_price), 'side_effect', 'existing_visit_changed', 'a prior visit changed');
   return row;
@@ -112,7 +119,7 @@ CASES['W5-dev-03'] = async (ctx, h, cast, c) => {
   // The contract: no card and no new row. A tool that rounds 2:30 to the hour and books it is as wrong as one that books 2:30.
   ctx.check(forced.cards.length === 0, 'proposal', 'half_hour_request_carded', `${forced.cards.length} card(s) offered for a 2:30 PM start: ${JSON.stringify(forced.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   if (forced.card) await h.confirm(h.actors.owner, forced.card);
-  await h.settle();
+  await noSends(ctx, h, ctx.cast, { what: 'a refused half-hour request', codes: { sms: 'text_sent_for_half_hour_request', smsRows: 'audit_row_for_half_hour_request' } });
   const rows = await newRows(h, s.pellham.id, s.existing.id);
   ctx.check(rows.length === 0, 'domain_rule', 'half_hour_window_accepted', `${rows.length} visit(s) saved after a 2:30 PM request, windows ${rows.map((r) => hhmm(r.window_start)).join(',')}`);
   ctx.markCompleted();
@@ -152,7 +159,7 @@ CASES['W5-dev-06'] = async (ctx, h, cast, c) => {
   ctx.check(turn.cards.length === 0, 'proposal', 'commercial_booking_carded', `${turn.cards.length} card(s) offered to book a commercial account: ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 200)}`);
   let confirmed;
   if (turn.card) confirmed = await h.confirm(h.actors.owner, turn.card);
-  await h.settle();
+  await noSends(ctx, h, ctx.cast, { what: 'a commercial booking request', codes: { sms: 'text_sent_for_commercial_booking', smsRows: 'audit_row_for_commercial_booking' } });
   const rows = await h.db('scheduled_services').where({ customer_id: s.commercial.id }).count('* as n').first();
   ctx.check(Number(rows.n) === 0, 'domain_rule', 'commercial_account_booked_on_price', `${rows.n} visit(s) booked for a commercial account; card ${turn.cards.length}; confirm ${confirmed && confirmed.status}`);
   ctx.markCompleted();
@@ -182,8 +189,7 @@ CASES['W5-dev-07'] = async (ctx, h, cast, c) => {
   const rows = await newRows(h, s.pellham.id, s.existing.id);
   ctx.check(rows.length === 1 && hhmm(rows[0].window_start) === '10:00', 'read_back', 'final_booking_wrong', `rows ${rows.map((r) => hhmm(r.window_start)).join(',')}`);
   ctx.check(!rows.some((r) => hhmm(r.window_start) === '09:00'), 'side_effect', 'nine_am_row_exists', 'a 9 AM row was saved');
-  const sent = await h.settle({ expect: 1 });
-  ctx.check(sent <= 1, 'side_effect', 'confirmation_text_count_wrong', `${sent} provider submissions across the revised booking`);
+  await checkConfirmationTexts(ctx, h, s, 1);
   ctx.markCompleted();
 };
 
@@ -212,8 +218,7 @@ CASES['W5-dev-08'] = async (ctx, h, cast, c) => {
   }
   const rows = await newRows(h, s.pellham.id, s.existing.id);
   ctx.check(rows.length === 1 && price(rows[0].estimated_price) === 159, 'read_back', 'final_price_wrong', `rows ${rows.map((r) => r.estimated_price).join(',')}`);
-  const sent = await h.settle({ expect: 1 });
-  ctx.check(sent === 1, 'side_effect', 'confirmation_text_count_wrong', `${sent} provider submissions`);
+  await checkConfirmationTexts(ctx, h, s, 1);
   ctx.markCompleted();
 };
 

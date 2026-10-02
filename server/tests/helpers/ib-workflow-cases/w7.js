@@ -5,7 +5,7 @@
 // records every submission, so "one send" and "which number" are read from it and from the sms_log reservation.
 
 const { phone, uuid } = require('../ib-workflow-fixtures');
-const { pick } = require('./common');
+const { pick, noSends, sendState, optOutRefusal } = require('./common');
 
 async function seedSmsSet(cast) {
   const s = {};
@@ -31,10 +31,11 @@ const sendRounds = (customerId, message, extra = {}) => [{ tools: [['send_sms', 
 /** The send step: card, confirm, then the stub, the reservation and the receipt against what was approved. */
 async function sendApproved(ctx, h, s, customer, message, { to, prompt, sessionId, page, extra, expectedCount = 1 } = {}) {
   stub(h).mockClear();
+  const preTurn = await sendState(h, ctx.cast); // rows and stubs as they are now: an earlier approved send in the same case is not "before confirm"
   const est = await ctx.establish({ prompt, page: page || { customerId: customer.id }, customer });
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionId, rounds: sendRounds(customer.id, message, extra) });
   ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_send', `cards ${turn.cards.length}; ${JSON.stringify(turn.toolCalls.slice(-1).map((t) => t.result)).slice(0, 240)}`);
-  ctx.check(submissions(h).length === 0, 'side_effect', 'sent_before_confirm', `${submissions(h).length} provider submissions before the card was confirmed`);
+  await noSends(ctx, h, ctx.cast, { what: 'a proposal before its card is confirmed', since: preTurn, codes: { sms: 'sent_before_confirm', smsRows: 'send_row_before_confirm' } });
   let confirmed;
   if (turn.card) {
     confirmed = await h.confirm(h.actors.owner, turn.card);
@@ -67,7 +68,8 @@ CASES['W7-dev-01'] = async (ctx, h, cast, c) => {
   const draft = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: draftRounds(s.pellham.id, draftText) });
   const result = pick(draft, 'draft_sms');
   ctx.check(!!result && !result.error, 'tool_result', 'draft_failed', JSON.stringify(result).slice(0, 200));
-  ctx.check(draft.cards.length === 0 && submissions(h).length === 0, 'side_effect', 'sent_with_the_draft', 'a card or a send accompanied the draft');
+  ctx.check(draft.cards.length === 0, 'side_effect', 'sent_with_the_draft', 'a card accompanied the draft');
+  await noSends(ctx, h, cast, { what: 'a draft', codes: { sms: 'sent_with_the_draft', smsRows: 'send_row_with_the_draft' } });
   await sendApproved(ctx, h, s, s.pellham, draftText, { prompt: c.corrections[0].request, sessionId: draft.sessionId });
   ctx.markCompleted();
 };
@@ -82,7 +84,8 @@ CASES['W7-dev-02'] = async (ctx, h, cast, c) => {
     const prompt = i === 0 ? est.prompt : (await ctx.establish({ prompt: c.corrections[i - 1].request, page: est.page, customer: s.pellham })).prompt;
     const turn = await ctx.turn(h.actors.owner, { prompt, page: est.page, sessionId, rounds: draftRounds(s.pellham.id, drafts[i]) });
     sessionId = turn.sessionId;
-    ctx.check(turn.cards.length === 0 && submissions(h).length === 0, 'side_effect', 'sent_with_a_draft', `draft ${i + 1} produced a card or a send`);
+    ctx.check(turn.cards.length === 0, 'side_effect', 'sent_with_a_draft', `draft ${i + 1} produced a card`);
+    await noSends(ctx, h, cast, { what: `draft ${i + 1}`, settle: i === 2, codes: { sms: 'sent_with_a_draft', smsRows: 'send_row_with_a_draft' } });
   }
   await sendApproved(ctx, h, s, s.pellham, drafts[2], { prompt: 'Send it.', sessionId });
   ctx.check(!submissions(h).some((x) => x.body === drafts[0] || x.body === drafts[1]), 'side_effect', 'superseded_draft_sent', 'an earlier draft was sent');
@@ -135,7 +138,7 @@ CASES['W7-dev-04'] = async (ctx, h, cast, c) => {
   }
   const row = await h.db('sms_log').where({ id: queued }).first('status');
   ctx.check(!row || /cancel/i.test(String(row.status)), 'read_back', 'queued_text_not_canceled', `status ${row && row.status}`);
-  ctx.check(submissions(h).length === 0, 'side_effect', 'text_sent_by_cancel', `${submissions(h).length} submissions`);
+  await noSends(ctx, h, cast, { what: 'cancelling a queued text', rowsMayShrink: true, codes: { sms: 'text_sent_by_cancel', smsRows: 'send_row_added_by_cancel' } });
   ctx.markCompleted();
 };
 
@@ -158,9 +161,10 @@ CASES['W7-dev-05'] = async (ctx, h, cast, c) => {
   }
   // A fresh send of the same text before the outcome is reconciled.
   const before = submissions(h).length;
+  const reservedBefore = (await reservations(h, s.pellham.id)).length;
   const again = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionKey: 'again', rounds: sendRounds(s.pellham.id, message) });
   if (again.card) await h.confirm(h.actors.owner, again.card);
-  ctx.check(submissions(h).length === before, 'recovery', 'resend_before_reconciliation', `${submissions(h).length - before} further provider submissions while the first outcome was unknown`);
+  ctx.check(submissions(h).length === before && (await reservations(h, s.pellham.id)).length === reservedBefore, 'recovery', 'resend_before_reconciliation', `${submissions(h).length - before} further provider submissions and ${(await reservations(h, s.pellham.id)).length - reservedBefore} further accepted audit rows while the first outcome was unknown`);
   ctx.markCompleted();
 };
 
@@ -174,8 +178,10 @@ CASES['W7-dev-06'] = async (ctx, h, cast, c) => {
     ctx.check(false, 'proposal', 'card_shown_for_a_send_that_will_be_blocked', 'a send card was offered for a number with STOP on file');
     confirmed = await h.confirm(h.actors.owner, turn.card);
   }
-  ctx.check(submissions(h).length === 0, 'side_effect', 'text_sent_to_opted_out_number', `${submissions(h).length} provider submissions to a STOP number`);
-  ctx.check(!confirmed || !(confirmed.body && confirmed.body.success === true), 'domain_rule', 'opt_out_not_honored', `confirm ${confirmed && JSON.stringify(confirmed.body).slice(0, 200)}`);
+  await noSends(ctx, h, cast, { what: 'a text to a STOP number', codes: { sms: 'text_sent_to_opted_out_number', smsRows: 'send_row_for_opted_out_number' } });
+  ctx.check(!(confirmed && confirmed.body && confirmed.body.success === true), 'domain_rule', 'opt_out_not_honored', `confirm ${confirmed && JSON.stringify(confirmed.body).slice(0, 200)}`);
+  // With no card the refusal has to be the send tool's own opt-out answer; absence of a card alone is not evidence of the opt-out.
+  if (!turn.card) ctx.check(optOutRefusal(pick(turn, 'send_sms')), 'tool_result', 'opt_out_refusal_not_reported', `send_sms answered ${JSON.stringify(pick(turn, 'send_sms')).slice(0, 200)}`);
   if (confirmed) ctx.check(confirmed.body && (confirmed.body.blocked || (confirmed.body.result && confirmed.body.result.blocked) || confirmed.body.outcome === 'blocked'), 'receipt', 'blocked_reason_not_reported', `confirm ${JSON.stringify(confirmed.body).slice(0, 220)}`);
   ctx.markCompleted();
 };
@@ -187,7 +193,8 @@ CASES['W7-dev-07'] = async (ctx, h, cast, c) => {
   const turn = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, rounds: draftRounds(s.fennimore.id, 'We need to move your visit. What day works for you?') });
   const draft = pick(turn, 'draft_sms');
   ctx.check(!!draft && !draft.error && (draft.message || draft.draft || draft.body || JSON.stringify(draft).includes('move your visit')), 'tool_result', 'draft_missing', JSON.stringify(draft).slice(0, 200));
-  ctx.check(turn.cards.length === 0 && submissions(h).length === 0, 'side_effect', 'draft_produced_a_send', 'a card or a send accompanied the draft');
+  ctx.check(turn.cards.length === 0, 'side_effect', 'draft_produced_a_send', 'a card accompanied the draft');
+  await noSends(ctx, h, cast, { what: 'a draft', codes: { sms: 'draft_produced_a_send', smsRows: 'draft_produced_a_send_row' } });
   ctx.markCompleted();
 };
 
@@ -207,7 +214,7 @@ CASES['W7-dev-09'] = async (ctx, h, cast, c) => {
   ctx.check(JSON.stringify(found) === JSON.stringify([s.murphyA.id, s.murphyB.id].sort()), 'tool_result', 'murphy_lookup_wrong', `lookup returned ${found.length} accounts`);
   ctx.check(turn.cards.length === 0, 'target_resolution', 'ambiguous_recipient_proposed', `a send card was offered for the surname Murphy (${turn.cards.length})`);
   if (turn.card) await h.confirm(h.actors.owner, turn.card);
-  ctx.check(submissions(h).length === 0, 'side_effect', 'text_sent_to_an_unchosen_murphy', `${submissions(h).length} submissions`);
+  await noSends(ctx, h, cast, { what: 'an ambiguous surname request', codes: { sms: 'text_sent_to_an_unchosen_murphy', smsRows: 'send_row_for_an_unchosen_murphy' } });
   ctx.markCompleted();
 };
 
