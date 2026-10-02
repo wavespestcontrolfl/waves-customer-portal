@@ -14,6 +14,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { ActionFeedback, Badge, Button, Card, Input, UiSurface } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import CorrectionReasonChips from "../../components/admin/CorrectionReasonChips";
+import { correctionReasonLabel } from "../../constants/correctionReasons";
 
 const STATUS_OPTIONS = [
   { value: "unreviewed", label: "Unreviewed" },
@@ -121,6 +123,11 @@ function labelFailure(err) {
 
 function ReviewRow({ review, onLabeled, onStale }) {
   const [note, setNote] = useState("");
+  // Starts as, and follows, the saved label's reason: a confirmed-wrong row
+  // opened from the all / confirmed_error filters shows its reason pressed, so
+  // a Replace resends it instead of erasing the classification.
+  const [reason, setReason] = useState(review.label?.reason ?? null);
+  useEffect(() => { setReason(review.label?.reason ?? null); }, [review.id, review.label?.reason]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
@@ -136,6 +143,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
     const body = { verdict, seen_answer: review.jevAnswer, seen_subject: review.subjectVersion ?? null };
     if (verdict === "jev_wrong") body.correct_value = !review.jevAnswer.yes;
     if (note.trim()) body.note = note.trim();
+    if (verdict === "jev_wrong" && reason) body.reason = reason;
     if (force) body.force = true;
     try {
       const result = await adminFetch(`/admin/typed-decisions/reviews/${encodeURIComponent(review.id)}/label`, {
@@ -143,6 +151,11 @@ function ReviewRow({ review, onLabeled, onStale }) {
         body: JSON.stringify(body),
       });
       setConflict(null);
+      // The chip follows the label the server just saved: cleared after a
+      // right/unclear verdict (a chip tapped before it must not ride into a
+      // later Jev wrong unasked), kept after a wrong one so a further Replace
+      // on a still-mounted row resends it instead of nulling it.
+      setReason(result?.review?.label?.reason ?? null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
       const kind = labelFailure(err);
@@ -172,7 +185,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
 
       {review.label?.verdict && (
         <div className="text-14 text-ink-secondary">
-          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}
+          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}{review.label.reason ? ` (${correctionReasonLabel(review.label.reason) || review.label.reason})` : ""}
         </div>
       )}
 
@@ -189,6 +202,8 @@ function ReviewRow({ review, onLabeled, onStale }) {
         onChange={(e) => setNote(e.target.value)}
         maxLength={500}
       />
+
+      {yesNo && <CorrectionReasonChips value={reason} onChange={setReason} disabled={!!busy} label="If wrong, why?" />}
 
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" disabled={!!busy} loading={busy === "jev_right" ? true : undefined} onClick={() => submit("jev_right")}>{modelName(review)} right</Button>

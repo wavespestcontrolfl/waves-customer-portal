@@ -882,6 +882,9 @@ function buildEstimateAssistantContext({
   // An authored proposal or an engine commercial row anywhere
   // (estimateHasCommercialScope): no row carries the plan terms itself.
   commercialScope = false,
+  // The resolved greeting token (utils/greeting-first-name): '' when the linked customer
+  // has no first name. Undefined keeps the legacy first word of the estimate name.
+  greetingFirstName = undefined,
 } = {}) {
   const parsedData = parseEstimateData(estData);
   const requestedMode = serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -942,8 +945,11 @@ function buildEstimateAssistantContext({
   const annual = Number(frequency.annual || estimate.annual_total || estimate.annualTotal);
   const firstVisitFees = selectedMode === 'one_time' ? [] : firstVisitFeesFromPricing(pricingBundle);
   const setupFee = firstVisitFees.find((fee) => fee.service === 'waveguard_setup') || firstVisitFees[0] || null;
-  const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
-    || cleanText(estimate.customerFirstName);
+  const legacyNameToken = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0];
+  const firstName = (typeof greetingFirstName === 'string' && legacyNameToken
+    ? cleanText(greetingFirstName)
+    : legacyNameToken)
+    || (legacyNameToken ? '' : cleanText(estimate.customerFirstName));
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
   // Expose separately-billed add-ons with their own Ask Waves chip or proven
   // purchased terms even when this recurring estimate offers no one-time plan.
@@ -2104,6 +2110,10 @@ async function answerEstimateQuestion({
   database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
+  // A linked customer with no first name must not be addressed by the surname the
+  // estimate name starts with (codex #5612 r3). Never throws; unlinked keeps the first word.
+  const { estimateGreetingFirstToken } = require('../utils/greeting-first-name');
+  const greetingFirstName = await estimateGreetingFirstToken(database, estimate);
   const context = buildEstimateAssistantContext({
     estimate,
     estData,
@@ -2113,6 +2123,7 @@ async function answerEstimateQuestion({
     noGuaranteeClaims,
     noEstimateWideGuarantee,
     commercialScope,
+    greetingFirstName,
   });
   try {
     context.supportContext = await loadEstimateAiSupportContext({
