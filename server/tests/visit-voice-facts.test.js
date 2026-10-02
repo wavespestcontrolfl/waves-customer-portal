@@ -142,6 +142,19 @@ describe('validateVoiceFacts', () => {
     expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
   });
 
+  test('an area whose own quote says no product went down there is dropped in code', () => {
+    const note = 'Did not treat inside, customer asked us to skip it. Sprayed around the outside of the house.';
+    const facts = validateVoiceFacts({
+      areas: [
+        { area: 'inside', quote: 'Did not treat inside' },
+        { area: 'outside', quote: 'Sprayed around the outside of the house' },
+      ],
+      pests: [],
+      spray: { method: 'perimeter', quote: 'Sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;

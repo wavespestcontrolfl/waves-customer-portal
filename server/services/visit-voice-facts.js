@@ -19,9 +19,10 @@
  *     spray its length.
  *
  * Every fact must quote the note word for word, or it is dropped; a pest's
- * words must sit inside its own quote, and a pest or a way of spraying
- * whose quote says it did not happen ("no roaches", "didn't spray the
- * perimeter") is dropped in code, whatever the model said. Any failure returns no facts;
+ * words must sit inside its own quote, and an area, a pest or a way of
+ * spraying whose quote says it did not happen ("did not treat inside", "no
+ * roaches", "didn't spray the perimeter") is dropped in code, whatever the
+ * model said. Any failure returns no facts;
  * the sheet then records none, as the quick recap screen always has.
  * Nothing here writes: the sheet shows the technician what was heard and
  * sends it with the completion.
@@ -152,7 +153,9 @@ function validateVoiceFacts(json, note) {
   for (const entry of Array.isArray(json?.areas) ? json.areas : []) {
     const area = AREA_LABELS[entry?.area] ? entry.area : null;
     const quote = area ? groundedQuote(entry?.quote, grounding) : null;
-    if (quote && !areaQuotes.has(area)) areaQuotes.set(area, quote);
+    // "Did not treat inside" is not an area: the sheet shows what was heard,
+    // so a missed one is said again, never recorded from a denial.
+    if (quote && !NEGATION_RE.test(quote) && !areaQuotes.has(area)) areaQuotes.set(area, quote);
   }
   const areas = AREA_ORDER.filter((area) => areaQuotes.has(area))
     .map((area) => ({ area: AREA_LABELS[area], quote: areaQuotes.get(area) }));
