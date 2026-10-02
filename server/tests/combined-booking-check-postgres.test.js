@@ -277,6 +277,32 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('the hourly urgent pass rings a visit due tomorrow and leaves far-off problems to the daily run', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const { etDateString } = require('../utils/datetime-et');
+      const tomorrow = etDateString(new Date(Date.now() + 86400000));
+      const near = await acceptedEstimate(trx, lines);
+      await repair(trx, near);
+      const far = await acceptedEstimate(trx, lines);
+      await repair(trx, far);
+      const childOf = async (est) => (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: (await childOf(near)).id }).update({ technician_id: null, scheduled_date: tomorrow });
+      await trx('scheduled_services').where({ id: (await childOf(far)).id }).update({ technician_id: null, scheduled_date: '2099-06-01' });
+      expect(await runCombinedBookingCheck({ conn: trx, urgentOnly: true })).toMatchObject({ candidates: 1, problems: 1 });
+      expect(await alertsOf(trx, near.estimateId)).toHaveLength(1);
+      expect(await alertsOf(trx, far.estimateId)).toHaveLength(0);
+      // The daily run with no budget left: tomorrow's is already standing, the far one waits.
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ held: 1 });
+      expect(await alertsOf(trx, far.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a standing bell gaining a problem past the budget is left untouched until a run with room rings it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

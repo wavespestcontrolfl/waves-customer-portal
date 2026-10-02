@@ -452,7 +452,9 @@ async function standingEstimateIds(conn) {
 // visit with no time or no technician (whenever it was accepted: a problem
 // still ahead is worth a bell; one in the past is history), plus every one
 // with an open bell (so a fix or a cancelled plan closes it).
-function candidateQuery(conn, { now, todayET, standing }) {
+// `lastDay` (urgent pass) limits the untimed visits that make a candidate to
+// today and tomorrow.
+function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
   return conn('estimates as e')
@@ -470,6 +472,7 @@ function candidateQuery(conn, { now, todayET, standing }) {
             });
           })
           .where('s.scheduled_date', '>=', todayET)
+          .modify((query) => { if (lastDay) query.where('s.scheduled_date', '<=', lastDay); })
           .whereNotIn('s.status', [...NOT_LIVE])
           .where(function untimed() { this.whereNull('s.window_start').orWhereNull('s.technician_id'); });
       });
@@ -501,18 +504,26 @@ const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === 
  * One sweep. Returns counts; never throws for a single bad estimate.
  * `conn` and `raise` are injectable for tests. `ringBudget` is what is left
  * of the run's shared budget (the watchdog passes its remainder): anything
- * that would ring past it is left for a later run, where the same upcoming
- * problem is found again (nothing to persist, nothing ages out).
+ * not time-critical that would ring past it is left for a later run, where
+ * the same upcoming problem is found again (nothing to persist, nothing ages
+ * out). A TIME-CRITICAL problem (a visit today or tomorrow) always rings:
+ * docs/admin-notifications.md, Budget, owner ruling 2026-10-01.
+ * `urgentOnly` is the hourly pass (scheduler.js): only bookings with an
+ * untimed visit today or tomorrow, so a booking made or changed after the
+ * daily run, or a write that failed, is caught the same day.
  */
-async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, ringBudget = DEFAULT_RING_BUDGET } = {}) {
+async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, ringBudget = DEFAULT_RING_BUDGET, urgentOnly = false } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const todayET = etDateString(now);
+  const tomorrowET = addDaysET(todayET, 1);
   const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0 };
   result.closed += await retireAbandoned(conn);
   // An internal test / demo customer never gets an admin artifact (the
   // notification service suppresses its bells): left out up front.
   const { isInternalTestCustomerId } = require('./internal-test-customers');
-  const candidates = (await candidateQuery(conn, { now, todayET, standing: await standingEstimateIds(conn) }))
+  const candidates = (await candidateQuery(conn, {
+    now, todayET, standing: urgentOnly ? [] : await standingEstimateIds(conn), lastDay: urgentOnly ? tomorrowET : null,
+  }))
     .filter((estimate) => !isInternalTestCustomerId(estimate.customer_id));
   result.candidates = candidates.length;
 
@@ -576,14 +587,21 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     }
   }
 
+  await postInUrgencyOrder(toPost, result, { raise, ringBudget, urgentOnly, tomorrowET });
+  return result;
+}
+
+// Posts the judged problems soonest-first, so the budget goes where a visit
+// is closest. Anything that would ring (a new bell, or a standing one gaining
+// a family it did not carry) spends the budget; past it the booking is left
+// as it is and found again on a later run. A TIME-CRITICAL problem (a visit
+// today or tomorrow) always rings. The urgent pass posts nothing else.
+async function postInUrgencyOrder(toPost, result, { raise, ringBudget, urgentOnly, tomorrowET }) {
   let rings = 0;
   for (const { estimate, known, verdict, ctx, earliest } of toPost.sort((a, b) => a.earliest.localeCompare(b.earliest))) {
-    // Anything that would ring (a new bell, or a standing one gaining a family
-    // it did not carry) spends the budget; past it the booking is left as it
-    // is and found again on a later run. A visit due TODAY is the exception:
-    // tomorrow it is history and would never be found again, so it rings.
+    const timeCritical = earliest <= tomorrowET;
     const wouldRing = !known || verdict.problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
-    if (wouldRing && rings >= ringBudget && earliest > todayET) {
+    if (!timeCritical && (urgentOnly || (wouldRing && rings >= ringBudget))) {
       result.held += 1;
       continue;
     }
@@ -592,7 +610,6 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     if (rang(row)) rings += 1;
     result.problems += 1;
   }
-  return result;
 }
 
 module.exports = {

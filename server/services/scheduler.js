@@ -8117,6 +8117,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :25, 7 AM-8 PM ET — the combined-booking check's urgent pass: a
+  // booking with a visit TODAY or TOMORROW that has no time or technician
+  // rings now, not at the next 6:40 run (by then a today visit is history).
+  // Catches bookings made, and technicians removed, after the daily tick, and
+  // retries a failed write. Same gate as the watchdog it belongs to.
+  cron.schedule('25 7-20 * * *', async () => {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('scheduleIntegrityWatchdog')) return;
+      const result = await runExclusive('combined-booking-check-urgent', () =>
+        require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
+      if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`[combined-booking-check] urgent pass failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // HOURLY :46 — Retroactive call_log→customer linking. Heals calls that
   // arrived before their customer record existed (unambiguous primary-phone
