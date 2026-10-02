@@ -366,9 +366,10 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   // Lane voice fill (GATE_LANE_VOICE_FILL): the specialty lane whose record
   // the Fast Complete sheet reads from the note, resolved as the completion
   // resolves it (visit-lane-facts.js voiceLaneFor), never for a visit that
-  // completes through a project; null otherwise. The recap's own `eligible`
-  // stays pest control only.
-  const lane = require('../config/feature-gates').laneVoiceFillLive() && !profile?.projectBacked && !profile?.requiresProject
+  // completes through a project, nor when the profile could not be read
+  // (whether it does is then unknown); null otherwise. The recap's own
+  // `eligible` stays pest control only.
+  const lane = profile && require('../config/feature-gates').laneVoiceFillLive() && !profile.projectBacked && !profile.requiresProject
     ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type })
     : null;
 

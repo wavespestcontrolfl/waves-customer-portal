@@ -3,7 +3,7 @@
 // `laneVoiceFillEnabled` and the report flow on the schedule row, a bed bug,
 // fire ant, tick, bee & wasp, mud dauber or mosquito visit opens the Fast
 // Complete sheet in its report flow, reading its own record, in place of the
-// project editor; the sheet's Full form opens the project editor as before.
+// project editor; the sheet's Full form opens the visit's own completion form.
 // A visit that completes through a project, a closed visit, or a row whose
 // profile could not be read keeps the old path.
 import React from 'react';
@@ -92,13 +92,15 @@ it('opens a lane visit in the report flow, reading its own lane, with no trace o
   expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
 });
 
-it('the sheet\'s Full form opens the project editor, the path the visit had before', async () => {
+it('the sheet\'s Full form opens the visit\'s own completion form, never the project editor (codex local r1 on #5629)', async () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', { ...window.location, assign });
   rows = [row('svc-fire-ant')];
   mount();
   await openFromTools();
   fireEvent.click(await screen.findByRole('button', { name: 'Full form' }));
-  expect(await screen.findByText('Project editor for svc-fire-ant')).toBeInTheDocument();
-  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-fire-ant');
+  expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
 });
 
 it('a lane visit filed under pest control still opens as its lane, outline trace and all', async () => {

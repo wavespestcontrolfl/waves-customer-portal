@@ -116,6 +116,20 @@ const ROW_METHOD_CHOICES = [
   { value: 'bait_placement', label: 'Bait placement' },
   { value: 'granular_broadcast', label: 'Granular' },
 ];
+// A lane visit's products (GATE_LANE_VOICE_FILL) also go down the ways the
+// full form records specialty work: a yard broadcast, a mosquito barrier
+// mist, a mound drench.
+const LANE_METHOD_CHOICES = [
+  ...ROW_METHOD_CHOICES,
+  { value: 'broadcast_spray', label: 'Broadcast spray' },
+  { value: 'fog_ulv', label: 'Fog/ULV' },
+  { value: 'soil_drench', label: 'Soil drench' },
+];
+
+// The line a lane visit's products resolve on, as the full form resolves
+// them: the mosquito lane's own (a methodless liquid is a barrier mist),
+// every other lane the pest line, bed bug's indoors.
+const laneProductLine = (lane) => ({ serviceLine: lane === 'mosquito' ? 'mosquito' : 'pest', interiorLane: lane === 'bed_bug_treatment' });
 // A rate goes on the record only in a unit /complete accepts: the server's
 // own list (shared/rate-units.json, read by inventory-units.js), matched
 // trimmed and case-blind as it matches them, less its mL units, which this
@@ -191,12 +205,14 @@ function blockedReasonFor(context, service) {
 // Its measure and starting unit are fixed when it lands on the sheet
 // (lib/fast-complete-products.js), so a later How change never re-labels an
 // amount already typed. What the tech typed wins.
-function productRow(product, { serviceType, totalAmount = '', common = null, visitMethod = DEFAULT_METHOD, added = false }) {
+function productRow(product, { serviceType, totalAmount = '', common = null, visitMethod = DEFAULT_METHOD, added = false, lane = null }) {
   const row = {
     product,
     productId: product.id,
     name: product.name,
-    catalogMethod: catalogMethodOf(product, serviceType),
+    catalogMethod: catalogMethodOf(product, serviceType, lane),
+    // A lane visit's row resolves on its lane's line and offers its ways.
+    lane,
     // The unit the catalog states the label rate in; '' when it names none
     // (the rate resolver then falls back to a bare "oz" of its own).
     labelUnit: String(product.default_unit || product.rate_unit || '').trim(),
@@ -210,8 +226,9 @@ function productRow(product, { serviceType, totalAmount = '', common = null, vis
   return { ...row, dimension, totalAmount: seeded.amount, amountUnit: seeded.unit };
 }
 
-function catalogMethodOf(product, serviceType) {
-  const resolved = defaultApplicationMethodForLine(product, 'pest', { serviceType });
+function catalogMethodOf(product, serviceType, lane = null) {
+  const { serviceLine, interiorLane } = laneProductLine(lane);
+  const resolved = defaultApplicationMethodForLine(product, serviceLine, { serviceType, interiorLane });
   if (product.application_method || product.method || !SPRAY_METHODS.has(resolved)) return resolved;
   const form = `${product.name || ''} ${product.category || ''} ${product.formulation || ''}`;
   if (SPRAYED_DRY_FORM.test(form)) return resolved;
@@ -236,7 +253,7 @@ function rowMethod(row, sprayMethod) {
 // the record unseen (owner ruling: the application record holds only what
 // the tech confirmed). The house mix starts at the rate the full form seeds.
 function rowRate(row, sprayMethod) {
-  const resolved = resolveRatePrefill(row.product, { applicationMethod: rowMethod(row, sprayMethod), serviceLine: 'pest' });
+  const resolved = resolveRatePrefill(row.product, { applicationMethod: rowMethod(row, sprayMethod), serviceLine: laneProductLine(row.lane).serviceLine });
   // An added product has a rate only in its label's own unit: never the pest
   // house default (4 oz, the house mix's rate), nor the resolver's bare "oz"
   // for a catalog row that names no unit at all.
@@ -551,7 +568,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
 // added from the picker. One product, one row (/complete keeps only the
 // first row per product); an added product's editor is open while the tech
 // sets how much and how.
-function useProductRows(ctx, serviceType) {
+function useProductRows(ctx, serviceType, lane = null) {
   const [rows, setRows] = useState(ctx.rows);
   const [editingId, setEditingId] = useState(null);
   const commonById = useMemo(
@@ -564,10 +581,10 @@ function useProductRows(ctx, serviceType) {
   const addProduct = useCallback((product, visitMethod) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { serviceType, common: commonById.get(String(product.id)), visitMethod, added: true }),
+      productRow(product, { serviceType, common: commonById.get(String(product.id)), visitMethod, added: true, lane }),
     ]));
     setEditingId(product.id);
-  }, [serviceType, commonById]);
+  }, [serviceType, commonById, lane]);
   const removeRow = useCallback((productId) => {
     setRows((prev) => prev.filter((row) => row.productId !== productId));
     setEditingId(null);
@@ -866,7 +883,11 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [!photosLoaded, 'Loading photos…'],
     [photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
-    [!active.length, 'Select at least one product.'],
+    // A lane visit's work without a product (heat, steam, nest removal, an
+    // inspection) is recorded by its protocol action, which carries its
+    // re-entry wait or inspection-only standing on the report; the sheet
+    // records none, so that work goes on the full form.
+    [!active.length, lane ? 'Add the product you applied. Work done without one (heat, steam, nest removal, an inspection) goes on the Full form.' : 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
@@ -1102,7 +1123,7 @@ function ReportFlowForm({
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
   const base = `/admin/dispatch/${service.id}`;
-  const products = useProductRows(ctx, service.serviceType);
+  const products = useProductRows(ctx, service.serviceType, routedLaneOf(service));
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
@@ -1148,11 +1169,11 @@ function ReportFlowForm({
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
-    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded,
+    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, lane,
   };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
-    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane,
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
   });
 
   // "Update inventory or remove it": once the stock is updated, the tech
@@ -1692,12 +1713,21 @@ const methodLabel = (value) => {
 // How an added product went down. A spray follows the visit's How until the
 // tech picks another way; a product with its own catalog method (a bait, a
 // granule) starts there. Picking the row's standard way puts it back on it.
+// What a spray with no way picked goes down as: the visit's How, the way the
+// note says (the report flow), or a spot treatment on a lane visit (its note
+// is read for its record, not its sprays).
+function followHint(row, sticky) {
+  if (!sticky) return 'Same as the visit\'s How';
+  return row.lane ? 'Spot treatment until you pick another way' : 'Goes the way your note says until you pick one';
+}
+
 function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
   const labelId = useId();
   const current = rowMethod(row, method);
   const standard = SPRAY_METHODS.has(row.catalogMethod) ? method : row.catalogMethod;
-  const ownMethod = row.catalogMethod && !ROW_METHOD_CHOICES.some((choice) => choice.value === row.catalogMethod);
-  const choices = ownMethod ? [...ROW_METHOD_CHOICES, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ROW_METHOD_CHOICES;
+  const ways = row.lane ? LANE_METHOD_CHOICES : ROW_METHOD_CHOICES;
+  const ownMethod = row.catalogMethod && !ways.some((choice) => choice.value === row.catalogMethod);
+  const choices = ownMethod ? [...ways, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ways;
   const pick = (value) => onChange({
     methodInput: !sticky && value === standard ? null : value,
     // A rate typed for one method doesn't carry to another.
@@ -1711,7 +1741,7 @@ function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
           <Chip disabled={locked} key={choice.value} label={choice.label} pressed={current === choice.value} onClick={() => pick(choice.value)} />
         ))}
       </div>
-      {followsVisitMethod(row) && <p className="tech-visit-muted">{sticky ? 'Goes the way your note says until you pick one' : 'Same as the visit\'s How'}</p>}
+      {followsVisitMethod(row) && <p className="tech-visit-muted">{followHint(row, sticky)}</p>}
     </div>
   );
 }

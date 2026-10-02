@@ -1389,9 +1389,10 @@ export default function TechHomePage({ section = 'today' }) {
           onFullForm={() => {
             const raw = fastCompleteService;
             setFastCompleteService(null);
-            // A lane visit's full form is the path it had before the sheet.
-            if (isLaneReportEligible(raw)) openProjectOrContinue(raw);
-            else openTypedCompletion(raw);
+            // A lane visit's too: its own completion form (the lane's places,
+            // findings and actions), never the project editor, whose bed bug
+            // form is retired (codex local r1 on #5629).
+            openTypedCompletion(raw);
           }}
         />
       )}

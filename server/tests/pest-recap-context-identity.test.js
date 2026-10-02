@@ -112,6 +112,12 @@ describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => 
     expect((await buildRecapContext(visit.id, contextDb(visit))).lane).toBeNull();
   });
 
+  test('a profile that could not be read is no lane: whether the visit completes through a project is unknown', async () => {
+    process.env.GATE_LANE_VOICE_FILL = 'true';
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('profile store down'));
+    expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
+  });
+
   test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no lane', async (value) => {
     if (value === undefined) delete process.env.GATE_LANE_VOICE_FILL; else process.env.GATE_LANE_VOICE_FILL = value;
     resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });

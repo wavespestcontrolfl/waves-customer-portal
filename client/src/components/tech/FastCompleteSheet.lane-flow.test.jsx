@@ -29,6 +29,7 @@ const CATALOG = [
   { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'temprid', name: 'Temprid FX', category: 'Insecticide' },
+  { id: 'mist', name: 'Example Mosquito Concentrate', category: 'Insecticide' },
 ];
 const VISIT = {
   id: 'svc-bb', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-bb',
@@ -268,6 +269,60 @@ describe('the visit the tech tapped', () => {
     await openSheet(request, { ...SERVICE, serviceType: 'Mud Dauber Removal', laneKey: 'mud_dauber_removal' });
     expect(screen.getByText('None selected')).toBeTruthy();
     expect(screen.queryByText(/Taurus SC/)).toBeNull();
+  });
+});
+
+describe('how a lane visit\'s products go down (codex local r1 on #5629)', () => {
+  const MOSQUITO_VISIT = { ...VISIT, serviceType: 'Mosquito Control (Monthly)', serviceKey: 'mosquito_monthly' };
+  const MOSQUITO_READ = {
+    available: true, status: 'read', lane: 'mosquito',
+    areas: [{ area: 'Shrubs / landscape beds', quote: 'misted the shrubs' }],
+    findings: [{ group: 'mosquito_activity', value: 'Moderate mosquito activity', quote: 'moderate activity' }],
+    unclearGroups: [],
+  };
+  const MOSQUITO_SERVICE = { ...SERVICE, serviceType: 'Mosquito Control (Monthly)', laneKey: 'mosquito' };
+
+  test('a mosquito visit\'s methodless liquid is a barrier mist (fog/ULV), as the full form records it, with no area to measure', async () => {
+    const request = makeRequest({ visit: MOSQUITO_VISIT, lane: 'mosquito', laneFacts: MOSQUITO_READ });
+    await openSheet(request, MOSQUITO_SERVICE);
+    addProduct('Example Mosquito Concentrate', '2');
+    const how = within(screen.getByRole('group', { name: 'Example Mosquito Concentrate' })).getByRole('group', { name: 'How' });
+    expect(within(how).getByRole('button', { name: 'Fog/ULV' }).getAttribute('aria-pressed')).toBe('true');
+    await generate('Misted the shrubs, moderate activity.');
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const product = request.bodies('/complete')[0].products[0];
+    expect(product).toMatchObject({ productId: 'mist', applicationMethod: 'fog_ulv', applicationArea: 'Shrubs / landscape beds' });
+    expect(product).not.toHaveProperty('areaValue');
+  });
+
+  test('a lane visit offers the full form\'s specialty ways, and the one picked is recorded', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    addProduct('Temprid FX', '1', 'Broadcast spray');
+    const how = within(screen.getByRole('group', { name: 'Temprid FX' })).getByRole('group', { name: 'How' });
+    for (const way of ['Spot treatment', 'Perimeter spray', 'Bait placement', 'Granular', 'Broadcast spray', 'Fog/ULV', 'Soil drench']) {
+      expect(within(how).getByRole('button', { name: way })).toBeTruthy();
+    }
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].products[0]).toMatchObject({ applicationMethod: 'broadcast_spray' });
+  });
+
+  test('a spray with no way picked goes down as a spot treatment, and says so', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    expect(within(screen.getByRole('group', { name: 'Temprid FX' })).getByText('Spot treatment until you pick another way')).toBeTruthy();
+  });
+
+  test('work done without a product goes on the Full form, which records its action (heat, steam, nest removal, an inspection)', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Heat treatment, whole unit.' } });
+    expect(screen.getByText('Add the product you applied. Work done without one (heat, steam, nest removal, an inspection) goes on the Full form.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
   });
 });
 
