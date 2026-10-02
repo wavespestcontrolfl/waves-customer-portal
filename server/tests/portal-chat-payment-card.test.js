@@ -72,6 +72,10 @@ test('a past-dated upcoming row shows as Processing, as on the Billing tab, and 
   await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
   const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
   expect(cards).toHaveLength(1);
+  // A later read that must not show clears the earlier card.
+  listPortalPayments.mockRejectedValue(new Error('db down'));
+  await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  expect(cards).toEqual([]);
   expect(cards[0].rows[0].statusLabel).toBe('Processing');
   expect(result.statuses).toEqual(['Processing']);
 });

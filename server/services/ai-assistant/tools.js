@@ -311,6 +311,10 @@ const methodLabel = (p) => {
 async function showRecentPayments(customerId, actions, cards) {
   const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
   if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
+  // Every read starts clean: a card from an earlier call in this turn never
+  // outlives a later read that says it must not be shown.
+  const prior = cards.findIndex((c) => c.type === 'payments');
+  if (prior !== -1) cards.splice(prior, 1);
   // The Billing page is the fallback on every exit below, so the button goes
   // on first: the model is not allowed to write a link itself.
   addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
@@ -351,10 +355,7 @@ async function showRecentPayments(customerId, actions, cards) {
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };
   }
-  // One payments card per reply: a repeated call replaces, never duplicates.
-  const card = { type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows };
-  const at = cards.findIndex((c) => c.type === 'payments');
-  if (at === -1) cards.push(card); else cards[at] = card;
+  cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
   return {
     shown: true,
     count: rows.length,

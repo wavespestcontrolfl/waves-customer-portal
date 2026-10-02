@@ -326,7 +326,9 @@ class WavesAssistant {
       return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
+      // A card or button a tool already built this turn still shows under
+      // the fallback text.
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) };
     }
   }
 
@@ -445,7 +447,7 @@ class WavesAssistant {
       // one that answered nothing (Codex r12 on #4884).
       if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
       logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
     }
 
     // Save the assistant reply

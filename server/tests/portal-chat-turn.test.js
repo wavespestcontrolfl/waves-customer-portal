@@ -154,6 +154,21 @@ test('a billing keyword hand-off ("refund") still shows the card under the facts
   escalate.mockRestore();
 });
 
+test('a card built before the model call fails still shows under the fallback text', async () => {
+  process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+  mockListPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Pest', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
+  wire('portal_chat', 'cust-1');
+  mockCreate
+    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'show_recent_payments', input: {} }] })
+    .mockRejectedValueOnce(new Error('provider down'));
+
+  const result = await assistant.processMessage({ message: 'Explain my last charge', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  expect(result.reply).toMatch(/having trouble/);
+  expect(result.cards).toHaveLength(1);
+  expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
