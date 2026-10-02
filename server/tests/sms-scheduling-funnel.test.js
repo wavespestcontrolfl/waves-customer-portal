@@ -21,6 +21,7 @@ test('only scheduling texts are counted, and each is tied to what followed it', 
   expect(isSchedulingText('Thanks so much!')).toBe(false);
 
   const summary = summarizeFunnel({
+    now: at('2026-10-10T00:00:00Z'),
     inbound: [
       { customer_id: A, body: 'Can we reschedule my appointment to Friday?', created_at: at('2026-09-29T14:00:00Z') },
       { customer_id: B, body: 'I need to reschedule my visit please', created_at: at('2026-09-30T14:00:00Z') },
@@ -46,6 +47,8 @@ test('offers are counted by kind and state, and an unresolved slot is called out
   const slot = { date: '2026-10-06', start: '10:00', end: '12:00' };
   const summary = summarizeFunnel({
     now,
+    // Follow-ups read three days later: every offer's 48h window has closed.
+    observedAt: at('2026-10-05T00:00:00Z'),
     moves: [{ customer_id: A, created_at: at('2026-10-01T15:00:00Z') }],
     offers: [
       { customer_id: A, kind: 'move_visit', status: 'open', sent_at: at('2026-10-01T14:00:00Z'), expires_at: at('2026-10-03T14:00:00Z'), slots: [slot] },
@@ -55,7 +58,7 @@ test('offers are counted by kind and state, and an unresolved slot is called out
   });
   expect(summary.offers).toEqual({
     sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, other: 0,
-    with_unresolved_slot: 1, followed_by_change_48h: 1,
+    with_unresolved_slot: 1, matured: 3, followed_by_change_48h: 1,
   });
 });
 
@@ -88,4 +91,28 @@ test('a supersede after the report end does not rewrite the past report', () => 
   expect(asOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 1, open: 0 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 0, open: 1 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-10-02T12:00:00Z')).toMatchObject({ superseded: 0, expired: 1 });
+});
+
+test('a text whose 48h window has not closed is left out of the change rate', () => {
+  const summary = summarizeFunnel({
+    now: at('2026-10-02T12:00:00Z'),
+    inbound: [
+      { customer_id: A, body: 'Can we reschedule my appointment to Friday?', created_at: at('2026-09-29T14:00:00Z') },
+      { customer_id: B, body: 'I need to reschedule my visit please', created_at: at('2026-10-02T09:00:00Z') },
+    ],
+    moves: [{ customer_id: A, created_at: at('2026-09-29T17:00:00Z') }],
+  });
+  expect(summary).toMatchObject({ scheduling_flagged: 2, scheduling_matured: 1 });
+  expect(summary.followed_within_48h.any).toBe(1);
+});
+
+test('an impossible bare date is refused, not rolled over', () => {
+  const { parseReportInstant } = require('../services/sms-scheduling-funnel');
+  expect(() => parseReportInstant('2026-02-30')).toThrow(/cannot read the date/);
+  expect(parseReportInstant('2026-02-28').toISOString()).toBe('2026-02-28T05:00:00.000Z');
+});
+
+test('report dates print as the Eastern day, also after 8 PM Eastern', () => {
+  const { formatReportDate } = require('../services/sms-scheduling-funnel');
+  expect(formatReportDate(new Date('2026-10-02T01:30:00Z'))).toBe('2026-10-01');
 });

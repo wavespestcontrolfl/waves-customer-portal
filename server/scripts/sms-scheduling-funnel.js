@@ -22,12 +22,14 @@ const ARGS = Object.fromEntries(
 );
 
 function printReport(since, until, f) {
+  const { formatReportDate } = require('../services/sms-scheduling-funnel');
   const pct = (n, of) => (of ? ` (${Math.round((n / of) * 100)}%)` : '');
   const lines = [
-    `SMS scheduling funnel, ${since.toISOString().slice(0, 10)} to ${until.toISOString().slice(0, 10)}`,
+    `SMS scheduling funnel, ${formatReportDate(since)} to ${formatReportDate(until)} (Eastern)`,
     `  Customer texts received            ${f.inbound_total}`,
     `  About scheduling                   ${f.scheduling_flagged}${pct(f.scheduling_flagged, f.inbound_total)}`,
-    `  Followed by a schedule change <48h ${f.followed_within_48h.any}${pct(f.followed_within_48h.any, f.scheduling_flagged)}`,
+    `  48h window closed (matured)        ${f.scheduling_matured}`,
+    `  Followed by a schedule change <48h ${f.followed_within_48h.any}${pct(f.followed_within_48h.any, f.scheduling_matured)} of matured`,
     `    moves / cancels+skips / bookings ${f.followed_within_48h.moves} / ${f.followed_within_48h.cancels_or_skips} / ${f.followed_within_48h.new_bookings}`,
     '    (moves = logged moves only; a date changed in the admin Edit appointment form is not logged and not counted)',
     '  Per week (Monday, Eastern):',
@@ -39,7 +41,7 @@ function printReport(since, until, f) {
     lines.push(
       `  Offers recorded                    ${f.offers.sent} (${kinds})`,
       `    open / expired / superseded      ${f.offers.open} / ${f.offers.expired} / ${f.offers.superseded}`,
-      `    followed by a move or booking    ${f.offers.followed_by_change_48h}`,
+      `    followed by a move or booking    ${f.offers.followed_by_change_48h} of ${f.offers.matured} matured`,
       `    with a slot that did not resolve ${f.offers.with_unresolved_slot}`,
     );
   }

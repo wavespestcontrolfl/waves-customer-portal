@@ -1,7 +1,8 @@
 'use strict';
 /**
  * SMS scheduling funnel: how many scheduling texts came in, how many were
- * followed by a real schedule change, and how many offers the ledger recorded (sms_offers, GATE_SMS_OFFER_LEDGER).
+ * followed by a real schedule change, and how many offers the ledger
+ * recorded (sms_offers, GATE_SMS_OFFER_LEDGER).
  *
  * Read-only and counts-only: no message text, name, phone or address leaves
  * this module. It measures completed requests, not replies: a scheduling text
@@ -18,7 +19,7 @@
  */
 
 const { hasSchedulingIntent, hasRescheduleOrAwayIntent, isSmsReaction } = require('./sms-intent');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 
 const FOLLOW_WINDOW_MS = 48 * 3600000;
 // No reply-time metric on purpose: whether an outbound answered a given
@@ -67,9 +68,10 @@ function firstWithin(times, from, to) {
 
 // The ledger's rows by kind and state. An offer still marked open past its
 // expiry is reported as expired.
-function summarizeOffers(offers, { moveTimes, bookingTimes, now }) {
+function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
   const nowMs = new Date(now).getTime();
-  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, other: 0, with_unresolved_slot: 0, followed_by_change_48h: 0 };
+  const observedMs = new Date(observedAt).getTime();
+  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, other: 0, with_unresolved_slot: 0, matured: 0, followed_by_change_48h: 0 };
   // State as of the report's end: a supersede that happened after it (a
   // later offer) must not rewrite a past report.
   const stateOf = (o) => {
@@ -85,6 +87,8 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now }) {
     if (slots.some((s) => !s || !s.date || !s.start)) out.with_unresolved_slot += 1;
     const t0 = new Date(o.sent_at).getTime();
     const until = t0 + FOLLOW_WINDOW_MS;
+    if (until > observedMs) continue;
+    out.matured += 1;
     const changed = firstWithin(moveTimes.get(o.customer_id), t0, until) !== null
       || firstWithin(bookingTimes.get(o.customer_id), t0, until) !== null;
     if (changed) out.followed_by_change_48h += 1;
@@ -100,8 +104,14 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now }) {
  *   cancels       [{ customer_id, transitioned_at }]       cancelled / skipped
  *   bookings      [{ customer_id, created_at }]            new scheduled_services
  *   offers        [{ customer_id, kind, status, sent_at, expires_at, closed_at, slots }] or null (no table)
+ *   now           the report end (offer state is as of then)
+ *   observedAt    the moment the follow-up rows were read (default: now).
+ *                 Only texts whose 48h window closed by then are "matured";
+ *                 the change rate is over matured texts, so a text from the
+ *                 last two days never counts as not followed before it could be.
  */
-function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, now = new Date() } = {}) {
+function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, now = new Date(), observedAt = now } = {}) {
+  const observedMs = new Date(observedAt).getTime();
   const flagged = inbound.filter((r) => r.customer_id && isSchedulingText(r.body));
   const moveTimes = byCustomer(moves, 'created_at');
   const cancelTimes = byCustomer(cancels, 'transitioned_at');
@@ -109,11 +119,14 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
 
   const perWeek = {};
   const followed = { any: 0, moves: 0, cancels_or_skips: 0, new_bookings: 0 };
+  let matured = 0;
   for (const r of flagged) {
     const t0 = new Date(r.created_at).getTime();
     const week = weekOf(t0);
     perWeek[week] = (perWeek[week] || 0) + 1;
     const until = t0 + FOLLOW_WINDOW_MS;
+    if (until > observedMs) continue;
+    matured += 1;
     const moved = firstWithin(moveTimes.get(r.customer_id), t0, until) !== null;
     const cancelled = firstWithin(cancelTimes.get(r.customer_id), t0, until) !== null;
     const booked = firstWithin(bookingTimes.get(r.customer_id), t0, until) !== null;
@@ -123,15 +136,21 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     if (moved || cancelled || booked) followed.any += 1;
   }
 
-  const offerSummary = offers ? summarizeOffers(offers, { moveTimes, bookingTimes, now }) : null;
+  const offerSummary = offers ? summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) : null;
 
   return {
     inbound_total: inbound.length,
     scheduling_flagged: flagged.length,
+    scheduling_matured: matured,
     per_week: perWeek,
     followed_within_48h: followed,
     offers: offerSummary,
   };
+}
+
+/** A report boundary as its Eastern calendar date (the report's own day). */
+function formatReportDate(instant) {
+  return etDateString(new Date(instant));
 }
 
 /**
@@ -145,7 +164,9 @@ function parseReportInstant(value, fallback, now = new Date()) {
   if (days) return new Date(new Date(now).getTime() - Number(days[1]) * 86400000);
   const text = /^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? `${value}T00:00` : String(value);
   const parsed = parseETDateTime(text);
-  if (Number.isNaN(parsed.getTime())) throw new Error(`cannot read the date "${value}" (use 14d or YYYY-MM-DD)`);
+  // Date rolls an impossible day over (2026-02-30 → March 2); refuse it.
+  const bareDate = text !== String(value);
+  if (Number.isNaN(parsed.getTime()) || (bareDate && etDateString(parsed) !== String(value))) throw new Error(`cannot read the date "${value}" (use 14d or YYYY-MM-DD)`);
   return parsed;
 }
 
@@ -154,6 +175,8 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   const from = new Date(since);
   const to = new Date(until);
   const followTo = new Date(to.getTime() + FOLLOW_WINDOW_MS);
+  // Follow-up rows exist only up to the moment they are read.
+  const observedAt = new Date(Math.min(Date.now(), followTo.getTime()));
   const inbound = await dbh('sms_log')
     .where({ direction: 'inbound' }).whereNotNull('customer_id')
     .where('created_at', '>=', from).where('created_at', '<', to)
@@ -167,7 +190,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     ...inbound.filter((r) => isSchedulingText(r.body)).map((r) => r.customer_id),
     ...(offers || []).map((o) => o.customer_id).filter(Boolean),
   ])];
-  if (!customerIds.length) return summarizeFunnel({ inbound, offers, now: to });
+  if (!customerIds.length) return summarizeFunnel({ inbound, offers, now: to, observedAt });
   const [moves, cancels, bookings] = await Promise.all([
     dbh('reschedule_log').whereIn('customer_id', customerIds).whereNot('initiated_by', 'system')
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
@@ -178,7 +201,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
-  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, now: to });
+  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, now: to, observedAt });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
