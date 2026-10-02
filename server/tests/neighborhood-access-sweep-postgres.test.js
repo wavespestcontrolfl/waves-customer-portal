@@ -202,6 +202,21 @@ postgres('neighborhood gate-code filing sweep', () => {
     await trx('neighborhoods').where({ id: n }).update({ match_key: same.match_key });
   });
 
+  test('a re-link back to the SAME neighborhood never re-files a code the office retired', async () => {
+    const n = await neighborhood('Retired Grove');
+    const customerId = await customerWithCode('2424', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('neighborhood_access').where({ neighborhood_id: n }).update({ status: 'retired' });
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: null, neighborhood_source: null, neighborhood_checked_at: null });
+    const lookup = jest.fn(async () => ({ county: 'Manatee', subdivision: 'RETIRED GROVE PH II PB2/2', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' }));
+    const before = await trx('neighborhoods').where({ id: n }).first('match_key');
+    await trx('neighborhoods').where({ id: n }).update({ match_key: 'manatee|retired grove' });
+    await sweepSavedGateCodes({ lookup });
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['2424', 'retired']]);
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    await trx('neighborhoods').where({ id: n }).update({ match_key: before.match_key });
+  });
+
   test('the ledger seed keeps a code the office retired after the backfill from coming back', async () => {
     const seed = require('../models/migrations/20261002110000_neighborhood_access_filings_seed');
     const n = await neighborhood('Retired Gate');

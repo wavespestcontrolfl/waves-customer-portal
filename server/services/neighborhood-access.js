@@ -393,6 +393,10 @@ async function fileOneSavedCode(customerId, lookup) {
     const [carried] = (await trx.raw(`SELECT (f.value_hash = ${VALUE_HASH_SQL}) AS same_value, f.neighborhood_id
       FROM neighborhood_access_filings f JOIN property_preferences pp ON pp.customer_id = f.customer_id
       WHERE f.customer_id = ?`, [customerId])).rows;
+    // Same value, same neighborhood: already filed (the link was only cleared
+    // and re-resolved). Filing again would re-insert a code the office has
+    // since retired, because fileNeighborhoodCode skips retired rows.
+    if (carried?.same_value && carried.neighborhood_id === neighborhoodId) return { status: 'already_filed', neighborhoodId };
     const carriedFromElsewhere = Boolean(carried?.same_value && carried.neighborhood_id && carried.neighborhood_id !== neighborhoodId);
     const unconfirmed = markedUnconfirmed || carriedFromElsewhere;
     const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId, unconfirmed });
