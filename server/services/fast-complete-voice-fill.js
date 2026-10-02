@@ -18,6 +18,15 @@
  *     never reaches the report writer (the sheet keeps them apart);
  *   - list and string lengths are capped.
  *
+ * Everything returned is a SUGGESTION, never a recorded value (owner rulings
+ * 2026-10-02 "one tap per product" + "confirm visit taps too"): the sheet shows
+ * each voice-filled product row and each visit value (pests, where, how,
+ * activity, linear feet) unconfirmed with its "Heard: …" words until the tech
+ * taps it, and Complete waits on those taps and on every Check. The checks above
+ * are the hard floor (closed sets, spoken numbers, rates and carrier volumes,
+ * negation, grounded notes, safety and company-name screens); how the tech
+ * phrased something is settled by that confirm tap, not by more server rules.
+ *
  * Only `pest_reservice` is built here. A sheet is one registry entry: its
  * completion-profile service key and a context loader that returns the choice
  * lists, so lawn_reservice / tree_shrub plug in later without touching the
