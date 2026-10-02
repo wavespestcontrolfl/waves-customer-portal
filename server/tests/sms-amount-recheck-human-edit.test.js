@@ -64,6 +64,11 @@ describe('a staff Zelle contact is rechecked against the decision\'s target invo
     expect(explicitInvoiceReference('You can send 200 dollars by Zelle.')).toBe(true);
     expect(explicitInvoiceReference('You can Zelle us at pay@example.com.')).toBe(false);
   });
+  // Codex round-76 P2: the owed-amount check downstream authorizes the re-targeted invoice's own amount (not only the aggregate / newest)
+  test('"Zelle $210 to ..." passes the owed-amount check too (untrusted figures): $210 is invoice B\'s amount due', async () => {
+    await expect(run('Zelle $210 to pay@example.com', 'inv-A', { trustOwedAmounts: false })).resolves.toMatchObject({ stale: false });
+    await expect(run('Zelle $333 to pay@example.com', 'inv-A', { trustOwedAmounts: false })).resolves.toMatchObject({ stale: true });
+  });
   test('"Zelle $210 to ..." on a decision targeted at the $95 invoice A: invoice B ($210) is the one checked', async () => {
     await expect(run('Zelle $210 to pay@example.com', 'inv-A')).resolves.toMatchObject({ stale: false, zelle: { invoiceId: 'inv-B' } });
     visibility.mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-A', reason: 'not_eligible' }));

@@ -4000,6 +4000,8 @@ function billingAmountCents(context) {
     owed: finiteSet([
       billing.outstandingBalance > 0 ? centsOf(billing.outstandingBalance) : NaN,
       centsOf(billing.openInvoice?.amountDue),
+      // every listed open invoice's amount due is owed too (Codex round-76 P2: a staff edit re-targeted to the $210 invoice by its figure)
+      ...(Array.isArray(billing.openInvoices) ? billing.openInvoices : []).map((inv) => centsOf(inv?.amountDue)),
       ...require('./context-aggregator').authorizedDuesCents(context),
     ]),
     paid: finiteSet((billing.recentPayments || []).map((p) => centsOf(p?.amount))),

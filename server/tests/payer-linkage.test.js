@@ -127,6 +127,16 @@ describe('loadLivePayerLinkage is bounded', () => {
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/customers c WHERE c\.id = invoices\.customer_id AND c\.payer_id IS NOT NULL/);
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/ss\.id = invoices\.scheduled_service_id AND ss\.customer_id = invoices\.customer_id AND ss\.payer_id IS NOT NULL/);
   });
+  // Codex round-76 P2: a payer assigned later must not take the customer's settled self-pay history with it
+  test('the live scan re-resolves only UNSETTLED invoices', async () => {
+    const scan = chain([invoices(5)]);
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
+    await loadLivePayerLinkage('c1', dbh);
+    const { LIVE_SETTLED_EXCLUSION_SQL } = require('../services/payer-linkage');
+    expect(scan.whereRaw).toHaveBeenCalledWith(LIVE_SETTLED_EXCLUSION_SQL);
+    for (const st of ['paid', 'prepaid', 'refunded', 'void', 'cancelled']) expect(LIVE_SETTLED_EXCLUSION_SQL).toContain(`'${st}'`);
+    expect(LIVE_SETTLED_EXCLUSION_SQL).toMatch(/NOT IN/);
+  });
 
   test('a scan inside both bounds is judged normally', async () => {
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([invoices(5)]));
