@@ -555,10 +555,10 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   });
 
   test('#5524 r5 P1: the fact-check record holds only the caller\'s call turns, never the summary or staff turns', async () => {
-    mockGetRecentCalls.mockResolvedValue([{ direction: 'inbound', created_at: new Date(), call_summary: 'Office said the tech has a new baby',
+    mockGetRecentCalls.mockResolvedValue([{ direction: 'inbound', from_phone: '+19415550100', created_at: new Date(), call_summary: 'Office said the tech has a new baby',
       transcript: 'Agent: our tech just had a new baby\nCaller: the ants are back by the lanai' }]);
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
-    await Drafter.draftTechVoice(INPUT);
+    await Drafter.draftTechVoice({ ...INPUT, customer: { ...INPUT.customer, phone: '+19415550100' } });
     const { record } = factInput(mockFactCheck.mock.calls[0][1]);
     expect(record).toContain('the ants are back by the lanai');
     expect(record).not.toMatch(/new baby/);
@@ -677,6 +677,33 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     // A refused duration first (no weeks quote), then the same supported duration must still pass.
     expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity'], [], null)).toBe(true);
     expect(timingUnsupported('Some activity for up to two weeks is normal.', ['some activity for up to two weeks is normal'], ['- Observations: some activity for up to two weeks is normal'], null)).toBe(false);
+  });
+
+  test('#5524 r23 P1: a duration must match the cited one exactly (amount and range)', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const lines = ['- Observations: activity is normal for up to two weeks'];
+    const q = ['activity is normal for up to two weeks'];
+    expect(timingUnsupported('Activity is normal for up to two weeks.', q, lines, null)).toBe(false);
+    expect(timingUnsupported('I noted activity is normal for several weeks.', q, lines, null)).toBe(true);
+    expect(timingUnsupported('Activity is normal for two weeks.', q, lines, null)).toBe(true);
+  });
+
+  test('#5524 r23: the first person must narrate the visit, not only the review request', () => {
+    const { notTechVoice } = Drafter.__private;
+    expect(notTechVoice('Ants were active in the kitchen. A Google review would help me: {review_url}', 'Adam')).toBe(true);
+    expect(notTechVoice('I saw ants in the kitchen. A Google review would help: {review_url}', 'Adam')).toBe(false);
+  });
+
+  test('#5524 r23 P1: only calls on the account holder\'s own number are evidence', async () => {
+    mockGetRecentCalls.mockResolvedValue([
+      { direction: 'inbound', from_phone: '+19415550100', created_at: new Date(), call_summary: 'own call', transcript: 'Caller: the ants are back by the lanai' },
+      { direction: 'inbound', from_phone: '+19415550199', created_at: new Date(), call_summary: 'tenant call', transcript: 'Caller: we just had a new baby' },
+    ]);
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, customer: { ...INPUT.customer, phone: '(941) 555-0100' } });
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).toContain('own call');
+    expect(text).not.toContain('tenant call');
   });
 
   test('a bare link after a question stays with its sentence', () => {

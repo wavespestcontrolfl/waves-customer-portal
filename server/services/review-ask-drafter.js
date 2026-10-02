@@ -569,10 +569,16 @@ async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, s
     customerOwnEmails(customer.id, before, customer.email),
     priorSequenceTouches(sequenceId, sequenceStep),
   ]);
+  // Only calls on the account holder's own number: other household contacts
+  // (a tenant, a second contact slot) link to the same customer, and their
+  // words are not the recipient's.
+  const digits = (v) => String(v || "").replace(/\D/g, "").slice(-10);
+  const own = digits(customer.phone);
+  const ownCall = (c) => !!own && (/^inbound/i.test(String(c.direction || "")) ? digits(c.from_phone) : digits(c.to_phone)) === own;
   return {
     report,
     sms: sms.filter((m) => inVisit(m.date)),
-    calls: (calls || []).filter((c) => inVisit(c.created_at)),
+    calls: (calls || []).filter((c) => inVisit(c.created_at) && ownCall(c)),
     emails: emails.filter((e) => inVisit(e.date)),
     priorTouches,
   };
@@ -873,7 +879,10 @@ function notTechVoice(body, techName) {
   if (OFFICE_NARRATION_RE.test(body) || COMPANY_NARRATION_RE.test(body)) return true;
   const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
   const introduces = names.some((n) => new RegExp(`\\b(?:it'?s|this is)\\s+${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body));
-  if (!FIRST_PERSON_RE.test(String(body).replace(/\{review_url\}/g, "")) && !introduces) return true;
+  // The first person must narrate the visit, not only the review request
+  // ("A Google review would help me" alone does not make it the tech's voice).
+  const narration = String(body).split(/(?<=[.!?])\s+/).filter((sent) => !isAskOnlySentence(sent, new Set())).join(" ");
+  if (!FIRST_PERSON_RE.test(narration.replace(/\{review_url\}/g, "")) && !introduces) return true;
   return names.some((n) => {
     const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const uses = String(body).match(new RegExp(`\\b${esc}\\b`, "gi")) || [];
@@ -1082,7 +1091,11 @@ function timingUnsupported(sentence, allQuotes, recordLines, visitDay) {
   const today = etCalendarDayOf(new Date());
   let rest = String(sentence);
   if (DURATION_RE.test(rest)) {
-    if (!quotes.some((q) => /\bweeks?\b/i.test(q))) return true;
+    // The same amount and range ("up to two weeks" is not "several weeks" or
+    // "two weeks"): the cited quote must carry the duration as written.
+    const key = (m) => normalizeForMatch(m).replace(/^for\s+/, "").replace(/\b2\b/, "two").replace(/\bweek\b/, "weeks");
+    const want = key(DURATION_RE.exec(rest)[0]);
+    if (!quotes.some((q) => { const m = DURATION_RE.exec(q); return !!m && key(m[0]) === want; })) return true;
     rest = rest.replace(allOf(DURATION_RE), " ");
   }
   if (VISIT_WEEK_RE.test(rest)) {

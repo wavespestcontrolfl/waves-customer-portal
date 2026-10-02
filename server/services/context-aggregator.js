@@ -1476,7 +1476,7 @@ class ContextAggregator {
         // SQL throws on any malformed row), and a filtered row must not
         // silently shrink the pick below 4 real calls.
         .limit(10)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status');
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status', 'from_phone', 'to_phone');
       const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
       // v10: the NEWEST call also carries its transcript (owner directive:
       // the drafter should see what was actually said, not only the
