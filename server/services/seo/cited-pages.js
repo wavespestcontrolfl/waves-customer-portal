@@ -85,10 +85,13 @@ const NOT_A_ROUNDUP_RE = /\b(costs?|pric(e|es|ing)|diy|identif\w*|signs?|tips?|v
 // evidence (best/top + providers in the plural) outranks them.
 const AMBIGUOUS_RE = /\b(how|what|why|when|business|businesses)\b/;
 
-// Sites that publish local provider roundups as their pages (not news): a
-// provider path on them is a roundup without a best/top word in the address
-// (owner 2026-10-01 "loosen the rule": smarfle.com/fl/bradenton/pest-control).
-const ROUNDUP_SITES = Object.freeze(['smarfle.com', 'floridist.com', 'todayshomeowner.com']);
+// Sites whose pages ARE local provider roundups (dedicated recommendation
+// sites, not news and not general home-advice publishers): a provider path on
+// them is a roundup without a best/top word in the address (owner 2026-10-01
+// "loosen the rule": smarfle.com/fl/bradenton/pest-control). Mixed-content
+// publishers stay out — Today's Homeowner's roundups carry "near-me" in the
+// address anyway, while its guides ("types of pest control") do not.
+const ROUNDUP_SITES = Object.freeze(['smarfle.com', 'floridist.com']);
 // "best"/"top" plus providers in the plural: an explicit roundup, whatever
 // other words its address carries ("what-are-the-best-pest-control-companies…").
 const PLURAL_PROVIDERS_RE = /\b(companies|businesses|exterminators|services|pros|contractors|providers)\b/;

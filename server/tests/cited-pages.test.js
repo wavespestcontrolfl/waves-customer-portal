@@ -154,6 +154,8 @@ describe('rankCitedPages', () => {
       'https://floridist.com/pest-control-company-identifies-common-pests', // identifies → not
       'https://floridist.com/pest-control-tip', // tip → not
       'https://floridist.com/early-sign-of-termites-pest-control', // sign → not
+      'https://todayshomeowner.com/pest-control/guides/types-of-pest-control', // a mixed-content publisher's guide → not
+      'https://todayshomeowner.com/near-me/florida/venice/pest-control/', // its near-me roundup → list
     ];
     const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
     expect(byKey).toEqual({
@@ -170,6 +172,8 @@ describe('rankCitedPages', () => {
       'floridist.com/pest-control-company-identifies-common-pests': false,
       'floridist.com/pest-control-tip': false,
       'floridist.com/early-sign-of-termites-pest-control': false,
+      'todayshomeowner.com/pest-control/guides/types-of-pest-control': false,
+      'todayshomeowner.com/near-me/florida/venice/pest-control': true,
     });
   });
 
