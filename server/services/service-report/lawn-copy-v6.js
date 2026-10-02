@@ -184,12 +184,12 @@ function approvedRowsFor(reportV2, ctx, deps) {
 function buildFacts(reportV2, ctx, approvedRows) {
   const products = productsOf(reportV2);
   const issues = issuesOf(reportV2);
-  // The since-last lane's lines: reportV2.lead.sinceLast (the lead, when it is
-  // already derived) or its non-enumerable hand-off reportV2.sinceLastCopy
-  // (report-data.js); both are { priorDate, lines }.
-  const sinceBlock = (reportV2 && reportV2.lead && reportV2.lead.sinceLast) || (reportV2 && reportV2.sinceLastCopy) || null;
-  const sinceLines = sinceBlock && Array.isArray(sinceBlock.lines)
-    ? sinceBlock.lines.filter((l) => typeof l === 'string' && l.trim())
+  // The since-last lane's lines (GATE_LAWN_SINCE_LAST), handed in by
+  // report-data.js as ctx.sinceLastLines whatever the render mode: the lead
+  // only carries them on live views, but this copy freezes at its first
+  // healthy render, which is usually not one.
+  const sinceLines = Array.isArray(ctx.sinceLastLines)
+    ? ctx.sinceLastLines.filter((l) => typeof l === 'string' && l.trim())
     : [];
   return {
     promptVersion: PROMPT_VERSION,
@@ -372,7 +372,7 @@ async function modelJson(facts, approvedRows, deps) {
  * Write the v6 fields for one visit.
  *
  * @param {object} reportV2 the deterministic lawn reportV2 (treatment, insights, diagnosis, snapshot)
- * @param {object} ctx { grassLabel, visitDate, nextVisitGapDays, progress, extraGuard }
+ * @param {object} ctx { grassLabel, visitDate, nextVisitGapDays, progress, sinceLastLines, extraGuard }
  * @param {object} deps { callModel?, buildExpectations? } injectable for tests
  * @returns {Promise<{ fields: {headline, whatWeDid, whatToExpect, watching},
  *   expectRows: Array<{id, keys}>, modelOk: boolean }>}

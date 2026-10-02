@@ -33,6 +33,11 @@ function loadFixtureEngine() {
           primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
           fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
         },
+        photoIdPlantV2: {
+          name: 'photoIdPlantV2',
+          primary: { provider: 'gemini', model: 'gemini-3.6-flash-test' },
+          fallback: { provider: 'openai', model: 'gpt-6-sol-test' },
+        },
       },
     };
   });
@@ -2199,6 +2204,152 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         slug: '', off_catalog_name: 'Mystery Grass', group_id: null, confidence: 0.5,
       }, []);
       expect(engine._test.describeIdentityRead(resolved)).toEqual({ slug: 'Mystery Grass', confidence: 0.5 });
+    });
+  });
+
+  // Owner 2026-10-02 ("same as pest"): the customer app's lawn and
+  // tree/shrub/palm read is Gemini alone — Call A (+ Call C in a workup), no
+  // verify, no OpenAI second opinion, no referee; OpenAI only when Gemini
+  // returns nothing usable.
+  describe('Gemini-only ladder (app routes)', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const MISS = { ok: false, reason: 'provider_error' };
+    const idItem = (slug, confidence) => ({ slug, off_catalog_name: '', group_id: null, confidence });
+    const condItem = ([slug, confidence]) => ({
+      slug, confidence, elements_visible: [1], signs_visible: [], symptoms_visible: [],
+    });
+    const candidatesLeg = ({ turf = [], weeds = [], host = [] } = {}) => ({
+      ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf, weeds, host },
+    });
+    const conditionsLeg = (items) => ({ ok: true, json: { quality: OK_QUALITY, observed_terms: ['browning'], candidates: items.map(condItem) } });
+    const escalationLeg = ({ turf = [], conditions = [] } = {}) => ({
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf, weeds: [], host: [], observed_terms: [],
+        conditions: conditions.map(condItem),
+      },
+    });
+    const queue = (...legs) => legs.forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+    const GEMINI_ONLY = { ladder: 'gemini_only' };
+
+    test('identify: one Gemini call on the app policy at LOW thinking, no verify or escalation', async () => {
+      queue(candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.6)] }));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch.mock.calls[0][0]).toMatchObject({ provider: 'gemini', model: 'gemini-3.6-flash-test' });
+      expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'plant_id_app', thinkingLevel: 'LOW' });
+      expect(result.internal).toMatchObject({ ladder: 'gemini_only', escalation_triggered: false });
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine' });
+    });
+
+    test('workup: Call A + Call C only, even when Call C is unsure', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        conditionsLeg([['fixture-large-patch', 0.5]]),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(dispatch.mock.calls.map(([, p]) => p.laneId)).toEqual(['plant_id_app', 'plant_id_app']);
+      expect(result.internal.escalation_reasons).toEqual([]);
+    });
+
+    test('a Gemini miss hands the photos to OpenAI on the app lane, without thinkingLevel', async () => {
+      queue(
+        MISS, // Call A
+        conditionsLeg([['fixture-large-patch', 0.9]]), // Call C still reads the class index
+        escalationLeg({ turf: [{ ...idItem('fixture-st-augustine', 0.9), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(result.internal.escalation_reasons).toContain('gemini_missed');
+      const escalationCall = dispatch.mock.calls.find(([route]) => route.provider === 'openai');
+      expect(escalationCall[0].model).toBe('gpt-6-sol-test');
+      expect(escalationCall[1]).toMatchObject({ laneId: 'plant_id_app' });
+      expect(escalationCall[1].thinkingLevel).toBeUndefined();
+    });
+
+    test('a Call C that names only conditions outside the index escalates', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        conditionsLeg([['not-in-the-index', 0.9]]),
+        escalationLeg({ conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+    });
+
+    test('workup: an empty Call A AND an empty Call C hands off to OpenAI (Codex #5596 r1 P1)', async () => {
+      queue(
+        candidatesLeg({}),
+        conditionsLeg([]),
+        escalationLeg({ turf: [{ ...idItem('fixture-st-augustine', 0.9), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toContain('no_identity_candidate');
+      // The stand-in's condition read reaches the workup too.
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+    });
+
+    test('workup: an empty Call A with a usable Call C stays Gemini-only', async () => {
+      queue(candidatesLeg({}), conditionsLeg([['fixture-large-patch', 0.9]]));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(result.internal.escalation_reasons).toEqual([]);
+    });
+
+    test('a stand-in for a failed Call C never overrides the plant Gemini named (Codex #5596 r1 P1)', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        MISS, // Call C
+        escalationLeg({ turf: [{ ...idItem('fixture-bahia', 0.95), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+    });
+
+    test('a stand-in for a failed Call A never overrides the conditions Gemini read', async () => {
+      queue(
+        MISS, // Call A
+        conditionsLeg([['fixture-large-patch', 0.9]]),
+        escalationLeg({ turf: [{ ...idItem('fixture-st-augustine', 0.9), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-drought', 0.95]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      const slugs = result.v2.possibilities.map((p) => p.slug);
+      expect(slugs).toContain('fixture-large-patch');
+      expect(slugs).not.toContain('fixture-drought');
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+    });
+
+    test('an empty Call C with a named plant hands the conditions to OpenAI and keeps the plant (Codex #5596 r2 P1)', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        conditionsLeg([]),
+        escalationLeg({ turf: [{ ...idItem('fixture-bahia', 0.95), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+    });
+
+    test('callers that do not ask (visit prep) keep the full ladder on plantIdVision', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.6)] }),
+        { ok: true, json: { candidates: [{ slug: 'fixture-st-augustine', confidence: 0.6, cues_visible: [1], cues_not_visible: [] }] } },
+        MISS,
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch.mock.calls[0][0].model).toBe('gemini-3.8-flash-test');
+      expect(dispatch.mock.calls[0][1]).toMatchObject({ laneId: 'plant_id' });
+      expect(dispatch.mock.calls[0][1].thinkingLevel).toBeUndefined();
+      expect(dispatch.mock.calls[1][1].system).toBeDefined(); // the verify leg ran
+      expect(result.internal.ladder).toBe('full');
     });
   });
 });

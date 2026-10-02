@@ -69,6 +69,7 @@
       12
     ],
     "peak_months": [
+      3,
       4,
       5,
       6,
@@ -98,12 +99,13 @@
     "legacy_slugs": [],
     "sources": [
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/dollarweed/",
-      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/",
+      "https://blogs.ifas.ufl.edu/sarasotaco/2024/03/26/manyflower-pennywort/"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "d03b64646a6a0422da6430ec70c642a6acad15bbd49c96be7733d78e6496a52d"
+      "notes": "Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "07fe92d070b88e20b1389e6c02c89b48d7379d5674ba8029f17aadc3aacea714"
     },
     "role": "weed",
     "risk": "low",

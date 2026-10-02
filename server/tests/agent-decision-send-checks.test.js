@@ -20,10 +20,14 @@ jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.
 jest.mock('../services/sms-label-facts', () => ({ labelFactsSendBlockReason: jest.fn(async () => null) }));
 jest.mock('../services/sms-eta-freshness', () => ({
   etaClaimBlockReason: jest.fn(async () => null),
+  ETA_FRESHNESS_WINDOW_MS: 15 * 60 * 1000,
   // The ONE shared infrastructure-failure set (round-42 P2) is consulted by the wrappers.
   isEtaInfrastructureFailure: (reason) => jest.requireActual('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason),
 }));
 jest.mock('../models/db', () => jest.fn());
+// the open-loop recheck asks the canonical commitment readers (PR #5499)
+jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn(async () => []) }));
+jest.mock('../services/sms-operational-actions', () => ({ listSmsCommitments: jest.fn(async () => []), smsCommitmentsEnabled: jest.fn(() => true) }));
 const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
@@ -353,8 +357,13 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
 
   test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+    // PR #5499: the open-loop recheck is composed at the same boundary
+    expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),');
+    // ...and its early queued-send recheck never retires a reply on an unreadable read
+    expect(src).toContain("if (rawOpenLoopsReason === 'open_loops_recheck_failed') {");
+    expect(src).toContain('} else if (rawOpenLoopsReason != null) {\n                openLoopsReason = rawOpenLoopsReason;\n                openLoopsStale = true;');
   });
 });
 
@@ -535,5 +544,244 @@ describe('follow-up (#5416 r31 P2): an unreadable label recheck keeps the decisi
     const read = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
     expect(read('../routes/admin-communications.js')).toContain("blockReasonIsRecheckInfrastructure(blockReason)) {\n        await require('../services/sms-suggest-mode').supersedeStaleDecision");
     expect(read('../services/scheduler.js')).toContain("if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {");
+  });
+});
+
+// PR #5499 r1: a reviewed reply grounded on an open promise is refused once that
+// promise was fulfilled or dismissed elsewhere; a read error fails closed.
+describe('open-loop commitments recheck', () => {
+  const { openLoopsBlockReason, scheduledOpenLoopsBlockReason } = require('../services/agent-decision-send-checks');
+  const { listOpenCommitments } = require('../services/call-commitments');
+  const { listSmsCommitments } = require('../services/sms-operational-actions');
+  const { commitmentRevision } = require('../services/visit-loops-facts');
+  const nowIso = () => new Date().toISOString();
+  const withIds = (ids, over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: nowIso(), visit_loop_commitment_ids: ids }), ...over });
+  // the customer's current open lists, from the same canonical readers the facts used
+  const openFor = ({ calls = [], texts = [] } = {}) => {
+    listOpenCommitments.mockReset().mockResolvedValue(calls);
+    listSmsCommitments.mockReset().mockResolvedValue(texts);
+  };
+  const decisionRowDb = (row = { input_snapshot: JSON.stringify({ facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ['cc-1'] }), customer_id: 'c1' }) => (table) => {
+    const q = { where: () => q, first: async () => row };
+    return table === 'agent_decisions' ? q : null;
+  };
+
+  test('no ids on the snapshot: no read, no block', async () => {
+    openFor();
+    await expect(openLoopsBlockReason({ decision: decision() })).resolves.toBeNull();
+    expect(listOpenCommitments).not.toHaveBeenCalled();
+  });
+
+  test('every ref still in the customer\'s open lists passes; one missing from them blocks', async () => {
+    openFor({ calls: [{ id: 'cc-1' }], texts: [{ id: 'cc-2' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBeNull();
+    // the readers are asked for THIS customer, Waves-owned call promises
+    expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves' }));
+    // each rendered SMS/email lane on its own page, as the facts loader reads them
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', lane: 'promise' }));
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', lane: 'request' }));
+    // closed, dismissed, superseded by a reprocess, or relinked to another customer: absent from the lists
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBe('commitment_closed');
+  });
+
+  test('a ref from a lane whose gate was rolled back since the draft is refused', async () => {
+    const { smsCommitmentsEnabled } = require('../services/sms-operational-actions');
+    openFor({ texts: [{ id: 'cc-2', channel: 'sms' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-2']) })).resolves.toBeNull();
+    smsCommitmentsEnabled.mockReturnValueOnce(false);
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-2']) })).resolves.toBe('commitment_closed');
+    // email rows need GATE_EMAIL_OPERATIONAL_ACTIONS (off here): never live
+    openFor({ texts: [{ id: 'em-1', channel: 'email' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['em-1']) })).resolves.toBe('commitment_closed');
+  });
+
+  test('no customer on the decision: refused (ownership cannot be shown)', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1'], { customer_id: null }) })).resolves.toBe('commitment_closed');
+  });
+
+  test('a staff edit to a still-open commitment refuses; an unedited one passes', async () => {
+    const row = { id: 'cc-1', kind: 'callback', description: 'Call back about the quote' };
+    const ref = `cc-1:${commitmentRevision(row)}`;
+    openFor({ calls: [row] });
+    await expect(openLoopsBlockReason({ decision: withIds([ref]) })).resolves.toBeNull();
+    openFor({ calls: [{ ...row, description: 'Call back after 3' }] });
+    await expect(openLoopsBlockReason({ decision: withIds([ref]) })).resolves.toBe('commitment_closed');
+  });
+
+  test('a commitment-backed reply is refused once the ET day the facts were built has passed ("later today" would shift)', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    const at = (iso) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: iso, visit_loop_commitment_ids: ['cc-1'] }) });
+    // drafted 11:30 PM ET, sent 8 AM ET the next day
+    await expect(openLoopsBlockReason({ decision: at('2026-10-01T03:30:00Z'), now: new Date('2026-10-01T12:00:00Z') })).resolves.toBe('commitment_day_changed');
+    await expect(openLoopsBlockReason({ decision: at('2026-10-01T12:00:00Z'), now: new Date('2026-10-01T20:00:00Z') })).resolves.toBeNull();
+    // no facts stamp: refused
+    await expect(openLoopsBlockReason({ decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_commitment_ids: ['cc-1'] }) }) })).resolves.toBe('commitment_day_changed');
+  });
+
+  test('a read error fails closed', async () => {
+    listOpenCommitments.mockReset().mockRejectedValue(new Error('db down'));
+    await expect(openLoopsBlockReason({ decision: withIds(['cc-1']) })).resolves.toBe('open_loops_recheck_failed');
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: () => { throw new Error('db down'); } })).resolves.toBe('open_loops_recheck_failed');
+  });
+
+  test('the immediate send path refuses with the open-loop reason', async () => {
+    openFor();
+    await expect(agentDecisionSendBlockReason({ decision: withIds(['cc-1']), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' }))
+      .resolves.toBe('open-loop facts stale (commitment_closed)');
+  });
+
+  test('the scheduler form reads the decision row (with its customer), then the open lists', async () => {
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: decisionRowDb() })).resolves.toBeNull();
+    openFor();
+    await expect(scheduledOpenLoopsBlockReason({ agentDecisionId: 'd1', dbh: decisionRowDb() })).resolves.toBe('commitment_closed');
+  });
+
+  test('provider-boundary form: no ids → no check; closed → refused; unreadable → refused retryably; repeatable', async () => {
+    const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    expect(openLoopsProviderPreSendCheck({ commitmentIds: [] })).toBeUndefined();
+    expect(openLoopsProviderPreSendCheck({ commitmentIds: null })).toBeUndefined();
+    const check = openLoopsProviderPreSendCheck({ commitmentIds: ['cc-1'], customerId: 'c1', factsGeneratedAt: new Date() });
+    expect(check.afterMarker).toBe(check);
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+    openFor();
+    await expect(check({ dbi: () => null }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
+    listOpenCommitments.mockReset().mockRejectedValue(new Error('down'));
+    await expect(check({ dbi: () => null }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
+  });
+
+  describe('visit status (visit_loop_status): rebuilt-facts signature', () => {
+    const facts = require('../services/visit-loops-facts');
+    const loops = (over = {}) => ({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [], ...over });
+    const lateAlert = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', type: 'tech_late', missingTracking: false };
+    const drafted = loops({ lateAlert });
+    const signature = facts.visitStatusSignature(drafted);
+    // durable facts: no TTL, however long the card waited
+    const withStatus = (over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - 3 * 3600000).toISOString(), visit_loop_status: { signature } }), ...over });
+    let spy;
+    afterEach(() => spy && spy.mockRestore());
+    const nowFacts = (v) => { spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(v); };
+
+    test('unchanged facts pass (no TTL); any change (resolved, moved, reclassified, a new fact) refuses, whatever the wording', async () => {
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', strict: true }));
+      for (const changed of [
+        loops(),
+        loops({ lateAlert: { ...lateAlert, windowStart: '13:00:00' } }),
+        loops({ lateAlert: { ...lateAlert, missingTracking: true } }),
+        loops({ lateAlert, pastWindow: { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control' } }),
+      ]) {
+        spy.mockRestore();
+        nowFacts(changed);
+        await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBe('visit_status_changed');
+      }
+    });
+
+    test('a null signature (section rendered, nothing time-sensitive) is still rechecked: a delay that appeared refuses', async () => {
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature: null } }) });
+      nowFacts(loops());
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
+      spy.mockRestore();
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('visit_status_changed');
+    });
+
+    test('a displayed commitment closed between the two reads is caught by the final rebuild', async () => {
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ['cc-1'], visit_loop_status: { signature: null } }) });
+      openFor({ calls: [{ id: 'cc-1' }] }); // first read: still open
+      nowFacts(loops()); // the rebuild: fulfilled meanwhile
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('commitment_closed');
+    });
+
+    test('the rebuild includes commitments: an open promise/request the draft did not show refuses (review), a shown one passes', async () => {
+      const d = (ids) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_commitment_ids: ids, visit_loop_status: { signature: null } }) });
+      openFor({ calls: [{ id: 'cc-1' }] });
+      nowFacts(loops({ weOwe: [{ id: 'cc-1' }] }));
+      await expect(openLoopsBlockReason({ decision: d(['cc-1']) })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withCommitments: true }));
+      // drafted with an empty list (recorded since, or the read failed then): refused
+      await expect(openLoopsBlockReason({ decision: d([]) })).resolves.toBe('commitment_appeared');
+    });
+
+    test('a real read failure during the rebuild is a retryable recheck failure, not "changed"', async () => {
+      await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('dispatch_alerts down'); } }))
+        .resolves.toBe('open_loops_recheck_failed');
+    });
+
+    test('no customer: refused (the facts cannot be rebuilt)', async () => {
+      nowFacts(drafted);
+      await expect(openLoopsBlockReason({ decision: withStatus({ customer_id: null }) })).resolves.toBe('visit_status_changed');
+    });
+
+    test('an unreadable recheck reads as infrastructure, so the composer keeps the card', () => {
+      const { blockReasonIsRecheckInfrastructure, blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
+      expect(blockReasonIsRecheckInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
+      expect(blockReasonIsRecheckInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
+      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(false); // not a live-ETA reason
+    });
+
+    test('the provider-boundary form rebuilds from the in-memory status for the claim\'s customer', async () => {
+      const { openLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+      const check = openLoopsProviderPreSendCheck({ commitmentIds: null, customerId: 'c1', status: { signature }, factsGeneratedAt: new Date() });
+      nowFacts(drafted);
+      await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+      spy.mockRestore();
+      nowFacts(loops());
+      await expect(check({ dbi: () => null }))
+        .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (visit_status_changed)' });
+    });
+  });
+
+  test('decision-row boundary form (composer / scheduled replay): reads through the handoff connection', async () => {
+    const { openLoopsDecisionProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    const check = openLoopsDecisionProviderPreSendCheck({ decisionId: 'd1' });
+    expect(check.afterMarker).toBe(check);
+    openFor({ calls: [{ id: 'cc-1' }] });
+    await expect(check({ dbi: decisionRowDb() })).resolves.toEqual({ ok: true });
+    openFor();
+    await expect(check({ dbi: decisionRowDb() }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
+    await expect(check({ dbi: () => { throw new Error('down'); } }))
+      .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  describe('gratitude boundary (fixed thank-you after the quiet period)', () => {
+    const facts = require('../services/visit-loops-facts');
+    const drafter = require('../services/sms-shadow-drafter');
+    const { gratitudeOpenLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    let spy;
+    beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; drafter.visitLoopsNeedAnswer = jest.fn(() => false); });
+    afterEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; if (spy) spy.mockRestore(); delete drafter.visitLoopsNeedAnswer; });
+
+    test('gate off or no customer: no check', () => {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' })).toBeUndefined();
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: null })).toBeUndefined();
+    });
+
+    test('rebuilds strict with commitments; refuses when something must be answered, passes otherwise; repeatable', async () => {
+      const loops = { lateAlert: null, pastWindow: { visitId: 'v1' }, weOwe: [], customerWaiting: [] };
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(loops);
+      const check = gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' });
+      expect(check.afterMarker).toBe(check);
+      await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', strict: true, withCommitments: true }));
+      drafter.visitLoopsNeedAnswer.mockReturnValue(true);
+      await expect(check({ dbi: () => null })).resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY' });
+      expect(drafter.visitLoopsNeedAnswer).toHaveBeenCalledWith({ visitLoops: loops });
+    });
+
+    test('an unreadable rebuild refuses retryably', async () => {
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockRejectedValue(new Error('down'));
+      await expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' })({ dbi: () => null }))
+        .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    });
   });
 });

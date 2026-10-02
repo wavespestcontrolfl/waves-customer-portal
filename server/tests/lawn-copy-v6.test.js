@@ -146,9 +146,10 @@ describe('what the model is told', () => {
 
   test("another lane's since-last lines ride only as a do-not-restate fact", async () => {
     const deps = modelReturning(GOOD);
-    const withSince = reportV2({ lead: { sinceLast: { priorDate: '2026-08-01', lines: ['Your overall score is up since August.'] } } });
-    await writeLawnCopyV6(withSince, {}, deps);
-    const facts = _test.buildFacts(withSince, {}, []);
+    const ctx = { sinceLastLines: ['Your overall score is up since August.'] };
+    await writeLawnCopyV6(reportV2(), ctx, deps);
+    expect(deps.callModel.mock.calls[0][0].text).toContain('Your overall score is up since August.');
+    const facts = _test.buildFacts(reportV2(), ctx, []);
     expect(facts.doNotRestate).toEqual(['Your overall score is up since August.']);
     expect(Object.keys(facts)).not.toContain('sinceLast');
     expect(_test.buildFacts(reportV2(), {}, []).doNotRestate).toBeUndefined();

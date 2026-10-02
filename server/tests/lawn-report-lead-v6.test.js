@@ -38,6 +38,22 @@ const V6 = {
 };
 
 describe('deriveLawnLead with the v6 writer fields', () => {
+  test('with the since-last block too: both keep their keys, and the budget gives writer fields up before sinceLast', () => {
+    const SINCE = { priorDate: '2026-08-01', lines: ['Last visit we treated the edge weeds.'] };
+    const lead = deriveLawnLead(reportOf(), { copyV6: V6, sinceLast: SINCE });
+    expect(lead.sinceLast).toEqual(SINCE);
+    expect(lead.whatToExpect).toBe(V6.whatToExpect);
+    expect(lead.watching).toBe(V6.watching);
+    // A long banner forces drops: why, watching, applied and whatToExpect go
+    // before the since-last block does.
+    const banner = { state: 'hold', lines: [words(165)] };
+    const tight = deriveLawnLead(reportOf({ banner }), { copyV6: V6, sinceLast: SINCE });
+    expect(tight.why).toBeNull();
+    expect(tight).not.toHaveProperty('watching');
+    expect(tight.sinceLast).toEqual(SINCE);
+    expect(leadWords({ ...reportOf({ banner }), lead: tight })).toBeLessThanOrEqual(250);
+  });
+
   test('no copyV6: the lead is exactly what it was, with no new keys (gate off is byte-identical)', () => {
     const lead = deriveLawnLead(reportOf());
     expect(lead).toEqual({

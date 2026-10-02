@@ -890,6 +890,10 @@ function applyReconciliationFixes(data, dynamicContext) {
  * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
  */
 function applyLawnReportReconciliation(data, dynamicContext = null) {
+  // The "Since your last visit" block rides the built report as a
+  // non-enumerable hand-off (report-data.js); the fixes below rebuild
+  // reportV2 by spread, which would drop it, so it is read first.
+  const sinceLast = (data && data.reportV2 && data.reportV2.sinceLastCopy) || null;
   // The v6 copy writer's fields (GATE_LAWN_REPORT_COPY_V6) ride the built report
   // as a non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first. They reach
@@ -903,7 +907,7 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // a lead failure leaves the payload exactly as reconciled.
   if (data && data.reportV2 && data.serviceLine === 'lawn' && lawnReportLeadLive()) {
     try {
-      const lead = deriveLawnLead(data.reportV2, { copyV6 });
+      const lead = deriveLawnLead(data.reportV2, { sinceLast, copyV6 });
       if (lead) data.reportV2 = { ...data.reportV2, lead };
     } catch { /* the lead is best-effort — the report renders without it */ }
   }

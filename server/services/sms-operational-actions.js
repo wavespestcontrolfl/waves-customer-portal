@@ -731,19 +731,22 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   });
 }
 
-const KIND_LABELS = {
-  send_estimate: 'An estimate requested or promised by SMS needs follow-up',
-  callback: 'An SMS callback request or promise needs follow-up',
-  send_report: 'A requested report needs follow-up',
-  send_paperwork: 'Requested paperwork needs follow-up',
-  technician_follow_up: 'A technician follow-up needs attention',
-  schedule_visit: 'An SMS scheduling request needs attention',
-  send_appointment_confirmation: 'A promised appointment confirmation needs attention',
-  other: 'An SMS request needs follow-up',
+// What the follow-up bell says is owed, per kind (owner audit 2026-10-01: a bell must
+// name WHO and WHAT). `action` completes "<Area> — <action>" with the customer's name;
+// `open` ends the why when nothing on file shows the work done. A promise staff texted
+// (basis 'promise') is owed the same thing, so it shares the kind's wording; only the
+// why changes ("We said ..." instead of the customer's own words).
+const KIND_ALERT = {
+  send_estimate: { area: 'Comms', action: (n) => `send ${n} the estimate`, open: 'no estimate sent yet' },
+  callback: { area: 'Comms', action: (n) => `call ${n} back`, open: 'no callback on record yet' },
+  send_report: { area: 'Comms', action: (n) => `send ${n} the report`, open: 'no report sent yet' },
+  send_paperwork: { area: 'Comms', action: (n) => `send ${n} the paperwork`, open: 'no paperwork sent yet' },
+  technician_follow_up: { area: 'Comms', action: (n) => `have a tech follow up with ${n}`, open: 'no tech follow-up on record yet' },
+  schedule_visit: { area: 'Schedule', action: (n) => `schedule ${n}'s visit`, open: 'no visit scheduled yet' },
+  send_appointment_confirmation: { area: 'Schedule', action: (n) => `confirm ${n}'s appointment`, open: 'no confirmation sent yet' },
+  send_reschedule_link: { area: 'Schedule', action: (n) => `send ${n} the reschedule link`, open: 'no reschedule link sent yet' },
+  other: { area: 'Comms', action: (n) => `follow up with ${n}`, open: 'nothing on record shows it done' },
 };
-// A promise staff texted (basis 'promise') carries its own title, whatever its
-// kind (owner-approved staff-promise plan, 2026-09-28).
-const PROMISE_LABEL = 'A promise texted to a customer needs follow-up';
 
 // An ask row's emails.customer_id, else the row's own email_customer_id —
 // the same resolution email-operational-actions.js uses; both follow a
@@ -757,11 +760,22 @@ const RESOLVED_EMAIL_CUSTOMER_ID_SQL = 'COALESCE(e.customer_id, cc.email_custome
 // sourced branch, kept to compatible column names) — an SMS row's output
 // shape is byte-identical to before. `channel` distinguishes the two for a
 // reader (e.g. the customer-profile panel's own label).
-async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date() }) {
+// `channels` (optional, additive): read only these sources ('sms' / 'email') so a
+// caller that renders one channel's rows is not bounded by the other's.
+// `lane` (optional, additive): 'request' = asks the customer is waiting on
+// (sms_context.basis 'request'); 'promise' = Waves-owned promises (party waves,
+// any other basis) — so a caller rendering one lane is not bounded by the other.
+const SMS_COMMITMENT_LANES = {
+  request: (b) => b.whereRaw("cc.sms_context->>'basis' = 'request'"),
+  promise: (b) => b.where('cc.party', 'waves').whereRaw("COALESCE(cc.sms_context->>'basis', '') <> 'request'"),
+};
+async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date(), channels = null, lane = null }) {
+  const byLane = (b) => { if (SMS_COMMITMENT_LANES[lane]) SMS_COMMITMENT_LANES[lane](b); };
   const smsRows = conn('call_commitments as cc')
     .join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id')
     .where({ 's.customer_id': customerId, 'cc.status': 'open' }).whereNull('c.deleted_at')
+    .modify(byLane)
     .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       'cc.sms_log_id', conn.raw('NULL::uuid as email_id'), 's.created_at as sms_started_at',
       's.customer_id', conn.raw("'sms' as channel"));
@@ -771,10 +785,14 @@ async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, no
     .whereExists(function availableCustomer() {
       this.select(1).from('customers as c').whereRaw(`c.id = ${RESOLVED_EMAIL_CUSTOMER_ID_SQL}`).whereNull('c.deleted_at');
     })
+    .modify(byLane)
     .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       conn.raw('NULL::uuid as sms_log_id'), 'cc.email_id', 'e.received_at as sms_started_at',
       conn.raw('?::uuid as customer_id', [customerId]), conn.raw("'email' as channel"));
-  const rows = await conn.unionAll([smsRows, emailRows], true)
+  const wanted = Array.isArray(channels) ? channels : ['sms', 'email'];
+  const parts = [wanted.includes('sms') && smsRows, wanted.includes('email') && emailRows].filter(Boolean);
+  if (!parts.length) return [];
+  const rows = await conn.unionAll(parts, true)
     .orderByRaw('due_at ASC NULLS LAST, sms_started_at ASC, id ASC')
     .limit(Math.max(1, Math.min(201, Number(limit) || 20)))
     .offset(Math.max(0, Number(offset) || 0));
@@ -933,11 +951,22 @@ async function lockLiveCommitment(trx, row, message) {
   return live && smsCommitmentsEnabled() && live.status === 'open' && live.human_state == null ? { source, live } : null;
 }
 
-const OVERDUE_BELL_BODY = {
-  uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
-  open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
-  late: (when) => `Promised in the ${when} ET conversation. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
+// The explanation behind the bell, kept in `detail` (the why carries the customer's
+// words instead). `when` is the ET time the message arrived; `channel` is sms or email.
+const OVERDUE_BELL_DETAIL = {
+  uncertain: (when, word) => `The ${when} ET ${word} needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
+  open: (when, word) => `Requested or promised in the ${when} ET ${word}. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+  late: (when, word) => `Promised in the ${when} ET ${word}. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
 };
+
+// The words that created the obligation: the extraction's grounded quote, else its
+// description, else (a text only) the message itself.
+function obligationWords(row, message) {
+  let evidence = row.evidence;
+  if (typeof evidence === 'string') { try { evidence = JSON.parse(evidence); } catch (_) { evidence = null; } }
+  const quoted = Array.isArray(evidence) ? evidence.map((item) => item?.quote).find((q) => typeof q === 'string' && q.trim()) : null;
+  return quoted || row.description || message.message_body || '';
+}
 
 // Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
 // clears. The deadline tick normally rings before the late record lands; when
@@ -948,25 +977,59 @@ function keptLate(row, verdict) {
     && new Date(verdict.matched_at) > new Date(row.due_at);
 }
 
-// The deadline passed and the records do not establish completion.
-// title/body/sourceIdField/triggerKey are optional overrides, added so
-// email-operational-actions.js can reuse this exact bell/dedupe/close
-// mechanics with its own titles and its own source column (email_id) —
-// coordinator correction #3, 2026-09-29: "export and reuse ringOverdueBell
-// ... through small exports only". Every existing SMS caller omits them, so
-// the computed defaults below reproduce today's exact title/body/metadata
-// shape; this function's SMS behavior is unchanged.
-async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, title, body, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup' }) {
+// The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
+// headline, their quoted words in the why, the whole story in `detail`.
+function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
+  const names = require('./admin-alert-names');
+  const compose = require('./admin-alert-compose');
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
-  const resolvedBody = body || (OVERDUE_BELL_BODY[verdict.late ? 'late' : verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
-  const resolvedTitle = title || (row.sms_context?.basis === 'promise' ? PROMISE_LABEL : (KIND_LABELS[row.kind] || KIND_LABELS.other));
-  const notification = await NotificationService.notifyAdmin('alert', resolvedTitle, resolvedBody,
-    { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+  const state = verdict.late ? 'late' : verdict.verdict;
+  const alert = KIND_ALERT[row.kind] || KIND_ALERT.other;
+  const promised = row.sms_context?.basis === 'promise';
+  const quote = names.redactedWords(obligationWords(row, message));
+  const status = state === 'late' ? 'done only after the promised time'
+    : (state === 'uncertain' ? "can't tell if it was done" : alert.open);
+  const day = names.shortDateET(message.created_at);
+  const detail = [
+    `${customerName || 'A customer'}: ${promised ? `we promised this by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
+    quote ? `“${quote.slice(0, 600)}”` : null,
+    (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord),
+  ].filter(Boolean).join('\n');
+  return {
+    detail,
+    spec: {
+      area: alert.area,
+      action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
+      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && compose.firstSentence(quote).replace(/[.!?]+$/, ''),
+        tail: `${day ? ` (${day})` : ''} — ${status}.` }),
+      severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-      metadata: { triggerKey, customerId: message.customer_id,
-        [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
+      subject: { type: 'customer', id: message.customer_id },
+      doneWhen: 'promise_fulfilled',
+      who: 'person',
+    },
+  };
+}
+
+// The deadline passed and the records do not establish completion.
+// sourceIdField/triggerKey are optional overrides, added so
+// email-operational-actions.js can reuse this exact bell/dedupe/close
+// mechanics with its own source column (email_id) — coordinator correction
+// #3, 2026-09-29: "export and reuse ringOverdueBell ... through small
+// exports only". An email source also words the bell for an email. The bell
+// names the customer and quotes the words behind it (owner audit 2026-10-01);
+// the title is not the dedupe key (dedupeKey is), so the wording may change.
+// Every existing SMS caller omits the overrides, so the SMS bell keeps its
+// dedupe, link and metadata shape.
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup' }) {
+  const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
+  const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text' });
+  const notification = await require('./admin-alert-compose').raiseAdminAlert('alert', spec, {
+    trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
+    metadata: { triggerKey, customerId: message.customer_id,
+      [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   return notification;
 }
