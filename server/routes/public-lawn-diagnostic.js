@@ -26,6 +26,10 @@ const { etParts } = require('../utils/datetime-et');
 const { publicFindingEvidence, publicBasis } = require('../services/lawn-diagnostic-evidence');
 const featureGates = require('../config/feature-gates');
 
+function evidenceGateLive() {
+  return typeof featureGates.lawnDiagnosticEvidenceLive === 'function' && featureGates.lawnDiagnosticEvidenceLive();
+}
+
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
 
 const readLimiter = rateLimit({
@@ -113,7 +117,7 @@ function buildPublicLawnReport(diagnostic = {}, { photoCount = null } = {}) {
   // GATE_LAWN_DIAGNOSTIC_EVIDENCE: the evidence behind each finding, as fixed
   // copy keyed by the allowlisted label and clamped confidence built below.
   // Gate off, no key is added anywhere in the payload.
-  const evidenceLive = featureGates.lawnDiagnosticEvidenceLive();
+  const evidenceLive = evidenceGateLive();
   const contract = parseJson(diagnostic.report_contract, {});
   const address = parseJson(diagnostic.address_snapshot, {});
   const contact = parseJson(diagnostic.contact_snapshot, {});
@@ -273,7 +277,7 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     // The photo count behind the report's basis line. Read only while the
     // evidence gate is live; a failed count just leaves the number out.
     let photoCount = null;
-    if (featureGates.lawnDiagnosticEvidenceLive()) {
+    if (evidenceGateLive()) {
       try {
         const counted = await db('lawn_diagnostic_photos').where({ diagnostic_id: row.id }).count('id as count').first();
         const n = Number(counted && counted.count);
