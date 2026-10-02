@@ -695,13 +695,6 @@ describe('completion attempts', () => {
     expect(hashCompletionRequest({ ...body, reportReconcileConfirmed: true, promiseMarksConfirmed: true })).toBe(hashCompletionRequest(body));
   });
 
-  test('confirming the report edit heads-up on a retry resumes the same attempt (Codex #5538)', () => {
-    // The heads-up is pre-claim like the other two prompts: a retry can meet
-    // it first (the actives read recovered) and confirm it with the same key.
-    const body = { technicianNotes: 'WHAT WE FOUND\nGhost ants.', reportDraftBase: 'WHAT WE FOUND\nAnts.' };
-    expect(hashCompletionRequest({ ...body, reportRulesConfirmed: true })).toBe(hashCompletionRequest(body));
-  });
-
   test('mode fields (backfill/timeOnSite) split the FULL hash but never the CORE segment (Codex P1, fix round 10)', () => {
     // Round 6 stripped `backfill` (and earlier `timeOnSite`) from EVERY
     // hash, so a same-key retry after a PRE-commit failure could flip

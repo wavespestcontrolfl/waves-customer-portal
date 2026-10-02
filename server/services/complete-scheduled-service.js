@@ -3357,8 +3357,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const rulesBlock = reportRulesReviewBlockPayload({
         isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
       });
+      // A same-key retry of a recorded attempt already got past the heads-up
+      // (it answers before any claim): asking again would make the retry
+      // carry reportRulesConfirmed, a request the attempt's hash refuses.
       if (rulesBlock
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCompletionAttemptForKey(
+          svc.id, completionInput.idempotencyKey || bodyIdempotencyKey, k,
+        ), true))) {
         return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
