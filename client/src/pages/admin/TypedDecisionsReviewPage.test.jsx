@@ -100,6 +100,18 @@ it('a chip tapped before Jev right is left out of that request and cleared, so a
   }));
 });
 
+it('a confirmed-wrong row opens with its saved reason pressed, and a re-label carries it', async () => {
+  mockList([yesNoRow({ label: { verdict: 'jev_wrong', correct_value: false, note: null, reason: 'missing_promise' }, labelStatus: 'confirmed_error' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  expect(screen.getByRole('button', { name: 'Missing promise' })).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'missing_promise' }),
+  }));
+});
+
 it('offers no Jev wrong button for choice questions', async () => {
   mockList([yesNoRow({ jevAnswer: { choice: 'reschedule' }, baselineAnswers: {} })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);

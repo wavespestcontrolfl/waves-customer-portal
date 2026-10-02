@@ -119,7 +119,11 @@ function labelFailure(err) {
 
 function ReviewRow({ review, onLabeled, onStale }) {
   const [note, setNote] = useState("");
-  const [reason, setReason] = useState(null);
+  // Starts as, and follows, the saved label's reason: a confirmed-wrong row
+  // opened from the all / confirmed_error filters shows its reason pressed, so
+  // a Replace resends it instead of erasing the classification.
+  const [reason, setReason] = useState(review.label?.reason ?? null);
+  useEffect(() => { setReason(review.label?.reason ?? null); }, [review.id, review.label?.reason]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
