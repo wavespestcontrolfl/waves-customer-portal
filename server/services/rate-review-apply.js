@@ -1231,19 +1231,31 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'switch_plan']);
   if (lock) query.forUpdate();
   const terms = await query.select('id', 'customer_id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
-  const noticed = terms.filter((t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== ''
+  // Family attribution through the notice the apply wrote for the term —
+  // and, before the nightly tick froze its amount, the DELIVERED notice
+  // that names the term: the customer was already told that amount, so it
+  // guards the renewal from delivery, not from the next 03:10 apply.
+  const prepayNotices = await dbh('price_change_notices')
+    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
+    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents');
+  const familyByTerm = new Map();
+  const deliveredCentsByTerm = new Map();
+  for (const n of prepayNotices) {
+    const termId = parseMetadata(n.metadata).term_id;
+    if (!termId) continue;
+    if (n.applied_at) familyByTerm.set(String(termId), n.family_key);
+    else if (wasDelivered(n)) {
+      const noticedCents = Number(n.noticed_new_cents ?? n.new_amount_cents);
+      if (Number.isFinite(noticedCents) && noticedCents > 0) {
+        familyByTerm.set(String(termId), n.family_key);
+        deliveredCentsByTerm.set(String(termId), noticedCents);
+      }
+    }
+  }
+  const frozen = (t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== '';
+  const noticed = terms.filter((t) => (frozen(t) || deliveredCentsByTerm.has(String(t.id)))
     && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')));
   if (!noticed.length) return null;
-  // Family attribution through the notice the apply wrote for the term.
-  const applied = await dbh('price_change_notices')
-    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
-    .whereNotNull('applied_at')
-    .select('family_key', 'metadata');
-  const familyByTerm = new Map();
-  for (const n of applied) {
-    const termId = parseMetadata(n.metadata).term_id;
-    if (termId) familyByTerm.set(String(termId), n.family_key);
-  }
   const candidates = noticed
     .filter((t) => {
       const labeled = familyOfCoverage(t.coverage_service_type);
@@ -1260,7 +1272,7 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   // A successor already on the books (whatever its amount) settles the
   // term: the guard protected the renewal that created it.
   if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
-  const noticedCents = cents(term.next_term_prepay_amount);
+  const noticedCents = frozen(term) ? cents(term.next_term_prepay_amount) : deliveredCentsByTerm.get(String(term.id));
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(Math.round(Number(amount) * 100)) };
 }
