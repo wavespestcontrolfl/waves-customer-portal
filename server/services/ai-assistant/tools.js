@@ -61,6 +61,10 @@ const PORTAL_SECTIONS = {
   referrals: { tab: 'refer', label: 'Open Refer' },
 };
 const MAX_ACTIONS_PER_REPLY = 4;
+// Reschedule buttons shown at once, and how many upcoming visits are checked
+// to find them (a year of monthly visits).
+const MAX_RESCHEDULE_BUTTONS = 3;
+const RESCHEDULE_CANDIDATES = 12;
 
 const PORTAL_TOOLS = [
   TOOLS[0],
@@ -181,9 +185,10 @@ async function offerRescheduleLink(customerId, actions) {
     // The reschedule page's own status set (a 'rescheduled' visit is still
     // upcoming and movable); its verdict below decides the rest.
     .whereIn('status', [...RESCHEDULABLE_STATUSES])
+    .whereNotNull('reschedule_token')
     .select('id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
     .orderBy('scheduled_date')
-    .limit(3);
+    .limit(RESCHEDULE_CANDIDATES);
 
   // A button only for a visit the reschedule page itself will accept: its own
   // loader and GET verdict (account state, status, dispatch review, grouped or
@@ -192,6 +197,9 @@ async function offerRescheduleLink(customerId, actions) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const visits = [];
   for (const row of rows) {
+    // The cap applies to buttons, not candidates: a visit the page refuses
+    // must not hide a later one it accepts.
+    if (visits.length >= MAX_RESCHEDULE_BUTTONS) break;
     if (!row.reschedule_token) continue;
     const verdict = await loadById(row.id).then((svc) => pageEligibility(svc)).catch((err) => {
       logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);

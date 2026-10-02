@@ -22,6 +22,7 @@ function mockUpcoming(rows) {
   const query = {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNotNull: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockResolvedValue(rows),
@@ -72,6 +73,22 @@ describe('portal tools', () => {
     expect(result.visits).toEqual([expect.objectContaining({ date: '2026-10-09', type: 'Pest Control' })]);
     // The model is told a button exists, never handed the link itself.
     expect(JSON.stringify(result)).not.toContain('tok_one');
+  });
+
+  test('visits the page refuses do not hide a later one it accepts, and buttons stop at three', async () => {
+    const query = mockUpcoming(Array.from({ length: 8 }, (_, i) => ({
+      id: i + 1, scheduled_date: `2026-10-${String(10 + i).padStart(2, '0')}`, service_type: 'Pest Control', window_start: '10:00', reschedule_token: `tok_${i + 1}`,
+    })));
+    pageEligibility.mockImplementation(async (svc) => ({ ok: svc.id > 3 }));
+    const actions = [];
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
+
+    expect(query.limit).toHaveBeenCalledWith(12);
+    expect(actions.map((a) => a.href)).toEqual(['/reschedule/tok_4', '/reschedule/tok_5', '/reschedule/tok_6']);
+    expect(result.visits).toHaveLength(3);
+    // Stops checking once three buttons exist.
+    expect(loadById).toHaveBeenCalledTimes(6);
   });
 
   test('no movable visit tells the model to hand off, and shows no button', async () => {
