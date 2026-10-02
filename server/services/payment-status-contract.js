@@ -525,6 +525,8 @@ function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scope
 // must carry one of those amounts. A true sentence about a DIFFERENT record is off target (held), never an answer.
 const INBOUND_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
 const amountCentsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
+// Codex round-66 P2: the customer's own figure also comes as "100 dollars" / "50 bucks" / "75 USD" (the money detector's forms)
+const INBOUND_NAMED_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?(?=\s*(?:dollars?|bucks|usd)\b)/gi;
 const INBOUND_TENDER_RES = [
   ['card', /\b(?:card|credit|debit|visa|mastercard|amex|discover|apple\s*pay|google\s*pay)\b/i],
   ['ach', /\b(?:ach|bank(?:\s+(?:account|transfer|draft))?|e-?check|checking)\b/i],
@@ -590,8 +592,9 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const named = invoiceNumbersNamed(inbound);
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
-  const namedTails = new Set([...named.tail.map(stripZeros), ...named.full.map((f) => stripZeros(f.split('-').pop()))]);
-  const amounts = new Set((inbound.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf));
+  // Codex round-66 P2: a FULL reference (WPC-2025-0001) matches only that number - tails repeat across years; a tail matches shorthand only
+  const namedTails = new Set(named.tail.map(stripZeros));
+  const amounts = new Set((inbound.match(INBOUND_NAMED_AMOUNT_RE) || []).map(amountCentsOf));
   // Codex round-60 P2: a payment method the customer named. A rendered payment sentence names a tender only when the row proves it (card
   // / ACH from Stripe columns; a manual tender - Zelle, cash, check - is never named), so a copied payment sentence answers a tender
   // question only when it names THAT tender: a Zelle / cash / check question is never answered by a copied receipt.
@@ -677,7 +680,21 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   const scoped = isPaymentScoped({ reply, inboundText, scoped: snapshot?.scoped === true || sentences.length > 0 });
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
+  if (copiesAmbiguousFamily(copied, snapshot)) return 'payment_status_ambiguous';
   return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
+}
+// HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
+// status line auto-sends only when the draft rendered exactly ONE line of that family; with 2+ candidates (or a snapshot that never
+// counted them) the draft goes to Agent Review and a person picks. copiesOffTarget stays a filter, not the gate.
+const sentenceFamily = (t) => (/^Invoice\s/.test(t) ? 'invoice' : /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) ? 'payment' : null);
+function familyCounts(texts) {
+  const counts = {};
+  for (const t of texts) { const f = sentenceFamily(String(t)); if (f) counts[f] = (counts[f] || 0) + 1; }
+  return counts;
+}
+function copiesAmbiguousFamily(copied, snapshot) {
+  const counts = snapshot?.family_counts && typeof snapshot.family_counts === 'object' ? snapshot.family_counts : {};
+  return copied.some((t) => { const f = sentenceFamily(String(t)); return f != null && counts[f] !== 1; });
 }
 
 /**
@@ -691,7 +708,11 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
   if (!copied.length && !scoped) return null;
   // a copied Zelle sentence is re-rendered at send for the SAME invoice (its live eligibility and the current recipient)
   const zelle = copied.some((t) => ZELLE_WORD_RE.test(t)) && zelleInvoiceId ? { invoice_id: String(zelleInvoiceId) } : null;
-  return { customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}), ...(zelle ? { zelle } : {}) };
+  // how many lines of each family the draft could have copied (the auto-send ambiguity hold reads it)
+  const counts = copied.some((t) => sentenceFamily(t)) ? familyCounts((sentences || []).map((s) => (typeof s === 'string' ? s : s.text))) : null;
+  return {
+    customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}), ...(zelle ? { zelle } : {}), ...(counts ? { family_counts: counts } : {}),
+  };
 }
 
 module.exports = {

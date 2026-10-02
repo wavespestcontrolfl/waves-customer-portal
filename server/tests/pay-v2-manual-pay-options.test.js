@@ -599,8 +599,9 @@ describe('a throwing Zelle eligibility probe never fails the public pay page', (
   });
 });
 
-// Codex round-13 P1: the projected-credit read happens ONCE per public GET (it rides the visibility verdict).
-describe('GET /pay/:token reads account credit no more than twice (coverage + one projection)', () => {
+// Codex round-13 P1: the projected-credit read happens ONCE per public GET (it rides the visibility verdict). Owner ruling 2026-10-02:
+// the final full pass re-reads coverage once more after the Stripe awaits - three reads, never more.
+describe('GET /pay/:token reads account credit no more than three times (coverage + one projection + the final pass)', () => {
   const gates = require('../config/feature-gates').gates;
   const PayerService = require('../services/payer');
   beforeEach(() => {
@@ -611,7 +612,7 @@ describe('GET /pay/:token reads account credit no more than twice (coverage + on
   });
   afterEach(() => { gates.autoApplyAccountCredit = false; delete process.env.ZELLE_RECIPIENT; });
 
-  test('credit lookups on customers.account_credits: no third read; creditPending still flagged from the shared projection', async () => {
+  test('credit lookups on customers.account_credits: no fourth read; creditPending still flagged from the shared projection', async () => {
     let creditReads = 0;
     const dbImpl = (table) => {
       const q = chain({ first: { billing_mode: null, monthly_rate: null } });
@@ -624,7 +625,7 @@ describe('GET /pay/:token reads account credit no more than twice (coverage + on
       return q;
     };
     const { body } = await getPayPage(invoiceData(), { dbImpl });
-    expect(creditReads).toBeLessThanOrEqual(2);
+    expect(creditReads).toBeLessThanOrEqual(3);
     expect(body.manualPayOptions).toMatchObject({ creditPending: true });
   });
 });
@@ -727,5 +728,21 @@ describe('payPageZelleVisibility re-reads the invoice row last', () => {
     withLiveRow({ ...inv });
     await expect(payPageZelleVisibility({ invoice: inv, creditWillCoverAnchor: false })).resolves.toMatchObject({ visible: true });
   });
+});
+
+// Codex round-66 P1 / owner ruling 2026-10-02: the final full pass reruns the saved-method requirement with no caller override
+test('a saved-method requirement that appears during the probes withholds Zelle (the caller override is not trusted)', async () => {
+  process.env.ZELLE_RECIPIENT = 'pay@example.com';
+  require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  const inv = invoiceData({ status: 'overdue' });
+  // the caller's pre-await override says "not required"; the live customer row now says required - the final pass must read it
+  setDbImpl((table) => {
+    if (table === 'invoices') return chain({ first: inv });
+    if (table === 'customers') return chain({ first: { billing_mode: 'per_application', monthly_rate: 50 } });
+    return chain({ first: null });
+  });
+  const verdict = await visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false });
+  expect(verdict).toEqual({ visible: false, reason: 'invoice_changed' });
+  delete process.env.ZELLE_RECIPIENT;
 });
 

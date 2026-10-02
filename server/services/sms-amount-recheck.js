@@ -195,6 +195,7 @@ async function loadCustomerContext(customerId, dbh = db) {
  *   payment_status_unauthorized        - after the copies are removed the body still asserts a status, carries a dollar figure / price
  *                                        grammar / Zelle, or a copy answers a different record than the customer named
  *   payment_status_not_auto_sendable   - (auto-send only) a payment-scoped reply with anything beyond copies and inert text
+ *   payment_status_ambiguous           - (auto-send only) a copied receipt / invoice line had 2+ rendered candidates: a person picks
  *   payment_status_changed             - a copied sentence is no longer one the records render right now
  *   payment_status_recheck_no_customer / payment_status_recheck_failed - unverifiable, fail closed
  * `zelle` = the live Zelle facts a copied Zelle sentence was re-rendered from (the provider boundary re-reads them).

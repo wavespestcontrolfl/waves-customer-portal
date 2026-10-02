@@ -491,7 +491,7 @@ describe('P2-3: no regex in the module is exponential on adversarial input', () 
 
 describe('structural: a payment-scoped reply auto-sends only as verbatim copies plus inert text', () => {
   const S = 'We received your $120.00 card payment on Sep 12, 2026.';
-  const block = (reply, over = {}) => c.autoSendScopeBlock({ reply, inboundText: 'Did my payment go through?', snapshot: { sentences: [S] }, ...over });
+  const block = (reply, over = {}) => c.autoSendScopeBlock({ reply, inboundText: 'Did my payment go through?', snapshot: { sentences: [S], family_counts: { payment: 1 } }, ...over });
   test.each([
     [S], [`Hi Jane, ${S}`], [`Hi Jane, ${S} Let us know if you have any questions.`], [`${S} Thanks!`], [`Thank you for reaching out. ${S}`],
     [`Hi Bill, ${S} Feel free to reach out if you have questions.`], [`${S} Have a great day!`],
@@ -896,5 +896,39 @@ test.each([
   ['Invoice WPC-2026-0002 for $200.00 is paid.', 'Did my Zelle for the invoice arrive?', true],
 ])('invoice sentence %s / %s => off target: %s', (copied, inbound, off) => {
   expect(c.copiesOffTarget([copied], inbound, { today: '2026-09-13' })).toBe(off);
+});
+
+// HOLD WHEN AMBIGUOUS (owner ruling 2026-10-02): a copied receipt / invoice line auto-sends only when it was the ONLY line of its family
+describe('auto-send holds a copied payment line that had 2+ rendered candidates', () => {
+  const R1 = 'We received your $100.00 card payment on Sep 12, 2026.';
+  const R2 = 'We received your $50.00 card payment on Sep 1, 2026.';
+  const I1 = 'Invoice WPC-2026-0001 for $100.00 is paid.';
+  const I2 = 'Invoice WPC-2026-0002 for $200.00 is paid.';
+  const snap = (sentences, reply) => c.paymentStatusSnapshotFor({ customerId: 'c', sentences, reply, inboundText: 'Did you get my payment?' });
+  test('the snapshot counts each family the draft could copy from', () => {
+    expect(snap([R1, 'Your account has no balance due.'], R1).family_counts).toEqual({ payment: 1 });
+    expect(snap([R1, R2, I1], R1).family_counts).toEqual({ payment: 2, invoice: 1 });
+    expect(snap(['Your account has no balance due.'], 'Your account has no balance due.').family_counts).toBeUndefined();
+  });
+  test.each([
+    [[R1], R1, null], [[R1, R2], R1, 'payment_status_ambiguous'], [[I1, I2], I1, 'payment_status_ambiguous'], [[R1, I1], I1, null],
+  ])('rendered %j, copied %s => %s', (sentences, reply, reason) => {
+    expect(c.autoSendScopeBlock({ reply, inboundText: 'Did you get my payment?', snapshot: snap(sentences, reply) })).toBe(reason);
+  });
+  test('a snapshot that never counted (drafted before the ruling) holds; a non-family line (balance) does not need a count', () => {
+    expect(c.autoSendScopeBlock({ reply: R1, inboundText: 'Did you get my payment?', snapshot: { sentences: [R1] } })).toBe('payment_status_ambiguous');
+    const B = 'Your account has no balance due.';
+    expect(c.autoSendScopeBlock({ reply: B, inboundText: 'Do I owe anything?', snapshot: { sentences: [B] } })).toBeNull();
+  });
+});
+
+// Codex round-66 P2s (filter): a full invoice reference matches only that number; amounts in words bind receipts
+test.each([
+  [['Invoice WPC-2026-0001 for $100.00 is paid.'], 'Is WPC-2025-0001 paid?', true],
+  [['Invoice WPC-2026-0001 for $100.00 is paid.'], 'Is invoice 0001 paid?', false],
+  [['We received your $50.00 card payment on Sep 1, 2026.'], 'Did you get my 100 dollar payment?', true],
+  [['We received your $100.00 card payment on Sep 12, 2026.'], 'Did you get my 100 dollar payment?', false],
+])('filter %j / %s => off target: %s', (copied, inbound, off) => {
+  expect(c.copiesOffTarget(copied, inbound, { today: '2026-09-13' })).toBe(off);
 });
 

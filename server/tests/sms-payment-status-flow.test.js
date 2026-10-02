@@ -75,7 +75,7 @@ test('a verbatim copy converges on the first pass and is recorded in the snapsho
   const result = await draft(drafter);
   expect(result.converged).toBe(true);
   expect(result.passes).toBe(1);
-  expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [COPY] });
+  expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [COPY], family_counts: { payment: 1 } });
   expect(result.promptVersion).toBe('house_voice_v12_real_answers5_cfl_p');
 });
 
@@ -87,7 +87,7 @@ test('a paraphrase is fed back as a violation; the revised verbatim copy converg
   expect(result.parsed.reply).toBe(COPY);
   expect(result.converged).toBe(true);
   expect(result.passes).toBe(2);
-  expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [COPY] });
+  expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [COPY], family_counts: { payment: 1 } });
 });
 
 test('a model that never copies is never converged: nothing publishes or sends it', async () => {
@@ -182,7 +182,7 @@ describe('draftShadowReply persists the payment_status_snapshot where every send
     });
     return { insertedRows, maybeAutoSend, publishSuggestion };
   }
-  const SNAP = { customer_id: 'cust-1', sentences: [COPY] };
+  const SNAP = { customer_id: 'cust-1', sentences: [COPY], family_counts: { payment: 1 } };
   afterEach(() => { jest.dontMock('../models/db'); jest.dontMock('../services/sms-auto-send'); jest.dontMock('../services/sms-suggest-mode'); jest.dontMock('../services/comms-lint'); jest.dontMock('../services/context-aggregator'); jest.dontMock('../services/voice-profile-distiller'); });
 
   test('the shadow draft row, the auto-send claim and the fallback card all carry it', async () => {
