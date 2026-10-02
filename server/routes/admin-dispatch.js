@@ -70,6 +70,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -3165,8 +3166,17 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
+    const scheduled = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
+    // The resolution reads the visit's application history; a reassignment
+    // during that read must not hand it to the former technician (same
+    // before-and-after check as the Job Card route).
+    const stillInScope = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!stillInScope) return res.status(404).json({ error: 'Service not found' });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -4243,6 +4253,30 @@ router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/lawn-reservice/fast-context
+// What the lawn re-service Fast Complete sheet loads: the visit identity
+// (echoed back as `expectedVisit` on /complete), the customer's booking words,
+// the active catalog the picker searches, and the property's last completed
+// lawn visit with its products (suggestion tiles, amounts only from what that
+// visit recorded). Read-only; dark behind GATE_LAWN_RESERVICE_FAST_COMPLETE (no
+// per-tech flag). A visit whose live completion profile is not lawn_re_service
+// is refused (409 not_lawn_re_service); any other ineligibility answers 200
+// `eligible: false` with a reason, like the tree-shrub context. See
+// services/lawn-reservice-fast-context.js.
+router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => {
+  try {
+    if (!lawnReserviceFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/lawn-reservice-fast-context').buildLawnReserviceFastContext(req.params.serviceId);
+    if (!ctx.ok) {
+      const status = ctx.reason === 'not_lawn_re_service' ? 409 : recapStatusForReason(ctx.reason);
+      return res.status(status).json({ error: ctx.reason, code: ctx.reason });
+    }
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -4609,7 +4643,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
+    // Ring only for a real conflict (an untimed visit, or a kept appointment
+    // that needs a cadence review). A move whose only finding is an accepted
+    // overlap rings nothing (owner 2026-10-01: six bells in 72h, every one with
+    // no conflicts and no preserved visits); the overlap still rides the move's
+    // response, and it is listed in the card below when a real conflict rings one.
+    if ((dueConflicts.length || (!cardOnly && preserved.length)) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
@@ -4633,9 +4672,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          preserved.length ? 'Recurring move needs a future visit review'
-            : dueConflicts.length ? 'Series move left visits without a time window'
-              : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
+          preserved.length ? 'Recurring move needs a future visit review' : 'Series move left visits without a time window',
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
           // A card-only pass stores only the conflicts it rings for: the
           // successor owns the preserved and overlap work (admin-alert-relevance.js
@@ -4653,6 +4690,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // The successor owns preserved commitments and accepted overlaps. With
     // no still-untimed conflict, this superseded operation owes no old card.
     if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
+    // An overlap-only move owes no card (above), but its conflict_count still
+    // counts the overlaps: stamp the card marker so the recovery sweep
+    // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
+    if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;

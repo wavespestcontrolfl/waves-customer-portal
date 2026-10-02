@@ -40,7 +40,8 @@ async function createScratchDb() {
   await db.raw(`CREATE TABLE customer_properties (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
-    address_line1 text, address_line2 text, city text, state text, zip text
+    address_line1 text, address_line2 text, city text, state text, zip text,
+    neighborhood_id uuid, neighborhood_source text, county_subdivision text, neighborhood_checked_at timestamptz
   )`);
   await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, property_id uuid, address text)');
   await db.raw(`CREATE TABLE annual_prepay_terms (

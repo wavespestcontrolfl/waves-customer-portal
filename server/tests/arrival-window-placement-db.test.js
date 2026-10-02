@@ -83,6 +83,9 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       }
       const offers = await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' });
       expect(offers.slots.length).toBeGreaterThan(0);
+      // Per-date refusal counts (the availability strip's day status) are
+      // the flat counts split by date — a single-date search has one entry.
+      expect(offers.rejections_by_date).toEqual(Object.keys(offers.rejections).length ? { [DAY]: offers.rejections } : {});
       expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control', bufferMinutes: 15 })).slots).toEqual(offers.slots);
       await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
       const moving = await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined });

@@ -65,6 +65,47 @@ async function withLeaseHeartbeat(From, lease, work) {
   if (typeof timer.unref === 'function') timer.unref();
   try { return await work(); } finally { clearInterval(timer); await inflight; }
 }
+// One bell row per customer conversation (owner 2026-10-01: ten texts in twelve
+// minutes rang ten rows). The row is keyed on the customer, so notifyAdmin's
+// refreshOnDedupe rewrites it for each new text — latest text as the body, a
+// running count in the title, unread again, bumped to the top — instead of
+// inserting another. The link keeps the `?thread=<customerId>` prefix that
+// markInboundSmsReadAdmin and inbound-sms-read match on.
+const threadBellKey = (customerId) => `sms-thread:${customerId}`;
+
+// Decided INSIDE notifyAdmin's keyed lock (standingRefresh), against the row as
+// it stands then, so two texts processed at once cannot race: both used to read
+// the row before the lock, and the older one could win the lock second and
+// overwrite the newer text.
+//   - How many texts the open row stands for: count + 1. It restarts at 1 once
+//     the row was read or done (that thread was dealt with), and a replay of the
+//     text already on the row (a webhook retry) leaves it as it was.
+//   - Which message is newer: by the time the text arrived (payload.receivedAtMs,
+//     ties by sid). An OLDER text only moves the count; the row keeps the newer
+//     text, sid, link and place in the list (keepContent).
+const isOlderMessage = (ms, sid, base) => {
+  const other = Number(base.receivedAtMs);
+  if (!Number.isFinite(other)) return false;
+  return ms < other || (ms === other && String(sid) < String(base.twilioSid || ''));
+};
+const threadRefresh = (MessageSid, receivedAtMs) => (existing, base) => {
+  const count = Math.max(1, Math.floor(Number(base.textCount)) || 1);
+  if (base.twilioSid === MessageSid) return { payload: { textCount: count } };
+  if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
+  return { payload: { textCount: count + 1 }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
+};
+
+// When the text reached us: the unified message row's own time, else now.
+async function receivedAtMs(MessageSid) {
+  try {
+    const row = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('created_at');
+    const ms = row?.created_at ? new Date(row.created_at).getTime() : NaN;
+    return Number.isFinite(ms) ? ms : Date.now();
+  } catch (e) {
+    return Date.now();
+  }
+}
+
 async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead }) {
   if (!customer && typeof afterRead !== 'function') throw new Error('Unknown SMS delivery requires read reconciliation');
   const { triggerNotification } = require('./notification-triggers');
@@ -73,8 +114,9 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
   if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
   // A committed bell is delivery evidence even if its legacy receipt failed.
   // Keep identity outside the mutable payload: reads can retarget that payload.
-  const dedupeKey = customer ? null : `sms-reply:${MessageSid}`;
-  const existingBell = dedupeKey && await db('notifications')
+  const dedupeKey = customer ? threadBellKey(customer.id) : `sms-reply:${MessageSid}`;
+  const arrivedAtMs = customer ? await receivedAtMs(MessageSid) : null;
+  const existingBell = !customer && await db('notifications')
     .where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id', 'created_at');
   const stats = existingBell ? { bellWritten: true, push: null, deduped: true } : await triggerNotification('sms_reply', {
     fromName: customer ? `${customer.first_name} ${customer.last_name}` : null,
@@ -82,7 +124,8 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
     message,
     threadId: customer?.id || null,
     twilioSid: MessageSid,
-  }, { beforePush: unifiedStillUnread, ...(dedupeKey ? { dedupeKey } : {}) });
+    ...(customer ? { textCount: 1, receivedAtMs: arrivedAtMs } : {}),
+  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) } : {}) });
   let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
     stats.deliveredAt = existingBell?.created_at || new Date();

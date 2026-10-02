@@ -848,18 +848,17 @@
   },
   "tree_shrub": {
     "name": "Tree & Shrub Protocol",
-    "version": "2026.06-swfl-tree-shrub-10",
+    "version": "2026.09-tree-shrub-field-guide",
     "service_area": "Venice / North Port / Parrish",
     "notes": [
       "Track rotation by IRAC/FRAC group and active ingredient. Merit, Zylam, and IMA-jet all count as Group 4A/neonic-style pressure.",
-      "Snapshot 2.5TG remains the quarterly visual differentiator: visits 1, 4, 7, and 10. Apply to beds only and water in with irrigation or rainfall.",
+      "Snapshot 2.5TG is the quarterly bed pre-emergent. Match the rate to the target weed and labeled site; treatment history determines whether an application is due.",
       "CRM ordinance zone is required. Sarasota/Venice and Manatee/Parrish landscape N/P blackout runs June 1-Sept. 30. North Port turf blackout starts April 1, but landscape plants are route-gated separately. Unknown zone defaults to Sarasota/Manatee conservative.",
       "Palm/tree injections are add-ons only. Minimum $35/palm, not included in Tree & Shrub tiers.",
       "Do not make oil + copper, oil + broad-spectrum pyrethroid, or neonic systemics a default production tank. Use plant safety, pollinator status, pest ID, and life stage gates.",
-      "Palm fertilizer dose = 1.5 lb per 100 sq ft of canopy. Measure the canopy width in feet and apply width × width ÷ 85 lb (6 ft = 0.4 lb, 8 ft = 0.75 lb, 10 ft = 1.2 lb, 12 ft = 1.7 lb, 14 ft = 2.3 lb, 16 ft = 3.0 lb, 18 ft = 3.8 lb, 20 ft = 4.7 lb). Spread it evenly under the whole canopy, never piled at the trunk, off hardscape, and not within 10 ft of water. Palm granular goes on no closer than about 3 months apart (4 per year at most); check Fertilizer applied YTD first.",
+      "Waves palm fertilizer chart: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb). Weigh each palm separately and spread evenly under the canopy, never piled at the trunk, off hardscape and 10 ft from water. This is the company canopy chart, distinct from the bag directions. Keep feedings about 3 months apart, at most four per year; count both palm fertilizers together.",
       "Palm scout every visit, and record only what you see (symptom + photo, never a disease name without a diagnosis): oldest fronds with translucent yellow-orange spots or dead tips (potassium) or a broad yellow band (magnesium); newest fronds small and frizzled (manganese, mainly queen, royal, pygmy date); a collapsed spear or bronzing from the oldest fronds up; a hard shelf/conk on the lower 4-5 ft of trunk; fronds dying down one side; royal palm bug, spiraling whitefly, scale, or sooty mold; over-pruning.",
-      "Palm diagnosis-only issues: suspected lethal bronzing, Ganoderma butt rot, or Fusarium wilt gets a photo, a note, and a call to the owner that it needs a diagnosis; do not quote a treatment on symptoms, and never promise the fertilizer program prevents them. Lethal-bronzing injections are preventive only, for healthy palms, palms near an infected one, or palms that tested negative; a symptomatic, positive, or infected palm is handled outside the injection service. Do not cut off potassium-yellowed fronds (it speeds decline; old fronds never re-green, new growth recovers over 1-2+ years), and never prune above the 9-to-3 o'clock line.",
-      "9x program (every 6 weeks, about 9 visits a year) has no fixed months: each visit runs the protocol for the month it lands in. Palm granular still stays about 3 months apart, so skip it on a visit that comes too soon after the last one; the other visits scout palms."
+      "Palm diagnosis-only issues: suspected lethal bronzing, Ganoderma butt rot, or Fusarium wilt gets a photo, a note, and a call to the owner that it needs a diagnosis; do not quote a treatment on symptoms, and never promise the fertilizer program prevents them. Lethal-bronzing injections are preventive only, for healthy palms, palms near an infected one, or palms that tested negative; a symptomatic, positive, or infected palm is handled outside the injection service. Do not cut off potassium-yellowed fronds (it speeds decline; old fronds never re-green, new growth recovers over 1-2+ years), and never prune above the 9-to-3 o'clock line."
     ],
     "safety_rules": [
       "CRM ordinance zone required before fertilizer",
@@ -873,7 +872,7 @@
       {
         "zone": "Sarasota/Venice",
         "rule": "No nitrogen or phosphorus landscape fertilizer June 1-Sept. 30.",
-        "sop_impact": "Hold 8-2-12, 13-0-13, alfalfa meal, and other N/P bed products during blackout."
+        "sop_impact": "Hold 8-0-12, 13-0-13, alfalfa meal, and other N/P bed products during blackout."
       },
       {
         "zone": "North Port",
@@ -894,21 +893,22 @@
     "visit_types": [
       "Granular bed visit: spreader only for Snapshot and legal palm/ornamental fertilizer.",
       "Foliar PHC visit: spray rig or FlowZone only for oil, IGR, micros, fungicide, insecticide.",
-      "Drench/systemic visit: drench gun, soil injection, or targeted root-zone soak.",
-      "Injection add-on: Arborjet only, billed separately.",
+      "Soil treatment: FlowZone soil injector kit on the 4-gal backpack, only for a verified soil method and plant-based dose.",
+      "Trunk injection is a separate add-on; no owned trunk injector is confirmed.",
       "Scout-only visit: photos, pest ID, palm health notes, and customer report."
     ],
-    "production_rule": "Do not run a spreader and then fire up the Honda rig on the same standard Tree & Shrub visit unless it is a premium or corrective job.",
+    "production_rule": "Use at most two tools per visit. A sprayer may accompany a spreader when a documented finding needs treatment.",
     "calibration": {
-      "tank_110_gal_formula": "Amount for 110 gal = label rate per 100 gal x 1.10",
-      "flowzone_2_5_gal_formula": "Amount for 2.5 gal = label rate per 100 gal x 0.025",
+      "tank_110_gal_formula": "Label amount per 100 gal × 1.10",
+      "flowzone_4_gal_formula": "Label amount per 100 gal × 0.04",
+      "bg_1_gal_formula": "Label amount per 100 gal ÷ 100",
       "snapshot_rates": [
-        "Clean maintained beds: 2.3 lb/1,000 sq ft",
-        "Moderate weed pressure: 3.45 lb/1,000 sq ft",
-        "Heavy pressure: 4.6 lb/1,000 sq ft only where label/site permits"
+        "2.3 lb/1,000 sq ft: listed low-rate weeds",
+        "3.45 lb/1,000 sq ft: listed medium-rate weeds",
+        "4.6 lb/1,000 sq ft: listed high-rate weeds"
       ],
-      "palm_fertilizer_rate": "8-2-12 palm fertilizer at 1.5 lb per 100 sq ft canopy/root-zone area where ordinance allows. Dose in lb = canopy width (ft) × width ÷ 85 (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb).",
-      "ornamental_fertilizer_rate": "13-0-13 at 0.25-0.50 lb N/1,000 sq ft equivalent unless site, plant type, and timing justify otherwise."
+      "palm_fertilizer_rate": "LESCO 8-0-12 #511542; LESCO 0-0-16 #510513 for the summer feeding. width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb)",
+      "ornamental_fertilizer_rate": "13-0-13 exact bag label needed; no verified dose."
     },
     "mixing_order": [
       "Fill tank 25-50% with clean water.",
@@ -925,10 +925,9 @@
     "annual_rotation": {
       "insect_miticide": [
         "4A/neonic-style pressure: Merit, Zylam, IMA-jet. Selective use only; track annually.",
-        "23: Kontos for non-neonic systemic rotation.",
         "28: Mainspring for caterpillars, whiteflies, leafminers, and resistance management.",
         "7C: Distance IGR for eggs, nymphs, and crawlers.",
-        "16: Talus IGR for immature whitefly and scale stages.",
+        "Talus held: the reviewed label prohibits residential use.",
         "Oil/contact: TriTek spray oil for crawlers, mites, and soft-bodied pests when plant/weather safe.",
         "Spinosyn: Conserve for caterpillar/thrips-type work where labeled.",
         "Miticide: Floramite for confirmed mites only.",
@@ -937,7 +936,7 @@
       "fungicide_disease": [
         "P07: KPHITE 7LP for root/oomycete/Phytophthora-type support where justified.",
         "M01/M1: Copper as a contact protectant for labeled leaf/bacterial disease.",
-        "11+3: Headway only for labeled ornamental disease where justified.",
+        "Headway held: the reviewed liquid label is turf-only; exact formulation and replacement pending.",
         "11: Artavia is not a fresh rotation after Headway's FRAC 11 component.",
         "3: Propizol only for labeled diagnosed tree diseases; not routine palm health."
       ]
@@ -990,168 +989,561 @@
         "month": "Jan",
         "visit_type": "Granular bed visit + targeted drench if justified",
         "main_goal": "Clean visual start, winter palm nutrition, bed pre-emergent, and documented systemic only where needed.",
-        "primary": "Snapshot 2.5TG Q1: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)",
+        "primary": "Snapshot 2.5TG Q1: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
         "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0-1.5% if scale crawlers are active and plant/weather safe ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($17.72)",
-        "material_cost": "22.47",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
-        "conditional_cost": "8.09"
+        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spreader visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "snapshot",
+              "where": "Beds"
+            },
+            {
+              "key": "f8012",
+              "where": "Every palm"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds that need it"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "tritek",
+              "where": "Scale crawlers, cool morning"
+            },
+            {
+              "key": "merit",
+              "where": "Borer or scale history"
+            },
+            {
+              "key": "sequestar",
+              "where": "Yellowing on high-pH soil"
+            }
+          ],
+          "dont": [
+            "No Merit on blooming plants",
+            "Keep fertilizer 10 ft from water"
+          ]
+        },
+        "completionDefaultProducts": [
+          {
+            "name": "Snapshot 2.5TG",
+            "treeShrubKey": "snapshot"
+          },
+          {
+            "name": "LESCO 8-0-12 #511542",
+            "treeShrubKey": "f8012"
+          }
+        ]
       },
       {
         "visit": 2,
         "month": "Feb",
         "visit_type": "Foliar PHC visit",
         "main_goal": "Clean up scale/mites/whitefly pressure, correct micros, and avoid unnecessary systemics.",
-        "primary": "TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nIron Plus: label rate ($1.52)\nMn Combo: label rate ($1.33)\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
-        "secondary": "Conserve SC 0.1-0.2 fl oz/gal for caterpillars where labeled ($4.05)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)",
-        "material_cost": "8.93",
+        "primary": "TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nMn Combo: exact container label needed; no verified dose\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
+        "secondary": "Conserve SC: target-specific label rate; no generic mix range\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Do not use turf disease language here. For T&S, document leaf spot, anthracnose, Phytophthora/root rot, palm disease diagnosis, mites, scale, or whitefly by plant group.",
-        "conditional_cost": "3.48"
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spray visit",
+          "palm": false,
+          "routine": [
+            {
+              "key": "tritek",
+              "where": "All shrubs"
+            },
+            {
+              "key": "mncombo",
+              "where": "Shrubs and palms"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "tritek15",
+              "where": "Heavy scale or mites"
+            },
+            {
+              "key": "conserve",
+              "where": "Caterpillars"
+            },
+            {
+              "key": "floramite",
+              "where": "Mites"
+            }
+          ],
+          "dont": [
+            "No Iron Plus (it's 12-0-0 nitrogen)"
+          ]
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 3,
         "month": "Mar",
         "visit_type": "Foliar/systemic PHC visit",
         "main_goal": "Break whitefly/scale cycles before summer without back-to-back 4A pressure.",
-        "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 non-neonic systemic ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)\nKPHITE 7LP: 1-2 qt/100 gal foliar, FRAC P07 where root/oomycete risk is justified ($4.68)",
+        "primary": "Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07",
         "secondary": "Zylam rescue only for severe documented pressure; log as 4A/neonic pressure and apply pollinator gate ($17.63)\nNutriRoot and Cytogro are premium/stressed-account support, not universal ($10.47)\nInspect ficus and spiraling whitefly undersides, honeydew, and sooty mold",
-        "material_cost": "13.52",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
         "notes": "March is intentionally the non-neonic systemic/IGR month unless severe pressure justifies rescue chemistry.",
-        "conditional_cost": "16.45"
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spray visit",
+          "palm": false,
+          "routine": [],
+          "conditional": [
+            {
+              "key": "mainspring",
+              "where": "Whitefly or caterpillars"
+            },
+            {
+              "key": "distance",
+              "where": "Whitefly or scale nymphs"
+            },
+            {
+              "key": "floramite",
+              "where": "Mites"
+            }
+          ],
+          "dont": [
+            "No Kontos (greenhouse label only)",
+            "No Zylam or Merit on blooming plants"
+          ],
+          "decision": "March product program awaits confirmation after removing Kontos. Treatments below require a finding."
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 4,
         "month": "Apr",
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
-        "primary": "Snapshot 2.5TG Q2: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)",
-        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nDistance or Talus for whitefly nymphs/crawlers ($16.52)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTalstar only as documented rescue, not default ($3.82)",
-        "material_cost": "22.47",
+        "primary": "Snapshot 2.5TG Q2: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
+        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nDistance or Talus (held: reviewed label prohibits residential use)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTalstar only as documented rescue, not default ($3.82)",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": false,
-        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
-        "conditional_cost": "8.70"
+        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spreader visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "snapshot",
+              "where": "Beds"
+            },
+            {
+              "key": "f8012",
+              "where": "Every palm"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds that need it"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "tritek",
+              "where": "Scale crawlers"
+            },
+            {
+              "key": "distance",
+              "where": "Whitefly or scale nymphs"
+            },
+            {
+              "key": "mainspring",
+              "where": "Caterpillars"
+            }
+          ],
+          "dont": [
+            "No oil and pyrethroid together"
+          ]
+        },
+        "completionDefaultProducts": [
+          {
+            "name": "Snapshot 2.5TG",
+            "treeShrubKey": "snapshot"
+          },
+          {
+            "name": "LESCO 8-0-12 #511542",
+            "treeShrubKey": "f8012"
+          }
+        ]
       },
       {
         "visit": 5,
         "month": "May",
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
-        "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nIron Plus + Mn Combo: label rate ($2.85)\n8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)",
-        "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
-        "material_cost": "16.37",
+        "primary": "Mainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nMn Combo: exact container label needed; no verified dose\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, lb per palm, only if due and legal before blackout\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
+        "secondary": "Floramite for confirmed mites ($6.02)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
-        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
-        "conditional_cost": "11.09"
+        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spreader visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "f8012",
+              "where": "Every palm, before June 1"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds that need it"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "floramite",
+              "where": "Mites"
+            },
+            {
+              "key": "mainspring",
+              "where": "Whitefly or caterpillars"
+            },
+            {
+              "key": "mncombo",
+              "where": "Iron or manganese yellowing"
+            }
+          ],
+          "dont": [
+            "Skip the palm feeding if palms were fed in April",
+            "No N or P fertilizer after May 31"
+          ],
+          "decision": "Mn Combo timing awaits confirmation; its exact label is also needed."
+        },
+        "completionDefaultProducts": [
+          {
+            "name": "LESCO 8-0-12 #511542",
+            "treeShrubKey": "f8012"
+          }
+        ]
       },
       {
         "visit": 6,
         "month": "Jun",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Begin Sarasota/Manatee N/P blackout, manage summer pest/disease pressure, and avoid heat injury.",
-        "primary": "TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)\nLiquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($11.35)\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
-        "secondary": "Conserve or Mainspring for caterpillars ($4.05)\nDistance or Talus for whitefly/scale nymphs ($16.52)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move",
-        "material_cost": "6.08",
+        "primary": "TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07\nCopper: exact container label needed; separate from oil\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
+        "secondary": "Conserve or Mainspring for caterpillars ($4.05)\nDistance or Talus (held: reviewed label prohibits residential use)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "No N/P landscape fertilizer in Sarasota/Manatee June 1-Sept. 30. Do not run Merit as a standard June drench.",
-        "conditional_cost": "11.37"
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spray visit",
+          "palm": false,
+          "routine": [],
+          "conditional": [
+            {
+              "key": "tritek",
+              "where": "Scale or mites, early morning"
+            },
+            {
+              "key": "kphite",
+              "where": "Root rot risk"
+            },
+            {
+              "key": "copper",
+              "where": "Labeled leaf spot"
+            }
+          ],
+          "dont": [
+            "No N or P fertilizer (blackout)",
+            "No Iron Plus (it's 12-0-0 nitrogen)"
+          ]
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 7,
         "month": "Jul",
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
-        "primary": "Snapshot 2.5TG Q3: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout",
-        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus for scale crawlers/nymphs ($16.52)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
-        "material_cost": "17.16",
+        "primary": "Snapshot 2.5TG Q3: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, lb per palm, if due",
+        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus (held: reviewed label prohibits residential use)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "July palm/ornamental N/P fertilizer is blocked on Sarasota/Manatee landscape accounts. Snapshot is fine; 8-2-12 and 13-0-13 are not.",
-        "conditional_cost": "22.46"
+        "notes": "July palm/ornamental N/P fertilizer is blocked on Sarasota/Manatee landscape accounts. Snapshot is fine; LESCO 8-0-12 #511542 and 13-0-13 are not.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spreader visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "snapshot",
+              "where": "Beds"
+            },
+            {
+              "key": "f0016",
+              "where": "Every palm"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "mainspring",
+              "where": "Whitefly or caterpillars"
+            },
+            {
+              "key": "distance",
+              "where": "Scale crawlers"
+            },
+            {
+              "key": "tritek",
+              "where": "Crawlers, cool morning only"
+            }
+          ],
+          "dont": [
+            "No 8-0-12 or 13-0-13 until October",
+            "Don't cut yellow palm fronds"
+          ]
+        },
+        "completionDefaultProducts": [
+          {
+            "name": "Snapshot 2.5TG",
+            "treeShrubKey": "snapshot"
+          },
+          {
+            "name": "LESCO 0-0-16 #510513",
+            "treeShrubKey": "f0016"
+          }
+        ]
       },
       {
         "visit": 8,
         "month": "Aug",
         "visit_type": "Scout-first PHC",
         "main_goal": "Prevent summer collapse with low burn-risk pest correction and high observation.",
-        "primary": "Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs ($16.52)\nTriTek spray oil: 1.0% only if safe ($6.08)\nCytogro and NutriRoot kelp/humate support for premium/stressed accounts ($10.47)",
+        "primary": "Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nTriTek spray oil: 1.0% only if safe ($6.08)\nCytogro and NutriRoot kelp/humate support for premium/stressed accounts ($10.47)",
         "secondary": "Floramite for confirmed mites ($6.02)\nNo alfalfa meal or other N/P bed products during Sarasota/Manatee blackout\nSevere whitefly: pair adult/nymph strategy to life stage, not calendar habit\nHeat stress: document and communicate instead of adding chemistry",
-        "material_cost": "0.00",
+        "material_cost": null,
         "labor_cost": "scout",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "August is low product, high observation. Customer value comes from catching decline early and explaining plant stress clearly.",
-        "conditional_cost": "13.90"
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Scout visit",
+          "palm": true,
+          "routine": [],
+          "conditional": [
+            {
+              "key": "f0016",
+              "where": "Palms missed July's feeding"
+            },
+            {
+              "key": "mainspring",
+              "where": "Whitefly or caterpillars"
+            },
+            {
+              "key": "floramite",
+              "where": "Mites"
+            }
+          ],
+          "dont": [
+            "No N or P fertilizer (blackout)"
+          ]
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 9,
         "month": "Sep",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Break late-summer scale/whitefly life cycles and prepare fall nutrition without N/P until October in Sarasota/Manatee.",
-        "primary": "Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)\nDistance IGR: 6-8 fl oz/100 gal if rotation calls for IRAC 7C ($16.52)\nIron Plus + Mn Combo: label rate ($2.85)\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
-        "secondary": "Headway only for labeled ornamental disease and only if FRAC history allows ($6.41)\nShortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating",
-        "material_cost": "2.85",
+        "primary": "Talus (held: reviewed label prohibits residential use)\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMn Combo: exact container label needed; no verified dose\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
+        "secondary": "Headway held: reviewed liquid label is turf-only; exact inventory formulation needed\nShortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
-        "notes": "Final blackout month for Sarasota/Manatee. Do not make Merit automatic with Talus; use life-stage IGR strategy unless systemic need is documented.",
-        "conditional_cost": "9.49"
+        "notes": "Final blackout month for Sarasota/Manatee. Do not make Merit automatic with Talus (held: reviewed label prohibits residential use) ",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spray visit",
+          "palm": false,
+          "routine": [
+            {
+              "key": "mncombo",
+              "where": "Shrubs and palms"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "talus",
+              "where": "Whitefly or scale nymphs"
+            },
+            {
+              "key": "tritek",
+              "where": "Scale crawlers"
+            },
+            {
+              "key": "headway",
+              "where": "Labeled leaf disease"
+            }
+          ],
+          "dont": [
+            "No N or P fertilizer (blackout)",
+            "No Iron Plus (it's 12-0-0 nitrogen)"
+          ]
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 10,
         "month": "Oct",
         "visit_type": "Granular bed visit + optional disease/root PHC",
         "main_goal": "Restart legal nutrition after blackout, reset beds, and protect fall disease/root-prone ornamentals.",
-        "primary": "Snapshot 2.5TG Q4: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where appropriate ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)\nKPHITE 7LP: 1-2 qt/100 gal foliar or labeled drench, FRAC P07 where justified ($4.68)",
-        "secondary": "Kontos 1.7-3.4 fl oz/100 gal if target pest fits ($13.52)\nDistance or Talus for whitefly nymphs/crawlers ($16.52)\nFall scale flush inspection\nHigh-value palms: offer injection assessment, not automatic injection",
-        "material_cost": "22.47",
+        "primary": "Snapshot 2.5TG Q4: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07",
+        "secondary": "Distance or Talus (held: reviewed label prohibits residential use)\nFall scale flush inspection\nHigh-value palms: offer injection assessment, not automatic injection",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
-        "conditional_cost": "9.76"
+        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spreader visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "snapshot",
+              "where": "Beds"
+            },
+            {
+              "key": "f8012",
+              "where": "Every palm"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds that need it"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "kphite",
+              "where": "Root rot risk"
+            },
+            {
+              "key": "distance",
+              "where": "Whitefly or scale nymphs"
+            }
+          ],
+          "dont": [
+            "Keep fertilizer 10 ft from water"
+          ],
+          "decision": "October KPHITE placement awaits confirmation; no routine drench is prescribed."
+        },
+        "completionDefaultProducts": [
+          {
+            "name": "Snapshot 2.5TG",
+            "treeShrubKey": "snapshot"
+          },
+          {
+            "name": "LESCO 8-0-12 #511542",
+            "treeShrubKey": "f8012"
+          }
+        ]
       },
       {
         "visit": 11,
         "month": "Nov",
         "visit_type": "Foliar cleanup + root/add-on work",
         "main_goal": "Cool-season cleanup, micronutrient correction, root support, and diagnosed injection add-on opportunities.",
-        "primary": "TriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: label rate ($1.33)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis sites ($1.73)",
-        "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nArtavia or Headway only if label fits and FRAC log allows ($2.11)",
-        "material_cost": "7.41",
+        "primary": "TriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: exact container label needed; no verified dose\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe",
+        "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nHeadway held: reviewed liquid label is turf-only; exact inventory formulation needed",
+        "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Call this cool-season cleanup, not dormant spray. SWFL ornamentals are not truly dormant like northern landscapes.",
-        "conditional_cost": "5.39"
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Spray visit",
+          "palm": true,
+          "routine": [
+            {
+              "key": "mncombo",
+              "where": "Shrubs and palms"
+            }
+          ],
+          "conditional": [
+            {
+              "key": "f8012",
+              "where": "Palms not fed in October"
+            },
+            {
+              "key": "tritek",
+              "where": "Scale or mites"
+            },
+            {
+              "key": "sequestar",
+              "where": "Yellowing on high-pH soil"
+            }
+          ],
+          "dont": [],
+          "decision": "The fall Snapshot catch-up decision is pending."
+        },
+        "completionDefaultProducts": []
       },
       {
         "visit": 12,
         "month": "Dec",
         "visit_type": "Scout/report + selective nutrition/systemic",
         "main_goal": "Retention, customer proof of value, winter palm nutrition where due, and next-year correction plan.",
-        "primary": "8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone if due and appropriate ($5.31)\nCytogro: label rate for premium/stressed accounts ($4.82)\nEDDHA iron (Sequestar 6% Fe): label rate for high-pH chlorosis ($1.73)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
+        "primary": "LESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm\nCytogro: label rate for premium/stressed accounts ($4.82)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
         "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nInspect declining palms: photo, note, and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible (see the palm diagnosis note)\nNote soil pH, irrigation water, or salt issues for chronic chlorosis",
-        "material_cost": "0.00",
+        "material_cost": null,
         "labor_cost": "report",
         "tier_4x": false,
         "tier_6x": false,
-        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose by canopy width: width × width ÷ 85 lb (8 ft = 0.75 lb, 12 ft = 1.7 lb, 16 ft = 3.0 lb, 20 ft = 4.7 lb); spread under the whole canopy, not at the trunk.",
-        "conditional_cost": "6.17"
+        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
+        "conditional_cost": null,
+        "fieldGuide": {
+          "title": "Report visit",
+          "palm": true,
+          "routine": [],
+          "conditional": [
+            {
+              "key": "f8012",
+              "where": "Palms missed the fall feeding"
+            },
+            {
+              "key": "zylam",
+              "where": "Pest history, and the 4A log allows"
+            }
+          ],
+          "dont": [
+            "No Zylam on blooming plants"
+          ]
+        },
+        "completionDefaultProducts": []
       }
     ],
     "costing_assumptions": [
@@ -1645,7 +2037,11 @@
           "premium": true
         },
         "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity.",
-        "completionDefaultProducts": ["Alpine WSG", "Gentrol IGR", "Advion Cockroach Gel Bait"]
+        "completionDefaultProducts": [
+          "Alpine WSG",
+          "Gentrol IGR",
+          "Advion Cockroach Gel Bait"
+        ]
       },
       {
         "visit": 2,

@@ -108,16 +108,208 @@ function proposalRowTermsScope(proposal, row, noGuaranteeClaims = false) {
 // Whether the PDF may print its canned IPM/callback sentence, a recurring
 // residential PEST term: the proposal carries the plan terms, every row is
 // pest work, and at least one line is a scheduled recurring visit.
+function proposalHasRecurringVisit(proposal) {
+  return (Array.isArray(proposal?.buildings) ? proposal.buildings : [])
+    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
+    .some((item) => item?.frequency && item.frequency !== 'one_time');
+}
+
 function proposalCallbackTermsEligible(proposal, estimateId = null) {
   if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
   const rows = proposalRows(proposal);
-  const recurringVisit = (Array.isArray(proposal.buildings) ? proposal.buildings : [])
-    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
-    .some((item) => item?.frequency && item.frequency !== 'one_time');
-  return recurringVisit && rows.every((row) => {
+  return proposalHasRecurringVisit(proposal) && rows.every((row) => {
     const lanes = proposalRowLanes(row);
     return lanes.length === 1 && lanes[0] === 'pest';
   });
+}
+
+// Frozen documents keep their original terms (codex #5434 r2 P1): an
+// accepted or declined estimate's document describes the proposal the
+// customer actually saw (estimateIsPriceLocked, the line this module already
+// draws between "committed" and "still selling"), so the rate review
+// disclosure prints on a frozen document ONLY when the recorded acceptance
+// proves the customer accepted under terms that carried the sentence — the
+// 'plan' acceptance snapshot (estimate_acceptances.terms_text). A document
+// frozen before this disclosure existed, one accepted under the 'base'
+// drawer (rodent, one-time toggle), or a declined one never acquires it. An
+// open estimate is being sold under the current terms and prints it.
+// Two pieces of persisted evidence, either suffices (codex #5434 r3 P1):
+// the acceptance drawer snapshot, or the accept's own document stamp
+// (estimate_data.rateReviewDisclosedAtAccept — written atomically with the
+// acceptance, itself only on evidence the customer was SERVED the line while
+// the estimate was open: the drawer snapshot or the served marker below —
+// never on plan eligibility alone).
+function documentCarriesRateReviewTerms(estimate, acceptance = null) {
+  if (!estimateIsPriceLocked(estimate)) return true;
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  if (data && typeof data === 'object' && data.rateReviewDisclosedAtAccept === true) return true;
+  const { RATE_REVIEW_SENTENCE } = require('./acceptance-terms-text');
+  const text = acceptance?.termsText ?? acceptance?.terms_text ?? '';
+  return typeof text === 'string' && text.includes(RATE_REVIEW_SENTENCE);
+}
+
+// Structured commercial terms (slice 1A-i) rendered as "Label: value" lines —
+// the pdfkit document prints them; both renderers treat their presence as
+// authored terms. Canonical payment tokens → labels (same map as
+// proposal-sections.js). Lives here, beside the predicates that key on it,
+// so the renderers and the served-disclosure evidence read ONE definition.
+function commercialTermLines(commercialTerms) {
+  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
+  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+  return [
+    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
+    ['Initial term', commercialTerms.initialTermMonths != null
+      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
+      : null],
+    ['Renewal', commercialTerms.renewal],
+    ['Price adjustment', commercialTerms.priceAdjustment],
+    ['Cancellation', commercialTerms.cancellation],
+    ['Property access', commercialTerms.accessRequirements],
+  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
+}
+
+// The renderers print the canned plan sentences (the callback guarantee, the
+// annual rate review line) only where no operator-authored terms sit beside
+// them — never next to a free-text `terms` block, a structured commercial
+// terms block, or a programs-mode proposal (estimate-pdf.js termsBlock
+// cannedTermsAllowed; EstimateProposalDocument.jsx authoredTermsPresent /
+// programList). The rate-review predicate below applies the same exclusions,
+// so the /data projection, the pdfkit fallback and the served-disclosure
+// evidence agree: a document whose renderer suppresses the line never
+// records that it showed it (pre-push Codex on #5434).
+function proposalPrintsCannedTerms(proposal) {
+  if (!proposal || typeof proposal !== 'object') return false;
+  if (proposal.terms) return false;
+  if (commercialTermLines(proposal.commercialTerms).length > 0) return false;
+  if (Array.isArray(proposal.programs) && proposal.programs.length > 0) return false;
+  return true;
+}
+
+// Whether the annual rate review disclosure prints beside the pdfkit
+// document's terms (owner ruling 2026-09-30): the SAME plan-terms scope the
+// money-back guarantee keys on — every row residential pest, lawn, mosquito
+// or tree & shrub (proposalCarriesPlanTerms: never termite, rodent,
+// commercial or an authored proposal) — plus at least one recurring line,
+// because a one-time-only document has no rate to review — and, given the
+// estimate row (+ its acceptance record), the frozen-document rule above.
+// Projected to the browser document by /data, so the two renderers read ONE
+// decision (EstimateProposalDocument.jsx rateReviewEligible).
+function proposalRateReviewTermsEligible(proposal, estimateId = null, { estimate = null, acceptance = null } = {}) {
+  if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
+  if (!proposalPrintsCannedTerms(proposal)) return false;
+  if (!proposalHasRecurringVisit(proposal)) return false;
+  return estimate ? documentCarriesRateReviewTerms(estimate, acceptance) : true;
+}
+
+// ── Served-disclosure evidence (pre-push Codex on #5434's merge head) ──────
+// The accept's frozen-document stamp must never rest on plan eligibility
+// alone: an older tab (a bundle that predates the line, the acceptance gate
+// off) can accept without rendering any rate review copy, and its frozen
+// document must not GAIN a line the customer never saw. So every
+// customer-facing render that prints the disclosure on an OPEN estimate —
+// the /pdf document download (browser or pdfkit renderer) and the legacy
+// page's plan-terms card — marks estimate_data.rateReviewTermsServed with
+// the copy version it printed, and the accept stamps
+// rateReviewDisclosedAtAccept only on that marker at the CURRENT version or
+// on the recorded 'plan' drawer snapshot. Idempotent; never on a frozen
+// estimate (guarded in SQL too); never throws — a missed marker costs a
+// frozen document its line, never the download or the page.
+const RATE_REVIEW_TERMS_SERVED_KEY = 'rateReviewTermsServed';
+function parseEstimateDataLoose(data) {
+  if (typeof data === 'string') { try { return JSON.parse(data); } catch { return null; } }
+  return data && typeof data === 'object' ? data : null;
+}
+function rateReviewTermsServedIsCurrent(estimateData) {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  const data = parseEstimateDataLoose(estimateData);
+  return !!data && data[RATE_REVIEW_TERMS_SERVED_KEY] === RATE_REVIEW_TERMS_VERSION;
+}
+// Outcome-reporting form (GH Codex r8 P0): callers that are about to SHOW
+// the line must tell a zero-row write (the row froze — render the frozen
+// row) from a FAILED write (persistence unproven — withhold the line), so a
+// document never carries a disclosure whose evidence is not durable.
+//   'persisted' — written now · 'current' — already at this version ·
+//   'frozen' — the row in hand is already price-locked (no write) ·
+//   'zero_rows' — the guarded UPDATE matched nothing (froze under us) ·
+//   'failed' — the write threw.
+async function recordRateReviewTermsServedOutcome(estimate, { database = db } = {}) {
+  if (!estimate?.id) return 'failed';
+  if (estimateIsPriceLocked(estimate)) return 'frozen';
+  if (rateReviewTermsServedIsCurrent(estimate.estimate_data)) return 'current';
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  try {
+    const updated = await database('estimates')
+      .where({ id: estimate.id })
+      .whereNull('price_locked_at')
+      .whereNotIn('status', [...FROZEN_DOCUMENT_STATUSES])
+      .update({
+        estimate_data: database.raw(
+          `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{${RATE_REVIEW_TERMS_SERVED_KEY}}', to_jsonb(?::text))`,
+          [RATE_REVIEW_TERMS_VERSION],
+        ),
+      });
+    return Number(updated) > 0 ? 'persisted' : 'zero_rows';
+  } catch (err) {
+    logger.warn(`[estimate-proposal] rate review served marker not written for estimate ${estimate.id}: ${err.message}`);
+    return 'failed';
+  }
+}
+// Whether the document THIS server prints for an open estimate carries the
+// line right now — the /pdf route's question for both renderers: the same
+// decision /data projects to the browser document and the pdfkit fallback
+// prints by. A pre-resolved billing context may be passed to avoid a second
+// resolution.
+async function documentPrintsRateReviewTerms(estimate, { billing = null } = {}) {
+  if (!estimate || estimateIsPriceLocked(estimate)) return false;
+  const { normalizeProposal } = require('./estimate-proposal');
+  const context = billing || await resolveProposalBillingContext(estimate);
+  const proposal = normalizeProposal(estimate, {
+    recurringMode: context?.billsPerApplication === true ? 'per_application' : 'legacy',
+    livePricing: context?.livePricing || null,
+  });
+  return proposalRateReviewTermsEligible(proposal, estimate.id, { estimate, acceptance: null });
+}
+// The /pdf route's pre-render step (GH Codex r7 P1): the evidence must be
+// durable BEFORE a document carrying the line exists. When this server
+// would print the line for the (open) row the route read, write the marker
+// first; a zero-row write means the row froze (accepted / declined) between
+// that read and this write — the accept it lost to recorded no evidence —
+// so the document is rendered from the row as it is NOW (frozen: no line
+// unless the accept stamped it) rather than from the stale open snapshot.
+// Returns `{ estimate, withholdRateReviewTerms }`: the row the renderer
+// must use, and whether the line must be WITHHELD because its evidence
+// could not be proven durable (GH Codex r8 P0: a failed write — or an
+// unreadable row after a zero-row write — never produces a document
+// carrying a disclosure the accept could not honor). Never throws.
+async function ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing = null, database = db } = {}) {
+  let prints = false;
+  try {
+    prints = await documentPrintsRateReviewTerms(estimate, { billing });
+  } catch (err) {
+    logger.warn(`[estimate-proposal] rate review document check failed for estimate ${estimate?.id || 'unknown'}: ${err.message}`);
+    // Fail closed: eligibility unknown ⇒ the line is withheld.
+    return { estimate, withholdRateReviewTerms: true };
+  }
+  if (!prints) return { estimate, withholdRateReviewTerms: false };
+  const outcome = await recordRateReviewTermsServedOutcome(estimate, { database });
+  if (outcome === 'persisted' || outcome === 'current') return { estimate, withholdRateReviewTerms: false };
+  if (outcome === 'zero_rows') {
+    try {
+      const fresh = await database('estimates').where({ id: estimate.id }).first();
+      if (fresh && estimateIsPriceLocked(fresh)) {
+        logger.info(`[estimate-proposal] estimate ${estimate.id} froze before its rate review evidence could be written — rendering the document from the current row`);
+        return { estimate: fresh, withholdRateReviewTerms: false };
+      }
+    } catch (err) {
+      logger.warn(`[estimate-proposal] could not re-read estimate ${estimate.id} after a zero-row evidence write: ${err.message}`);
+    }
+  }
+  // 'failed', or a zero-row write that cannot be shown to have hit a frozen
+  // row (re-read failed, missing, or still open): persistence unproven ⇒
+  // withhold.
+  logger.warn(`[estimate-proposal] rate review evidence unproven for estimate ${estimate.id} (${outcome}) — the document is rendered without the line`);
+  return { estimate, withholdRateReviewTerms: true };
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -315,6 +507,14 @@ module.exports = {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRateReviewTermsEligible,
+  proposalPrintsCannedTerms,
+  commercialTermLines,
+  documentCarriesRateReviewTerms,
+  documentPrintsRateReviewTerms,
+  rateReviewTermsServedIsCurrent,
+  recordRateReviewTermsServedOutcome,
+  ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,

@@ -50,6 +50,57 @@ describe('preserved recurring visit staff alert', () => {
   );
 });
 
+// Owner 2026-10-01: six "Series move needs route review" bells in 72h, every one
+// with no conflicts and no preserved visits, only accepted overlap dates.
+describe('series move overlap-only findings', () => {
+  const markerWrites = [];
+  beforeEach(() => {
+    jest.clearAllMocks();
+    markerWrites.length = 0;
+    db.fn = { now: () => new Date() };
+    db.mockImplementation((table) => {
+      if (table !== 'series_moves') throw new Error(`Unexpected table ${table}`);
+      return {
+        where: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ status: 'committed', conflict_card_at: null, reminders_synced_at: new Date(), notified_at: new Date() }),
+        update: jest.fn(async (values) => { markerWrites.push(values); return 1; }),
+      };
+    });
+    notifyAdmin.mockResolvedValue({ id: 'card' });
+  });
+  const move = (extra) => applySeriesMoveEffects({
+    result: { seriesMoveId: 'move-1', notifyRequested: false, rescheduledOccurrences: [], ...extra },
+    serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+  });
+
+  test.each([
+    ['promised arrival windows at stake', { overlapDates: ['2099-02-05', '2099-02-12'], arrivalWindowDates: ['2099-02-05'] }],
+    ['plain overlap', { overlapDates: ['2099-02-05'] }],
+  ])('an accepted overlap with no conflict and no preserved visit rings no bell (%s)', async (_name, extra) => {
+    await move({ ...extra, preservedOccurrences: [] });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // No card is owed, so the marker is stamped: the recovery sweep counts
+    // overlaps in conflict_count and would otherwise retry the move forever.
+    expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(true);
+  });
+
+  test('a real conflict still rings, and the card lists the overlap beside it', async () => {
+    await move({
+      rescheduledOccurrences: [{ id: 'visit-3', date: '2099-02-03', conflicted: true }],
+      overlapDates: ['2099-02-05'], arrivalWindowDates: ['2099-02-05'],
+    });
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = notifyAdmin.mock.calls[0];
+    expect(category).toBe('schedule_conflict');
+    expect(title).toBe('Series move left visits without a time window');
+    expect(body).toContain('NO time window');
+    expect(body).toContain('need route review');
+    expect(opts.metadata).toMatchObject({ conflicts: [{ id: 'visit-3', date: '2099-02-03' }], overlapDates: ['2099-02-05'] });
+    expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(true);
+  });
+});
+
 describe('superseded series move card', () => {
   // The successor owns the preserved and overlap work; the old operation's
   // card is about the conflicts still windowless, and stores only those — the

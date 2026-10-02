@@ -1,6 +1,7 @@
 import { Button, Select } from '../ui';
 import FollowThroughCards from '../follow-through/FollowThroughCards';
 import RescheduleProposalCards from '../follow-through/RescheduleProposalCards';
+import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 
 const ui = {
   Card: ({ children }) => <article className="rounded-md border-hairline border-zinc-300 bg-white p-4 space-y-2 text-14 text-ink-primary">{children}</article>,
@@ -11,8 +12,10 @@ const ui = {
 };
 
 export default function AdminFollowThroughCards(props) {
+  // The admin shell also serves technician logins (Promises tab, dashboard).
+  const openCall = useCanAccessCalls();
   return <>
-    <RescheduleProposalCards ui={ui} pollMs={props.pollMs} />
-    <FollowThroughCards {...props} ui={ui} />
+    <RescheduleProposalCards ui={ui} pollMs={props.pollMs} openCall={openCall} />
+    <FollowThroughCards {...props} ui={ui} openCall={openCall} />
   </>;
 }

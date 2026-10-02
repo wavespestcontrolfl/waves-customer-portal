@@ -119,6 +119,40 @@ describe('first bell', () => {
   });
 });
 
+describe('booked then cancelled by the office', () => {
+  const afterCall = '2026-09-28T21:50:00Z';
+
+  test('first ring is suppressed for a visit booked FROM the call that was later cancelled', async () => {
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '12:00:00', created_at: afterCall, source_call_log_id: CALL_ID, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each(['08:00:00', '11:00:00'])('a cancelled row WITHOUT call provenance (window %s vs the 11 AM slot) does not suppress the ring', async (window_start) => {
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start, created_at: afterCall, source_call_log_id: null, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+  });
+
+  test('a repeat is suppressed too (the first bell already rang, then the office cancelled)', async () => {
+    mockState.alertedKeys = new Set([`call-booking-miss:${CALL_ID}`]);
+    mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
+    mockState.booked = [{ customer_id: 'cust-9', status: 'cancelled', sched_date: '2026-10-04', window_start: '12:00:00', created_at: afterCall, source_call_log_id: CALL_ID, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 0, repeated: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('no repeat once the confirmed slot start has passed', async () => {
+    mockState.alertedKeys = new Set([`call-booking-miss:${CALL_ID}`]);
+    mockState.rung = [{ call_log_id: CALL_ID, last_at: '2026-10-04T12:00:00Z' }];
+    const result = await runCallBookingMissWatchdog({ now: new Date('2026-10-04T16:30:00Z') }); // 12:30 ET, slot 11:00
+    expect(result.repeated).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
 describe('repeat paging', () => {
   beforeEach(() => {
     mockState.alertedKeys = new Set([`call-booking-miss:${CALL_ID}`]);
@@ -227,9 +261,10 @@ describe('repeatWindowOpen', () => {
     expect(repeatWindowOpen(slot, new Date('2026-10-04T10:30:00Z'))).toBe(false); // 06:30 ET
   });
 
-  test('stays open after the slot passes unbooked, through the end of that ET day', () => {
-    expect(repeatWindowOpen(slot, new Date('2026-10-04T15:00:00Z'))).toBe(true); // 11:00 ET
-    expect(repeatWindowOpen(slot, new Date('2026-10-04T23:30:00Z'))).toBe(true); // 19:30 ET
+  test('closes once the slot start time has passed (no repeats through the rest of that day)', () => {
+    expect(repeatWindowOpen(slot, new Date('2026-10-04T14:59:00Z'))).toBe(true); // 10:59 ET, slot 11:00
+    expect(repeatWindowOpen(slot, new Date('2026-10-04T15:00:00Z'))).toBe(false); // 11:00 ET
+    expect(repeatWindowOpen(slot, new Date('2026-10-04T23:30:00Z'))).toBe(false); // 19:30 ET
   });
 
   test('closed from the next ET day on', () => {

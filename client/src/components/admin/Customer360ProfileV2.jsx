@@ -151,6 +151,7 @@ import {
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
 import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
+import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
 import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
 
@@ -4037,10 +4038,10 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
       };
       let result;
       try {
-        result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+        result = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
           method: "POST",
-          body: JSON.stringify(recordedPayload),
-        });
+          body: JSON.stringify({ ...recordedPayload, ...ack }),
+        }));
       } catch (err) {
         // The route refuses (409, setupFeeRequired) when the coverage
         // series owes the bait-station setup — confirm the collected total
@@ -4071,15 +4072,16 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             ? `${refusal.error}\n\nRecord $${Number(amount).toFixed(2)} coverage + $${setupFee.toFixed(2)} Bait Station Setup — pre-tax total $${submittedTotal.toFixed(2)}?${taxNote}`
             : `${refusal.error}\n\nRecord the $${setupFee.toFixed(2)} Bait Station Setup as its own line on this prepay? Confirm the $${Number(amount).toFixed(2)} you entered is the pre-tax collected total INCLUDING the setup.${taxNote}`);
           if (!ok) throw new Error("Annual prepay not recorded — the bait-station setup must ride the invoice.");
-          result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+          result = await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
             method: "POST",
             body: JSON.stringify({
               ...recordedPayload,
               amount: submittedTotal,
               setupFeeAmount: setupFee,
               ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
+              ...ack,
             }),
-          });
+          }));
         } else {
           throw err;
         }
@@ -4438,10 +4440,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // with staff and re-submit carrying the server-derived figure + anchor.
   const mintAnnualPrepay = async (payload) => {
     try {
-      return await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+      return await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
         method: "POST",
-        body: JSON.stringify(payload),
-      });
+        body: JSON.stringify({ ...payload, ...ack }),
+      }));
     } catch (err) {
       const refusal = err?.body;
       // scheduledServiceId is null for a NEW rodent prepay with no series
@@ -4451,14 +4453,15 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           `${refusal.error}\n\nAdd the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup line to this invoice?`,
         );
         if (!ok) throw new Error("Annual prepay not created — the bait-station setup must ride the invoice.");
-        return adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+        return sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
           method: "POST",
           body: JSON.stringify({
             ...payload,
             setupFeeAmount: Number(refusal.setupFeeAmount),
             ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
+            ...ack,
           }),
-        });
+        }));
       }
       throw err;
     }

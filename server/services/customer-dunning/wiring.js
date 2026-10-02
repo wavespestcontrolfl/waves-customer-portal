@@ -186,7 +186,7 @@ const SUMMARY_COUNT_TIMEOUT_MS = 4000;
  * in time or names nothing (a hold that could not resolve the balance, nothing open): the panel then says
  * "all invoices on their balance" rather than a number that may be wrong.
  */
-async function combinedInvoiceCount(customerId, { now = new Date(), timeoutMs = SUMMARY_COUNT_TIMEOUT_MS } = {}) {
+async function combinedCoverage(customerId, { now = new Date(), timeoutMs = SUMMARY_COUNT_TIMEOUT_MS } = {}) {
   let timer = null;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => resolve(null), timeoutMs);
@@ -194,34 +194,68 @@ async function combinedInvoiceCount(customerId, { now = new Date(), timeoutMs = 
   });
   try {
     const set = await Promise.race([BalanceSet.resolveDunnableSet(customerId, { now }), timeout]);
-    const count = Array.isArray(set?.members) ? set.members.length : 0;
-    return count > 0 ? count : null;
+    const invoiceIds = Array.isArray(set?.members) ? set.members.map((m) => String(m.invoice_id)) : [];
+    return { count: invoiceIds.length > 0 ? invoiceIds.length : null, invoiceIds };
   } catch (err) {
     logger.warn(`[customer-dunning] invoice count for customer ${customerId} unreadable: ${redactContact(err.message)}`);
-    return null;
+    return { count: null, invoiceIds: [] };
   } finally {
     clearTimeout(timer);
   }
 }
 
+// Why a paused schedule is paused, as the panel says it before anyone presses Resume: what the office
+// typed (a staff pause), or the engine's own reason in plain English (no way to reach them, archived...).
+function pausedReasonOf(schedule) {
+  if (schedule.status !== 'paused') return { pausedBy: null, pausedReason: null };
+  const reason = String(schedule.paused_reason || '').trim();
+  if (schedule.paused_by_admin_id || reason === 'admin_paused') {
+    return { pausedBy: 'staff', pausedReason: reason && reason !== 'admin_paused' ? reason : null };
+  }
+  return { pausedBy: 'system', pausedReason: Schedule.reasonText(reason) };
+}
+
 /**
  * What the invoice panel shows (GET /api/admin/invoices/:id/followup) for a customer on combined
  * reminders: the open schedule, the human name of its current step and how many invoices a send would
- * cover (combinedInvoiceCount; null when it cannot be read). null when the customer has no open schedule.
+ * cover (null when it cannot be read). null when the customer has no open schedule.
+ *
+ * `controllable`: the live gate covers this customer now. A schedule can stay open for a while after the
+ * gate, a prerequisite or the allowlist turns off (until the next run releases it); the panel offers no
+ * pause / resume then, and controlCustomerSchedule refuses them (a pause pressed in that window would be
+ * carried onto every per-invoice reminder by the release).
+ *
+ * `coveringInvoiceId`: asked on behalf of an invoice with no reminder row of its own. Answered only when
+ * the combined balance really names that invoice (a paid or excluded invoice of the same customer, or a
+ * balance that cannot be read, gets null: the panel says nothing rather than something wrong).
  */
-async function customerScheduleSummary(customerId, { now = new Date(), countTimeoutMs } = {}) {
+async function customerScheduleSummary(customerId, { now = new Date(), countTimeoutMs, coveringInvoiceId = null } = {}) {
   if (!UUID.test(String(customerId || ''))) return null;
   const schedule = await Schedule.openScheduleFor(customerId);
   if (!schedule) return null;
+  const coverage = await combinedCoverage(customerId, { now, timeoutMs: countTimeoutMs });
+  if (coveringInvoiceId && !coverage.invoiceIds.includes(String(coveringInvoiceId))) return null;
   const stepIndex = Number(schedule.step_index);
   return {
     id: schedule.id,
+    // The panel's pause / resume buttons post to the customer's own schedule routes.
+    customerId: schedule.customer_id,
     status: schedule.status,
     stepIndex,
     stepLabel: Schedule.STEPS[stepIndex]?.label || null,
-    invoiceCount: await combinedInvoiceCount(customerId, { now, timeoutMs: countTimeoutMs }),
+    invoiceCount: coverage.count,
     nextTouchAt: schedule.next_touch_at || null,
+    controllable: liveForCustomer(schedule.customer_id),
+    ...pausedReasonOf(schedule),
   };
+}
+
+/** The same summary for an invoice with NO reminder row of its own that the combined balance covers. */
+async function customerScheduleSummaryForInvoice(invoiceId, opts = {}) {
+  if (!UUID.test(String(invoiceId || ''))) return null;
+  const invoice = await db('invoices').where({ id: invoiceId }).first('customer_id');
+  if (!invoice?.customer_id) return null;
+  return customerScheduleSummary(invoice.customer_id, { ...opts, coveringInvoiceId: invoiceId });
 }
 
 const CONTROLS = Object.freeze({
@@ -230,6 +264,8 @@ const CONTROLS = Object.freeze({
   resume: (schedule, opts) => Admin.resume(schedule.id, { now: opts.now }),
   release: (schedule, opts) => Admin.release(schedule.id, { now: opts.now }),
 });
+
+const GATED_CONTROLS = new Set(['pause', 'resume']);
 
 const SCHEDULE_CHANGED = 'The reminder schedule changed. Reload and try again.';
 const NO_OPEN_SCHEDULE = Object.freeze({ status: 404, body: { error: 'This customer has no open reminder schedule.', code: 'NO_OPEN_SCHEDULE' } });
@@ -293,7 +329,38 @@ function httpResult(out) {
   return { status: 200, body: out };
 }
 
-/** One staff control on the customer's OPEN schedule. Returns { status, body }. */
+const CONTROL_LABELS = Object.freeze({
+  'send-now': 'Send now', pause: 'Pause', resume: 'Resume', release: 'Release',
+});
+
+/**
+ * Who pressed which combined-reminder control, when, and what happened (owner 10-01: every press of
+ * send-now / pause / resume / release is on the customer's activity log). One activity_log row per press
+ * that reached a schedule, refusals included. Best effort: a failed write is logged, never fails the press.
+ */
+async function recordStaffControl({ customerId, control, adminId = null, reason = null, result, via = 'customer' }) {
+  const label = CONTROL_LABELS[control] || control;
+  const ok = result?.status === 200;
+  const body = result?.body || {};
+  const what = ok ? 'done' : `not done: ${String(body.error || 'refused').replace(/\.$/, '')}`;
+  const why = control === 'pause' && reason ? ` Reason: ${String(reason).slice(0, 200)}` : '';
+  try {
+    await db('activity_log').insert({
+      customer_id: customerId,
+      admin_user_id: UUID.test(String(adminId || '')) ? adminId : null,
+      action: `combined_reminders_${control.replace('-', '_')}`,
+      description: `Combined overdue reminders: ${label} pressed — ${what}.${why}`,
+      metadata: JSON.stringify({
+        control, via, scheduleId: body.scheduleId || null, httpStatus: result?.status ?? null,
+        code: body.code || null, outcome: body.outcome || null,
+      }),
+    });
+  } catch (err) {
+    logger.warn(`[customer-dunning] staff control activity_log insert failed (customer ${customerId}, ${control}): ${redactContact(err.message)}`);
+  }
+}
+
+/** One staff control on the customer's OPEN schedule. Returns { status, body }. Every press that reaches a schedule is recorded. */
 async function controlCustomerSchedule(customerId, control, { adminId = null, reason = null, now = new Date() } = {}) {
   const run = CONTROLS[control];
   if (!run) return { status: 404, body: { error: 'Unknown control', code: 'UNKNOWN_CONTROL' } };
@@ -301,8 +368,14 @@ async function controlCustomerSchedule(customerId, control, { adminId = null, re
   if (!UUID.test(String(customerId || ''))) return NO_OPEN_SCHEDULE;
   const schedule = await Schedule.openScheduleFor(customerId);
   if (!schedule) return NO_OPEN_SCHEDULE;
-  const out = await run(schedule, { adminId, reason, now });
-  return httpResult({ scheduleId: schedule.id, ...out });
+  // Pause and resume only while the live gate covers the customer (send-now checks this itself). A dark
+  // schedule is about to be released; a pause pressed now would land on every per-invoice reminder.
+  // Release is never refused here: it is how a dark schedule is cleared by hand.
+  const dark = GATED_CONTROLS.has(control) && !liveForCustomer(customerId);
+  const out = dark ? { ...NOT_LIVE } : await run(schedule, { adminId, reason, now });
+  const result = httpResult({ scheduleId: schedule.id, ...out });
+  await recordStaffControl({ customerId, control, adminId, reason, result });
+  return result;
 }
 
 module.exports = {
@@ -313,7 +386,9 @@ module.exports = {
   sendNowForInvoiceOnSchedule,
   combinedScheduleClosed,
   customerScheduleSummary,
+  customerScheduleSummaryForInvoice,
   controlCustomerSchedule,
+  recordStaffControl,
   httpResult,
   _test: { resetReadMemory: () => { lastReadSawOpen = false; } },
 };

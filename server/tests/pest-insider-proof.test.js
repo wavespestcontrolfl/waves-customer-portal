@@ -45,7 +45,7 @@ const FIRST_TUESDAY = new Date('2026-06-02T11:05:00Z');
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   return q;
 }
@@ -345,6 +345,117 @@ describe('pest-insider proof catch-up', () => {
 
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(result.skipped).toBe(false);
+  });
+
+  describe('after the 10th of the month', () => {
+    const LATE = new Date('2026-06-11T18:15:00Z');
+    // A refused approval leaves the rejected reply's id on the row (durable),
+    // with no proof on record and no approval.
+    const REFUSED = { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z'), proof_sent_at: null, proof_approved_at: null, proof_refused_at: new Date('2026-06-11T13:00:00Z'), proof_approval_email_id: null };
+
+    test('a corrected draft whose approval was refused is re-proofed, from the row alone (codex #5187 follow-up)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      const { audit } = wireDb({ draft: REFUSED });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(mockValidate).toHaveBeenCalled();
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+      expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true, reason: null });
+      // best-effort audit rows are not the evidence
+      expect(audit.whereRaw).not.toHaveBeenCalled();
+    });
+
+    test('…but not while it still fails validation (no repeat notices for an uncorrected draft)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: REFUSED });
+      mockValidate.mockImplementation(() => ({ errors: ['still blocked'], warnings: [] }));
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    // codex #5414 round 3 P2: a refusal from the live event recheck leaves the
+    // validator passing, so the late retry fires — once; the next tick must not
+    // re-proof (and re-notify) an unedited draft every day.
+    const LIVE_ATTEMPT_AT = new Date('2026-06-11T16:00:00Z');
+    const attemptWith = (reason, notified = true) => ({ created_at: LIVE_ATTEMPT_AT, metadata: { sent: false, reason, notified } });
+
+    test.each(['live_reverify_failed', 'event_selection_invalid'])('an unchanged draft whose last attempt was blocked by %s is not retried (no daily notice)', async (reason) => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: REFUSED, lastAttempt: attemptWith(reason) });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result).toEqual({ skipped: true, reason, sendId: 'send-pi-1' });
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('…the same guard holds before the cutoff', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: attemptWith('live_reverify_failed') });
+
+      const result = await retryPestInsiderProof({ now: new Date('2026-06-05T18:15:00Z') });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test.each(['live_reverify_failed', 'event_selection_invalid'])('a draft corrected (edited) after a %s block is re-proofed once', async (reason) => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { ...REFUSED, updated_at: new Date('2026-06-11T17:00:00Z') }, lastAttempt: attemptWith(reason) });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+      expect(result.skipped).toBe(false);
+    });
+
+    test('a block whose notice was never delivered does not suppress the retry', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: REFUSED, lastAttempt: attemptWith('live_reverify_failed', false) });
+
+      await retryPestInsiderProof({ now: LATE });
+
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    });
+
+    test('…and a draft with no refused approval stays cut off, however clean it is', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { id: 'send-pi-1', proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, proof_approval_email_id: null } });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('a CANCELLED approved schedule is never re-proofed after day 10 (approval id survives a cancel; the refusal marker does not)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      // what cancel-schedule leaves behind: proof_token/sent/approved/refused cleared, the approving reply's id kept
+      wireDb({ draft: { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z'), proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, proof_approval_email_id: 'email-9' } });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('an approved draft (approved_at set, even with a stale refusal marker) is never re-proofed', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { ...REFUSED, proof_approved_at: new Date('2026-06-11T15:00:00Z') } });
+
+      expect((await retryPestInsiderProof({ now: LATE })).skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('no draft at all is still a quiet skip', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({});
+      expect((await retryPestInsiderProof({ now: LATE })).skipped).toBe(true);
+    });
   });
 
   test('after the 10th of the month a stale draft is not proofed', async () => {

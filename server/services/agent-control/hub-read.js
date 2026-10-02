@@ -23,8 +23,12 @@
  *
  * The ops-queue and Activity reads are each behind their own gate and each
  * isolated: unavailable → that source contributes no reasons, never an
- * error. Cost (`estCostUsd`), runs and verification are null until S6 / S3
- * / S7 fill them in.
+ * error. Runs and verification are null until S3 / S7 fill them in.
+ *
+ * Cost (`estCostUsd`, `unpricedCalls`) is an ESTIMATE behind
+ * GATE_LLM_COST_TRACKING (services/llm-cost.js): the ledger's tokens times
+ * the weekly-pulled list prices. Off, or the price read fails = null, as
+ * before (cost never takes the hub down).
  */
 
 const db = require('../../models/db');
@@ -32,7 +36,7 @@ const logger = require('../logger');
 const modelSwitchboard = require('../model-switchboard');
 const { policyFor } = require('./lane-policies');
 const { riskTierFor } = require('./taxonomy');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, llmCostTrackingLive } = require('../../config/feature-gates');
 const { RETENTION_DAYS } = require('../llm-dispatch-metrics');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
@@ -230,6 +234,18 @@ async function loadLedger(window, now) {
 
 // ── Other sources (each gated, each isolated) ────────────────────────
 
+// Estimated spend per lane for the window. null = no cost phase (gate off or
+// the read failed); every lane then reports estCostUsd null.
+async function loadCost(window) {
+  if (!llmCostTrackingLive()) return null;
+  try {
+    return await require('../llm-cost').laneCosts(window.from, window.to);
+  } catch (err) {
+    logger.warn(`[agent-control] hub read: cost unavailable: ${err.message}`);
+    return null;
+  }
+}
+
 async function loadQueueReasons() {
   if (!gateEnvValue('GATE_ADMIN_OPS_QUEUE')) return [];
   try {
@@ -248,12 +264,16 @@ async function loadQueueReasons() {
   }
 }
 
+// Returns the attention reasons plus the feed's own `unavailableSources` (a
+// backing table missing mid-migration leaves the feed available but partial;
+// agent-activity.js folds that into the field instead of failing), so a
+// consumer can say the Activity half of "needs attention" is incomplete.
 async function loadActivityReasons(windowHours) {
-  if (!gateEnvValue('GATE_AGENT_ACTIVITY')) return [];
+  if (!gateEnvValue('GATE_AGENT_ACTIVITY')) return { reasons: [], unavailableSources: [] };
   try {
     const { getActivity } = require('../agent-activity');
     const feed = await getActivity({ windowHours });
-    if (!feed.available) return [];
+    if (!feed.available) return { reasons: [], unavailableSources: [] };
     const counts = new Map();
     for (const item of feed.items || []) {
       const laneId = SOURCE_LANE.activity[item.kind];
@@ -261,7 +281,7 @@ async function loadActivityReasons(windowHours) {
       const key = `${laneId}:${item.status}`;
       counts.set(key, (counts.get(key) || 0) + 1);
     }
-    return [...counts].map(([key, n]) => {
+    const reasons = [...counts].map(([key, n]) => {
       const [laneId, status] = key.split(':');
       return {
         laneId,
@@ -270,9 +290,10 @@ async function loadActivityReasons(windowHours) {
         detail: `${n} ${status} run${n === 1 ? '' : 's'} in the Activity feed`,
       };
     });
+    return { reasons, unavailableSources: Array.isArray(feed.unavailableSources) ? feed.unavailableSources : [] };
   } catch (err) {
     logger.warn(`[agent-control] hub read: activity unavailable: ${err.message}`);
-    return [];
+    return { reasons: [], unavailableSources: [] };
   }
 }
 
@@ -332,7 +353,7 @@ function riskTierOf(sideEffectClass) {
  * the external attention reasons into hub lane rows. Pure: every input is
  * an argument, so the assembly is testable without the DB.
  */
-function buildLanes({ lanes, window, ledger, reasons = [] }) {
+function buildLanes({ lanes, window, ledger, reasons = [], cost = null }) {
   const current = new Map(ledger.current.map((r) => [r.lane_id, r]));
   const prior = new Map(ledger.prior.map((r) => [r.lane_id, r]));
   const chains = new Map(ledger.chains.map((r) => [r.lane_id, r]));
@@ -351,6 +372,14 @@ function buildLanes({ lanes, window, ledger, reasons = [] }) {
   return lanes.map((lane) => {
     const row = current.get(lane.id) || null;
     const metrics = laneMetrics(row, window.priorAvailable ? prior.get(lane.id) || null : null, chains.get(lane.id) || null, window.priorAvailable);
+    // priced lanes only: no price table yet (first pull pending) leaves cost
+    // null, and so does a lane whose calls never reach the ledger (image,
+    // audio, embeddings) — a zero there would read as measured
+    if (cost?.priced && policyFor(lane.id).ledger !== 'unrecordable') {
+      const c = cost.byLane.get(lane.id);
+      metrics.estCostUsd = round(c?.usd || 0, 4);
+      metrics.unpricedCalls = c?.unpricedCalls || 0;
+    }
     const attentionReasons = laneReasons(recent.get(lane.id) || null, extraByLane.get(lane.id) || []);
     return {
       ...laneIdentity(lane, policyFor(lane.id)),
@@ -456,7 +485,7 @@ function buildAreas({ areas, laneRows, window, ledger }) {
       fallbackRate: chainRecording() ? round(rate(fallbacks.get(area.key) || 0, chains.get(area.key) || 0)) : null,
       tokensUnknownRows: rows.reduce((n, l) => n + l.tokens.unknownRows, 0),
       p95LatencyMs: p95.has(area.key) ? p95.get(area.key) : null,
-      estCostUsd: null,
+      estCostUsd: rows.some((l) => l.estCostUsd != null) ? round(rows.reduce((n, l) => n + (l.estCostUsd || 0), 0), 4) : null,
       deltaVsPrior: window.priorAvailable ? { calls: calls - priorCalls } : null,
       spark: sumSparks(rows.map((l) => l.spark), window),
     };
@@ -464,10 +493,10 @@ function buildAreas({ areas, laneRows, window, ledger }) {
 }
 
 function phases() {
-  return { ledger: readGateOn(), runs: false, cost: false, verification: false };
+  return { ledger: readGateOn(), runs: false, cost: llmCostTrackingLive(), verification: false };
 }
 
-function basisFor(window) {
+function basisFor(window, cost = null) {
   return {
     source: TABLE,
     rowKinds: ROW_KINDS,
@@ -484,17 +513,28 @@ function basisFor(window) {
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString(), unit: window.unit },
     // false = deltaVsPrior is null everywhere: the ledger keeps RETENTION_DAYS
     priorAvailable: window.priorAvailable,
+    // null = no cost phase. pricesFetchedAt = when the stored prices were
+    // pulled (each pull replaces the whole table).
+    cost: cost ? { source: 'openrouter_list_prices', estimate: true, priced: cost.priced, pricesFetchedAt: cost.pricesFetchedAt ? new Date(cost.pricesFetchedAt).toISOString() : null } : null,
   };
 }
 
 async function loadHub(window, now) {
-  const [ledger, queueReasons, activityReasons] = await Promise.all([
+  const [ledger, queueReasons, activity, cost] = await Promise.all([
     loadLedger(window, now),
     loadQueueReasons(),
     loadActivityReasons(window.key === '30d' ? 168 : 24),
+    loadCost(window),
   ]);
   const { lanes } = modelSwitchboard.getSwitchboard();
-  return { ledger, laneRows: buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activityReasons] }) };
+  return {
+    ledger,
+    cost,
+    laneRows: buildLanes({ lanes, window, ledger, reasons: [...queueReasons, ...activity.reasons], cost }),
+    // Activity tables the feed could not read (partial migration): the
+    // Activity half of the attention reasons is incomplete for these.
+    activityUnavailableSources: activity.unavailableSources,
+  };
 }
 
 /**
@@ -506,25 +546,25 @@ async function readLanes({ area = null, window: preset = '7d', status = 'all', n
   if (!window) throw badRequest(`window must be one of ${Object.keys(WINDOWS).join(', ')}`);
   if (!STATUSES.includes(status)) throw badRequest(`status must be one of ${STATUSES.join(', ')}`);
   if (area && !modelSwitchboard.AREAS.some((a) => a.key === area)) throw badRequest(`unknown area: ${area}`);
-  const { laneRows: all } = await loadHub(window, now);
+  const { laneRows: all, cost } = await loadHub(window, now);
   const scoped = area ? all.filter((l) => l.area === area) : all;
   const counts = { all: scoped.length, active: 0, attention: 0, idle: 0 };
   for (const l of scoped) counts[l.status] += 1;
   const lanes = (status === 'all' ? scoped : scoped.filter((l) => l.status === status))
     .sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.calls - a.calls || a.name.localeCompare(b.name));
-  return { generatedAt: now.toISOString(), phases: phases(), basis: basisFor(window), counts, lanes };
+  return { generatedAt: now.toISOString(), phases: phases(), basis: basisFor(window, cost), counts, lanes };
 }
 
 /** GET /control/areas — one card per switchboard area. */
 async function readAreas({ window: preset = '7d', now = new Date() } = {}) {
   const window = resolveWindow(preset, now);
   if (!window) throw badRequest(`window must be one of ${Object.keys(WINDOWS).join(', ')}`);
-  const { ledger, laneRows } = await loadHub(window, now);
+  const { ledger, laneRows, cost } = await loadHub(window, now);
   ledger.areaLatency = await areaLatency(window.from, window.to, laneRows.map((l) => [l.id, l.area]));
   return {
     generatedAt: now.toISOString(),
     window: { from: window.from.toISOString(), to: window.to.toISOString() },
-    basis: basisFor(window),
+    basis: basisFor(window, cost),
     areas: buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window, ledger }),
   };
 }
@@ -537,6 +577,8 @@ module.exports = {
   readAreas,
   readLanes,
   readGateOn,
+  // One snapshot for a consumer that renders both views (ops/agents/agents-report.js).
+  loadHub,
   // exported for tests
   resolveWindow,
   buildLanes,

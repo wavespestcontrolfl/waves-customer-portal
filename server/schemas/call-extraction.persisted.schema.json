@@ -59,9 +59,10 @@
             "1.18.0",
             "1.19.0",
             "1.20.0",
-            "1.21.0"
+            "1.21.0",
+            "1.22.0"
           ],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech); 1.18.0 is additive (caller.relationship_to_property gains family_member — owner ruling 2026-09-28: a relative of the homeowner/resident arranging service at that relative's home, e.g. \"my grandfather's house\", is authorized when staff confirmed a time on the call; live miss, call f5a54dbd); 1.19.0 is additive (consent.sms_declined — codex P1 on #5292: sms_consent_given=false conflated \"never asked\" with an explicit refusal, so the booking-link text lane started texting callers who said no; sms_declined is the dedicated explicit-refusal field, optional/nullable in both schemas per AGENTS.md's additive-only rule, so a pre-1.19 persisted row — which never has it — still validates; the booking-link staging check fails closed on that shape instead); 1.20.0 is additive (scheduling.definite_commitment, scheduling.relative_date_used, scheduling.moved_appointment_relative_date_used — the extraction judges whether the agent definitely committed and whether a relative date was used; the reschedule applier only verifies them); 1.21.0 is additive (service_request.price_offered_by_staff, price_accepted_by_caller, price_is_final; scheduling.staff_accepted_proposed_slot, scheduling.selected_day_words — owner direction 2026-09-30: the extraction judges the language the commercial dictated booking path needs (staff offered the price, the caller accepted it, it was final, staff accepted the caller's proposed slot as a whole, which day the caller selected); the path only verifies the pinned quotes) — older payloads remain valid."
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (caller.relationship_to_property gains home_buyer — owner ruling 2026-09-26: a buyer under contract ordering their own WDO inspection); 1.16.0 is additive (scheduling.caller_accepted_slot, scheduling.moved_appointment_date — the call's reschedule agreement and the appointment it moves); 1.17.0 is additive (scheduling.agreed_slot_words, scheduling.moved_appointment_words — owner decision 2026-09-27: the agreed slot and moved-appointment date are recorded as verbatim words so the reschedule applier checks quotes instead of parsing speech); 1.18.0 is additive (caller.relationship_to_property gains family_member — owner ruling 2026-09-28: a relative of the homeowner/resident arranging service at that relative's home, e.g. \"my grandfather's house\", is authorized when staff confirmed a time on the call; live miss, call f5a54dbd); 1.19.0 is additive (consent.sms_declined — codex P1 on #5292: sms_consent_given=false conflated \"never asked\" with an explicit refusal, so the booking-link text lane started texting callers who said no; sms_declined is the dedicated explicit-refusal field, optional/nullable in both schemas per AGENTS.md's additive-only rule, so a pre-1.19 persisted row — which never has it — still validates; the booking-link staging check fails closed on that shape instead); 1.20.0 is additive (scheduling.definite_commitment, scheduling.relative_date_used, scheduling.moved_appointment_relative_date_used — the extraction judges whether the agent definitely committed and whether a relative date was used; the reschedule applier only verifies them); 1.21.0 is additive (service_request.price_offered_by_staff, price_accepted_by_caller, price_is_final; scheduling.staff_accepted_proposed_slot, scheduling.selected_day_words — owner direction 2026-09-30: the extraction judges the language the commercial dictated booking path needs (staff offered the price, the caller accepted it, it was final, staff accepted the caller's proposed slot as a whole, which day the caller selected); the path only verifies the pinned quotes); 1.22.0 is additive (secondary_contact(s).wants_appointment_texts, .on_site — owner ruling 2026-09-30 \"on-site person is the contact point\", redesigned 2026-10-01: the call pipeline uses them only to decide whether a spouse/buyer/seller/tenant/family member is sent the recipient opt-in ask; consent is that person's own YES; optional in both schemas, never `required`) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -296,6 +297,14 @@
         "wants_notifications": {
           "type": "boolean"
         },
+        "wants_appointment_texts": {
+          "type": "boolean",
+          "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+        },
+        "on_site": {
+          "type": "boolean",
+          "description": "1.22.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
+        },
         "is_billing_party": {
           "type": "boolean",
           "description": "The paying third party for call→payer Bill-To linkage. 1.6.0 additive; absent in older payloads."
@@ -380,6 +389,14 @@
           "wants_notifications": {
             "type": "boolean",
             "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person."
+          },
+          "wants_appointment_texts": {
+            "type": "boolean",
+            "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+          },
+          "on_site": {
+            "type": "boolean",
+            "description": "1.22.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
           },
           "is_billing_party": {
             "type": "boolean",

@@ -2246,6 +2246,61 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // MONTHLY, 1ST–7TH 6:20 AM ET — Annual rate review ranking batch (plan
+  // annual-rate-review-2026-09-30 step 2). On the 1st it ranks every active
+  // plan line whose anniversary falls 35–65 days out into
+  // rate_review_snapshots and emails ONE ACT:/OK: summary to contact@
+  // (services/rate-review.js); days 2–7 are the idempotent RETRY of that
+  // digest — an emailed batch is skipped before any query, an unsent one is
+  // rebuilt inside its stored window and sent (a delivery failure is thrown
+  // so job_health records it). Dark behind GATE_RATE_REVIEW — rateReviewLive()
+  // is read BEFORE the cron lock, so off = no query, no write, no email.
+  // Writes rankings only: never a rate, never a customer message. After the
+  // 6:05 MRR snapshot and before the 8 AM dues run. runExclusive: a deploy-
+  // overlap tick must not build and email the same batch twice (the batch
+  // row's email_sent_at is the second guard).
+  // =========================================================================
+  cron.schedule('20 6 1-7 * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review monthly batch');
+    try {
+      await runExclusive('rate-review-monthly', async () => {
+        const { runMonthlyRateReview } = require('./rate-review');
+        const result = await runMonthlyRateReview();
+        logger.info(`[rate-review] monthly tick: ${result.skipped ? `skipped (${result.skipped})` : `${result.rows} rows, emailed=${result.emailed}`}`);
+      });
+    } catch (err) { logger.error(`Rate review monthly batch failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:10 AM ET — Annual rate review APPLY (plan annual-rate-review-
+  // 2026-09-30 step 3, services/rate-review-apply.js). Writes the noticed
+  // rate on its effective date for every rate-review notice the comms lane
+  // has SENT: per-application visits + fee + ledger slice, monthly dues +
+  // slice, or the prepaid term's successor amount — one transaction per
+  // notice, holds recorded and belled, never a customer message. Dark behind
+  // GATE_RATE_REVIEW — rateReviewLive() is read BEFORE the cron lock, so off
+  // = no query, no write (customers keep the lower rate: the safe direction
+  // of the kill switch). Before the 6:05 MRR snapshot and the 8 AM dues run,
+  // so a dues day on the effective date bills the new rate. runExclusive: a
+  // deploy-overlap tick must not apply the same night twice (applied_at
+  // under the notice row lock is the second guard).
+  // =========================================================================
+  cron.schedule('10 3 * * *', async () => {
+    const { rateReviewLive } = require('../config/feature-gates');
+    if (!rateReviewLive()) return;
+    logger.info('Running: rate review nightly apply');
+    try {
+      await runExclusive('rate-review-apply', async () => {
+        const { applyDueRateChanges } = require('./rate-review-apply');
+        const result = await applyDueRateChanges();
+        logger.info(`[rate-review-apply] nightly tick: ${result.reason ? `skipped (${result.reason})` : `${result.due} due, ${result.applied} applied, ${result.held} held`}`);
+      });
+    } catch (err) { logger.error(`Rate review nightly apply failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
   // competitors' ranked keywords from DataForSEO Labs, diffs against our
   // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners
@@ -3114,6 +3169,27 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-classify', () => classifyPathologies());
     } catch (err) {
       logger.error(`SMS pathology classifier failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
+  // The judge's human_better verdict is a lead, not a failure: this turns
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
+  // ai_incidents only — shadow data, nothing reads it at runtime. Same
+  // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
+  // =========================================================================
+  cron.schedule('30 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS incident adjudicator');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateHumanBetter } = require('./sms-pathology-ledger');
+      await runExclusive('sms-incident-adjudicate', () => adjudicateHumanBetter());
+    } catch (err) {
+      logger.error(`SMS incident adjudicator failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4615,8 +4691,25 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
+            // Open-loop revalidation (PR #5499 r1): a promise the reply was grounded on
+            // can be fulfilled or dismissed before this fires. Fail-closed.
+            let openLoopsStale = false;
+            let openLoopsReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !labelStale && !reserviceStale) {
+              const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              // An unreadable recheck says nothing about the message (same as the LIVE ETA
+              // leg below): never retire on it — the provider-boundary open-loop check re-reads
+              // and, if still unreadable, refuses retryably onto the bounded retry rail.
+              if (rawOpenLoopsReason === 'open_loops_recheck_failed') {
+                logger.warn(`[scheduled-sms] ${msg.id} open-loop recheck unreadable; deferring to the provider-boundary check`);
+              } else if (rawOpenLoopsReason != null) {
+                openLoopsReason = rawOpenLoopsReason;
+                openLoopsStale = true;
+              }
+            }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4639,7 +4732,9 @@ function initScheduledJobs() {
                         ? 'stale_label_facts_agent_decision'
                         : reserviceStale
                           ? 'stale_reservice_agent_decision'
-                          : 'stale_eta_agent_decision';
+                          : openLoopsStale
+                            ? 'stale_open_loops_agent_decision'
+                            : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4675,7 +4770,9 @@ function initScheduledJobs() {
                             ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
                             : reserviceStale
                               ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                              : openLoopsStale
+                                ? `A promise this scheduled reply was written around is no longer open (${openLoopsReason}) — review the thread.`
+                                : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4944,12 +5041,14 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
               labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // open-loop facts (PR #5499) at the same boundary
+              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -7132,6 +7231,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:40 AM ET — Estimated AI spend check (dark, GATE_LLM_COST_TRACKING,
+  // checked inside the service). Refreshes the OpenRouter list prices when
+  // the stored ones are a week old, then raises ONE admin item when a lane's
+  // estimated spend yesterday jumped well above its own recent average, and
+  // closes it once spend is back to normal. Throws on failure so job_health
+  // records it.
+  // =========================================================================
+  cron.schedule('40 7 * * *', async () => {
+    try {
+      await runExclusive('llm-cost-check', async () => {
+        const { runLlmCostCheck } = require('./llm-cost');
+        const result = await runLlmCostCheck();
+        if (result.raised) logger.info(`[llm-cost] spend spike item raised: ${result.spikes} lane(s)`);
+        if (result.reason === 'alert_not_persisted') throw new Error('spend spike item was not persisted');
+      });
+    } catch (e) { logger.error(`[llm-cost] daily spend check failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
   // Refreshes unknown outcome evidence, then raises ONE admin item for
   // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
@@ -8109,11 +8227,28 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.combinedBookingCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''}${result.combinedBookingCheckFailed ? ' COMBINED-BOOKING-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY :25, 7 AM-8 PM ET — the combined-booking check's urgent pass: a
+  // booking with a visit TODAY or TOMORROW that has no time or technician
+  // rings now, not at the next 6:40 run (by then a today visit is history).
+  // Catches bookings made, and technicians removed, after the daily tick, and
+  // retries a failed write. Same gate as the watchdog it belongs to.
+  cron.schedule('25 7-20 * * *', async () => {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('scheduleIntegrityWatchdog')) return;
+      const result = await runExclusive('combined-booking-check-urgent', () =>
+        require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
+      if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`[combined-booking-check] urgent pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
