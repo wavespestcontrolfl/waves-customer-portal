@@ -115,7 +115,10 @@ describe('route wiring', () => {
     // The attached call-lead branch MERGES (keeps every key); the replace
     // branch must carry sign_host forward like additional_properties/timeline.
     expect(block).toMatch(/COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb/);
-    expect(block).toMatch(/'sign_host', COALESCE\(extracted_data, '\{\}'::jsonb\)->'sign_host'\)\) \|\| \?::jsonb/);
+    expect(block).toMatch(/db\.raw\(TRIAGE_REPLACE_EXTRACTED_SQL, /);
+    const sql = require('../routes/lead-webhook')._test.TRIAGE_REPLACE_EXTRACTED_SQL;
+    expect(sql).toContain("'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'");
+    expect(sql).toContain(")) || (?::jsonb - 'attribution') || ");
   });
 
   test('both Customer 360 notes carry the sign-host line', () => {

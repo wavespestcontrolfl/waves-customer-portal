@@ -53,6 +53,7 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../../models/db');
+const { resolveRetiredLinks, resolveRetiredText, resolveRetiredPayload } = require('./retired-blog-links');
 const logger = require('../logger');
 const { parseETDateTime } = require('../../utils/datetime-et');
 // Same claim-budget ceiling claimNext/peek enforce — the reseed CASE below
@@ -340,7 +341,7 @@ const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
  */
 function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], schemaTypes = [] }) {
   const meta = (opportunity && typeof opportunity.signal_metadata === 'object' && opportunity.signal_metadata) || {};
-  const payload = meta.intercept_brief;
+  const payload = resolveRetiredPayload(meta.intercept_brief);
   if (!payload) return null;
 
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
@@ -394,8 +395,8 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
     // `sources` so the archive.org snapshot step only ever consumes real
     // http(s) URLs and the directives still reach the writer verbatim.
     source_notes: sourceNotes,
-    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
-    internal_links_required: Array.isArray(payload.internal_links) ? payload.internal_links : [],
+    verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText) : [],
+    internal_links_required: resolveRetiredLinks(payload.internal_links),
     schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
     // Explicit operator FAQ mandate (owner directive 2026-06-11: FAQPage on
     // every intercept post). content-guardrails / content-quality-gate honor
@@ -448,7 +449,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     sourceNotes.length
       ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post with explicit attribution (a real linked URL — EXCEPT a competitor's own website, which is named in plain text and never linked; list its URL under "Evidence sources" in notes_for_reviewer, which is never published), and OMIT any claim those pages do not support.`
       : null,
-    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
+    ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map(resolveRetiredText).map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
     payload.internal_links?.length
       ? `REQUIRED INTERNAL LINKS (each must appear as a natural in-body anchor): ${payload.internal_links.join(', ')}. You may add further house-style internal links beyond these.`
       : null,

@@ -175,6 +175,16 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return trxPaymentsQuery;
       if (table === 'invoices') return trxInvoicesQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      // The reinstatement's office-handoff reconcile (no PAF setup handoffs here).
+      if (table === 'dispatch_alerts') {
+        const q = { where: () => q, whereRaw: () => q, select: async () => [] };
+        return q;
+      }
+      // ...which first locks the fee's series: no setup-fee claim here.
+      if (table === 'setup_fee_claims') {
+        const q = { where: () => q, select: async () => [] };
+        return q;
+      }
       throw new Error(`Unexpected trx table: ${table}`);
     });
 

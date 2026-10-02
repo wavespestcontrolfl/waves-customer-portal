@@ -113,4 +113,15 @@ async function raiseAdminAlertWithReopen(category, title, body, opts = {}) {
   return { ...result, rang: !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false)) };
 }
 
-module.exports = { closeAdminAlertKeys, openAdminAlertKeys, raiseAdminAlertWithReopen };
+// The metadata of every open (not auto-cleared) admin row under a dedupe-key
+// prefix, for a caller that must know what a standing alert is about before
+// closing it.
+async function openAdminAlertMetadata(conn, prefix) {
+  const rows = await conn('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
+    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+    .select('metadata');
+  return rows.map((r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) || {});
+}
+
+module.exports = { closeAdminAlertKeys, openAdminAlertKeys, openAdminAlertMetadata, raiseAdminAlertWithReopen };

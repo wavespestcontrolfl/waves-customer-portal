@@ -3724,8 +3724,21 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // A customer on a customer-level reminder schedule: the click sent (or
     // refused to send) the schedule's current step (dunning consolidation §8).
     if (routed?.routedTo === 'customer_schedule') {
-      const { status, body } = require('../services/customer-dunning/wiring').httpResult(routed);
-      return res.status(status).json(body);
+      const Wiring = require('../services/customer-dunning/wiring');
+      const result = Wiring.httpResult(routed);
+      // On the customer's activity log like the customer page's send-now (who, when, what happened).
+      // Best effort: a failed lookup never turns the press's answer into a 500.
+      try {
+        const invoice = await db('invoices').where({ id: req.params.id }).first('customer_id');
+        if (invoice?.customer_id) {
+          await Wiring.recordStaffControl({
+            customerId: invoice.customer_id, control: 'send-now', adminId: req.technicianId || null, result, via: 'invoice',
+          });
+        }
+      } catch (err) {
+        logger.warn(`[admin-invoices] combined send-now activity record failed for invoice ${req.params.id}: ${err.message}`);
+      }
+      return res.status(result.status).json(result.body);
     }
     res.json({ ok: true });
   } catch (err) { next(err); }
