@@ -441,6 +441,32 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('visit prices: the converter\'s own prices pass; a visit priced off the accepted price rings', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      // As converted and assigned: no price finding (the converter priced every visit right, or left it unpriced).
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, failed: 0 });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+      // One upcoming lawn visit at the wrong price.
+      const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 1 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.metadata.itemKeys).toEqual(['price_mismatch:lawn_care']);
+      expect(alert.body).toMatch(/lawn visits priced \$1\.00, accepted \$100\.00/);
+      // Fixed: the bell closes.
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ estimated_price: 100 });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 0, closed: 1 });
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('an OK result writes no row (an fyi fact)', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

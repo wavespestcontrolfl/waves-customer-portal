@@ -5,16 +5,20 @@
  * For every accepted estimate with MORE THAN ONE recurring service (pest +
  * lawn, pest + lawn + tree & shrub, pest + rodent, ...), this verifies that
  * every UPCOMING visit the booking created has a time and a technician, and
- * posts ONE admin bell when one does not (owner rulings 2026-10-01: time and
- * technician only; upcoming visits, whenever the estimate was accepted). The
+ * that every upcoming priced series visit carries the price the customer
+ * accepted for it, and posts ONE admin bell when one does not (owner rulings
+ * 2026-10-01: upcoming visits, whenever the estimate was accepted; 2026-10-02:
+ * visit prices are back, visit prices only, no invoices). The
  * 2026-09-28 defect it guards: companion services were booked with no time and
  * no technician.
  *
  * NOT THIS CHECK'S (each has its own owner, and a second bell would conflict):
- *   - prices and invoices (an unpriced visit is the watchdog's unpriced-series
- *     alert's; split first-application invoices are the sibling-split
- *     workflow's). Owner ruling 2026-10-01: price checks may come back later as
- *     their own change, not here.
+ *   - invoices, and visits with no price at all (an unpriced visit is the
+ *     watchdog's unpriced-series alert's; first-application and split
+ *     invoices are the sibling-split workflow's). A first visit, a prepaid
+ *     visit, and any visit whose accepted price cannot be known for certain
+ *     (a discounted or credited plan, monthly-dues rodent) are not
+ *     price-checked: never guessed.
  *   - whether the right number of visits exist: the shared accepted-plan
  *     classifier (recurring-schedule-audit's acceptedScheduleFindings), the
  *     source of the watchdog's `accepted-schedule:*` alerts. An estimate with
@@ -73,6 +77,9 @@ const SETTLE_MINUTES = 3;
 const ROUTING_HORIZON_DAYS = 14;
 const addDaysET = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
 
+const PRICE_TOLERANCE = 0.02;
+const money = (value) => `$${(Math.round(Number(value) * 100) / 100).toFixed(2)}`;
+
 const CANCELLED = new Set(['cancelled', 'canceled']);
 // Finished or parked visits are not judged: the shared terminal set
 // (completed, cancelled, rescheduled, skipped, no_show) plus the alternate
@@ -112,11 +119,12 @@ function parseJson(value, fallback = {}) {
 }
 
 /**
- * The service families an accepted estimate auto-schedules, from the
- * converter's own scheduling units. null for a one-time accept or a plan the
- * converter does not auto-schedule. Pure.
+ * What the customer accepted: the service families the converter
+ * auto-schedules (from its own scheduling units) and, per family, the accepted
+ * per-visit price (`prices`: null when it cannot be known for certain). null
+ * for a one-time accept or a plan the converter does not auto-schedule. Pure.
  */
-function acceptedFamilies(estimate) {
+function acceptedPlan(estimate) {
   const converter = require('./estimate-converter');
   const { acceptedRecurringBillingLines } = require('./plan-rate-ledger');
   const { inferFrequencyKeyFromEstimateData, legacyRodentRowPredicateFor } = require('./billing-cadence');
@@ -134,17 +142,45 @@ function acceptedFamilies(estimate) {
   })) return null;
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
+  const family = (line) => converter.seedingFamilyKey(line);
   const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
     acceptFrequency: acceptedFrequency, supplementalCompanions: converter.supplementalCompanionLines(data),
   });
-  return new Set([
+  const families = new Set([
     ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => [service, [service]]),
     ...combos.map((combo) => [combo.service, combo.combinedFrom]),
   ]
     // Commercial lines, billing riders and contradictory terms are scheduled
     // by the office; they have no auto-seeded cadence to verify here.
     .filter(([service]) => converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency))
-    .flatMap(([, sources]) => sources.map((line) => converter.seedingFamilyKey(line))));
+    .flatMap(([, sources]) => sources.map(family)));
+  return { families, prices: acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family }) };
+}
+
+// The accepted per-visit price of each family: the same per-line rule the
+// converter's own price split uses (lineAnnualPerVisitAmount), summed over the
+// family's lines. Known only when the lines add up to the accepted annual
+// total to the cent (a manual discount, a plan credit or a cadence change
+// breaks that, and a guessed price would alert falsely), and only for a family
+// billed by its lines (a legacy rodent supplement is monthly dues: no line,
+// no per-visit price).
+function acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family }) {
+  const annualFromLines = Math.round(lines.reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0) * 100);
+  const reconciles = Number(estimate.annual_total) > 0
+    && Math.abs(annualFromLines - Math.round(Number(estimate.annual_total) * 100)) <= lines.length;
+  const prices = new Map();
+  for (const key of families) {
+    const perVisits = lines.filter((line) => family(line) === key)
+      .map((line) => converter.lineAnnualPerVisitAmount(line, acceptedFrequency));
+    const known = reconciles && perVisits.length > 0 && perVisits.every((amount) => amount > 0);
+    prices.set(key, known ? Math.round(perVisits.reduce((a, b) => a + b, 0) * 100) / 100 : null);
+  }
+  return prices;
+}
+
+/** The service families an accepted estimate auto-schedules (see acceptedPlan). */
+function acceptedFamilies(estimate) {
+  return acceptedPlan(estimate)?.families || null;
 }
 
 /** Service families a scheduled row performs (a combined route spans two). */
@@ -188,6 +224,37 @@ function checkTimeAndTech(dated, families, { firstDay, byId, todayET }) {
   }));
 }
 
+// Price on every upcoming series child that carries one (owner ruling
+// 2026-10-02: visit prices only, no invoices). A child bills its own
+// estimated_price at completion, so it must be the accepted per-visit price of
+// the services it performs (a combined route row: their sum), within two
+// cents. Skipped, never guessed: a row with no price (the unpriced-series
+// alert's), a prepaid row (prepay coverage bills it), a first visit (the
+// first-application invoice's), and any row whose accepted price is unknown.
+function checkPrices(dated, families, prices) {
+  const off = new Map();
+  for (const row of dated) {
+    const price = Number(row.estimated_price);
+    if (!row.recurring_parent_id || row.is_recurring === false || !(price > 0)) continue;
+    if (Number(row.prepaid_amount) > 0 || row.annual_prepay_term_id) continue;
+    const performs = rowFamilies(row).filter((family) => prices.has(family));
+    const judged = performs.filter((family) => families.has(family));
+    const shares = performs.map((family) => prices.get(family));
+    if (!judged.length || shares.some((share) => share == null)) continue;
+    const expected = Math.round(shares.reduce((a, b) => a + b, 0) * 100) / 100;
+    if (Math.abs(price - expected) <= PRICE_TOLERANCE) continue;
+    for (const family of judged) {
+      const entry = off.get(family) || { count: 0, earliest: row.day, detail: `${money(price)}, accepted ${money(expected)}` };
+      entry.count += 1;
+      off.set(family, entry);
+    }
+  }
+  return [...families].filter((family) => off.has(family)).map((family) => {
+    const { count, earliest, detail } = off.get(family);
+    return { code: 'price_mismatch', families: [family], earliest, text: `${count} ${lowerLabel(family)} visits priced ${detail}` };
+  });
+}
+
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, excludedFamilies: Set, scheduleGaps,
@@ -203,8 +270,9 @@ function evaluateCombinedBooking(ctx) {
     scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleOnHoldFamilies = new Set(), scheduleUnjudged = false,
     todayET = null,
   } = ctx;
-  const accepted = acceptedFamilies(estimate);
-  if (!accepted || accepted.size < 2) return null;
+  const plan = acceptedPlan(estimate);
+  if (!plan || plan.families.size < 2) return null;
+  const accepted = plan.families;
   const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
     && rowFamilies(row).some((family) => scope.has(family));
@@ -244,10 +312,16 @@ function evaluateCombinedBooking(ctx) {
     .filter((row) => !todayET || row.day >= todayET)
     .sort((a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
-  const problems = checkTimeAndTech(dated, families, { firstDay, byId, todayET });
+  const problems = [
+    ...checkTimeAndTech(dated, families, { firstDay, byId, todayET }),
+    ...checkPrices(dated, families, plan.prices),
+  ];
+  // Families whose accepted price is unknown: their prices were not checked,
+  // so a standing price finding about one is kept (the runner's heldProblems).
+  const unpricedFamilies = [...families].filter((family) => plan.prices.get(family) == null);
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
-  return { ok: !problems.length && !deferred, deferred, heldFamilies, problems, labels };
+  return { ok: !problems.length && !deferred, deferred, heldFamilies, unpricedFamilies, problems, labels };
 }
 
 function shortName(customer) {
@@ -264,7 +338,12 @@ function shortName(customer) {
  */
 function composeAlert(verdict, { customerName, customerId, estimateId }) {
   const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
-  const texts = verdict.problems.map((problem) => `${problem.text}${problem.held ? ' (on hold)' : ''}`);
+  const HELD_NOTE = { hold: ' (on hold)', price: ' (not re-checked)' };
+  const HELD_DETAIL = {
+    hold: ' (service on hold; checked again when the hold ends)',
+    price: ' (its accepted price cannot be confirmed right now, so it was not re-checked)',
+  };
+  const texts = verdict.problems.map((problem) => `${problem.text}${HELD_NOTE[problem.held] || ''}`);
   const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
     area: AREA,
@@ -275,8 +354,8 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
     subject: { type: 'estimate', id: String(estimateId) },
     doneWhen: DONE_WHEN,
     who: 'person',
-    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a time and technician on every visit.`,
-      ...verdict.problems.map((problem) => `- ${problem.text}${problem.held ? ' (service on hold; checked again when the hold ends)' : ''}`)].join('\n'),
+    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a look.`,
+      ...verdict.problems.map((problem) => `- ${problem.text}${HELD_DETAIL[problem.held] || ''}`)].join('\n'),
   };
 }
 
@@ -309,6 +388,7 @@ async function loadContext(conn, estimate) {
     })
     .select('s.id', 's.status', 's.recurring_parent_id', 's.is_recurring', 's.is_callback', 's.followup_included',
       's.service_type', 's.service_key_snapshot', 's.window_start', 's.technician_id',
+      's.estimated_price', 's.prepaid_amount', 's.annual_prepay_term_id',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
@@ -422,12 +502,20 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
-// A standing bell's findings about a service now on hold: not re-judged
-// this run, so they stay on the bell (marked) instead of closing as fixed.
+// A standing bell's findings this run could not re-judge stay on the bell
+// (marked) instead of closing as fixed: any finding about a service now on
+// hold, and a price finding about a service whose accepted price is unknown.
 function heldProblems(verdict, standingProblems = []) {
-  const held = new Set(verdict.heldFamilies || []);
-  return standingProblems.filter((problem) => (problem?.families || []).some((family) => held.has(family)))
-    .map((problem) => ({ code: problem.code, families: problem.families, text: problem.text, held: true }));
+  const onHold = new Set(verdict.heldFamilies || []);
+  const unpriced = new Set(verdict.unpricedFamilies || []);
+  const reasonFor = (problem) => {
+    const families = problem?.families || [];
+    if (families.some((family) => onHold.has(family))) return 'hold';
+    if (problem?.code === 'price_mismatch' && families.some((family) => unpriced.has(family))) return 'price';
+    return null;
+  };
+  return standingProblems.filter(reasonFor)
+    .map((problem) => ({ code: problem.code, families: problem.families, text: problem.text, held: reasonFor(problem) }));
 }
 
 // What a sweep does with one verdict, given the standing bell's findings:
@@ -453,9 +541,10 @@ async function standingEstimateIds(conn) {
 }
 
 // Accepted estimates to judge: every one that still has an UPCOMING live
-// visit with no time or no technician (whenever it was accepted: a problem
-// still ahead is worth a bell; one in the past is history), plus every one
-// with an open bell (so a fix or a cancelled plan closes it).
+// visit with no time or no technician, or (daily run) an upcoming priced
+// series child to price-check, whenever it was accepted (a problem still ahead
+// is worth a bell; one in the past is history), plus every one with an open
+// bell (so a fix or a cancelled plan closes it).
 // `lastDay` (urgent pass) limits the untimed visits that make a candidate to
 // today and tomorrow.
 function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
@@ -478,7 +567,12 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
           .where('s.scheduled_date', '>=', todayET)
           .modify((query) => { if (lastDay) query.where('s.scheduled_date', '<=', lastDay); })
           .whereNotIn('s.status', [...NOT_LIVE])
-          .where(function untimed() { this.whereNull('s.window_start').orWhereNull('s.technician_id'); });
+          .where(function untimedOrPriced() {
+            this.whereNull('s.window_start').orWhereNull('s.technician_id');
+            // The daily run also judges every upcoming PRICED series child
+            // (checkPrices); the urgent pass is about time and technician only.
+            if (!lastDay) this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id').where('s.estimated_price', '>', 0));
+          });
       });
     })
     .where('c.active', true).whereNull('c.deleted_at')
