@@ -46,7 +46,8 @@ function chain(first) {
 
 beforeEach(() => {
   process.env.ZELLE_RECIPIENT = 'pay@example.com';
-  db.mockReset().mockImplementation(() => chain({ billing_mode: null, monthly_rate: null }));
+  // the invoice row re-read just before visibility answers (Codex round-65 P1) reads this suite's invoice
+  db.mockReset().mockImplementation((table) => chain(table === 'invoices' ? invoice : { billing_mode: null, monthly_rate: null }));
   StripeService.assertNoInvoiceChargeReconciliationPending.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => { delete process.env.ZELLE_RECIPIENT; jest.restoreAllMocks(); });

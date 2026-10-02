@@ -253,3 +253,22 @@ test('a staff-edited status body with no customer: clean, and no boundary', asyn
       .resolves.toEqual({ stale: false, reason: null });
   } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
 });
+
+// Codex round-65 P2: a billing READ failure at fire time defers a decision-linked reply to a retryable provider-boundary refusal
+describe('scheduled billing recheck outages ride the retry rail', () => {
+  test('the scheduler un-stales an infrastructure reason for a decision-linked row and arms the boundary with no fingerprint', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+    const at = src.indexOf('const amountsVerdict = await recheckScheduledSmsAmounts({ msg, claimMeta });');
+    const defer = src.indexOf("blockReasonIsBillingInfrastructure(`amount no longer authorized (${amountsReason})`)", at);
+    expect(at).toBeGreaterThan(-1);
+    expect(defer).toBeGreaterThan(at);
+    expect(src.slice(defer, defer + 600)).toContain('billingBoundary = { customerId: msg.customer_id || null, fingerprint: null, zelle: null };');
+    expect(src.slice(at, defer)).toContain('claimMeta.agent_decision_id');
+  });
+  test('a boundary armed with no fingerprint always refuses, retryably', async () => {
+    const { billingUnchangedProviderPreSendCheck } = require('../services/billing-fingerprint');
+    await expect(billingUnchangedProviderPreSendCheck({ customerId: 'c1', fingerprint: null, zelle: null })({ dbi: { raw: async () => ({ rows: [{ fingerprint: 'x' }] }) } }))
+      .resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
+  });
+});
+

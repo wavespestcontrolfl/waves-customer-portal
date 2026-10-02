@@ -887,3 +887,14 @@ test.each(['disputed', 'requires_action', 'mystery'])('a %s payment row suppress
   expect(texts(billing({ recentPayments: [row()] }))).toContain('Your account has no balance due.');
   expect(texts(billing({ recentPayments: [row(), row({ id: 'p9', status })] }))).not.toContain('Your account has no balance due.');
 });
+
+// Codex round-65 P2: with no invoice named, an invoice sentence must match the amount / date / tender the customer named
+test.each([
+  ['Invoice WPC-2026-0002 for $200.00 is paid.', 'Is my $100 invoice paid?', true],
+  ['Invoice WPC-2026-0001 for $100.00 is paid.', 'Is my $100 invoice paid?', false],
+  ['Invoice WPC-2026-0002 for $200.00 is paid.', 'Is my invoice paid?', false],
+  ['Invoice WPC-2026-0002 for $200.00 is paid.', 'Did my Zelle for the invoice arrive?', true],
+])('invoice sentence %s / %s => off target: %s', (copied, inbound, off) => {
+  expect(c.copiesOffTarget([copied], inbound, { today: '2026-09-13' })).toBe(off);
+});
+

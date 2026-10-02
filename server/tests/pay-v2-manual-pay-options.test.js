@@ -60,6 +60,17 @@ jest.mock('../services/completion-balance-sweep', () => ({
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const payRouter = require('../routes/pay-v2');
+// Codex round-65 P1: payPageZelleVisibility re-reads the invoice row just before answering. Unless a test routes 'invoices' itself,
+// that read returns the invoice under test (the GET's refreshed row, or the row handed to a direct visibility call) - unchanged.
+let liveInvoice = null;
+const setDbImpl = db.mockImplementation.bind(db);
+db.mockImplementation = (fn) => setDbImpl((table, ...rest) => {
+  const q = fn(table, ...rest);
+  if (table === 'invoices' && liveInvoice && q && typeof q.first === 'function' && q.__liveInvoice !== false) q.first = jest.fn(async () => liveInvoice);
+  return q;
+});
+const visibilityOf = payRouter.payPageZelleVisibility;
+payRouter.payPageZelleVisibility = (args = {}) => { if (args.invoice) liveInvoice = args.invoice; return visibilityOf(args); };
 const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
 
 function chain({ first } = {}) {
@@ -89,6 +100,7 @@ function invoiceData(overrides = {}) {
 }
 
 async function getPayPage(data, { customerRow, refreshedData = data, dbImpl = null } = {}) {
+  liveInvoice = refreshedData;
   InvoiceService.getByToken.mockReset()
     .mockResolvedValueOnce(data)
     .mockResolvedValueOnce(refreshedData);
@@ -688,3 +700,32 @@ describe('GET /pay/:token payFaq (GATE_PAY_PAGE_FAQ)', () => {
     expect(rest).toEqual(off);
   });
 });
+
+// Codex round-65 P1: the invoice row is re-read just before visibility answers
+describe('payPageZelleVisibility re-reads the invoice row last', () => {
+  const { payPageZelleVisibility } = payRouter;
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  const withLiveRow = (row) => setDbImpl((table) => (table === 'invoices'
+    ? (row instanceof Error ? { where: () => ({ first: async () => { throw row; } }) } : chain({ first: row }))
+    : chain({ first: { billing_mode: null, monthly_rate: null } })));
+  test.each([
+    ['paid meanwhile', { status: 'paid' }, 'invoice_changed'],
+    ['a new PaymentIntent stamped', { stripe_payment_intent_id: 'pi_new' }, 'invoice_changed'],
+    ['re-amounted', { total: '175.00' }, 'invoice_changed'],
+  ])('%s => withheld', async (_label, change, reason) => {
+    const inv = invoiceData({ status: 'overdue' });
+    withLiveRow({ ...inv, ...change });
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason });
+  });
+  test('row gone => invoice_not_found; read throws => eligibility_unverifiable; unchanged => visible', async () => {
+    const inv = invoiceData({ status: 'overdue' });
+    withLiveRow(undefined);
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'invoice_not_found' });
+    withLiveRow(new Error('db down'));
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+    withLiveRow({ ...inv });
+    await expect(payPageZelleVisibility({ invoice: inv, creditWillCoverAnchor: false })).resolves.toMatchObject({ visible: true });
+  });
+});
+

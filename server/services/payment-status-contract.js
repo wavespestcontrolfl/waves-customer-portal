@@ -604,19 +604,21 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   return copied.some((sentence) => {
     const t = String(sentence);
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
-    if (inv) return invoiceNamed && !(named.full.includes(inv[1].toUpperCase()) || namedTails.has(stripZeros(inv[1].toUpperCase().split('-').pop())));
-    return /\bpayment\b/i.test(t) && receiptOffTarget(t, { namedDates, namedTenders, invoiceNamed, amounts });
+    if (inv && invoiceNamed) return !(named.full.includes(inv[1].toUpperCase()) || namedTails.has(stripZeros(inv[1].toUpperCase().split('-').pop())));
+    // Codex round-65 P2: no invoice named - an invoice sentence must match the amount / date / tender the customer did name, like a receipt
+    // (status lines only - "Invoice N for $T is paid." / "Invoice N has $D due..."; a Zelle offer names the tender it is about)
+    if (inv) return /^Invoice\s/.test(t) && attributesOffTarget(t, { namedDates, namedTenders, amounts });
+    return /\bpayment\b/i.test(t) && (invoiceNamed || attributesOffTarget(t, { namedDates, namedTenders, amounts }));
   });
 }
-// A copied RECEIPT (a payment sentence naming no invoice) against what the customer named: its date, its tender, an invoice (Codex
-// round-64 P2: a receipt that names no invoice is never proven to be the named invoice's payment), its amount.
-function receiptOffTarget(t, { namedDates, namedTenders, invoiceNamed, amounts }) {
+// A copied sentence against the payment attributes the customer named: its date, its tender (an invoice sentence names none, so a named
+// tender never matches one), its amount. (Codex round-64 P2: a receipt that names no invoice never answers a NAMED invoice - above.)
+function attributesOffTarget(t, { namedDates, namedTenders, amounts }) {
   if (namedDates.length) {
     const d = sentenceDate(t);
     if (!d || !namedDates.some((n) => n.month === d.month && n.day === d.day && (n.year == null || n.year === d.year))) return true;
   }
   if (namedTenders.length && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
-  if (invoiceNamed) return true;
   return amounts.size > 0 && !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
 }
 

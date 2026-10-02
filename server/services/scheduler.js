@@ -4599,6 +4599,15 @@ function initScheduledJobs() {
               amountsStale = amountsVerdict.stale;
               amountsReason = amountsVerdict.reason;
               billingBoundary = amountsVerdict.boundary || null;
+              // Codex round-65 P2: a billing READ failure says nothing about the message - for a decision-linked reply, do NOT retire it.
+              // The provider-boundary billing check is armed with no fingerprint, so it refuses RETRYABLY onto the bounded retry rail
+              // (each retry reruns this full recheck) - never sent unverified, never permanently stale. Other rows keep the block.
+              if (amountsStale && claimMeta.agent_decision_id
+                && require('./agent-decision-send-checks').blockReasonIsBillingInfrastructure(`amount no longer authorized (${amountsReason})`)) {
+                logger.warn(`[scheduled-sms] ${msg.id} billing recheck unreadable (${amountsReason}); deferring to the provider-boundary check`);
+                amountsStale = false;
+                billingBoundary = { customerId: msg.customer_id || null, fingerprint: null, zelle: null };
+              }
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above

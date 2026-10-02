@@ -398,6 +398,19 @@ async function zellePayerOwnership(inv, dbh) {
   return require('../services/invoice-payer-ownership').invoicePayerOwnership(inv, dbh);
 }
 
+// null when the invoice row still reads as it did (collectible, not withdrawn, same status / PaymentIntent / amount due) and no
+// third-party payer owns it now; otherwise the withholding reason.
+async function zelleInvoiceStillSame(inv, dbh) {
+  let fresh;
+  try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return 'eligibility_unverifiable'; }
+  if (!fresh) return 'invoice_not_found';
+  const changed = String(fresh.status || '') !== String(inv.status || '')
+    || (fresh.stripe_payment_intent_id || null) !== (inv.stripe_payment_intent_id || null)
+    || invoiceAmountDue(fresh) !== invoiceAmountDue(inv);
+  if (changed || !isInvoiceCollectibleStatus(fresh.status) || invoiceWithdrawnFromCustomer(fresh)) return 'invoice_changed';
+  return zellePayerOwnership(fresh, dbh);
+}
+
 const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
 function withTimeout(promise, ms) {
   let timer;
@@ -475,10 +488,11 @@ async function payPageZelleVisibility({
   try { projectedCredit = await invoiceProjectedCreditApplied(inv, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   // projectedCredit rides the verdict so GET /:token reuses it instead of a
   // third credit read (Codex round-13 P1).
-  // Codex round-63 P0: the LIVE payer resolver runs AGAIN after the credit / reconciliation / Stripe awaits - a Bill-To assignment
-  // (scheduled service or customer default) that landed meanwhile withholds Zelle; a failed lookup fails closed (payer_unverifiable).
-  const ownershipNow = await zellePayerOwnership(inv, dbh);
-  if (ownershipNow) return { visible: false, reason: ownershipNow };
+  // Codex round-63 P0 / round-65 P1: the invoice row and its LIVE payer are read AGAIN after the credit / reconciliation / Stripe
+  // awaits - an invoice paid, voided, withdrawn, re-amounted or stamped with a new PaymentIntent meanwhile, or a Bill-To assignment that
+  // landed, withholds Zelle. A failed read fails closed.
+  const settled = await zelleInvoiceStillSame(inv, dbh);
+  if (settled) return { visible: false, reason: settled };
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
   return { visible: true, reason: null, projectedCredit };
 }
