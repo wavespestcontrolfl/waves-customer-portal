@@ -1552,6 +1552,13 @@ async function sendCustomerMessageCore(input) {
   // blocking: the text is already out.
   await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);
 
+  // SMS offer ledger (GATE_SMS_OFFER_LEDGER, dark): a reply that came from an
+  // agent decision and quoted appointment times leaves a record of the slots
+  // the SENT text carried. Every decision send (reviewer, scheduled, auto-send)
+  // passes through here with metadata.agentDecisionId. input.body is the text
+  // the send checks approved; sendInput.body may have had its links rewritten.
+  await recordSmsOfferAfterSend(input, sendInput, providerOutcome);
+
   return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,
     blocked: false,
@@ -1592,6 +1599,25 @@ async function sendCustomerMessageCore(input) {
       void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
         .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
     }
+  }
+}
+
+// Never throws and never blocks the result: the text is already out. Gate off
+// (the default), the ledger module is not even loaded.
+async function recordSmsOfferAfterSend(input, sendInput, providerOutcome) {
+  try {
+    const agentDecisionId = input?.metadata?.agentDecisionId;
+    if (!agentDecisionId || providerOutcome?.provider === 'push') return;
+    if (!require('../../config/feature-gates').gateEnvValue('GATE_SMS_OFFER_LEDGER')) return;
+    await require('../sms-offers').recordOfferForSend({
+      agentDecisionId,
+      outgoingBody: input.body,
+      providerMessageId: providerOutcome?.providerMessageId || null,
+      to: sendInput.to,
+      sentAt: providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date(),
+    });
+  } catch (err) {
+    logger.warn(`[send-customer-message] sms offer ledger skipped: ${err.message}`);
   }
 }
 
@@ -1724,6 +1750,7 @@ module.exports = {
   _internals: {
     validateContract,
     recordPromiseEvidenceFallback,
+    recordSmsOfferAfterSend,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

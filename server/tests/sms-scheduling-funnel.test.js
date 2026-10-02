@@ -1,0 +1,71 @@
+/**
+ * SMS scheduling funnel summary: counts only, computed from rows.
+ */
+jest.mock('../models/db', () => jest.fn());
+
+const { summarizeFunnel, weekOf, isSchedulingText } = require('../services/sms-scheduling-funnel');
+
+const at = (iso) => new Date(iso);
+const A = 'cust-a';
+const B = 'cust-b';
+const C = 'cust-c';
+
+test('weeks start on Monday, Eastern', () => {
+  expect(weekOf(at('2026-09-30T15:00:00Z'))).toBe('2026-09-28'); // Wednesday
+  expect(weekOf(at('2026-09-28T03:00:00Z'))).toBe('2026-09-21'); // still Sunday night in Florida
+  expect(weekOf(at('2026-09-28T12:00:00Z'))).toBe('2026-09-28'); // Monday
+});
+
+test('only scheduling texts are counted, and each is tied to what followed it', () => {
+  expect(isSchedulingText('Can we reschedule my appointment to Friday?')).toBe(true);
+  expect(isSchedulingText('Thanks so much!')).toBe(false);
+
+  const summary = summarizeFunnel({
+    inbound: [
+      { customer_id: A, body: 'Can we reschedule my appointment to Friday?', created_at: at('2026-09-29T14:00:00Z') },
+      { customer_id: B, body: 'I need to reschedule my visit please', created_at: at('2026-09-30T14:00:00Z') },
+      { customer_id: C, body: 'Can you reschedule me for next week?', created_at: at('2026-09-30T16:00:00Z') },
+      { customer_id: A, body: 'Thanks so much!', created_at: at('2026-09-29T18:00:00Z') },
+    ],
+    // A's visit moved 3 hours later; B's moved 3 days later (outside 48h).
+    moves: [{ customer_id: A, created_at: at('2026-09-29T17:00:00Z') }, { customer_id: B, created_at: at('2026-10-03T14:00:00Z') }],
+    cancels: [{ customer_id: C, transitioned_at: at('2026-09-30T17:00:00Z') }],
+    bookings: [],
+    personReplies: [
+      { customer_id: A, created_at: at('2026-09-29T14:30:00Z') },
+      { customer_id: B, created_at: at('2026-09-30T16:00:00Z') },
+      // A reply BEFORE the text is not an answer to it.
+      { customer_id: C, created_at: at('2026-09-30T15:00:00Z') },
+    ],
+  });
+
+  expect(summary.inbound_total).toBe(4);
+  expect(summary.scheduling_flagged).toBe(3);
+  expect(summary.per_week).toEqual({ '2026-09-28': 3 });
+  expect(summary.followed_within_48h).toEqual({ any: 2, moves: 1, cancels_or_skips: 1, new_bookings: 0 });
+  expect(summary.person_replied).toBe(2);
+  expect(summary.person_reply_median_minutes).toBe(120);
+  expect(summary.offers).toBeNull();
+});
+
+test('offers are counted by kind and state, and an unresolved slot is called out', () => {
+  const now = at('2026-10-02T12:00:00Z');
+  const slot = { date: '2026-10-06', start: '10:00', end: '12:00' };
+  const summary = summarizeFunnel({
+    now,
+    moves: [{ customer_id: A, created_at: at('2026-10-01T15:00:00Z') }],
+    offers: [
+      { customer_id: A, kind: 'move_visit', status: 'open', sent_at: at('2026-10-01T14:00:00Z'), expires_at: at('2026-10-03T14:00:00Z'), slots: [slot] },
+      { customer_id: B, kind: 'move_visit', status: 'open', sent_at: at('2026-09-29T14:00:00Z'), expires_at: at('2026-10-01T14:00:00Z'), slots: JSON.stringify([slot]) },
+      { customer_id: C, kind: 'book_new', status: 'superseded', sent_at: at('2026-10-01T10:00:00Z'), expires_at: at('2026-10-03T10:00:00Z'), slots: [{ date: null, start: null, end: null }] },
+    ],
+  });
+  expect(summary.offers).toEqual({
+    sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, other: 0,
+    with_unresolved_slot: 1, followed_by_change_48h: 1,
+  });
+});
+
+test('an empty window reports zeros, not errors', () => {
+  expect(summarizeFunnel({})).toMatchObject({ inbound_total: 0, scheduling_flagged: 0, person_replied: 0, person_reply_median_minutes: null, offers: null });
+});
