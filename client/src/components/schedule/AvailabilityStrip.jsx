@@ -193,7 +193,7 @@ function HourChip({ hour, withDay, current, onPick }) {
   );
 }
 
-export default function AvailabilityStrip({ availability, currentDate, currentStart, onPick, style }) {
+export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style }) {
   const [viewDate, setViewDate] = useState(currentDate);
   // A new pick (typed, or filled by a chip) brings the browse row back to it.
   useEffect(() => { setViewDate(currentDate); }, [currentDate]);
@@ -201,7 +201,11 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   if (!verdict) return null;
   const tone = TONES[verdict.tone];
   const viewed = availability.days.find((day) => day.date === viewDate) || null;
-  const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart);
+  // Same rule as BestTimeHint's isCurrentPick: the hour is only "current"
+  // when taking it would change nothing. An hour scored for a technician the
+  // visit does not have (an unassigned visit adopts it on pick) stays tappable.
+  const techMatches = (hour) => !hour.technicianId || String(hour.technicianId) === String(currentTechnicianId ?? '');
+  const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart) && techMatches(hour);
   const today = etDateString();
 
   return (

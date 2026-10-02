@@ -5849,6 +5849,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
                 onPick={(slot) =>
                   // Same adoption rule as the hint chips below: an
                   // unassigned visit takes the technician the hour was

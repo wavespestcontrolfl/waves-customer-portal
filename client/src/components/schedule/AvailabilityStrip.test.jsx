@@ -128,10 +128,22 @@ describe('AvailabilityStrip', () => {
 
   it('the hour already in the fields is shown pressed, not offered again', () => {
     const fits = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 });
-    render(<AvailabilityStrip availability={fits} currentDate="2035-01-02" currentStart="09:00:00" onPick={() => {}} />);
+    render(<AvailabilityStrip availability={fits} currentDate="2035-01-02" currentStart="09:00:00" currentTechnicianId="t1" onPick={() => {}} />);
     const current = screen.getAllByTestId('availability-hour').filter((c) => c.getAttribute('aria-pressed') === 'true');
     expect(current).toHaveLength(1);
     expect(current[0].disabled).toBe(true);
+  });
+
+  it('an unassigned visit can still take its own hour, adopting the technician it was scored for', () => {
+    const fits = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 });
+    const onPick = vi.fn();
+    render(<AvailabilityStrip availability={fits} currentDate="2035-01-02" currentStart="09:00" currentTechnicianId={null} onPick={onPick} />);
+    const chips = screen.getAllByTestId('availability-hour');
+    expect(chips.filter((c) => c.getAttribute('aria-pressed') === 'true')).toHaveLength(0);
+    const nine = chips.find((c) => c.textContent.startsWith('9 AM'));
+    expect(nine.disabled).toBe(false);
+    fireEvent.click(nine);
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '09:00', technicianId: 't1' }));
   });
 
   it('names the technician on an all-technician search', () => {

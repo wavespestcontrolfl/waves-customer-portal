@@ -146,6 +146,7 @@ export default function RescheduleDialogView({
                 availability={manualAvailability}
                 currentDate={manualDate}
                 currentStart={manualTime}
+                currentTechnicianId={service.technicianId || service.technician_id}
                 onPick={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
                 style={{ marginTop: 10 }}
               />
