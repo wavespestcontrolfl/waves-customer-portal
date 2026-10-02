@@ -117,7 +117,7 @@ describe('the blog post on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].blogPostId).toBe(POST.id);
   });
 
-  it('no picker and no pick sent while the server answers unavailable (a visit whose line is not pest)', async () => {
+  it('no picker and no pick sent while the server answers unavailable (WDO, pre-treat, lawn, tree & shrub)', async () => {
     blogResponse = () => ({ available: false, posts: [] });
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
       serviceId: service.id,

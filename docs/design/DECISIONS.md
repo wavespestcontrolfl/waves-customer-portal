@@ -2959,7 +2959,7 @@ spam or voicemail calls. Nothing is sent to a customer.
 ## 2026-10-01 — "From the Waves blog" on the service report (dark)
 
 Owner "ok go" on the Fast Complete mockup: the technician or the office can
-pick one Waves blog post while completing a pest visit, searched the way
+pick one Waves blog post while completing a visit, searched the way
 Quick Links searches links, and the customer's report shows it at the bottom
 as "From the Waves blog": the post's title as a link and where it lives
 (`wavespestcontrol.com/pest-control/…`). Behind `GATE_REPORT_BLOG_POST`
@@ -2969,6 +2969,8 @@ the share gate's live rule); the pick is frozen on the record at completion
 and checked against the host again when the report renders. The card is a
 glass card with an `h2` title (the glass theme hides `.section-eyebrow`
 outside the hero), live view only, the last card above the footer on every
-layout. Never on lawn or tree, shrub & palm (another lane owns those
-completions). Off, the search answers unavailable, a pick is ignored and no
-report shows a post.
+layout. Owner ruling 2026-10-02: every service but WDO, termite pre-treat,
+lawn and tree, shrub & palm (another lane owns those completions), and never
+a visit that completes through a project (`blogPostAllowedFor`, the one rule
+the search and the completion share). Off, the search answers unavailable, a
+pick is ignored and no report shows a post.

@@ -9,8 +9,10 @@
  *    post or another host.
  *  - The search is dark with the gate off and reads only the technician's
  *    own current visit.
- *  - The pick is frozen at completion for pest visits only, and one that is
- *    not live is an actionable 400 before any write.
+ *  - The pick is frozen at completion for every service but WDO, termite
+ *    pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor, the
+ *    search's rule too), and one that is not live is an actionable 400
+ *    before any write.
  *  - The report shows a frozen post only while the gate is on.
  */
 
@@ -39,11 +41,16 @@ jest.mock('../services/job-costing', () => ({
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
+const mockResolveProfile = jest.fn();
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: (...args) => mockResolveProfile(...args),
+}));
 
 const fs = require('fs');
 const path = require('path');
 const {
-  reportBlogLink, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, searchTerms,
+  blogPostAllowedFor, reportBlogLink, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, searchTerms,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -58,6 +65,38 @@ const LIVE = {
 afterEach(() => {
   mockDbCurrent = null;
   jest.clearAllMocks();
+});
+
+// Owner ruling 2026-10-02: every service but WDO, termite pre-treat, lawn
+// and tree, shrub & palm.
+describe('blogPostAllowedFor', () => {
+  test.each([
+    ['Quarterly Pest Control', null],
+    ['Rodent Trap Check', { serviceKey: 'rodent_trapping' }],
+    ['Mosquito Control', { serviceKey: 'mosquito_monthly' }],
+    ['Bed Bug Treatment', { serviceKey: 'bed_bug_treatment' }],
+    ['Termite Bait Station Monitoring', { serviceKey: 'termite_bait_monitoring' }],
+    ['Liquid Termite Treatment', { serviceKey: 'termite_liquid', projectType: 'termite_treatment' }],
+    ['Termite Inspection', { serviceKey: 'termite_inspection' }],
+  ])('%s carries a post', (serviceType, profile) => {
+    expect(blogPostAllowedFor({ serviceType, profile })).toBe(true);
+  });
+
+  test.each([
+    ['WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection', projectType: 'wdo_inspection' }],
+    ['Termite Inspection', { serviceKey: 'wdo_inspection' }],
+    ['Pre-Slab Termite Treatment', { serviceKey: 'termite_slab_pretreat', projectType: 'pre_treatment_termite_certificate' }],
+    ['Termite Pre-Treatment', { serviceKey: 'termite_pretreatment' }],
+    ['WDO Inspection', null],
+    ['New Construction Termite Pretreat', null],
+    ['Lawn Care', { serviceKey: 'lawn_care' }],
+    ['Tree & Shrub Care', null],
+    ['Palm Injection', null],
+    ['Pest Control', { serviceKey: 'pest_general', requiresProject: true }],
+    ['Pest Control', { serviceKey: 'pest_general', projectBacked: true }],
+  ])('%s carries none', (serviceType, profile) => {
+    expect(blogPostAllowedFor({ serviceType, profile })).toBe(false);
+  });
 });
 
 describe('reportBlogLink', () => {
@@ -196,6 +235,10 @@ function scriptedDb(service, posts, calls) {
 
 describe('GET /:serviceId/blog-posts', () => {
   const ORIGINAL = process.env.GATE_REPORT_BLOG_POST;
+  beforeEach(() => {
+    mockResolveProfile.mockReset();
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'pest_general_quarterly', synthesized: false });
+  });
   afterEach(() => {
     if (ORIGINAL === undefined) delete process.env.GATE_REPORT_BLOG_POST;
     else process.env.GATE_REPORT_BLOG_POST = ORIGINAL;
@@ -224,13 +267,29 @@ describe('GET /:serviceId/blog-posts', () => {
     expect(other.statusCode).toBe(403);
   });
 
-  test('a visit whose own line is not pest answers unavailable, as /complete would drop the pick (codex local r1 on #5547)', async () => {
+  test.each([
+    ['WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection', projectType: 'wdo_inspection' }],
+    ['Pre-Slab Termite Treatment', { serviceKey: 'termite_slab_pretreat', projectType: 'pre_treatment_termite_certificate' }],
+    ['Lawn Care', { serviceKey: 'lawn_care' }],
+    ['Tree & Shrub Care', { serviceKey: 'tree_shrub_care' }],
+  ])('%s answers unavailable, as /complete would drop the pick (owner ruling 2026-10-02)', async (serviceType, profile) => {
     process.env.GATE_REPORT_BLOG_POST = 'true';
+    mockResolveProfile.mockResolvedValue(profile);
     const calls = [];
-    mockDbCurrent = scriptedDb({ ...SERVICE, service_type: 'Rodent Pest Control' }, [LIVE], calls);
+    mockDbCurrent = scriptedDb({ ...SERVICE, service_type: serviceType }, [LIVE], calls);
     const res = await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' }, { techRole: 'technician', technicianId: 'tech-1' });
     expect(res.body).toEqual({ available: false, posts: [] });
     expect(calls).toEqual(['scheduled_services']);
+  });
+
+  test('a rodent visit gets live posts too: the profile is read from the visit\'s own identity', async () => {
+    process.env.GATE_REPORT_BLOG_POST = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'rodent_trapping' });
+    const service = { ...SERVICE, service_type: 'Rodent Trap Check', service_id: 'cat-9', service_key_snapshot: 'rodent_trapping', is_recurring: false };
+    mockDbCurrent = scriptedDb(service, [LIVE], []);
+    const res = await invoke({ serviceId: 'svc-1' }, { q: 'roof rats' }, { techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.body).toEqual({ available: true, posts: [{ id: LIVE.id, title: LIVE.title, url: LIVE.astro_live_url }] });
+    expect(mockResolveProfile).toHaveBeenCalledWith(service);
   });
 
   test('the assigned technician gets live posts; an empty query reads no posts', async () => {
@@ -252,8 +311,8 @@ describe('completion freeze contract', () => {
   const completionSource = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   const block = completionSource.slice(completionSource.indexOf('async function completeScheduledService('));
 
-  test('the pick is resolved under the gate, for pest visits only, through a savepoint read', () => {
-    expect(block).toMatch(/const blogPostPick = require\('\.\.\/config\/feature-gates'\)\.reportBlogPostLive\(\) && reportServiceLine === 'pest'/);
+  test('the pick is resolved under the gate, by the search\'s own scope rule, through a savepoint read', () => {
+    expect(block).toMatch(/const blogPostPick = require\('\.\.\/config\/feature-gates'\)\.reportBlogPostLive\(\)\s*&& ReportBlogPost\.blogPostAllowedFor\(\{ serviceType: svc\.service_type, profile: completionProfile \}\)/);
     expect(block).toMatch(/resolveReportBlogPostPick\(\s*\(reader\) => failSoftRead\(db, reader, null\),\s*completionInput\.body\?\.blogPostId,/);
     expect(block).toMatch(/: \{ post: null, rejected: false \};/);
   });

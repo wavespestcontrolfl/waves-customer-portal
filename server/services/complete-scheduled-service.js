@@ -3923,11 +3923,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crafted client cannot keep it alive. An optional read: in a grouped
     // closeout `db` is the packet's transaction, so it runs in a savepoint,
     // and a failed read is a pick that cannot be verified (refused below).
-    // Pest visits only (the approved design); never lawn or tree, shrub &
-    // palm, whose completions another lane owns: a post sent for any other
-    // line is ignored, never frozen.
-    const blogPostPick = require('../config/feature-gates').reportBlogPostLive() && reportServiceLine === 'pest'
-      ? await require('../services/service-report/report-blog-post').resolveReportBlogPostPick(
+    // Every service but WDO, termite pre-treat, lawn and tree, shrub & palm
+    // (owner ruling 2026-10-02; blogPostAllowedFor is the search route's rule
+    // too): a post sent for any other visit is ignored, never frozen.
+    const ReportBlogPost = require('../services/service-report/report-blog-post');
+    const blogPostPick = require('../config/feature-gates').reportBlogPostLive()
+      && ReportBlogPost.blogPostAllowedFor({ serviceType: svc.service_type, profile: completionProfile })
+      ? await ReportBlogPost.resolveReportBlogPostPick(
         (reader) => failSoftRead(db, reader, null),
         completionInput.body?.blogPostId,
       )

@@ -16,12 +16,32 @@
 
 const { blogPostShareability } = require('../content/blog-share-gate');
 const { isSiteUrl } = require('../link-library');
+const { detectServiceLine } = require('./service-line-configs');
 
 const MAX_RESULTS = 8;
 const MAX_TERMS = 4;
 const MAX_TITLE_CHARS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLUMNS = ['id', 'title', 'status', 'astro_status', 'astro_live_url'];
+
+// Which visits a post may ride (owner ruling 2026-10-02: every service but
+// WDO, termite pre-treat, lawn and tree, shrub & palm). The search route and
+// the completion judge it the same way, from the visit's label and its
+// completion profile: never a WDO inspection or a termite pre-treat (by
+// service key, project type, or the label of a visit with no catalog link),
+// never the lawn or tree, shrub & palm lines (another lane owns those
+// completions), and never a visit that completes through a project
+// (/complete refuses it).
+const NO_POST_LINES = new Set(['lawn', 'tree_shrub', 'palm']);
+const NO_POST_SERVICE_KEYS = new Set(['wdo_inspection', 'termite_pretreatment', 'termite_slab_pretreat']);
+const NO_POST_PROJECT_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
+const NO_POST_LABEL_RE = /\bwdo\b|wood[\s-]*destroying|\bpre[\s-]*(?:treat|slab)|new[\s-]*construction/i;
+function blogPostAllowedFor({ serviceType, profile }) {
+  if (NO_POST_LINES.has(detectServiceLine(serviceType))) return false;
+  if (NO_POST_SERVICE_KEYS.has(profile?.serviceKey) || NO_POST_PROJECT_TYPES.has(profile?.projectType)) return false;
+  if (profile?.requiresProject || profile?.projectBacked) return false;
+  return !NO_POST_LABEL_RE.test(String(serviceType || ''));
+}
 
 // What a report may link, or null.
 function reportBlogLink(row) {
@@ -93,6 +113,7 @@ function frozenBlogPost(value) {
 }
 
 module.exports = {
+  blogPostAllowedFor,
   reportBlogLink,
   searchReportBlogPosts,
   resolveReportBlogPostPick,

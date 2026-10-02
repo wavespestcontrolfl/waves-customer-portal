@@ -13513,8 +13513,9 @@ export function CompletionPanel({
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
-  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): pest visits
-  // only; the search answers available:false while the switch is off.
+  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): every service
+  // but WDO, termite pre-treat, lawn and tree, shrub & palm; the search
+  // answers available:false elsewhere and while the switch is off.
   // Whether the server offers the blog search for this visit: "checking"
   // until it answers, then "yes" or "no"; "unknown" when it could not be
   // asked. A pick (a restored draft's) stays and is sent unless the answer

@@ -494,7 +494,7 @@ function genericCompletionFacts(opts = {}) {
         { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
       ],
       whenMissing: 'hidden',
-      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Pest visits only, never lawn or tree, shrub & palm.',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, lawn and tree, shrub & palm (report-blog-post.js blogPostAllowedFor).',
     },
     {
       key: 'protocol_actions_completed',

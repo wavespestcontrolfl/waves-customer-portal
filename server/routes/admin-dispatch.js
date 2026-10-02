@@ -506,10 +506,11 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // Waves blog search (GATE_REPORT_BLOG_POST, owner "ok go" 2026-10-01): live
 // hub posts matching every typed word, newest first, at most eight, each as
 // { id, title, url } under the one link rule (report-blog-post.js). The pick
-// rides /complete as blogPostId and is frozen there, on pest visits only
-// (the visit's own service line, detectServiceLine), so any other visit
-// answers { available: false } too. Read-only; off = the answer is
-// { available: false } with no database read.
+// rides /complete as blogPostId and is frozen there for every service but
+// WDO, termite pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor,
+// the completion's own rule), so any other visit answers { available: false }
+// too. Read-only; off = the answer is { available: false } with no database
+// read.
 router.get('/:serviceId/blog-posts', async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').reportBlogPostLive()) {
@@ -517,7 +518,7 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type');
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician searches only from their own current visit; admins keep
     // office-wide reach (the completion routes' rule).
@@ -531,9 +532,9 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
       return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     }
     // The completion's own rule for keeping a pick (complete-scheduled-service).
-    const { detectServiceLine } = require('../services/service-report/service-line-configs');
-    if (detectServiceLine(svc.service_type) !== 'pest') return res.json({ available: false, posts: [] });
-    const { searchReportBlogPosts } = require('../services/service-report/report-blog-post');
+    const { blogPostAllowedFor, searchReportBlogPosts } = require('../services/service-report/report-blog-post');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!blogPostAllowedFor({ serviceType: svc.service_type, profile })) return res.json({ available: false, posts: [] });
     const posts = await searchReportBlogPosts(db, req.query?.q);
     res.json({ available: true, posts });
   } catch (err) { next(err); }
