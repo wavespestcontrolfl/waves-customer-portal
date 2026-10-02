@@ -8,9 +8,9 @@ import './tech-field.css';
 
 // Mounted only after TechLayout verifies the staff profile. One flag read
 // owns the entire workspace; child routes consume the outlet context.
-// forceEnabled skips the flag read (the /admin/today mount always shows the field
-// UI); embedded adjusts the chrome for the admin scroll container and adds a
-// Menu tab back into the rest of Waves Admin.
+// embedded adjusts the chrome for the admin scroll container and adds a Menu
+// tab back into the rest of Waves Admin. forceEnabled (tests only) skips the
+// tech-field-workspace flag read.
 export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable, forceEnabled = false, embedded = false }) {
   const flag = useFeatureFlagReady('tech-field-workspace', false);
   const enabled = forceEnabled || flag.enabled;

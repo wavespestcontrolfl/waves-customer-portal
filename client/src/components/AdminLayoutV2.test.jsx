@@ -280,5 +280,7 @@ describe("AdminLayoutV2", () => {
     fireEvent.click(customersLink);
     expect(screen.getByTestId("where")).toHaveTextContent("/admin/today");
     expect(screen.queryByText("Customers page")).not.toBeInTheDocument();
+    // ⌘K is swallowed while busy (fireEvent returns false when default was prevented).
+    expect(fireEvent.keyDown(window, { key: "k", metaKey: true })).toBe(false);
   });
 });

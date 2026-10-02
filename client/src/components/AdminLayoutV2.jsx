@@ -114,6 +114,19 @@ export default function AdminLayoutV2() {
     event.preventDefault();
     event.stopPropagation();
   };
+  // The palette's ⌘K / Ctrl+K listener is a window bubble-phase handler; this
+  // capture-phase listener runs first and swallows the shortcut while busy.
+  useEffect(() => {
+    if (!fieldBusy) return undefined;
+    const swallowPaletteShortcut = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "k") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+    window.addEventListener("keydown", swallowPaletteShortcut, true);
+    return () => window.removeEventListener("keydown", swallowPaletteShortcut, true);
+  }, [fieldBusy]);
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);

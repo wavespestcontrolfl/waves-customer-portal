@@ -52,7 +52,7 @@ function mount(path = '/admin/today') {
 }
 
 beforeEach(() => {
-  flags.shellEnabled = false;
+  flags.shellEnabled = true;
   flags.shellReads.length = 0;
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     let data = {};
@@ -64,7 +64,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('/admin/today field shell', () => {
-  it('renders the embedded field workspace with Today, Tools, More and Menu, even with the legacy flag off', async () => {
+  it('renders the embedded field workspace with Today, Tools, More and Menu', async () => {
     mount();
     const nav = await screen.findByRole('navigation', { name: 'Field navigation' });
     expect(nav.textContent).toMatch(/Today.*Tools.*More.*Menu/);
@@ -79,12 +79,12 @@ describe('/admin/today field shell', () => {
     expect(await screen.findByRole('button', { name: 'Open visit' })).toBeInTheDocument();
   });
 
-  it('is not gated by the tech-field-workspace flag', async () => {
+  it('honors the tech-field-workspace flag: off renders the legacy route UI inside admin', async () => {
     flags.shellEnabled = false;
-    mount('/admin/today/tools');
-    expect(await screen.findByRole('navigation', { name: 'Field navigation' })).toBeInTheDocument();
-    expect(screen.queryByText('Loading field workspace…')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('aria-current', 'page');
+    mount();
+    expect(await screen.findByText("Today's Route")).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
+    expect(flags.shellReads).toContain('tech-field-workspace');
   });
 
   it('Menu leaves the workspace for the admin menu', async () => {
