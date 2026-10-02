@@ -1357,8 +1357,10 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(call).toBeGreaterThan(0);
     // what the customer actually pays is judged too, FIRST (so the prompt and the override log name the real charge):
     // the LOCKED invoice's total, whenever it differs from the term amount
-    expect(route).toMatch(/\.where\(\{ id: invoice\.id \}\)\.forUpdate\(\)\.first\('id', 'customer_id', 'total'\)/);
-    expect(route).toContain('const chargedTotal = Number(lockedInvoiceRow.total);');
+    expect(route).toMatch(/\.where\(\{ id: invoice\.id \}\)\.forUpdate\(\)\.first\('id', 'customer_id', 'total', 'line_items'\)/);
+    // gross of a paid deposit (a negative deposit_credit line): a $434 invoice + $50 deposit is a $484 coverage charge
+    expect(route).toMatch(/InvoiceService\._parseInvoiceLineItems\(lockedInvoiceRow\.line_items\)\s*\.filter\(\(li\) => li && li\.category === 'deposit_credit'\)/);
+    expect(route).toContain('const chargedTotal = Math.round((Number(lockedInvoiceRow.total) + depositCredit) * 100) / 100;');
     const totalCall = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal })');
     expect(totalCall).toBeGreaterThan(0);
     expect(totalCall).toBeLessThan(call);
@@ -1368,7 +1370,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // after the per-customer annual-prepay advisory lock, before the term write
     expect(route.indexOf('pg_advisory_xact_lock')).toBeLessThan(call);
     expect(call).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay('));
-    expect(route.slice(Math.max(0, call - 1800), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route.slice(Math.max(0, call - 3000), call)).toMatch(/rateReviewLive\(\)/);
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });

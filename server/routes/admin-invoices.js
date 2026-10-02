@@ -2151,7 +2151,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         // the undo's reverse repoint — whichever commits second sees the
         // other (the undo's new prepay-term child probe refuses on ours).
         const lockedInvoiceRow = await trx('invoices')
-          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id', 'total');
+          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id', 'total', 'line_items');
         if (!lockedInvoiceRow) {
           const notFound = new Error('Invoice not found');
           notFound.statusCode = 404;
@@ -2220,12 +2220,17 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
             .first('id', 'term_start', 'coverage_service_type');
           const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };
           // Both amounts must match the notice: what the customer actually
-          // pays — the locked invoice's total, judged FIRST so the prompt and
-          // the override log name the real charge — AND the term's prepay
-          // amount (an editable field). A $468 invoice marked with
-          // prepayAmount 484 still charges $468, so it needs the same
-          // acknowledgement.
-          const chargedTotal = Number(lockedInvoiceRow.total);
+          // pays for the coverage — the locked invoice's total GROSS of any
+          // deposit credit (a paid deposit is prior payment riding as a
+          // negative deposit_credit line, the same gross basis the Customer
+          // 360 renewal records), judged FIRST so the prompt and the override
+          // log name the real charge — AND the term's prepay amount (an
+          // editable field). A $468 invoice marked with prepayAmount 484
+          // still charges $468, so it needs the same acknowledgement.
+          const depositCredit = InvoiceService._parseInvoiceLineItems(lockedInvoiceRow.line_items)
+            .filter((li) => li && li.category === 'deposit_credit')
+            .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
+          const chargedTotal = Math.round((Number(lockedInvoiceRow.total) + depositCredit) * 100) / 100;
           const totalDiffers = Number.isFinite(chargedTotal) && Math.round(chargedTotal * 100) !== Math.round(resolvedAmount * 100);
           let noticed = totalDiffers ? await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal }) : null;
           if (!noticed) noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount });
