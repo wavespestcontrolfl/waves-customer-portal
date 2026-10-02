@@ -122,8 +122,9 @@ describe('twilio-webhook wiring', () => {
     // the screen's own eligibility: not complianceEligible (which covers the AI line), no reaction, no media
     expect(src.slice(hook - 600, hook)).toMatch(/if \(Body && !smsReaction && inboundMedia\.length === 0 && !complianceEligible && smsLogEntry\?\.id\)/);
     expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
-    expect(hook).toBeGreaterThan(src.indexOf('if (solicitationEnforced) return res.type('));
-    expect(hook).toBeLessThan(src.indexOf('LeadIntake.handleIntakeReply('));
+    // after the inbound row persists, BEFORE the enforcement stop: a silenced text is shadowed too
+    expect(hook).toBeGreaterThan(src.indexOf("const [smsLogEntry] = await db('sms_log').insert("));
+    expect(hook).toBeLessThan(src.indexOf('if (solicitationEnforced) return res.type('));
     // it is handed the screen's verdict, whatever the gate's mode
     expect(src.slice(hook, hook + 300)).toMatch(/verdict: solicitation,/);
   });
