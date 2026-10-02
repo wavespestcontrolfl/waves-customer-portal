@@ -120,7 +120,14 @@ test('export refuses a directory inside the repository, however it is spelled', 
       await database('ai_incidents').insert({
         area: 'sms', evidence_type: 'judgment', evidence_id: judgmentId, incident_key: key, disposition: 'confirmed_mistake', ...CELL,
         prompt_version: V12, produced_at: new Date('2026-10-01T15:00:00Z'), summary: `summary-${i}`, adjudicated_at: new Date('2026-10-02T08:30:00Z'),
-        adjudication: JSON.stringify({ readers: [{ answer: { quote: `Wednesday at ${i + 1}pm` } }, { answer: { quote: `Wednesday at ${i + 1}pm` } }] }),
+        // The shape adjudicateHumanBetter stores: the first reader's quote under
+        // `model`, the readers without their answers.
+        adjudication: JSON.stringify({
+          rule: 'two_models',
+          model: { disposition: 'confirmed_mistake', quote: `Wednesday at ${i + 1}pm`, quote_verified: true },
+          readers: [{ provider: 'openai', model: 'm1', disposition: 'confirmed_mistake', failure_mode: CELL.failure_mode, quote_verified: true },
+            { provider: 'anthropic', model: 'm2', disposition: 'confirmed_mistake', failure_mode: CELL.failure_mode, quote_verified: true }],
+        }),
       });
     }
     await proposeFromIncidents({ dbi: database, area: 'sms', promptVersion: V12, minEvidence: 5, now: new Date('2026-10-04T08:45:00Z') });
@@ -170,7 +177,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
     expect(run).toMatchObject({ status: 'underpowered', case_count: 2 });
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).holdout_run_id).toBe(run.id);
     // A run that is not this proposal's own dev fix run never authorizes its holdout.
-    const recurrence = await record({ purpose: 'recurrence', split: 'holdout', results: results(proposal.holdout_incident_keys) });
+    const recurrence = await record({ purpose: 'recurrence' });
     await database('ai_fix_proposals').where({ id: proposal.id }).update({ dev_run_id: recurrence.run.id });
     await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
     const otherId = randomUUID();
@@ -184,12 +191,11 @@ test('export refuses a directory inside the repository, however it is spelled', 
   });
 
   test('a version bump carries the proposal only when a recurrence check on the new version still reproduces', async () => {
-    // The mistake still reproduces in dev too: a recurrence check needs no dev pass.
-    await record({ promptVersion: V13, results: results(proposal.dev_incident_keys, 'reproduces') });
-    const fixRun = (await database('ai_fix_proposals').where({ id: proposal.id }).first()).dev_run_id;
-    await expect(record({ purpose: 'recurrence', split: 'dev', promptVersion: V13 })).rejects.toMatchObject({ code: 'needs_holdout' });
-    const repro = await record({ purpose: 'recurrence', split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys, 'reproduces') });
-    expect(repro.run).toMatchObject({ purpose: 'recurrence', status: 'failed' });
+    const fixRun = (await record({ promptVersion: V13 })).run.id;
+    // The holdout stays sealed: a recurrence check replays the dev cases.
+    await expect(record({ purpose: 'recurrence', split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys) })).rejects.toMatchObject({ code: 'needs_dev' });
+    const repro = await record({ purpose: 'recurrence', promptVersion: V13, results: results(proposal.dev_incident_keys, 'reproduces') });
+    expect(repro.run).toMatchObject({ purpose: 'recurrence', split: 'dev', status: 'failed' });
     // A recurrence check is not the proposal's proof.
     expect(await database('ai_fix_proposals').where({ id: proposal.id }).first()).toMatchObject({ dev_run_id: fixRun, holdout_run_id: null });
     await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: repro.run.id, promptVersion: 'house_voice_v14', by: 'lane:test' }))
@@ -205,7 +211,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const fixHoldout = await record({ split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys, 'reproduces') });
     await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: fixHoldout.run.id, promptVersion: V13, by: 'lane:test' }))
       .rejects.toMatchObject({ code: 'needs_recurrence_run' });
-    const clean = await record({ purpose: 'recurrence', split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys) });
+    const clean = await record({ purpose: 'recurrence', promptVersion: V13 });
     await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: clean.run.id, promptVersion: V13, by: 'lane:test' }))
       .rejects.toMatchObject({ code: 'no_longer_reproduces' });
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).status).toBe('pending');
@@ -245,7 +251,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
     // The stored scheduling-intent flag reaches the replayed prompt, case by case.
     for (const c of cases) expect(c.user_prompt.endsWith('(scheduling)')).toBe(c.scheduling_intent);
     expect(new Set(cases.map((c) => c.scheduling_intent)).size).toBe(2);
-    expect(sched.unsupported_quotes).toHaveLength(2);
+    expect(sched.unsupported_quotes).toEqual([expect.stringMatching(/^Wednesday at \d+pm$/)]);
     // (The shared phone redactor takes the space before the number with it.)
     expect(sched.user_prompt).toMatch(/\n\nCUSTOMER: when are you coming\? text me at ?\[phone\]/);
     // Each case points at the system prompt for the voice profile it was drafted under.
@@ -270,9 +276,13 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const dry = await cli.run({ dbi: database, argv: ['record', `--file=${file}`], log: () => {} });
     expect(dry.recorded).toBe(false);
     expect(await database('ai_replay_runs').count('* as n').first()).toEqual({ n: '0' });
-    const done = await cli.run({ dbi: database, argv: ['record', `--file=${file}`, '--execute'], log: () => {} });
+    await expect(cli.run({ dbi: database, argv: ['record', `--file=${file}`, '--delete-export'], log: () => {} })).rejects.toMatchObject({ exitCode: 2 });
+    expect(fs.existsSync(dir)).toBe(true);
+    const done = await cli.run({ dbi: database, argv: ['record', `--file=${file}`, '--execute', '--delete-export'], log: () => {} });
     expect(done.run).toMatchObject({ status: 'passed', case_count: 10 });
-    fs.rmSync(dir, { recursive: true, force: true });
+    // The redacted cases do not outlive the recorded run.
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(lines.join('\n')).toMatch(/names of other people can remain/);
   });
 
   test('a facts-block gap, few-shot leak or verifier miss is refused: frozen inputs cannot reproduce it', async () => {
@@ -288,21 +298,39 @@ test('export refuses a directory inside the repository, however it is spelled', 
     for (const status of ['dismissed', 'superseded', 'insufficient_evidence']) {
       await database('ai_fix_proposals').where({ id: proposal.id }).update({ status });
       await expect(record()).rejects.toMatchObject({ code: 'proposal_closed' });
-      await expect(record({ purpose: 'recurrence', split: 'holdout', results: results(proposal.holdout_incident_keys) })).rejects.toMatchObject({ code: 'proposal_closed' });
+      await expect(record({ purpose: 'recurrence' })).rejects.toMatchObject({ code: 'proposal_closed' });
     }
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).dev_run_id).toBe(run.id);
   });
 
+  test('the holdout is exported only after the current dev run passed on this checkout', async () => {
+    const head = require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const drafter = { buildUserPromptFromFacts: () => 'u', buildSystemPromptWithProfile: () => ({ system: 's' }), currentPromptVersion: () => V12 };
+    const out = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')), 'out');
+    const exportHoldout = (dir) => cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=holdout', `--out=${dir}`], log: () => {}, drafter });
+    let dir = out();
+    await expect(exportHoldout(dir)).rejects.toMatchObject({ code: 'dev_not_passed' });
+    expect(fs.existsSync(dir)).toBe(false);
+    await record({ codeRef: SHA });
+    await expect(exportHoldout(out())).rejects.toMatchObject({ code: 'dev_not_passed' });
+    await record({ codeRef: head });
+    dir = out();
+    expect((await exportHoldout(dir)).exported).toBe(2);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'results-template.json'), 'utf8'))).toMatchObject({ code_ref: head, prompt_version: V12 });
+  });
+
   test('an empty split exports nothing and writes no files', async () => {
-    await database('ai_fix_proposals').where({ id: proposal.id }).update({ holdout_incident_keys: JSON.stringify([]) });
+    await database('ai_fix_proposals').where({ id: proposal.id }).update({ dev_incident_keys: JSON.stringify([]) });
     const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')), 'out');
-    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=holdout', `--out=${dir}`], log: () => {}, drafter: {} }))
+    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=dev', `--out=${dir}`], log: () => {}, drafter: { currentPromptVersion: () => V12 } }))
       .rejects.toMatchObject({ exitCode: 1 });
     expect(fs.existsSync(dir)).toBe(false);
   });
 
   test('the brief reads incidents, proposals, runs and recurrence without message text', async () => {
     await record();
+    // Another producer's unversioned draft is not a house-voice opportunity.
+    await database('message_drafts').insert({ id: randomUUID(), inbound_message: 'x', draft_response: 'y', prompt_version: null, created_at: new Date('2026-10-01T15:00:00Z') });
     const r = await report.buildReport({ dbi: database, now: new Date('2026-10-05T12:00:00Z'), days: 30, liveVersion: V12 });
     expect(r.week).toEqual([{ disposition: 'confirmed_mistake', cell: `${CELL.surface}/${CELL.failure_mode}`, n: 12 }]);
     expect(r.proposals[0]).toMatchObject({ status: 'pending', incidents: 12, dev: 10, holdout: 2, devRun: expect.objectContaining({ status: 'passed' }) });

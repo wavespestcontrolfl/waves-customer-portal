@@ -18,16 +18,18 @@
 //       from system-prompt.txt + the case's user_prompt and grade it
 //       (fixed | reproduces | inconclusive). Customer text: the dir must be
 //       outside the repository (the session scratchpad).
-//   record --file=<results.json> [--execute]
+//   record --file=<results.json> [--execute [--delete-export]]
 //       Validates and stores a run: { proposal_id, split, method, purpose
 //       (fix | recurrence), code_ref,
 //       prompt_version, drafter_model, notes, results: [{ incident_key,
 //       verdict, reason }] }. A fix's holdout run needs a passed dev run on
 //       the same code_ref and version, and stamps the proposal; a recurrence
-//       check (holdout, a newer version) needs neither and is what carry reads.
+//       check (dev cases, a newer version) needs neither and is what carry reads.
+//       A holdout export needs the proposal's current dev run passed on this
+//       checkout's commit and prompt version.
 //   carry --proposal=<id|8-char> --run=<holdout run uuid> --version=<live prompt version> [--execute]
-//       Carries a proposal to the live version when that holdout recurrence
-//       check still reproduces the mistake (owner ruling Q2).
+//       Carries a proposal to the live version when that recurrence check (dev
+//       cases) still reproduces the mistake (owner ruling Q2).
 //
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/correction-replay.js export --proposal=1a2b3c4d --split=dev --out=$SCRATCH/replay-1a2b3c4d
@@ -54,6 +56,7 @@ const { resolveId } = require('./fix-proposal-link');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COMMANDS = Object.freeze(['export', 'record', 'carry']);
 const VALUE_FLAGS = Object.freeze(['proposal', 'split', 'out', 'file', 'run', 'version', 'by']);
+const BOOLEAN_FLAGS = Object.freeze(['execute', 'delete-export']);
 
 function usageError(message, exitCode = 2) {
   return Object.assign(new Error(message), { exitCode });
@@ -64,12 +67,12 @@ function parseArgs(argv) {
   if (!COMMANDS.includes(command)) throw usageError(`first argument must be one of ${COMMANDS.join(', ')}`);
   const out = { command };
   for (const a of rest) {
-    const m = a.match(/^--([a-z]+)(?:=(.*))?$/);
+    const m = a.match(/^--([a-z-]+)(?:=(.*))?$/);
     if (!m) throw usageError(`unrecognized argument: ${a}`);
     const [, name, value] = m;
-    if (name === 'execute') {
-      if (value !== undefined) throw usageError('--execute takes no value');
-      out.execute = true;
+    if (BOOLEAN_FLAGS.includes(name)) {
+      if (value !== undefined) throw usageError(`--${name} takes no value`);
+      out[name === 'delete-export' ? 'deleteExport' : name] = true;
     } else if (VALUE_FLAGS.includes(name)) {
       if (!value) throw usageError(`--${name} needs a value`);
       out[name] = value;
@@ -104,13 +107,22 @@ function assertOutsideRepo(dir) {
   return resolved;
 }
 
+function gitHead() {
+  const { execFileSync } = require('child_process');
+  return execFileSync('git', ['-C', REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+}
+
 async function runExport({ dbi, args, log, drafter }) {
   if (!args.proposal || !args.split || !args.out) throw usageError('export needs --proposal, --split and --out');
   const dir = assertOutsideRepo(args.out);
   const id = await resolveId(dbi, args.proposal);
-  const { proposal, cases, missing } = await exportCases({ dbi, proposalId: id, split: args.split });
-  if (!cases.length) throw usageError(`the proposal has no ${args.split} cases to export${missing.length ? ` (${missing.length} without a stored draft)` : ''}`, 1);
   const d = drafter || require(path.join(REPO_ROOT, 'server', 'services', 'sms-shadow-drafter'));
+  // The code and prompt version this checkout replays: what the exported
+  // prompts are rendered from, and what a holdout export must match.
+  const codeRef = gitHead();
+  const promptVersion = d.currentPromptVersion();
+  const { proposal, cases, missing } = await exportCases({ dbi, proposalId: id, split: args.split, codeRef, promptVersion });
+  if (!cases.length) throw usageError(`the proposal has no ${args.split} cases to export${missing.length ? ` (${missing.length} without a stored draft)` : ''}`, 1);
   // One system prompt per voice profile the drafts were written under, as
   // THIS checkout renders it with that profile's stored text.
   const versions = [...new Set(cases.map((c) => c.voice_profile_version).filter((v) => v != null))];
@@ -147,18 +159,30 @@ async function runExport({ dbi, args, log, drafter }) {
     split: args.split,
     method: 'subagent',
     purpose: 'fix',
-    code_ref: '<git sha of the checkout that rendered system-prompt.txt>',
-    prompt_version: d.currentPromptVersion(),
+    code_ref: codeRef,
+    prompt_version: promptVersion,
     drafter_model: '<subagent model>',
     notes: null,
     results: cases.map((c) => ({ incident_key: c.incident_key, verdict: null, reason: null })),
   }, null, 2)}\n`);
   log(`exported ${cases.length} ${args.split} case(s) of ${String(proposal.id).slice(0, 8)} (${proposal.surface}/${proposal.failure_mode}) to ${dir}`);
+  log('  customer text is redacted, but names of other people can remain: keep this folder in the session scratchpad and remove it with `record --execute --delete-export` once the run is stored');
   if (missing.length) log(`  ${missing.length} incident(s) had no stored draft and were skipped`);
   return { exported: cases.length, missing: missing.length };
 }
 
+// Owner ruling 2026-10-02: exported cases may sit in the session scratchpad
+// (never the repo) only until the run is recorded. Removes the folder only
+// when it is an export folder (it holds cases.jsonl) outside the repository.
+function removeExportDir(dir, log) {
+  assertOutsideRepo(dir);
+  if (!fs.existsSync(path.join(dir, 'cases.jsonl'))) throw usageError(`${dir} is not an export folder (no cases.jsonl); nothing deleted`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  log(`deleted the export folder ${dir}`);
+}
+
 async function runRecord({ dbi, args, log }) {
+  if (args.deleteExport && !args.execute) throw usageError('--delete-export runs only with --execute (after the run is stored)');
   if (!args.file) throw usageError('record needs --file');
   let body;
   try {
@@ -181,6 +205,7 @@ async function runRecord({ dbi, args, log }) {
     by: args.by || 'lane:correction-loop',
     dryRun: !args.execute,
   });
+  if (args.deleteExport && args.execute) removeExportDir(path.dirname(path.resolve(args.file)), log);
   log(`${args.execute ? 'RECORDED' : 'DRY RUN (add --execute to write)'}: ${run.purpose} ${run.split} run ${run.id ? String(run.id).slice(0, 8) : '(new)'} ${run.status} — ${run.fixed_count} fixed, ${run.reproduces_count} reproduce, ${run.inconclusive_count} inconclusive of ${run.case_count}; exact production model: no`);
   return { recorded: Boolean(args.execute), run };
 }

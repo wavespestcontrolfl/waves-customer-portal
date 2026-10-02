@@ -13,8 +13,9 @@
 // PR and replay runs; recurrence per cell per prompt version over --days.
 //
 // Recurrence is attributed to the version and time the DRAFT was produced,
-// never when it was judged. Opportunities are every inbound-reply draft on
-// that version (campaign and backfill drafts excluded), with the reviewed
+// never when it was judged. Opportunities are every house-voice inbound
+// reply draft on that version (campaign, backfill and unversioned drafts
+// from other producers excluded), with the reviewed
 // share beside the rate: judged / drafts and human-replied / drafts. A
 // version is "inconclusive" under 20 drafts, or when its judged share fell by
 // more than a third against the version before it. Prints ids, cells and
@@ -69,8 +70,11 @@ async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = nul
   const drafts = await dbi({ md: 'message_drafts' })
     .leftJoin({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
     .where('md.created_at', '>=', since)
+    // House-voice inbound replies only: the drafts the shadow judge grades
+    // (other producers, e.g. estimate clarify asks, write unversioned rows).
     .whereNull('md.campaign_type')
-    .whereRaw("COALESCE(md.prompt_version, '') NOT LIKE '%backfill'")
+    .where('md.prompt_version', 'like', 'house_voice%')
+    .whereRaw("md.prompt_version NOT LIKE '%backfill'")
     .groupBy('md.prompt_version')
     .select('md.prompt_version')
     .count('md.id as drafts')

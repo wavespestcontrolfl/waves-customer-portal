@@ -7,14 +7,16 @@
  *
  *   exportCases       — the frozen evidence for one split of one proposal
  *                       (customer text: the caller writes it OUTSIDE the repo).
+ *                       The holdout is exported only after the proposal's
+ *                       current dev run passed on the same code and version.
  *   recordReplayRun   — validates the verdicts against the proposal's split,
  *                       computes the run status, stores run + results and
  *                       stamps the proposal's dev_run_id / holdout_run_id.
  *                       A fix's holdout run needs a PASSED dev run on the
- *                       same code and version; a recurrence check (holdout
+ *                       same code and version; a recurrence check (dev
  *                       only) needs none and never stamps the proposal.
- *   carryForward      — after a prompt-version bump, a holdout recurrence
- *                       check on the new version that still reproduces the mistake carries the
+ *   carryForward      — after a prompt-version bump, a recurrence check on
+ *                       the dev cases of the new version that still reproduces the mistake carries the
  *                       proposal (and its count) to the new version (owner
  *                       ruling Q2: count across bumps only when a replay still
  *                       reproduces).
@@ -84,7 +86,7 @@ function scrubCaseText(text, customer) {
  * given, the customer's text, the person's reply and what the two readers
  * quoted. SMS only (the area whose incident_key is a message_drafts id).
  */
-async function exportCases({ dbi, proposalId, split }) {
+async function exportCases({ dbi, proposalId, split, codeRef = null, promptVersion = null }) {
   if (!SPLITS.includes(split)) throw new TransitionError('bad_split', `split must be ${SPLITS.join(' or ')}`);
   const proposal = await dbi('ai_fix_proposals').where({ id: proposalId }).first();
   if (!proposal) throw new TransitionError('not_found', `no proposal ${proposalId}`);
@@ -92,6 +94,10 @@ async function exportCases({ dbi, proposalId, split }) {
   if (!REPLAYABLE_SURFACES.includes(proposal.surface)) {
     throw new TransitionError('unsupported_surface', `${proposal.surface} cannot be replayed from frozen inputs (a new fact, the exemplars or the verify loop are not in them): prove the fix with its fixture test and new incidents after it ships`);
   }
+  // Held-out cases are revealed only to prove a candidate that already
+  // passed its dev cases on this code and version; before that, seeing them
+  // would let the fix be tuned against its own proof.
+  if (split === 'holdout') await assertCurrentDevPassed(dbi, proposal, codeRef, promptVersion);
   const keys = splitKeys(proposal, split);
   if (!keys.length) return { proposal, cases: [], missing: [] };
   const rows = await dbi({ i: 'ai_incidents' })
@@ -117,7 +123,8 @@ async function exportCases({ dbi, proposalId, split }) {
     seen.add(r.incident_key);
     const customer = { first_name: r.first_name, last_name: r.last_name };
     const scrub = (t) => (t == null ? null : scrubCaseText(t, customer));
-    const quotes = (r.adjudication?.readers || []).map((rd) => rd?.answer?.quote).filter(Boolean).map(scrub);
+    // The first reader's verified quote, as adjudication stores it.
+    const quotes = [r.adjudication?.model?.quote].filter(Boolean).map(scrub);
     // A gratitude draft was prompted with the reply production approved for
     // this customer by name: rebuilt the same way, then scrubbed like the rest.
     const intentName = r.intent || r.judge_intent || null;
@@ -199,8 +206,11 @@ async function recordReplayRun({
     }
     if (!keys.length) throw new TransitionError('empty_split', `the proposal has no ${split} incidents`);
 
-    if (purpose === 'recurrence' && split !== 'holdout') {
-      throw new TransitionError('needs_holdout', 'a recurrence check replays the holdout cases');
+    // The holdout stays sealed until a fix candidate has passed dev, so a
+    // recurrence check (is the mistake still happening on a newer version?)
+    // replays the dev cases.
+    if (purpose === 'recurrence' && split !== 'dev') {
+      throw new TransitionError('needs_dev', 'a recurrence check replays the dev cases; the holdout is sealed for fix proof');
     }
     if (purpose === 'fix' && split === 'holdout') {
       await assertCurrentDevPassed(trx, proposal, codeRef, promptVersion);
@@ -250,8 +260,8 @@ async function recordReplayRun({
 }
 
 /**
- * Carry an open proposal to the live prompt version when a holdout replay ON
- * that version still reproduces the mistake: the old proposal is superseded
+ * Carry an open proposal to the live prompt version when a recurrence check
+ * of its dev cases ON that version still reproduces the mistake: the old proposal is superseded
  * and a new pending one carries its incidents and split. A replay that no
  * longer reproduces is refused here — that fix shipped, and the lane closes
  * the proposal as shipped with the PR that fixed it.
@@ -266,8 +276,8 @@ async function carryForward({ dbi, proposalId, runId, promptVersion, by, now = n
     if ((old.prompt_version ?? null) === promptVersion) throw new TransitionError('same_version', 'the proposal is already on that version');
     const run = await trx('ai_replay_runs').where({ id: runId, proposal_id: proposalId }).first();
     if (!run) throw new TransitionError('not_found', `run ${runId} is not a run of this proposal`);
-    if (run.purpose !== 'recurrence' || run.split !== 'holdout') {
-      throw new TransitionError('needs_recurrence_run', 'carrying forward needs a holdout recurrence check on the new version');
+    if (run.purpose !== 'recurrence' || run.split !== 'dev') {
+      throw new TransitionError('needs_recurrence_run', 'carrying forward needs a recurrence check (dev cases) on the new version');
     }
     if (run.prompt_version !== promptVersion) throw new TransitionError('wrong_version', `the run replayed ${run.prompt_version || 'no version'}, not ${promptVersion}`);
     if (run.reproduces_count === 0) {
@@ -287,7 +297,7 @@ async function carryForward({ dbi, proposalId, runId, promptVersion, by, now = n
       // The watermark stays where the old proposal's evidence ended, so
       // incidents adjudicated since are still counted as fresh next week.
       evidence_cutoff_at: old.evidence_cutoff_at,
-      proposal: `Carried from ${String(old.id).slice(0, 8)} (${old.prompt_version || 'unversioned'}): holdout replay ${String(run.id).slice(0, 8)} on ${promptVersion} still reproduced ${run.reproduces_count} of ${run.case_count}.\n\n${old.proposal}`,
+      proposal: `Carried from ${String(old.id).slice(0, 8)} (${old.prompt_version || 'unversioned'}): recurrence check ${String(run.id).slice(0, 8)} on ${promptVersion} still reproduced ${run.reproduces_count} of ${run.case_count}.\n\n${old.proposal}`,
       supersedes: old.id,
       history: JSON.stringify([{ at: now, by, from: null, to: 'pending', fields: { carried_from: old.id, run_id: run.id } }]),
     };
