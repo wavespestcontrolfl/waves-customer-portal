@@ -131,6 +131,23 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     expect(await trx('sms_offers').where({ agent_decision_id: recoverable }).first('status')).toMatchObject({ status: 'open' });
   }));
 
+  test('three offers recorded out of order (B, C, then A recovered) chain in send order', () => inTrx(async (trx) => {
+    const phone = '9415550109';
+    const visit = { scheduledServiceId: '11111111-1111-4111-8111-111111111111' };
+    const at = (h) => new Date(SENT_AT.getTime() + h * 3600000);
+    const send = async (h) => offers.recordOfferForSend({ agentDecisionId: await insertDecision(trx, { lookup: visit }), outgoingBody: BODY, to: phone, sentAt: at(h), dbh: trx });
+    const b = await send(1);
+    const c = await send(2);
+    const a = await send(0);
+    expect(a).toMatchObject({ recorded: true, late: true });
+    const rows = Object.fromEntries((await trx('sms_offers').where({ phone_last10: phone }).select('id', 'status', 'superseded_by', 'closed_at')).map((r) => [r.id, r]));
+    expect(rows[a.id]).toMatchObject({ status: 'superseded', superseded_by: b.id });
+    expect(new Date(rows[a.id].closed_at).toISOString()).toBe(at(1).toISOString());
+    expect(rows[b.id]).toMatchObject({ status: 'superseded', superseded_by: c.id });
+    expect(new Date(rows[b.id].closed_at).toISOString()).toBe(at(2).toISOString());
+    expect(rows[c.id]).toMatchObject({ status: 'open', superseded_by: null, closed_at: null });
+  }));
+
   test('the database refuses a second open offer for one phone and kind', () => inTrx(async (trx) => {
     const base = { phone_last10: '9415550103', kind: 'move_visit', slots: '[]', sent_at: SENT_AT, expires_at: SENT_AT, status: 'open' };
     await trx('sms_offers').insert({ ...base, agent_decision_id: await insertDecision(trx) });

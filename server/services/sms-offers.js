@@ -159,6 +159,38 @@ function resolveSlot(pair, sentAt, dayLabel) {
 }
 
 /**
+ * Rebuild one phone+kind chain of standing offers (open or superseded; any
+ * later status, such as accepted, is final and left alone) in send order.
+ * Demotes before promoting so the one-open index never sees two open rows.
+ * Returns how many previously open rows were demoted and the open row's id.
+ */
+async function relinkOfferChain(trx, phone, kind) {
+  const chain = await trx('sms_offers')
+    .where({ phone_last10: phone, kind })
+    .whereIn('status', ['open', 'superseded'])
+    .orderBy([{ column: 'sent_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .select('id', 'status', 'sent_at', 'superseded_by', 'closed_at');
+  let demoted = 0;
+  for (let i = 0; i < chain.length - 1; i += 1) {
+    const cur = chain[i];
+    const next = chain[i + 1];
+    const closedAt = new Date(next.sent_at);
+    const same = cur.status === 'superseded' && cur.superseded_by === next.id
+      && cur.closed_at && new Date(cur.closed_at).getTime() === closedAt.getTime();
+    if (same) continue;
+    if (cur.status === 'open') demoted += 1;
+    await trx('sms_offers').where({ id: cur.id })
+      .update({ status: 'superseded', superseded_by: next.id, closed_at: closedAt, updated_at: trx.fn.now() });
+  }
+  const last = chain[chain.length - 1];
+  if (last && last.status !== 'open') {
+    await trx('sms_offers').where({ id: last.id })
+      .update({ status: 'open', superseded_by: null, closed_at: null, updated_at: trx.fn.now() });
+  }
+  return { demoted, openId: last ? last.id : null };
+}
+
+/**
  * Record the offer an accepted send carried. Idempotent per decision; a newer
  * offer to the same phone for the same kind supersedes the open one. Returns
  * { recorded: true, id } or { recorded: false, reason } and never throws.
@@ -179,33 +211,16 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['sms_offers', row.phone_last10]);
       const existing = await trx('sms_offers').where({ agent_decision_id: row.agent_decision_id }).first('id');
       if (existing) return { recorded: false, reason: 'already_recorded', id: existing.id };
-      // The lock orders the writes, not the sends: a record can land after a
-      // newer text's. The open offer is always the latest SENT one, so a late
-      // record of an older text is kept as already superseded.
-      const newer = await trx('sms_offers')
-        .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
-        .where('sent_at', '>', row.sent_at)
-        .orderBy('sent_at', 'asc')
-        .first('id', 'sent_at');
-      // closed_at is when the offer stopped standing: the superseding text's
-      // send time, not this write's (a recovered write can land hours late,
-      // and reports rebuild past state from closed_at).
-      if (newer) {
-        const [late] = await trx('sms_offers')
-          .insert({ ...row, status: 'superseded', superseded_by: newer.id, closed_at: newer.sent_at })
-          .returning('id');
-        return { recorded: true, id: late?.id || late, superseded: 0, late: true };
-      }
-      const prior = await trx('sms_offers')
-        .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
-        .update({ status: 'superseded', closed_at: row.sent_at, updated_at: trx.fn.now() })
-        .returning('id');
-      const [inserted] = await trx('sms_offers').insert(row).returning('id');
+      // The lock orders the writes, not the sends: a record can land after
+      // newer texts' (a recovered write). So the new row goes in closed, and
+      // the chain for this phone and kind is rebuilt in SEND order: each offer
+      // is superseded by the next one sent, closed at that text's send time,
+      // and only the latest sent offer stays open. Same result whatever order
+      // the writes arrive in.
+      const [inserted] = await trx('sms_offers').insert({ ...row, status: 'superseded' }).returning('id');
       const id = inserted?.id || inserted;
-      if (prior.length) {
-        await trx('sms_offers').whereIn('id', prior.map((p) => p.id || p)).update({ superseded_by: id });
-      }
-      return { recorded: true, id, superseded: prior.length };
+      const { demoted, openId } = await relinkOfferChain(trx, row.phone_last10, row.kind);
+      return { recorded: true, id, superseded: demoted, late: openId !== id };
     });
   } catch (err) {
     // Code only, never the message: a Knex error embeds the bound phone.
