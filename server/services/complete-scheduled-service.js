@@ -13388,6 +13388,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // paid template; the post-block recovery restores the separate
               // receipt the claim stood down.
             }
+            // GATE_PAF_PREPAY (owner ruling 2026-10-02, first visit only): when
+            // this performed visit releases a deferred year's charge, say the
+            // year is being charged now instead of "nothing due today".
+            // Disabled / missing template or no facts → the regular text below.
+            if (!body && annualPrepayCovered
+              && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)) {
+              const firstCharge = await require('../services/paf-prepay-release').firstChargeCompletionFacts(svc);
+              if (firstCharge) {
+                sentSmsType = 'service_complete_annual_prepay_first_charge';
+                body = await renderTemplate(sentSmsType, {
+                  ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
+                }, paidTemplateContext);
+              }
+            }
             if (!body && annualPrepayCovered) {
               sentSmsType = 'service_complete_annual_prepay';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);

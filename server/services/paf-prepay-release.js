@@ -436,8 +436,60 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
+// Completion text for the first visit of a deferred year (owner ruling
+// 2026-10-02): when THIS visit is the one that releases the year's charge —
+// held by the deferred year, and the job still waiting for its first visit —
+// the text says the year is being charged now. Returns { amount, methodLine }
+// or null (any other visit, or anything unreadable: the regular annual-prepay
+// text is the safe fallback).
+async function firstChargeCompletionFacts(svc, conn = db) {
+  try {
+    if (!svc || svc.prepaid_method || !svc.customer_id) return null;
+    let estimateId = svc.source_estimate_id || null;
+    if (!estimateId && svc.recurring_parent_id) {
+      const parent = await conn('scheduled_services')
+        .where({ id: svc.recurring_parent_id, customer_id: svc.customer_id }).first('source_estimate_id');
+      estimateId = parent?.source_estimate_id || null;
+    }
+    if (!estimateId) return null;
+    const row = await conn('estimates').where({ id: estimateId }).first('estimate_data');
+    const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
+    if (!job || job.deferred_to_first_visit !== true || job.status !== AWAITING) return null;
+    if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
+    const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
+    if (!(await pafDeferredPrepayCoversVisit(svc, conn, { throwOnError: true }))) return null;
+    const method = job.payment_method_row_id
+      ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('method_type')
+      : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('method_type');
+    const bank = ['us_bank_account', 'ach'].includes(String(method?.method_type || ''));
+    // The acknowledged total is a CEILING (owner R1): account credit the
+    // charge will draw lowers it. Credit that covers the year means nothing
+    // is charged, so the regular "nothing due today" text is the true one;
+    // credit that only lowers it makes the amount "up to" the ceiling.
+    const invoice = job.invoice_id
+      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'total', 'credit_applied')
+      : null;
+    if (!invoice) return null;
+    const credit = require('./customer-credit');
+    let creditLowers = false;
+    if (await credit.autoApplyWouldApply(invoice, conn)) {
+      const balance = await credit.getBalance(invoice.customer_id, conn);
+      if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
+      creditLowers = true;
+    } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
+      return null;
+    }
+    const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
+  } catch (err) {
+    logger.warn(`[paf-prepay] first-charge completion facts unavailable for visit ${svc?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   AWAITING,
+  firstChargeCompletionFacts,
   STALE_DAYS,
   releaseDeferredPrepayCharges,
   reconcileAlerts,
