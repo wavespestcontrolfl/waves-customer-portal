@@ -1294,6 +1294,8 @@ describe('retired topics', () => {
       expect(gate.evaluate(blog({ query, category: 'lawn-care' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
     }
     expect(gate.evaluate(blog({ query: 'dollar weed control', category: 'lawn-care' }), { requireCorpus: false }).findings.filter((x) => x.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    // Only in the other targeting fields (codex r4).
+    expect(gate.evaluate(blog({ query: 'lawn fungus guide', title: 'Lawn Fungus in Venice', category: 'lawn-care', targeting: 'Dollar spot on St. Augustine: what to do' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/lawn-care/venice-dollar-spot-fungus-lawn-treatment/' });
     const row = await gate.evaluateBlogPostRow({ slug: 'venice-dollar-spot-fungus-lawn-treatment', status: 'published' });
     expect(row.skipped).toBe('already_live');
     expect(gate.evaluate({ actionType: 'refresh_existing_page', query: 'dollar spot' }, { requireCorpus: false }).ok).toBe(true);

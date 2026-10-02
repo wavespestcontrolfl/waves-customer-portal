@@ -1007,7 +1007,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // → compare against all (conservative).
   const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   // Retired topics need no corpus: judged in every mode, before any fetch.
-  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
+  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, targeting: candidate.targeting, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
   const idx = index || (corpus ? indexCorpus(corpus) : null);
   if (!idx) {
     // Pre-spend: a geo or retired-topic verdict needs no corpus and stands on its own.
@@ -1211,7 +1211,7 @@ function retiredIndex() {
   return retiredIndexCache;
 }
 
-function retiredTopicFindings({ query = '', title = '', slug = '', category = null, leafOnly = false, urlOnly = false } = {}) {
+function retiredTopicFindings({ query = '', title = '', slug = '', category = null, targeting = '', leafOnly = false, urlOnly = false } = {}) {
   const idx = retiredIndex();
   const url = normalizeSlug(slug);
   const leaf = slugLeaf(url);
@@ -1230,6 +1230,14 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
       // key, so a lawn "rainy season" guide would otherwise read as the
       // retired pest-control rainy-season post. Unknown category: all.
       if (post && (!category || [post.url, post.merged_into].some((u) => categoryFromSlug(u) === category))) { hit = post; where = label; break; }
+    }
+    // A live owner's topic also counts when it appears only in the other
+    // targeting fields (meta description, secondary keywords, H2/H3s).
+    if (!hit && targeting) {
+      const words = new Set(topicKey(targeting).split(' '));
+      const owner = idx.liveOwners.find((o) => o.words.every((w) => words.has(w))
+        && (!category || [o.post.url, o.post.merged_into].some((u) => categoryFromSlug(u) === category)));
+      if (owner) { hit = owner.post; where = 'targeting (meta description / secondary keywords / headings)'; }
     }
   }
   if (!hit) return [];
