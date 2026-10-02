@@ -60,6 +60,9 @@ const PROOF_RETRY_LAST_DAY = 10;
 // catch-up can tell "edited since the last attempt" from "same blocked
 // draft as yesterday" without guessing from timestamps.
 const PROOF_ATTEMPT_ACTION = 'newsletter.pest_insider_proof_attempted';
+// sendNewsletterProof outcomes that come from the locked event lineup (live
+// official-page recheck, eligibility) rather than the validator or audience.
+const LIVE_RECHECK_REASONS = new Set(['live_reverify_failed', 'event_selection_invalid']);
 
 function proofGateOn() {
   return require('../config/feature-gates').pestInsiderProofLive();
@@ -212,9 +215,15 @@ async function runPestInsiderAutopilot({ now = new Date() } = {}) {
  */
 async function retryPestInsiderProof({ now = new Date() } = {}) {
   if (!proofGateOn()) return { skipped: true, reason: 'proof gate off' };
-  if (etParts(now).day > PROOF_RETRY_LAST_DAY) {
-    return { skipped: true, reason: `past day ${PROOF_RETRY_LAST_DAY} of the month (ET)` };
-  }
+  // The day-10 cutoff keeps a stale, never-proofed draft from being proofed
+  // late in the month. It does not apply to a CORRECTED draft: one whose
+  // proof was sent and then released by a refused approval (proof_sent_at
+  // cleared, proof_refused_at stamped) and that passes
+  // validation now — without this it could never be
+  // re-proofed after day 10 (codex #5187 follow-up). That draft is checked
+  // below, once it is loaded.
+  const pastCutoff = etParts(now).day > PROOF_RETRY_LAST_DAY;
+  const pastCutoffSkip = { skipped: true, reason: `past day ${PROOF_RETRY_LAST_DAY} of the month (ET)` };
 
   const { start, end } = etMonthBounds(now);
   const draft = await db('newsletter_sends')
@@ -224,7 +233,10 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
     .where('created_at', '>=', start)
     .where('created_at', '<', end)
     .first();
-  if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
+  if (!draft) return pastCutoff ? pastCutoffSkip : { skipped: true, reason: 'no unproofed draft this month' };
+  if (pastCutoff && !(approvalWasRefused(draft) && !(await draftFailsValidation(draft)))) {
+    return pastCutoffSkip;
+  }
 
   // Deterministic failure: the validator blocks this draft, nobody has
   // edited it since the last proof attempt, and that attempt ended in
@@ -245,6 +257,18 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
       logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
       return { skipped: true, reason: 'validation_failed', sendId: draft.id };
     }
+    // A blocked live event recheck / event selection is deterministic for an
+    // unedited draft too: the notice already told the owner to swap the
+    // event, and only an edit (a new lineup) changes the answer. Without this
+    // a refusal after the day-10 cutoff (proof_refused_at set, validator
+    // passing) would be re-proofed — and re-notified — on every tick for the
+    // rest of the month (codex #5414 round 3 P2). The edit check above is the
+    // whole test: a corrected draft has updated_at after the last attempt and
+    // is re-proofed once.
+    if (LIVE_RECHECK_REASONS.has(lastAttempt.reason)) {
+      logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: ${lastAttempt.reason} and the draft has not been edited since the last attempt`);
+      return { skipped: true, reason: lastAttempt.reason, sendId: draft.id };
+    }
     if (lastAttempt.reason === 'zero_recipients' && await audienceStillEmpty(draft)) {
       logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: segment still matches 0 subscribers since the last attempt`);
       return { skipped: true, reason: 'zero_recipients', sendId: draft.id };
@@ -253,6 +277,16 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
 
   const proof = await sendProofFor(draft.id);
   return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
+}
+
+// True when an approval reply was refused for this draft: the releases in
+// newsletter-proof.js that clear proof_sent_at after a refused approval stamp
+// proof_refused_at. It is its own column — not proof_approval_email_id, which
+// survives a cancelled schedule — and cancel-schedule, the PATCH invalidation
+// and every scheduler/sender revert-to-draft clear it, so an approval the
+// owner cancelled can never look like a refusal.
+function approvalWasRefused(draft) {
+  return Boolean(draft?.proof_refused_at) && !draft.proof_approved_at;
 }
 
 function editedSince(draft, at) {
