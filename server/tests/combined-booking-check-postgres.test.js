@@ -257,6 +257,26 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('with no budget left a visit due TODAY still rings (tomorrow it is history); later ones wait', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const soon = await acceptedEstimate(trx, lines);
+      const later = await acceptedEstimate(trx, lines);
+      await repair(trx, soon);
+      const today = require('../utils/datetime-et').etDateString(new Date());
+      const lawnChild = (await rowsOf(trx, soon.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null, scheduled_date: today });
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 0 })).toMatchObject({ problems: 1, held: 1 });
+      expect(await alertsOf(trx, soon.estimateId)).toHaveLength(1);
+      expect(await alertsOf(trx, later.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a standing bell gaining a problem past the budget is left untouched until a run with room rings it', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

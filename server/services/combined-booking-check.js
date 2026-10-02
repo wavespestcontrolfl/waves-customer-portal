@@ -68,6 +68,11 @@ const DEFAULT_RING_BUDGET = 10;
 
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
+// A seasonal visit this close is expected to be routed (the watchdog's own
+// upcoming look-ahead).
+const ROUTING_HORIZON_DAYS = 14;
+const addDaysET = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+
 const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
 
@@ -149,25 +154,33 @@ function rowFamilies(row) {
 
 // Time + technician on every live row, except a SEASONAL mosquito series
 // (catalog mosquito_seasonal, the Feb–Oct program) whose first visit rolled
-// past the booking's first day: the converter books it unslotted on purpose
-// until the office routes that season (estimate-converter.js, the
-// seasonalMosquito promotion). A monthly mosquito series is checked like any
-// other.
-function checkTimeAndTech(dated, families, { firstDay, byId }) {
+// past the booking's first day, while its visit is still beyond the routing
+// horizon: the converter books it unslotted on purpose until the office
+// routes that season (estimate-converter.js, the seasonalMosquito
+// promotion), and once a visit is within ROUTING_HORIZON_DAYS it must have
+// been routed. A monthly mosquito series is checked like any other.
+// Each problem carries `earliest`, the soonest day it affects.
+function checkTimeAndTech(dated, families, { firstDay, byId, todayET }) {
+  const routingHorizon = todayET ? addDaysET(todayET, ROUTING_HORIZON_DAYS) : null;
   const untimed = new Map();
+  const earliest = new Map();
   const seasonalUnslotted = (row) => {
     const root = byId.get(String(row.recurring_parent_id)) || row;
     return (root.catalog_service_key || root.service_key_snapshot) === 'mosquito_seasonal'
-      && dateOnly(root.scheduled_date) > firstDay;
+      && dateOnly(root.scheduled_date) > firstDay && (!routingHorizon || row.day > routingHorizon);
   };
   for (const row of dated) {
     if (row.window_start && row.technician_id) continue;
     if (seasonalUnslotted(row)) continue;
-    for (const family of rowFamilies(row).filter((f) => families.has(f))) untimed.set(family, (untimed.get(family) || 0) + 1);
+    for (const family of rowFamilies(row).filter((f) => families.has(f))) {
+      untimed.set(family, (untimed.get(family) || 0) + 1);
+      if (!earliest.has(family)) earliest.set(family, row.day); // rows arrive in date order
+    }
   }
   // In the booking's own service order, so the alert reads pest, lawn, T&S.
   return [...families].filter((family) => untimed.has(family)).map((family) => ({
-    code: 'missing_time_tech', families: [family], text: `${untimed.get(family)} ${lowerLabel(family)} visits missing time/tech`,
+    code: 'missing_time_tech', families: [family], earliest: earliest.get(family),
+    text: `${untimed.get(family)} ${lowerLabel(family)} visits missing time/tech`,
   }));
 }
 
@@ -227,7 +240,7 @@ function evaluateCombinedBooking(ctx) {
     .filter((row) => !todayET || row.day >= todayET)
     .sort((a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
-  const problems = checkTimeAndTech(dated, families, { firstDay, byId });
+  const problems = checkTimeAndTech(dated, families, { firstDay, byId, todayET });
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
   return { ok: !problems.length && !deferred, deferred, heldFamilies, problems, labels };
@@ -476,6 +489,10 @@ function candidateQuery(conn, { now, todayET, standing }) {
     .orderBy('e.accepted_at', 'asc');
 }
 
+// The soonest day a booking's problems affect (a held finding has none, so it
+// sorts last).
+const earliestDay = (problems) => problems.map((problem) => problem.earliest).filter(Boolean).sort()[0] || '9999-12-31';
+
 // A bell that actually rang this run (created, or a refresh that rang): what
 // the budget counts. A silent refresh or a suppressed test row costs nothing.
 const rang = (row) => !!row && !row.suppressed && (!row.deduped || row.rung === true);
@@ -533,7 +550,9 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const gaps = work.length ? await require('./recurring-schedule-audit')
     .acceptedRecurringScheduleGaps(conn, { now, cutoff: now, estimateIds: work.map((estimate) => estimate.id), coverage }) : [];
 
-  let rings = 0;
+  // Judge everything first, then post the problems soonest-first, so the
+  // budget is spent where a visit is closest.
+  const toPost = [];
   for (const estimate of work) {
     const id = String(estimate.id);
     const known = standing.get(id);
@@ -550,22 +569,28 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         continue;
       }
       result.checked += 1;
-      // Anything that would ring (a new bell, or a standing one gaining a
-      // family it did not carry) spends the budget; past it the booking is
-      // left as it is and found again on a later run.
-      const wouldRing = !known || problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
-      if (wouldRing && rings >= ringBudget) {
-        result.held += 1;
-        continue;
-      }
-      const row = await postAlert(estimate, { ...checked.verdict, problems }, checked.ctx, { raise });
-      if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${id}`); continue; }
-      if (rang(row)) rings += 1;
-      result.problems += 1;
+      toPost.push({ estimate, known, verdict: { ...checked.verdict, problems }, ctx: checked.ctx, earliest: earliestDay(problems) });
     } catch (err) {
       result.failed += 1;
       logger.warn(`[combined-booking-check] estimate ${id} check failed: ${err.message}`);
     }
+  }
+
+  let rings = 0;
+  for (const { estimate, known, verdict, ctx, earliest } of toPost.sort((a, b) => a.earliest.localeCompare(b.earliest))) {
+    // Anything that would ring (a new bell, or a standing one gaining a family
+    // it did not carry) spends the budget; past it the booking is left as it
+    // is and found again on a later run. A visit due TODAY is the exception:
+    // tomorrow it is history and would never be found again, so it rings.
+    const wouldRing = !known || verdict.problems.flatMap(problemKeys).some((key) => !known.keys.has(key));
+    if (wouldRing && rings >= ringBudget && earliest > todayET) {
+      result.held += 1;
+      continue;
+    }
+    const row = await postAlert(estimate, verdict, ctx, { raise });
+    if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${estimate.id}`); continue; }
+    if (rang(row)) rings += 1;
+    result.problems += 1;
   }
   return result;
 }

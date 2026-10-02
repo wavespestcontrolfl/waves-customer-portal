@@ -144,6 +144,17 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], allCancelled, { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) })).toBeNull();
   });
 
+  test('the seasonal exemption ends once a visit is within the routing horizon (it should be routed by then)', () => {
+    const later = '2027-02-01';
+    const mosq = series({ key: 'mosquito_seasonal', type: 'Mosquito Control', visits: 3, spacing: 42, parentOverrides: { scheduled_date: later, ...untimed }, childOverrides: untimed })
+      .map((row) => (row.recurring_parent_id ? { ...row, scheduled_date: later } : row));
+    const at = (todayET) => evaluateCombinedBooking({ estimate: estimate([PEST, MOSQ]), rows: [...pestRows(), ...mosq], todayET });
+    expect(at('2026-10-04').ok).toBe(true); // months out: still waiting for routing
+    const near = at('2027-01-25'); // a week out: should have been routed
+    expect(codes(near)).toEqual(['missing_time_tech']);
+    expect(near.problems[0].earliest).toBe(later);
+  });
+
   test('every family skipped: nothing judged, and only on-hold findings survive (a stopped one\'s close)', () => {
     const both = new Set(['pest_control', 'lawn_care']);
     // Pest on hold, lawn stopped for good (its visits cancelled after one completed).
