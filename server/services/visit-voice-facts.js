@@ -134,10 +134,11 @@ function treatmentAssertion(quote) {
   return match ? { offset: match.index, length: match[0].length } : null;
 }
 
-// What a place's quote asserts there: the treatment word of the clause that
-// names the place ("did not treat inside but sprayed outside" asserts
-// "sprayed" for outside and "treat" for inside), so a denial about one
-// place never decides another (codex local r18 on #5538). A quote that does
+// What a place's quote asserts there: the treatment word that governs the
+// place, the nearest one before it in its clause ("sprayed outside and did
+// not treat inside" asserts "sprayed" for outside and "treat" for inside),
+// else the nearest after it ("inside: sprayed"), so a denial about one place
+// never decides another (codex local r18, r19 on #5538). A quote that does
 // not name the place in its plain words is judged at its first treatment
 // word, as before.
 const CLAUSE_BREAK_RE = /[,;.!?]|\bbut\b/g;
@@ -149,8 +150,10 @@ function areaAssertion(area) {
     const breaks = [...quote.matchAll(CLAUSE_BREAK_RE)].map((m) => m.index);
     const from = Math.max(0, ...breaks.filter((at) => at < place.index));
     const to = Math.min(quote.length, ...breaks.filter((at) => at > place.index));
-    const match = TREATMENT_WORD_RE.exec(quote.slice(from, to));
-    return match ? { offset: from + match.index, length: match[0].length } : treatmentAssertion(quote);
+    const words = [...quote.slice(from, to).matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))]
+      .map((m) => ({ offset: from + m.index, length: m[0].length }));
+    const before = words.filter((w) => w.offset < place.index).pop();
+    return before || words[0] || treatmentAssertion(quote);
   };
 }
 
@@ -185,8 +188,11 @@ const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DE
 // A pest named after its sentence's treatment shares it: "treated for ants
 // outside and roaches inside" treats the roaches too. Only a treatment word
 // earlier in the same sentence that the note does not deny counts, so "saw
-// ants inside, treated outside for spiders" still leaves the ants out.
+// ants inside, treated outside for spiders" still leaves the ants out, and an
+// observation in between ("treated for ants outside and saw roaches inside")
+// breaks it: the roaches were only seen (codex local r19 on #5538).
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
+const OBSERVATION_WORDS_RE = /\b(?:saw|see|sees|seen|seeing|noticed|notice|found|find|spotted|observed|checked|check(?:ing)?|inspected|inspect(?:ing)?|looked|look(?:ing)?|heard|showed|shows)\b/;
 function treatedEarlierInSentence(name, quote, note) {
   const at = note.indexOf(quote);
   if (at < 0) return false;
@@ -194,7 +200,8 @@ function treatedEarlierInSentence(name, quote, note) {
   const start = Math.max(0, ...[...note.matchAll(SENTENCE_BREAK_RE)].map((m) => m.index + 1).filter((i) => i <= nameAt));
   const before = note.slice(start, nameAt);
   const words = [...before.matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))];
-  return words.some((m) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, start + m.index)));
+  return words.some((m) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, start + m.index))
+    && !OBSERVATION_WORDS_RE.test(before.slice(m.index + m[0].length)));
 }
 
 // An area whose own word the quote denies ("sprayed outside but not the

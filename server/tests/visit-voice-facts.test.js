@@ -376,6 +376,25 @@ describe('validateVoiceFacts', () => {
     ])).toEqual(['spiders']);
   });
 
+  test('a place is judged by the treatment that governs it, across "and" (codex local r19 on #5538)', () => {
+    const note = 'Sprayed outside and did not treat inside.';
+    const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Sprayed outside and did not treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(read('inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(read('outside')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
+  });
+
+  test('an observation between a treatment and a pest breaks the shared treatment (codex local r19 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('Treated for ants outside and saw roaches inside.', [
+      { name: 'ants', quote: 'Treated for ants outside' },
+      { name: 'roaches', quote: 'saw roaches inside' },
+    ])).toEqual(['ants']);
+    expect(read('Treated for ants outside and checked for roaches inside.', [
+      { name: 'ants', quote: 'Treated for ants outside' },
+      { name: 'roaches', quote: 'roaches inside' },
+    ])).toEqual(['ants']);
+  });
+
   test('a place is judged by the treatment of its own clause (codex local r18 on #5538)', () => {
     const note = 'Did not treat inside but sprayed outside for ants.';
     const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Did not treat inside but sprayed outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
