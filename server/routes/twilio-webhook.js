@@ -1570,6 +1570,7 @@ router.post('/sms', async (req, res) => {
         fromPhone: From,
         customer,
         smsLogId: smsLogEntry?.id || null,
+        hasMedia: inboundMedia.length > 0,
       }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
     }
 

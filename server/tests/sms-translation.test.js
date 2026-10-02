@@ -32,17 +32,18 @@ const { runTranslationTrial, tokenParity, needsTranslation } = require('../servi
 
 const SPANISH = 'Hola, ¿cuándo pueden salir los perros después del tratamiento de hoy?';
 const ENGLISH_IN = 'Hi, when can the dogs go out after today\'s treatment?';
-const REPLY = 'Thanks for asking! Your technician will text you about 30 minutes before arriving. Your next visit is Tuesday, Oct 14 at 2 PM.';
-const REPLY_ES = '¡Gracias por preguntar! Su técnico le enviará un mensaje unos 30 minutos antes de llegar. Su próxima visita es el martes 14 de octubre a las 14 h.';
+const REPLY = 'Thanks! Your tech will text about 30 minutes before arriving. Next visit: Tuesday, Oct 14 at 2 PM.';
+const REPLY_ES = '¡Gracias! Su técnico le escribirá unos 30 minutos antes. Próxima visita: martes 14 de octubre, 14 h.';
 const customer = { id: 'c1', city: 'Parrish' };
 
-function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, backLang = 'es', meaning = { same_meaning: true, differences: [] } }) {
+function scriptModels({ inbound, translated = REPLY_ES, back = REPLY, backLang = 'es', meaning = { same_meaning: true, differences: [] }, inboundMeaning = { same_meaning: true, differences: [] } }) {
   mockDispatch.mockImplementation(async (policy, payload) => {
     const sys = payload.system;
     if (sys.startsWith('You read text messages')) return { ok: true, json: inbound };
     if (sys.startsWith('Translate a text message from a pest control company')) return { ok: true, json: { text: translated } };
     if (sys.startsWith('Say what language this text message')) return { ok: true, json: { language_code: backLang, text: back } };
     if (sys.startsWith('Compare two English versions')) return { ok: true, json: meaning };
+    if (sys.startsWith('ORIGINAL is a customer')) return { ok: true, json: inboundMeaning };
     throw new Error(`unexpected prompt: ${sys.slice(0, 40)}`);
   });
 }
@@ -214,6 +215,23 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_banned_copy' });
   });
 
+  test('an inbound translation that changes the meaning (a dropped "not") is held before drafting', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Please change my appointment.' }, inboundMeaning: { same_meaning: false, differences: ['ENGLISH drops the "no"'] } });
+    const row = await runTranslationTrial({ inboundMessage: 'Por favor no cambien mi cita.', customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'meaning_changed_in_inbound_translation' });
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
+  test('a text with a photo is left to the photo lanes', async () => {
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1', hasMedia: true })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a translation over the SMS segment limit is held (UCS-2 languages fit fewer characters)', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, translated: `${REPLY_ES} ${'Gracias por su paciencia, ¡nos vemos pronto! '.repeat(8)}` });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_over_segment_limit' });
+  });
+
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {
     const logger = require('../services/logger');
     logger.info.mockClear();
@@ -245,7 +263,8 @@ describe('runTranslationTrial', () => {
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row).toMatchObject({ verdict: 'held', hold_reason: 'english_checks_not_passed' });
     expect(row).not.toHaveProperty('reply_translated');
-    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // the inbound translation and its meaning check only: nothing translated
+    expect(mockDispatch.mock.calls.map(([, p]) => p.system.slice(0, 20))).toEqual(["You read text messag", "ORIGINAL is a custom"]);
   });
 
   test('a translation that changes a figure is held', async () => {

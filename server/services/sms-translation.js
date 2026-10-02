@@ -158,10 +158,24 @@ async function meaningCheck({ englishReply, backTranslation }) {
   return { ok: true, same: out.json.same_meaning === true && differences.length === 0, differences, model: out.model };
 }
 
-// Every figure a customer could act on, normalised for comparison: links,
-// emails, then digit runs (times, prices, phones, dates, counts — "10:30" and
-// "$45.00" contribute their digit groups, so a translation that writes
-// "10h30" or "45,00 $" still carries the same groups).
+// The customer's own text, checked the same way: a dropped "not" or a swapped
+// day keeps every figure, so the English the draft reads is compared for
+// meaning against the original before anything is drafted from it.
+async function inboundMeaningCheck({ original, english, language }) {
+  const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'sms_translation',
+    system: `ORIGINAL is a customer's text message in ${language}; ENGLISH is a translation of it. Answer same_meaning true only if ENGLISH asks, tells and requests exactly what ORIGINAL does (negations, days, times, who and what included). Wording may differ. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
+    text: `ORIGINAL:\n<text>\n${original}\n</text>\n\nENGLISH:\n<text>\n${english}\n</text>`,
+    jsonSchema: MEANING_SCHEMA,
+  });
+  if (!out.ok) return out;
+  const differences = Array.isArray(out.json.differences) ? out.json.differences.filter((d) => typeof d === 'string' && d.trim()).map((d) => d.slice(0, 300)) : [];
+  return { ok: true, same: out.json.same_meaning === true && differences.length === 0, differences };
+}
+
+// Every figure a customer could act on, compared between two versions of one
+// message: links and emails exactly, phone numbers and other numbers whole
+// (see numberValues).
 const LINK_RE = /https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+/gi;
 const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
@@ -336,6 +350,9 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
   const inboundParity = tokenParity(inbound.english, inboundMessage);
   if (!inboundParity.ok) return { stop: 'figures_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity } };
+  const inboundMeaning = await inboundMeaningCheck({ original: inboundMessage, english: inbound.english, language: inbound.language });
+  if (!inboundMeaning.ok) return { stop: `inbound_meaning_check_failed:${inboundMeaning.reason}`, fields, checks: { inbound_parity: inboundParity } };
+  if (!inboundMeaning.same) return { stop: 'meaning_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity, inbound_meaning: { differences: inboundMeaning.differences } } };
 
   const ContextAggregator = require('./context-aggregator');
   const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
@@ -377,6 +394,8 @@ async function translateAndCheck({ englishReply, language, languageCode }) {
   const fields = { reply_translated: translated.text };
   // checked whole, never clipped: an unread tail would escape both checks (and an SMS over the cap cannot send)
   if (translated.text.length > MAX_TEXT) return { stop: 'translation_too_long', fields };
+  // the SMS length rule on the text that would actually send (Arabic or Chinese fits ~67 characters a segment)
+  if (require('./comms-lint').lintComms(translated.text, { channel: 'sms', audience: 'customer', stopExpected: false }).failures.some((f) => f.rule === 'sms-segment-limit')) return { stop: 'translation_over_segment_limit', fields };
   // a "translation" the English checks still read as English (or the reply echoed back) is not in the customer's language
   if (translated.text === englishReply || !needsTranslation(translated.text)) return { stop: 'translation_not_in_customer_language', fields };
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(translated.text)) return { stop: 'translation_has_placeholder', fields };
@@ -405,8 +424,9 @@ async function translateAndCheck({ englishReply, language, languageCode }) {
  * Never throws, never sends. Returns the stored row (saved:false when the
  * insert failed) for logging/tests.
  */
-async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId }) {
-  if (!trialEnabled() || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
+async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId, hasMedia = false }) {
+  // text only: a photo's caption is answered by the photo lanes, which this trial cannot see
+  if (!trialEnabled() || hasMedia || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
   const startedAt = Date.now();
   const save = async (verdict, holdReason, fields = {}, checks = undefined) => {
     const row = {
