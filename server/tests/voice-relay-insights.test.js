@@ -168,9 +168,13 @@ describe('stored turn stats carry the join keys', () => {
     expect(storedStatsFor({ transcription_metadata: out.transcription_metadata })).toEqual(turnStats);
   });
 
-  test('a reconnected call without a final turn_stats reads every recovery segment in order', () => {
-    const row = { transcription_metadata: { source: 'voice_relay_session' }, metadata: { relay_segments: [{ turn_stats: [{ turn: 1 }] }, { turn_stats: [{ turn: 1 }, { turn: 2 }] }] } };
-    expect(storedStatsFor(row)).toHaveLength(3);
+  test('a reconnected call reads every recovery segment in order, even when the closing socket also wrote its own turn_stats', () => {
+    const segments = [{ turn_stats: [{ turn: 1, segmentGeneration: 1 }] }, { turn_stats: [{ turn: 1, segmentGeneration: 2 }, { turn: 2, segmentGeneration: 2 }] }];
+    const row = {
+      transcription_metadata: { source: 'voice_relay_session', turn_stats: segments[1].turn_stats },
+      metadata: { relay_segments: segments },
+    };
+    expect(storedStatsFor(row).map((s) => s.segmentGeneration)).toEqual([1, 2, 2]);
   });
 });
 

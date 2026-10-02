@@ -46,14 +46,18 @@ function parseJson(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-/** Our turn stats: the final transcript's, else every recovery segment's in order. */
+/**
+ * Our turn stats. A reconnected call (GATE_VOICE_RELAY_RECOVERY) stores one
+ * segment per socket, in order, and the closing socket's transcript write
+ * carries only its own turns — so the segments win whenever they exist.
+ */
 function storedStatsFor(row) {
-  const tm = parseJson(row.transcription_metadata) || {};
-  if (Array.isArray(tm.turn_stats)) return tm.turn_stats;
   const meta = parseJson(row.metadata) || {};
   const segments = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
   const fromSegments = segments.flatMap((s) => (Array.isArray(s && s.turn_stats) ? s.turn_stats : []));
-  return fromSegments.length ? fromSegments : [];
+  if (fromSegments.length) return fromSegments;
+  const tm = parseJson(row.transcription_metadata) || {};
+  return Array.isArray(tm.turn_stats) ? tm.turn_stats : [];
 }
 
 async function loadRows() {
