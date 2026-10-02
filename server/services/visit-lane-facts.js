@@ -22,7 +22,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchText, groundedQuote, MAX_NOTE_CHARS } = require('./visit-voice-facts');
-const { SPECIALTY_SERVICE_CLOSEOUTS } = require('../../shared/specialty-service-closeouts');
+const { SPECIALTY_SERVICE_CLOSEOUTS, specialtyServiceKey } = require('../../shared/specialty-service-closeouts');
 
 // Bump on any prompt or schema change.
 const LANE_FACTS_VERSION = 'visit-lane-facts-v1';
@@ -40,6 +40,16 @@ const VOICE_LANES = {
   mud_dauber_removal: 'mud dauber removal',
   mosquito: 'mosquito treatment',
 };
+
+// The lane a visit's record is read for: its completion profile's lane, as
+// the completion resolves it (a typed form has none), when this reader reads
+// that lane; else null. The lane-facts route and the schedule payload's
+// laneVoiceFillEnabled both ask here.
+function voiceLaneFor({ profile, serviceType } = {}) {
+  if (profile?.findingsType) return null;
+  const laneKey = specialtyServiceKey({ serviceKey: profile?.serviceKey, serviceType });
+  return laneKey && Object.prototype.hasOwnProperty.call(VOICE_LANES, laneKey) ? laneKey : null;
+}
 
 function laneSchema(spec) {
   return {
@@ -158,6 +168,7 @@ async function readLaneFacts({ note, laneKey }) {
 module.exports = {
   readLaneFacts,
   validateLaneFacts,
+  voiceLaneFor,
   laneSchema,
   laneSystemPrompt,
   VOICE_LANES,
