@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import TechProtocolsPage from './TechProtocolsPage';
 import TechLawnDiagnosticPage from './TechLawnDiagnosticPage';
 import TechSocialPostPage from './TechSocialPostPage';
+import { TechBasePathContext } from '../../components/tech/techBasePath';
 
 function Destination() { const location = useLocation(); return <output>{location.pathname}{location.search}</output>; }
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -18,4 +19,13 @@ it.each([TechProtocolsPage, TechLawnDiagnosticPage, TechSocialPostPage])('embedd
   </Routes></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: '← Back', exact: true }));
   expect(screen.getByRole('status')).toHaveTextContent('/tech?visit=visit%3Agroup');
+});
+
+it.each([TechProtocolsPage, TechLawnDiagnosticPage, TechSocialPostPage])('%s Back goes to the workspace base path when mounted at /admin/today', async Page => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ photos: [], locations: [], enabled: true }) })));
+  render(<TechBasePathContext.Provider value="/admin/today"><MemoryRouter initialEntries={['/admin/today/tool?visit=visit%3Agroup']}><Routes>
+    <Route path="/admin/today/tool" element={<Page />} /><Route path="/admin/today" element={<Destination />} />
+  </Routes></MemoryRouter></TechBasePathContext.Provider>);
+  fireEvent.click(await screen.findByRole('button', { name: '← Back', exact: true }));
+  expect(screen.getByRole('status')).toHaveTextContent('/admin/today?visit=visit%3Agroup');
 });

@@ -76,15 +76,21 @@ export default function AdminLoginPage() {
         // Authentication is already committed and stored. Feature flags fail
         // closed independently, so continue to the authenticated destination.
       }
-      // Honor a ?next= return target (e.g. the tech entry point sends
-      // ?next=/tech) so techs land in Field Tools rather than the admin-only
-      // dashboard. Defaults to /admin for the normal admin sign-in.
+      // Honor a ?next= return target. Technicians default to their field
+      // workspace inside Waves Admin (/admin/today); the retired /tech entry
+      // points (?next=/tech/...) are rewritten to their /admin/today
+      // equivalents. Defaults to /admin for the normal admin sign-in.
       const next = searchParams.get('next');
-      const techNext = isInternalPath(next)
-        && /^\/tech(?:[/?#]|$)/i.test(next);
+      const internalNext = isInternalPath(next) ? next : null;
+      const techNext = internalNext && /^\/tech(?:[/?#]|$)/i.test(internalNext)
+        ? `/admin/today${internalNext.replace(/^\/tech/i, '').replace(/^\/(?=[?#]|$)/, '')}`
+        : null;
+      // The layout's role guard redirects a technician off any owner-only
+      // /admin path, so an internal /admin target is safe to honor here.
+      const adminNext = internalNext && /^\/admin(?:[/?#]|$)/i.test(internalNext) ? internalNext : null;
       const destination = data.user?.role === 'technician'
-        ? (techNext ? next : '/tech')
-        : (isInternalPath(next) ? next : '/admin');
+        ? (techNext || adminNext || '/admin/today')
+        : (internalNext || '/admin');
       navigate(destination, { replace: true });
     } catch (e) {
       setError(e.message);

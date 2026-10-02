@@ -1,36 +1,43 @@
 import { Link, matchPath, Outlet, useLocation } from 'react-router-dom';
-import { CalendarDays, MoreHorizontal, Waves, Wrench } from 'lucide-react';
+import { CalendarDays, ClipboardList, MoreHorizontal, Waves, Wrench } from 'lucide-react';
 import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
 import { useTechNavigationLock } from './TechNavigationLock';
+import { useTechBasePath } from './techBasePath';
 import './tech-field.css';
 
 // Mounted only after TechLayout verifies the staff profile. One flag read
 // owns the entire workspace; child routes consume the outlet context.
-export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable }) {
-  const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
+// forceEnabled skips the flag read (the /admin/today mount always shows the field
+// UI); embedded adjusts the chrome for the admin scroll container and adds a
+// Menu tab back into the rest of Waves Admin.
+export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable, forceEnabled = false, embedded = false }) {
+  const flag = useFeatureFlagReady('tech-field-workspace', false);
+  const enabled = forceEnabled || flag.enabled;
+  const ready = forceEnabled || flag.ready;
+  const base = useTechBasePath();
   const { pathname, search } = useLocation();
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
-  const documentsRoute = Boolean(matchPath('/tech/documents', pathname));
-  const payGrowthRoute = Boolean(matchPath('/tech/pay-growth', pathname));
-  const todayRoute = Boolean(matchPath('/tech', pathname));
-  const moreRoute = Boolean(matchPath('/tech/more', pathname));
+  const documentsRoute = Boolean(matchPath(`${base}/documents`, pathname));
+  const payGrowthRoute = Boolean(matchPath(`${base}/pay-growth`, pathname));
+  const todayRoute = Boolean(matchPath(base, pathname));
+  const moreRoute = Boolean(matchPath(`${base}/more`, pathname));
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
-  const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].some(path => matchPath(path, pathname));
-  if (!ready) return <div className="tech-field" role="status">Loading field workspace…</div>;
+  const legacyTool = ['protocols', 'lawn-diagnostic', 'social-post'].map(tool => `${base}/${tool}`).some(path => matchPath(path, pathname));
+  if (!ready) return <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'} role="status">Loading field workspace…</div>;
   if (!enabled) return children;
   const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (
-    <div className="tech-field">
+    <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'}>
       <header className="tf-header">
-        <Link to="/tech" className="tf-brand" aria-label="Waves Tech Today" onClick={(event) => { if (navigationBusy) event.preventDefault(); }} aria-disabled={navigationBusy}><Waves aria-hidden="true" /><strong>waves</strong> tech</Link>
+        <Link to={base} className="tf-brand" aria-label="Waves Tech Today" onClick={(event) => { if (navigationBusy) event.preventDefault(); }} aria-disabled={navigationBusy}><Waves aria-hidden="true" /><strong>waves</strong> tech</Link>
         <span className="tf-profile">{techName}</span>
       </header>
       <main className="tf-main">
         <AddToHomeScreenHint />
-        {visit && !todayRoute && <Link className="tf-button" to={`/tech${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
+        {visit && !todayRoute && <Link className="tf-button" to={`${base}${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
@@ -39,11 +46,12 @@ export default function TechFieldShell({ children, techName, techRole, documents
       </main>
       <nav className="tf-nav" aria-label="Field navigation">
         {[
-          { id: 'today', to: '/tech', label: 'Today', Icon: CalendarDays },
-          { id: 'tools', to: '/tech/tools', label: 'Tools', Icon: Wrench },
-          { id: 'more', to: '/tech/more', label: 'More', Icon: MoreHorizontal },
-        ].map(({ id, to, label, Icon }) => (
-          <Link key={id} to={`${to}${visitSearch}`} aria-current={section === id ? 'page' : undefined} aria-disabled={navigationBusy} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>
+          { id: 'today', to: base, label: 'Today', Icon: CalendarDays },
+          { id: 'tools', to: `${base}/tools`, label: 'Tools', Icon: Wrench },
+          { id: 'more', to: `${base}/more`, label: 'More', Icon: ClipboardList },
+          ...(embedded ? [{ id: 'menu', to: '/admin/more', label: 'Menu', Icon: MoreHorizontal, leavesWorkspace: true }] : []),
+        ].map(({ id, to, label, Icon, leavesWorkspace }) => (
+          <Link key={id} to={leavesWorkspace ? to : `${to}${visitSearch}`} aria-current={section === id ? 'page' : undefined} aria-disabled={navigationBusy} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>
             <Icon aria-hidden="true" /><span>{label}</span>
           </Link>
         ))}

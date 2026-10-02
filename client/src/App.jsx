@@ -1,5 +1,5 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
@@ -245,7 +245,7 @@ import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
 import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
-import TechLayout from './components/TechLayout';
+import TechPortalRedirect from './components/tech/TechPortalRedirect';
 import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
@@ -427,9 +427,17 @@ const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystem
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
+const AdminTodayShell = lazyWithRetry(() => import('./pages/admin/TodayShell'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
+
+// /admin lands technicians on their field workspace; everyone else on the
+// dashboard (a requireAdmin page that would be a wall of 403s for a technician).
+function AdminIndexRedirect() {
+  const role = useOutletContext()?.user?.role;
+  return <Navigate to={role === 'technician' ? 'today' : 'dashboard'} replace />;
+}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
@@ -701,22 +709,12 @@ export default function App() {
           <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
           <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
           <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
-          <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
-            <Route index element={<Suspense fallback={<RouteFallback label="Loading..." />}><TechHomePage /></Suspense>} />
-            <Route path="tools" element={<Suspense fallback={<RouteFallback label="Loading tools…" />}><TechHomePage section="tools" /></Suspense>} />
-            <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><TechHomePage section="more" /></Suspense>} />
-            {/* Field estimates use the canonical server-priced builder. The retired
-                tech-only calculator duplicated prices client-side and its SMS call
-                posted the wrong request shape, so it could show “sent” after a 400. */}
-            <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
-            <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
-            <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
-            <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
-            <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
-            <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
-          </Route>
+          {/* The standalone tech portal is retired: the field workspace lives at
+              /admin/today. Installed PWAs, push notifications and bookmarks still
+              open /tech/*, so every such URL redirects there permanently. */}
+          <Route path="/tech/*" element={<TechPortalRedirect />} />
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
-            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route index element={<AdminIndexRedirect />} />
             <Route path="dashboard" element={<Suspense fallback={<RouteFallback label="Loading dashboard..." />}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />
             <Route path="customers/new" element={<Suspense fallback={<RouteFallback label="Loading customer form..." />}><AdminCustomersPage /></Suspense>} />
@@ -834,6 +832,19 @@ export default function App() {
             <Route path="_design-system/flags" element={<Suspense fallback={<RouteFallback label="Loading flags..." />}><DesignSystemFlagsPage /></Suspense>} />
             {/* Unknown staff URLs stay in the admin shell instead of falling through to the customer login. */}
             <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
+            <Route path="today" element={<Suspense fallback={<RouteFallback label="Loading today…" />}><AdminTodayShell /></Suspense>}>
+              <Route index element={<Suspense fallback={<RouteFallback label="Loading..." />}><TechHomePage /></Suspense>} />
+              <Route path="tools" element={<Suspense fallback={<RouteFallback label="Loading tools…" />}><TechHomePage section="tools" /></Suspense>} />
+              <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><TechHomePage section="more" /></Suspense>} />
+              {/* Field estimates use the canonical server-priced builder. The retired
+                  tech-only calculator duplicated prices client-side. */}
+              <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
+              <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
+              <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
+              <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
+              <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
+              <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
+            </Route>
           </Route>
           <Route
             path="/*"

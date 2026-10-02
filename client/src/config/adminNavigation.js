@@ -6,6 +6,7 @@ import {
   Building2,
   Calculator,
   Calendar,
+  CalendarCheck,
   Camera,
   ClipboardList,
   Clock,
@@ -55,8 +56,19 @@ export const ADMIN_NAV_ITEMS = {
     mobileTabIcon: Home,
     keywords: ["home", "overview"],
     // server/routes/admin-dashboard.js is requireAdmin — the page is a wall
-    // of 403s for any other role. Technicians land on /admin/schedule.
+    // of 403s for any other role. Technicians land on /admin/today.
     adminOnly: true,
+  },
+  // The technician field workspace (route, visits, tools) inside Waves Admin.
+  // Not adminOnly. `technicianTab` puts it in the mobile tab bar for
+  // technician logins only; admins keep Dashboard in that slot.
+  today: {
+    id: "today",
+    path: "/admin/today",
+    label: "Today",
+    icon: CalendarCheck,
+    keywords: ["route", "field", "visits", "my day"],
+    technicianTab: true,
   },
   customers: {
     id: "customers",
@@ -311,7 +323,7 @@ export const ADMIN_NAV_ITEMS = {
 // Group by operational responsibility; individual leaf roles remain authoritative.
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
-  { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+  { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
   { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
   { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
@@ -321,6 +333,7 @@ const NAV_SECTION_DEFINITIONS = [
 ];
 
 const MOBILE_TAB_IDS = [
+  "today",
   "dashboard",
   "schedule",
   "customers",
@@ -363,6 +376,7 @@ function materializeItem(itemId, surface) {
         ? item.mobileTabIcon
         : item.icon,
     adminOnly: Boolean(item.adminOnly),
+    technicianTab: Boolean(item.technicianTab),
     flag: item.flag || null,
   };
 }
@@ -399,7 +413,7 @@ export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)
 
 const WORKSPACE_GROUPS = [
   { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily" },
-  { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["schedule"], section: "Daily" },
+  { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["today", "schedule"], section: "Daily" },
   { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts"], section: "Daily" },
   { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate"], section: "Daily" },
   { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily" },
@@ -472,6 +486,7 @@ function pathnameFor(path) {
 // EVERY other /admin path — current or future — as owner-only. The API's
 // role middleware stays the real enforcement.
 const TECH_ALLOWED_PATH_PREFIXES = [
+  "/admin/today", // technician field workspace
   "/admin/schedule",
   "/admin/dispatch",
   "/admin/timetracking",

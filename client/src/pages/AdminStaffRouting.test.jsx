@@ -24,8 +24,8 @@ function renderRoutes(initialPath, page) {
         <Route path="/admin/login" element={page} />
         <Route path="/admin/change-password" element={page} />
         <Route path="/admin/forgot-password" element={<AdminForgotPasswordPage />} />
-        <Route path="/tech" element={<div>Field tools home</div>} />
-        <Route path="/tech/*" element={<div>Field tools destination</div>} />
+        <Route path="/admin/today" element={<div>Field tools home</div>} />
+        <Route path="/admin/today/*" element={<div>Field tools destination</div>} />
         <Route path="/admin" element={<div>Admin home</div>} />
         <Route path="/admin/settings" element={<div>Admin settings</div>} />
       </Routes>
@@ -55,7 +55,7 @@ describe('staff authentication destinations', () => {
     vi.unstubAllGlobals();
   });
 
-  it('sends a technician to Field Tools after an ordinary staff login', async () => {
+  it('sends a technician to the Today workspace after an ordinary staff login', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({
@@ -72,14 +72,17 @@ describe('staff authentication destinations', () => {
   });
 
   it.each([
-    ['/tech?visit=row%3Atwo', '/tech?visit=row%3Atwo'],
-    ['/tech/tools?visit=row%3Atwo', '/tech/tools?visit=row%3Atwo'],
-    ['/TECH/?visit=row%3Atwo', '/TECH/?visit=row%3Atwo'],
-    ['/TECH/TOOLS/?visit=row%3Atwo', '/TECH/TOOLS/?visit=row%3Atwo'],
-    ['/TECHNOLOGY?visit=row%3Atwo', '/tech'],
-    ['/technology?visit=row%3Atwo', '/tech'],
-    ['//example.com/tech?visit=row%3Atwo', '/tech'],
-  ])('preserves allowed technician destinations for %s', async (next, expected) => {
+    ['/tech?visit=row%3Atwo', '/admin/today?visit=row%3Atwo'],
+    ['/tech/tools?visit=row%3Atwo', '/admin/today/tools?visit=row%3Atwo'],
+    ['/TECH/?visit=row%3Atwo', '/admin/today?visit=row%3Atwo'],
+    ['/TECH/TOOLS/?visit=row%3Atwo', '/admin/today/TOOLS/?visit=row%3Atwo'],
+    ['/admin/today/tools?visit=row%3Atwo', '/admin/today/tools?visit=row%3Atwo'],
+    ['/TECHNOLOGY?visit=row%3Atwo', '/admin/today'],
+    ['/technology?visit=row%3Atwo', '/admin/today'],
+    ['//example.com/tech?visit=row%3Atwo', '/admin/today'],
+    ['/\\example.com/tech', '/admin/today'],
+    ['https://example.com/tech', '/admin/today'],
+  ])('maps technician return target %s to %s', async (next, expected) => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ token: 'fixture-only', user: { id: 'tech-fixture', role: 'technician' } }) })));
     renderRoutes(`/admin/login?next=${encodeURIComponent(next)}`, <AdminLoginPage />);
     fillLogin();
@@ -105,7 +108,7 @@ describe('staff authentication destinations', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('does not honor an admin return target for a technician', async () => {
+  it('honors an internal /admin return target for a technician', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({
@@ -117,8 +120,8 @@ describe('staff authentication destinations', () => {
     renderRoutes('/admin/login?next=/admin/settings', <AdminLoginPage />);
     fillLogin();
 
-    expect(await screen.findByText('Field tools home')).toBeInTheDocument();
-    expect(screen.queryByText('Admin settings')).not.toBeInTheDocument();
+    expect(await screen.findByText('Admin settings')).toBeInTheDocument();
+    expect(screen.queryByText('Field tools home')).not.toBeInTheDocument();
   });
 
   it('routes a required rotation to the reset request without retaining a session', async () => {

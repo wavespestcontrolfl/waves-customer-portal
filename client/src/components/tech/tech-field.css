@@ -62,3 +62,10 @@
   .tf-today-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 24px; }
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container,
+   so the header/nav stick inside it instead of pinning to the viewport. */
+.tech-field.tf-embedded { min-height: auto; }
+.tech-field.tf-embedded .tf-header { position: sticky; top: 0; }
+.tech-field.tf-embedded .tf-nav { position: sticky; bottom: 0; left: auto; right: auto; }
+.tech-field.tf-embedded .tf-main { padding-bottom: 24px; }

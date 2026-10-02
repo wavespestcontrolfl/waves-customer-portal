@@ -175,9 +175,10 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     if (!user || user.role === "admin") return;
     if (isPathAdminOnly(location.pathname)) {
-      // Schedule, not dashboard: admin-dashboard.js is requireAdmin, so the
+      // Today, not dashboard: admin-dashboard.js is requireAdmin, so the
       // dashboard would land a technician on a page of 403s (codex P1).
-      navigate("/admin/schedule", { replace: true });
+      // /admin/today is the technician's home inside Waves Admin.
+      navigate("/admin/today", { replace: true });
     }
   }, [user, location.pathname, navigate]);
 
@@ -230,6 +231,9 @@ export default function AdminLayoutV2() {
     [closeSidebarForPalette]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
+  // On a phone the field workspace (/admin/today) supplies its own header and
+  // bottom nav, so the admin shell's mobile top bar and tab bar step aside.
+  const fieldChrome = isMobile && /^\/admin\/today(\/|$)/.test(location.pathname);
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
   const canRenderRoute = authStatus === "ready"
@@ -252,7 +256,7 @@ export default function AdminLayoutV2() {
     >
       <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
-      {isMobile && (
+      {isMobile && !fieldChrome && (
         <div
           style={{
             position: "fixed",
@@ -664,14 +668,14 @@ export default function AdminLayoutV2() {
           minWidth: 0,
           maxWidth: "100%",
           marginLeft: isMobile ? 0 : navigationEnabled ? 240 : 220,
-          paddingTop: isMobile
+          paddingTop: fieldChrome ? 0 : isMobile
             ? "calc(52px + env(safe-area-inset-top) + 16px)"
             : 24,
-          paddingBottom: isMobile
+          paddingBottom: fieldChrome ? 0 : isMobile
             ? "calc(56px + env(safe-area-inset-bottom) + 16px)"
             : 24,
-          paddingLeft: isMobile ? 16 : 28,
-          paddingRight: isMobile ? 16 : 28,
+          paddingLeft: fieldChrome ? 0 : isMobile ? 16 : 28,
+          paddingRight: fieldChrome ? 0 : isMobile ? 16 : 28,
           height: "var(--admin-vh, 100vh)",
           minHeight: "var(--admin-vh, 100vh)",
           boxSizing: "border-box",
@@ -694,7 +698,7 @@ export default function AdminLayoutV2() {
       </main>
 
       {/* Mobile bottom tab bar */}
-      {isMobile && (
+      {isMobile && !fieldChrome && (
         <nav
           aria-label="Primary"
           className="admin-mobile-tabbar"
@@ -711,7 +715,8 @@ export default function AdminLayoutV2() {
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
             {ADMIN_MOBILE_TABS.filter(
-              (item) => !item.adminOnly || user?.role === "admin",
+              (item) => (!item.adminOnly || user?.role === "admin")
+                && (!item.technicianTab || user?.role === "technician"),
             ).map((item) => {
               const { path, icon: Icon, label } = item;
               const active = isAdminNavItemActive(

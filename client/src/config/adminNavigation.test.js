@@ -65,7 +65,7 @@ describe("admin navigation registry", () => {
   it("uses the consolidated admin taxonomy", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
-      { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+      { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
       { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
       { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
@@ -75,9 +75,15 @@ describe("admin navigation registry", () => {
     ]);
   });
 
-  it("keeps the five task-focused mobile tabs", () => {
+  it("keeps the five task-focused mobile tabs per role (Today replaces Dashboard for technicians)", () => {
+    const tabsFor = (role) => ADMIN_MOBILE_TABS
+      .filter((item) => (!item.adminOnly || role === "admin") && (!item.technicianTab || role === "technician"))
+      .map(({ id }) => id);
+    expect(tabsFor("technician")).toEqual(["today", "schedule", "customers", "communications", "more"]);
+    expect(tabsFor("admin")).toEqual(["dashboard", "schedule", "customers", "communications", "more"]);
+    expect(ADMIN_MOBILE_TABS[0]).toMatchObject({ id: "today", path: "/admin/today", technicianTab: true });
     expect(
-      ADMIN_MOBILE_TABS.map(({ id, path, label }) => ({ id, path, label })),
+      ADMIN_MOBILE_TABS.filter(({ technicianTab }) => !technicianTab).map(({ id, path, label }) => ({ id, path, label })),
     ).toEqual([
       { id: "dashboard", path: "/admin/dashboard", label: "Dashboard" },
       { id: "schedule", path: "/admin/schedule", label: "Schedule" },
@@ -104,6 +110,13 @@ describe("admin navigation registry", () => {
 
     expect(new Set(mobileIds)).toEqual(new Set(desktopIds));
     expect(mobileIds).toEqual(expect.arrayContaining(["jobs", "contracts", "payers"]));
+  });
+
+  it("defines Today as a non-owner-only first Operations destination", () => {
+    expect(ADMIN_NAV_ITEMS.today).toMatchObject({ id: "today", path: "/admin/today", label: "Today" });
+    expect(ADMIN_NAV_ITEMS.today.adminOnly).toBeFalsy();
+    expect(ADMIN_DESKTOP_NAV_SECTIONS.find(({ section }) => section === "Operations").items[0].id).toBe("today");
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.today, "/admin/today/tools")).toBe(true);
   });
 
   it("uses canonical labels and routes on both navigation surfaces", () => {
@@ -245,6 +258,7 @@ describe("role scoping (adminOnly)", () => {
   // The technician-role day-to-day surface. Changing this set is a product
   // decision — update deliberately, with the owner's sign-off.
   const TECH_VISIBLE_IDS = [
+    "today",
     "schedule",
     "staff",
     "jobs",
@@ -286,6 +300,8 @@ describe("role scoping (adminOnly)", () => {
     // Dashboard's API is requireAdmin — owner-only despite being a mobile tab.
     expect(isPathAdminOnly("/admin/dashboard")).toBe(true);
     expect(isPathAdminOnly("/admin/schedule")).toBe(false);
+    expect(isPathAdminOnly("/admin/today")).toBe(false);
+    expect(isPathAdminOnly("/admin/today/tools")).toBe(false);
     expect(isPathAdminOnly("/admin/dispatch")).toBe(false);
     expect(isPathAdminOnly("/admin/customers/abc")).toBe(false);
     expect(isPathAdminOnly("/admin/knowledge")).toBe(false);
