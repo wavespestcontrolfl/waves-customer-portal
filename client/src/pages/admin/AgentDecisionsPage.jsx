@@ -167,19 +167,22 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   useEffect(() => {
     const nextActions = selected?.recommendedActions?.join("\n") || "";
+    // A reviewed row keeps its saved reason pressed, so re-confirming it from
+    // the all / corrected / dismissed filters never erases the classification.
+    const nextReason = selected?.correctionReason ?? null;
     setCorrectionNote("");
     setCorrectedActions(nextActions);
     setActualReply("");
     setIdealReply("");
     setReplyReviewNote("");
     setReplyScenarioLabel("");
-    setCorrectionReason(null);
+    setCorrectionReason(nextReason);
     setDetail(null);
     draftBaselineRef.current = {
       ...draftBaselineRef.current,
       correctionNote: "",
       correctedActions: nextActions,
-      correctionReason: null,
+      correctionReason: nextReason,
       actualReply: "",
       idealReply: "",
       replyReviewNote: "",

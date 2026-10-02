@@ -143,6 +143,9 @@ function ReviewRow({ review, onLabeled, onStale }) {
         body: JSON.stringify(body),
       });
       setConflict(null);
+      // The label is saved and shown on the row; a chip tapped before a
+      // right/unclear verdict must not ride into a later Jev wrong unasked.
+      setReason(null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
       const kind = labelFailure(err);

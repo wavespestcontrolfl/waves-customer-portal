@@ -79,6 +79,27 @@ it('sends the tapped reason with Jev wrong and shows it on a labeled row', async
   await screen.findByText(/Labeled Jev Wrong — asked for text only \(Wrong tone\)/);
 });
 
+it('a chip tapped before Jev right is left out of that request and cleared, so a later Jev wrong does not reuse it', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'all' } }); // the row stays mounted after a label
+  await screen.findByText('Does the customer want a call back?');
+  const chip = screen.getByRole('button', { name: 'Wrong tone' });
+  fireEvent.click(chip);
+  fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_right', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null }),
+  }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Wrong tone' })).toHaveAttribute('aria-pressed', 'false'));
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false }),
+  }));
+});
+
 it('offers no Jev wrong button for choice questions', async () => {
   mockList([yesNoRow({ jevAnswer: { choice: 'reschedule' }, baselineAnswers: {} })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
