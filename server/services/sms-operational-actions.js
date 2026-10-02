@@ -20,8 +20,7 @@ const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation'
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
-const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
-const { isCancelRequestText, loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -521,14 +520,6 @@ function resolveDueDeadline(item, messageCreatedAt) {
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
 }
 
-// A customer's request (basis 'request', the extractor's `other`) to cancel.
-const isCustomerCancelRequest = (item) => item.kind === 'other' && item.basis === 'request'
-  && isCancelRequestText([item.description, item.quote].filter(Boolean).join(' '));
-
-// What an unscoped cancel ask records at ask time (nothing for any other item).
-const askLiveVisits = (item, propertyId, liveVisitIds) => (!propertyId && isCustomerCancelRequest(item)
-  ? { ask_live_visit_ids: liveVisitIds.map(String) } : {});
-
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -574,17 +565,6 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const additional = !replay && matchedContext.captureAdditionalProperties
       ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
       : null;
-    // An unscoped customer cancel ask is answered by a cancellation only when
-    // the customer had exactly ONE live upcoming visit when it arrived and
-    // that visit was the one cancelled (sms-commitment-fulfillment
-    // cancelsOnlyLiveVisit). The live visits are recorded here, at ask time;
-    // three ids are enough to tell one from several.
-    const needsLiveVisits = obligations.some(isCustomerCancelRequest);
-    const liveVisitIds = needsLiveVisits
-      ? await trx('scheduled_services').where({ customer_id: customer.id }).whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
-        .where('scheduled_date', '>=', etDateString(new Date(message.created_at))).where('created_at', '<=', message.created_at)
-        .orderBy('scheduled_date').limit(3).pluck('id')
-      : [];
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at);
@@ -595,13 +575,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
         // The customer's only active property when the text arrived: an
-        // unscoped cancel ask is answered only by a cancellation of the one
-        // visit live when it arrived (ask_live_visit_ids below), never by a
-        // property that became the sole one later (Codex #4816 r20).
+        // unscoped cancel ask is answered only by a cancellation there, never
+        // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,
           customer_id: customer.id, source_at: message.created_at,
-          ...askLiveVisits(item, propertyId, liveVisitIds),
           // Whether money landing can answer this ask at all: the
           // extraction's own judgement (answered_by_payment; a refund or a
           // payment-method change never is, however worded). Payment

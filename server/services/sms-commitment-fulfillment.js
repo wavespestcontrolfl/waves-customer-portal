@@ -86,12 +86,11 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     evidence hash it compares against sms_context.fulfillment_check — one
 //     model call per still-open row on its next tick, expected and one-time
 //     (noted in the PR body).
-// 25: owner 2026-10-01 (false overdue bells): (a) an unscoped customer cancel
-//     ask is answered by a cancellation when the customer had exactly one live
-//     upcoming visit at ask time (sms_context.ask_live_visit_ids) and that
-//     visit was cancelled after it (cancelsOnlyLiveVisit); (b) a
-//     delivered text a person wrote after a general staff promise closes it
-//     without the model, like a customer's ask (replyFulfillment).
+// 25: owner 2026-10-01 (false overdue bells): a delivered text a person wrote
+//     after a general staff promise closes it without the model, like a
+//     customer's ask (replyFulfillment). (An SMS cancel-ask witness was tried
+//     and dropped from #5543, owner ruling 2026-10-02; cancel asks behave as
+//     before.)
 const FULFILLMENT_POLICY = 25;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
@@ -179,36 +178,6 @@ const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sm
 // one does — besides a visit, money or a call back that reached the customer
 // (Codex #5248 r2 P1). The ask-only person-reply limits do not apply.
 const staffPromise = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'promise';
-// A customer's request to cancel something (owner 2026-10-01: a cancel text
-// the office already acted on rang an 'uncertain' bell). The extractor has no
-// cancel kind — a cancel ask is `other` with the customer's own words — so the
-// ask is recognised from its verbatim quote/description; there is no
-// structural stamp to read. A negated mention ("don't cancel") is not a
-// request. Used at intake (to stamp the visits live at ask time) and at
-// verification.
-const CANCEL_WORD = /\bcancel/i;
-const NEGATED_CANCEL = /\b(?:don['’]?t|do not|not|never|no need to|without)\b[^.!?]{0,24}\bcancel/i;
-const isCancelRequestText = (words) => CANCEL_WORD.test(words) && !NEGATED_CANCEL.test(words);
-function askWords(commitment) {
-  let evidence = commitment.evidence;
-  if (typeof evidence === 'string') { try { evidence = JSON.parse(evidence); } catch { evidence = []; } }
-  const quotes = (Array.isArray(evidence) ? evidence : []).map((e) => e?.quote);
-  return [commitment.description, ...quotes].filter((v) => typeof v === 'string').join(' ');
-}
-const cancelAsk = (commitment) => customerAsk(commitment) && isCancelRequestText(askWords(commitment));
-// An unscoped cancel ask (several properties, or none resolved) is answered by
-// a cancellation ONLY when, when the ask arrived, the customer had exactly ONE
-// live upcoming visit (stamped at intake as sms_context.ask_live_visit_ids)
-// and that very visit was cancelled after it. Zero or two-plus live visits at
-// ask time — including a visit already cancelled before the ask — is not
-// admissible: the ask still rings (Codex #4816 r27; #5543 r1-r4: matching a
-// service by words kept admitting the wrong visit). A promise or a negated
-// mention never qualifies (cancelAsk).
-function cancelsOnlyLiveVisit(record, commitment) {
-  const ids = commitment.sms_context?.ask_live_visit_ids;
-  return cancelAsk(commitment) && Array.isArray(ids) && ids.length === 1 && String(ids[0]) === String(record.id);
-}
-
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
 // before it clears the invoice's PaymentIntent, and a won dispute restores
@@ -744,8 +713,7 @@ function visitWitnessAt(record, commitment) {
     // r34): field progress answers either kind even if the visit was
     // cancelled afterwards; a cancellation answers only an `other` ask scoped
     // to that visit's property (r14–r27). The earliest qualifying stamp wins.
-    const cancellation = commitment.kind === 'other'
-      && (!!commitment.sms_context?.property_id || cancelsOnlyLiveVisit(record, commitment)) ? record.cancelled_at : null;
+    const cancellation = commitment.kind === 'other' && !!commitment.sms_context?.property_id ? record.cancelled_at : null;
     const times = [record.progressed_at, cancellation].filter(Boolean).map((v) => new Date(v))
       .filter((v) => !Number.isNaN(v.getTime()) && v > after);
     return times.length ? new Date(Math.min(...times.map((v) => v.getTime()))) : null;
@@ -1212,4 +1180,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { isCancelRequestText, loadSmsFulfillmentEvidence, admissibleWitness, replyFulfillment, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, replyFulfillment, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };

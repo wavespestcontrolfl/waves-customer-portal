@@ -1660,24 +1660,6 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     expect(dispatchWithFallback).toHaveBeenCalledTimes(6);
   });
 
-  test('owner 2026-10-01 (Codex #5543 r4): an unscoped cancel ask is answered by a cancellation only for the ONE visit live at ask time; negated asks and promises never qualify', () => {
-    const visit = (id) => ({ id, ref: `visit:${id}`, type: 'visit', status: 'cancelled', service_type: 'WDO Inspection',
-      created_at: '2040-03-10T10:00:00Z', cancelled_at: '2040-03-12T13:05:00Z', progressed_at: null, text: 'cancelled after the request' });
-    const ask = (quote, ids, extra = {}) => ({ kind: 'other', description: quote, evidence: [{ quote }],
-      sms_context: { ...ctx, basis: 'request', property_id: null, ask_live_visit_ids: ids, ...extra } });
-    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', ['v1']))).toBe(true);
-    // Two live visits at ask time, none, or a different visit: never.
-    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', ['v1', 'v2']))).toBe(false);
-    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', []))).toBe(false);
-    expect(admissibleWitness(visit('v2'), ask('Please cancel WDO', ['v1']))).toBe(false);
-    // An ask recorded before the stamp existed is never answered this way.
-    expect(admissibleWitness(visit('v1'), ask('Please cancel WDO', undefined))).toBe(false);
-    expect(admissibleWitness(visit('v1'), ask('Please do not cancel WDO', ['v1']))).toBe(false);
-    expect(admissibleWitness(visit('v1'), ask('We will cancel WDO', ['v1'], { basis: 'promise' }))).toBe(false);
-    // A property-scoped ask is unchanged: a cancellation at that property answers it.
-    expect(admissibleWitness({ ...visit('v9'), property_id: 'home' }, ask('Please cancel my appointment', undefined, { property_id: 'home' }))).toBe(true);
-  });
-
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
     const scopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: { ...ctx, property_id: 'home' } };
     const unscopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: ctx };
