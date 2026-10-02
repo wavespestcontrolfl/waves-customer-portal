@@ -12,6 +12,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { TOOLS, PORTAL_TOOLS, executeToolCall } = require('./tools');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
 // One texting-AI gap report for an escalation its caller marked as the
@@ -188,7 +189,7 @@ function escalationReply({ isPortal, teamNotified, firstName }) {
   const thanks = firstName ? `Thanks ${firstName}` : 'Thanks for reaching out';
   return teamNotified
     ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?`
-    : `${thanks}. I've saved your request for our team. If it can't wait, please call us at (941) 318-7612.`;
+    : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 }
 
 const TOPIC_BY_REASON = {
@@ -264,132 +265,142 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      let messages = history;
-      let finalReply = '';
-      let escalated = false;
-      let escalationId = null;
-
-      // Two system blocks: the static prompt carries a 1-hour cache breakpoint
-      // (tools render before system, so the entry covers TOOLS + SYSTEM_PROMPT
-      // and is shared across every customer and conversation); the
-      // per-conversation context block sits AFTER the breakpoint so it never
-      // fragments that shared entry. 1h TTL because customer replies routinely
-      // arrive more than 5 minutes apart.
-      const system = [
-        { type: 'text', text: lane.prompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
-      ];
-      if (contextStr) {
-        system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
-      }
-
-      // Tool-use loop — Claude may call multiple tools before responding
-      let lastResponse = null;
-      let loopExhausted = true;
-      for (let turn = 0; turn < 5; turn++) {
-        const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
-          model: MODEL,
-          ...anthropicEffortConfig(MODEL),
-          max_tokens: anthropicMaxTokens(MODEL, 800),
-          system,
-          tools: lane.tools,
-          messages: withCacheBreakpoint(messages),
-        }), { laneId: 'portal_assistant' });
-
-        // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
-        // customer turns is the prod verification signal.
-        const u = response.usage || {};
-        logger.info(
-          `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
-          `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
-          `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
-        );
-
-        // Check if Claude wants to use tools
-        const toolUses = response.content.filter(c => c.type === 'tool_use');
-        const textBlocks = response.content.filter(c => c.type === 'text');
-
-        if (toolUses.length === 0) {
-          // No tools — just a text response
-          finalReply = textBlocks.map(t => t.text).join('');
-          // A terminal turn with neither a tool call nor usable text (a
-          // thinking-only or refused reply) is this exact call answering
-          // nothing — the loop-exhausted guard below still catches it and
-          // serves the canned reply, but that guard cannot tell this leg's
-          // own row apart from one where every earlier turn correctly used
-          // a tool; flag it here on the response that actually produced it.
-          if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
-          loopExhausted = false;
-          break;
-        }
-        lastResponse = response;
-
-        // Execute tool calls
-        const toolResults = [];
-        for (const toolUse of toolUses) {
-          // Check if it's an escalation
-          if (toolUse.name === 'escalate') {
-            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-              { gap: toolUse.input.not_supported === true });
-            return escResult;
-          }
-
-          const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions);
-          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
-
-          // Log tool usage
-          await db('agent_messages').insert({
-            conversation_id: conversation.id,
-            role: 'tool_use',
-            content: toolUse.name,
-            tool_calls: JSON.stringify(toolUse.input),
-            tool_results: JSON.stringify(result),
-          }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
-        }
-
-        // Continue the loop with tool results
-        messages = [
-          ...messages,
-          { role: 'assistant', content: response.content },
-          { role: 'user', content: toolResults },
-        ];
-      }
-
-      // If every loop turn was tool_use (e.g. a tool kept erroring and the
-      // model kept retrying it), finalReply is still empty — degrade to the
-      // canned reply instead of persisting a blank customer-visible message.
-      if (!finalReply.trim()) {
-        // Every turn was a (valid-looking) tool_use round, so no row was
-        // failed above; the call that ended the loop without a reply is the
-        // one that answered nothing (Codex r12 on #4884).
-        if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
-        logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
-        return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
-      }
-
-      // Save the assistant reply
-      await db('agent_messages').insert({
-        conversation_id: conversation.id,
-        role: 'assistant',
-        content: finalReply,
-        channel,
-        sent_to_customer: true,
-      }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
-
-      // generated marks true model output — canned fallbacks and the
-      // deterministic escalation template never carry it, so the portal's
-      // "report AI content" affordance only attaches to real AI replies.
-      return {
-        reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
-        // Buttons the portal tools asked for, shown under the reply.
-        ...(lane.actions?.length ? { actions: lane.actions } : {}),
-      };
-
+      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
       return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
     }
+  }
+
+  /**
+   * One model turn: the tool-use loop for a saved customer message. Runs the
+   * lane's prompt and tools, executes tool calls (an escalate call ends the
+   * turn with the hand-off reply), saves and returns the reply. Throws on a
+   * provider failure; processMessage owns the fallback reply.
+   */
+  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel }) {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    let messages = history;
+    let finalReply = '';
+    let escalated = false;
+    let escalationId = null;
+
+    // Two system blocks: the static prompt carries a 1-hour cache breakpoint
+    // (tools render before system, so the entry covers TOOLS + SYSTEM_PROMPT
+    // and is shared across every customer and conversation); the
+    // per-conversation context block sits AFTER the breakpoint so it never
+    // fragments that shared entry. 1h TTL because customer replies routinely
+    // arrive more than 5 minutes apart.
+    const system = [
+      { type: 'text', text: lane.prompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ];
+    if (contextStr) {
+      system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
+    }
+
+    // Tool-use loop — Claude may call multiple tools before responding
+    let lastResponse = null;
+    let loopExhausted = true;
+    for (let turn = 0; turn < 5; turn++) {
+      const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
+        model: MODEL,
+        ...anthropicEffortConfig(MODEL),
+        max_tokens: anthropicMaxTokens(MODEL, 800),
+        system,
+        tools: lane.tools,
+        messages: withCacheBreakpoint(messages),
+      }), { laneId: 'portal_assistant' });
+
+      // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
+      // customer turns is the prod verification signal.
+      const u = response.usage || {};
+      logger.info(
+        `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
+        `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
+        `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+      );
+
+      // Check if Claude wants to use tools
+      const toolUses = response.content.filter(c => c.type === 'tool_use');
+      const textBlocks = response.content.filter(c => c.type === 'text');
+
+      if (toolUses.length === 0) {
+        // No tools — just a text response
+        finalReply = textBlocks.map(t => t.text).join('');
+        // A terminal turn with neither a tool call nor usable text (a
+        // thinking-only or refused reply) is this exact call answering
+        // nothing — the loop-exhausted guard below still catches it and
+        // serves the canned reply, but that guard cannot tell this leg's
+        // own row apart from one where every earlier turn correctly used
+        // a tool; flag it here on the response that actually produced it.
+        if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
+        loopExhausted = false;
+        break;
+      }
+      lastResponse = response;
+
+      // Execute tool calls
+      const toolResults = [];
+      for (const toolUse of toolUses) {
+        // Check if it's an escalation
+        if (toolUse.name === 'escalate') {
+          const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
+            { gap: toolUse.input.not_supported === true });
+          return escResult;
+        }
+
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions);
+        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
+
+        // Log tool usage
+        await db('agent_messages').insert({
+          conversation_id: conversation.id,
+          role: 'tool_use',
+          content: toolUse.name,
+          tool_calls: JSON.stringify(toolUse.input),
+          tool_results: JSON.stringify(result),
+        }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
+      }
+
+      // Continue the loop with tool results
+      messages = [
+        ...messages,
+        { role: 'assistant', content: response.content },
+        { role: 'user', content: toolResults },
+      ];
+    }
+
+    // If every loop turn was tool_use (e.g. a tool kept erroring and the
+    // model kept retrying it), finalReply is still empty — degrade to the
+    // canned reply instead of persisting a blank customer-visible message.
+    if (!finalReply.trim()) {
+      // Every turn was a (valid-looking) tool_use round, so no row was
+      // failed above; the call that ended the loop without a reply is the
+      // one that answered nothing (Codex r12 on #4884).
+      if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
+      logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
+    }
+
+    // Save the assistant reply
+    await db('agent_messages').insert({
+      conversation_id: conversation.id,
+      role: 'assistant',
+      content: finalReply,
+      channel,
+      sent_to_customer: true,
+    }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
+
+    // generated marks true model output — canned fallbacks and the
+    // deterministic escalation template never carry it, so the portal's
+    // "report AI content" affordance only attaches to real AI replies.
+    return {
+      reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
+      // Buttons the portal tools asked for, shown under the reply.
+      ...(lane.actions?.length ? { actions: lane.actions } : {}),
+    };
+
   }
 
   /**
@@ -591,7 +602,9 @@ class WavesAssistant {
         action: 'Reply to a portal chat request',
         why: cutAtWord(`${name} asked the portal assistant about ${topic}`, 110),
         severity: 'needs-you',
-        link: `/admin/communications?thread=${customer.id}`,
+        // The customer record, not a message thread: a portal customer may
+        // have no texts yet, or only a thread on an old number.
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
         subject: { type: 'customer', id: String(customer.id) },
         doneWhen: 'customer_answered',
         who: 'person',

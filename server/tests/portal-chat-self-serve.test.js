@@ -65,6 +65,7 @@ describe('portal tools', () => {
     const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
 
     expect(query.where).toHaveBeenCalledWith('customer_id', 'cust-1');
+    expect(query.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed', 'rescheduled']);
     expect(loadById.mock.calls.map(([id]) => id)).toEqual([1, 2, 3, 4]);
     expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' }]);
     expect(result.available).toBe(true);
@@ -149,7 +150,7 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     expect(why).toBe('Jordan Sample asked the portal assistant about a billing question');
     expect(opts).toEqual(expect.objectContaining({
       bell: true,
-      link: '/admin/communications?thread=cust-1',
+      link: '/admin/customers?customerId=cust-1',
       dedupeKey: 'portal-chat-escalation:esc-1',
       detail: 'Why was I charged twice on 2026-09-30?!',
     }));
@@ -172,7 +173,8 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     expect(result.escalationId).toBe('esc-1');
     expect(result.teamNotified).toBe(false);
     expect(result.reply).toMatch(/saved your request/);
-    expect(result.reply).toMatch(/\(941\) 318-7612/);
+    // The general support line, not a location's own number.
+    expect(result.reply).toMatch(/\(941\) 297-5749/);
     expect(result.reply).not.toMatch(/sent this to our team|notified/i);
   });
 

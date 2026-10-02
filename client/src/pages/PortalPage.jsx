@@ -16228,6 +16228,25 @@ function chatActionsOf(actions) {
   )).slice(0, 4);
 }
 
+// A /ai/chat response as the chat rows it adds: the assistant's reply (with
+// its buttons), then the "team notified" line only when the server says the
+// bell rang (teamNotified false = the request is saved but nobody was paged,
+// and the reply itself tells the customer to call).
+function chatRowsFor(data) {
+  // Only model-generated replies are reportable — the greeting and the
+  // hardcoded fallback/error strings are not AI output.
+  const rows = [{
+    role: 'assistant',
+    content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.",
+    reportable: !!data.reply && data.canReport !== false,
+    actions: chatActionsOf(data.actions),
+  }];
+  if (data.escalated && data.teamNotified !== false) {
+    rows.push({ role: 'system', content: 'A team member has been notified and will follow up shortly.' });
+  }
+  return rows;
+}
+
 function ChatActions({ actions, onNavigate }) {
   if (!actions?.length) return null;
   return (
@@ -16309,15 +16328,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
         method: 'POST',
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
-      // Only model-generated replies are reportable — the greeting and the
-      // hardcoded fallback/error strings are not AI output.
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false, actions: chatActionsOf(data.actions) }]);
-      // Only say the team was notified when the server says the bell rang
-      // (teamNotified false = the request is saved but nobody was paged, and
-      // the reply itself tells the customer to call).
-      if (data.escalated && data.teamNotified !== false) {
-        setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
-      }
+      setMessages(prev => [...prev, ...chatRowsFor(data)]);
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
     }

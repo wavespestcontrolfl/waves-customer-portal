@@ -9,6 +9,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { arrivalWindowRange } = require('../../utils/sms-time-format');
+const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -177,7 +178,9 @@ async function offerRescheduleLink(customerId, actions) {
   const rows = await db('scheduled_services')
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
-    .whereIn('status', ['pending', 'confirmed'])
+    // The reschedule page's own status set (a 'rescheduled' visit is still
+    // upcoming and movable); its verdict below decides the rest.
+    .whereIn('status', [...RESCHEDULABLE_STATUSES])
     .select('id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
     .orderBy('scheduled_date')
     .limit(3);
