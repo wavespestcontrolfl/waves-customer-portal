@@ -77,6 +77,20 @@ function excludeActivityOnlyFromBell(query) {
 // reader and the fence must agree on it. No `updated_at` column exists.
 // A JSON array, not a joined string: field boundaries and NULL-vs-empty stay
 // distinct, so two different contents never share a version.
+// Does this customer (bound twice: unified rows, then legacy-only rows) still
+// have an unread inbound text? Same two sources the thread read looks at:
+// unified messages on any of their conversations, and recent legacy sms_log rows
+// that never got a unified twin (older ones were initialised unread and never
+// mirrored, so they do not count).
+const CUSTOMER_UNREAD_INBOUND_SQL = `(
+  EXISTS (SELECT 1 FROM messages um JOIN conversations uc ON uc.id = um.conversation_id
+    WHERE uc.customer_id = ? AND um.channel = 'sms' AND um.direction = 'inbound'
+      AND (um.is_read = false OR um.is_read IS NULL))
+  OR EXISTS (SELECT 1 FROM sms_log ul WHERE ul.customer_id = ? AND ul.direction = 'inbound'
+      AND ul.created_at > NOW() - interval '30 days' AND (ul.is_read = false OR ul.is_read IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM messages tw WHERE tw.twilio_sid = ul.twilio_sid AND tw.channel = 'sms'))
+)`;
+
 const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
 
 // The done state (docs/admin-notifications.md section 4.3, owner ruling
@@ -1024,9 +1038,26 @@ const NotificationService = {
     )
       .whereNull('read_at')
       .where('created_at', '<=', before);
+    // A shared thread row (dedupeKey sms-thread:<customerId>) stands for EVERY
+    // text from that customer, so reading one message is not reading the row.
+    // The ONE rule for it, whichever caller reaches here: a SID never clears it,
+    // and a customer-wide clear (the thread open, the webhook's post-write read
+    // check, the cross-clear) clears it only when that customer has no unread
+    // inbound text left on any business number.
+    const THREAD_ROW_SQL = "COALESCE(metadata->>'dedupeKey', '') LIKE 'sms-thread:%'";
     // The thread link, bare or with the alerted message (&message=<sid>, sms_reply).
-    if (customerId) q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`]);
-    if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
+    if (customerId) {
+      q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`])
+        .whereRaw(`(NOT (${THREAD_ROW_SQL}) OR NOT (${CUSTOMER_UNREAD_INBOUND_SQL}))`, [customerId, customerId]);
+    }
+    if (sids.length) {
+      q = q.whereRaw(
+        customerId
+          ? `(${THREAD_ROW_SQL} OR metadata->'payload'->>'twilioSid' = ANY(?))`
+          : `(NOT (${THREAD_ROW_SQL}) AND metadata->'payload'->>'twilioSid' = ANY(?))`,
+        [sids],
+      );
+    }
     return q.update({ read_at: new Date() });
   },
 
