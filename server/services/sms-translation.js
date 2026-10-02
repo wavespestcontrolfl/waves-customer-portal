@@ -109,7 +109,7 @@ async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
     system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, time, date, price, phone number, link, email and name exactly as written (digits stay digits). Return only the translation. ${DATA_NOTE}`,
-    text: `<text>\n${clip(englishReply)}\n</text>`,
+    text: `<text>\n${englishReply}\n</text>`,
     jsonSchema: TRANSLATE_SCHEMA,
   });
   if (!out.ok) return out;
@@ -123,7 +123,7 @@ async function backTranslate({ translated, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
     system: `Translate this ${language} text message into English, word for word as far as natural English allows. Keep every number, time, date, price, phone number, link, email and name exactly as written. Do not fix, soften or add anything. ${DATA_NOTE}`,
-    text: `<text>\n${clip(translated)}\n</text>`,
+    text: `<text>\n${translated}\n</text>`,
     jsonSchema: TRANSLATE_SCHEMA,
   });
   if (!out.ok) return out;
@@ -135,7 +135,7 @@ async function meaningCheck({ englishReply, backTranslation }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
     system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
-    text: `ORIGINAL:\n<text>\n${clip(englishReply)}\n</text>\n\nBACK:\n<text>\n${clip(backTranslation)}\n</text>`,
+    text: `ORIGINAL:\n<text>\n${englishReply}\n</text>\n\nBACK:\n<text>\n${backTranslation}\n</text>`,
     jsonSchema: MEANING_SCHEMA,
   });
   if (!out.ok) return out;
@@ -247,7 +247,8 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
   let translatedRows = 0;
   const out = [];
   for (const [i, m] of rows.entries()) {
-    if (i >= 10 || !m || m.direction !== 'inbound' || typeof m.body !== 'string' || !needsTranslation(m.body)) { out.push(m); continue; }
+    // (a row over the cap stays as written: a clipped translation would hide its tail, and the guards hold a foreign row)
+    if (i >= 10 || !m || m.direction !== 'inbound' || typeof m.body !== 'string' || m.body.length > MAX_TEXT || !needsTranslation(m.body)) { out.push(m); continue; }
     const key = m.body.trim();
     if (!cache.has(key)) {
       const t = await translateInbound(m.body);
@@ -296,7 +297,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
   // the model reads it as English: today's English path already answers it
   if (inbound.isEnglish) return { english: true };
-  const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: clip(inbound.english) };
+  const fields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: inbound.english };
   // the customer's own figures (a time, an address number, an amount) must survive into the English the draft reads
   const inboundParity = tokenParity(inbound.english, inboundMessage);
   if (!inboundParity.ok) return { stop: 'figures_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity } };
@@ -348,6 +349,8 @@ async function translateAndCheck({ englishReply, language }) {
   const back = await backTranslate({ translated: translated.text, language });
   fields.back_translation = back.ok ? back.text : null;
   if (!back.ok) return { stop: `back_translation_failed:${back.reason}`, fields, checks: { token_parity: parity } };
+  // every model input is compared whole, never clipped (the reply and its translation are capped above)
+  if (back.text.length > 2 * MAX_TEXT) return { stop: 'back_translation_too_long', fields, checks: { token_parity: parity } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
   if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };

@@ -180,6 +180,16 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_too_long' });
   });
 
+  test('the meaning check reads the whole back-translation; one too long to compare is held', async () => {
+    const longBack = `${REPLY} ${'Also, we promise a free visit. '.repeat(10)}`;
+    scriptModels({ inbound: SPANISH_INBOUND, back: longBack });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    const meaningCall = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'));
+    expect(meaningCall[1].text).toContain(longBack.trim());
+    scriptModels({ inbound: SPANISH_INBOUND, back: 'x '.repeat(1700) });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_too_long' });
+  });
+
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {
     const logger = require('../services/logger');
     logger.info.mockClear();
