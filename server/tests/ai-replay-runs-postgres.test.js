@@ -27,7 +27,8 @@ jest.setTimeout(60000);
 
 const V12 = 'house_voice_v12_real_answers3_cfl';
 const V13 = 'house_voice_v13';
-const CELL = { surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta' };
+// A prompt-wording cell: the only kind a frozen replay can reproduce.
+const CELL = { surface: 'prompt_discipline', failure_mode: 'invented_schedule_eta' };
 const SHA = 'e25e9cfabc';
 // Distinct 8-character prefixes; the hash split of these 12 is 10 dev / 2 holdout.
 const KEYS = Array.from({ length: 12 }, (_, i) => `${String(i + 1).padStart(8, '0')}-0000-4000-8000-000000000000`);
@@ -254,11 +255,22 @@ test('export refuses a directory inside the repository, however it is spelled', 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  test('a few-shot leak or verifier miss is refused: a single re-draft cannot reproduce it', async () => {
-    for (const surface of ['few_shot_leak', 'verifier_miss']) {
+  test('a facts-block gap, few-shot leak or verifier miss is refused: frozen inputs cannot reproduce it', async () => {
+    for (const surface of ['facts_block_gap', 'few_shot_leak', 'verifier_miss']) {
       await database('ai_fix_proposals').where({ id: proposal.id }).update({ surface });
       await expect(replay.exportCases({ dbi: database, proposalId: proposal.id, split: 'dev' })).rejects.toMatchObject({ code: 'unsupported_surface' });
+      await expect(record()).rejects.toMatchObject({ code: 'unsupported_surface' });
     }
+  });
+
+  test('a closed proposal takes no replay results, so its proof stays as it was', async () => {
+    const { run } = await record();
+    for (const status of ['dismissed', 'superseded', 'insufficient_evidence']) {
+      await database('ai_fix_proposals').where({ id: proposal.id }).update({ status });
+      await expect(record()).rejects.toMatchObject({ code: 'proposal_closed' });
+      await expect(record({ purpose: 'recurrence', split: 'holdout', results: results(proposal.holdout_incident_keys) })).rejects.toMatchObject({ code: 'proposal_closed' });
+    }
+    expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).dev_run_id).toBe(run.id);
   });
 
   test('an empty split exports nothing and writes no files', async () => {

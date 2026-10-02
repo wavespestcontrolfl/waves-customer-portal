@@ -11,8 +11,9 @@
 //       <dir>/system-prompt-<v|base>.txt (the drafter's system prompt as THIS
 //       checkout renders it under the process's gates with the voice profile
 //       each draft was written under: run it from the fix branch), and
-//       <dir>/results-template.json. Few-shot leaks and verifier misses are
-//       refused: their exemplars and verify loop are not stored. Claude Code subagents re-draft each case
+//       <dir>/results-template.json. Only prompt-wording cells replay: a
+//       facts-block gap (the new fact is not in the frozen facts), a few-shot
+//       leak and a verifier miss are refused. Claude Code subagents re-draft each case
 //       from system-prompt.txt + the case's user_prompt and grade it
 //       (fixed | reproduces | inconclusive). Customer text: the dir must be
 //       outside the repository (the session scratchpad).

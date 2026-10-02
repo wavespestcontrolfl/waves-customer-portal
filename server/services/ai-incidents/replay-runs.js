@@ -20,18 +20,20 @@
  *                       reproduces).
  */
 
-const { transitionProposal, TransitionError } = require('./fix-proposals');
+const { transitionProposal, TransitionError, OPEN_STATUSES } = require('./fix-proposals');
 
 const SPLITS = Object.freeze(['dev', 'holdout']);
 const METHODS = Object.freeze(['subagent', 'code']);
 const PURPOSES = Object.freeze(['fix', 'recurrence']);
 const RUN_STATUSES = Object.freeze(['passed', 'failed', 'inconclusive', 'underpowered']);
 const VERDICTS = Object.freeze(['fixed', 'reproduces', 'inconclusive']);
-// A single re-draft can reproduce only a failure that lives in the draft
-// itself. A few-shot leak needs the exemplars the drafter was shown, and a
-// verifier miss needs the verify/revise loop; neither is stored, so those
-// cells are proven by their fix's fixture test and by recurrence instead.
-const REPLAYABLE_SURFACES = Object.freeze(['facts_block_gap', 'prompt_discipline', 'other']);
+// A single re-draft can reproduce only a failure that lives in the prompt
+// wording itself. A facts-block gap is fixed by a NEW fact the frozen facts
+// can never contain (a past draft's context is not stored, so the block
+// cannot be rebuilt), a few-shot leak needs the exemplars the drafter was
+// shown, and a verifier miss needs the verify/revise loop. Those cells are
+// proven by their fix's fixture test and by new incidents after it ships.
+const REPLAYABLE_SURFACES = Object.freeze(['prompt_discipline', 'other']);
 // What every replay leaves out, printed on each exported case.
 const REPLAY_OMITS = Object.freeze(['few_shot_exemplars', 'verify_revise_loop', 'thread_mixed_hint']);
 // A holdout run on fewer cases than this is labelled underpowered, never passed.
@@ -65,7 +67,7 @@ async function exportCases({ dbi, proposalId, split }) {
   if (!proposal) throw new TransitionError('not_found', `no proposal ${proposalId}`);
   if (proposal.area !== 'sms') throw new TransitionError('unsupported_area', `export supports sms only, not ${proposal.area}`);
   if (!REPLAYABLE_SURFACES.includes(proposal.surface)) {
-    throw new TransitionError('unsupported_surface', `${proposal.surface} cannot be replayed from a single re-draft (its exemplars or verify loop are not stored): prove the fix with its fixture test and recurrence`);
+    throw new TransitionError('unsupported_surface', `${proposal.surface} cannot be replayed from frozen inputs (a new fact, the exemplars or the verify loop are not in them): prove the fix with its fixture test and new incidents after it ships`);
   }
   const keys = splitKeys(proposal, split);
   if (!keys.length) return { proposal, cases: [], missing: [] };
@@ -144,6 +146,15 @@ async function recordReplayRun({
   return dbi.transaction(async (trx) => {
     const proposal = await trx('ai_fix_proposals').where({ id: proposalId }).forUpdate().first();
     if (!proposal) throw new TransitionError('not_found', `no proposal ${proposalId}`);
+    // A closed proposal's proof is history: a result exported while it was
+    // open and recorded after it shipped, was dismissed or superseded never
+    // rewrites it.
+    if (!OPEN_STATUSES.includes(proposal.status)) {
+      throw new TransitionError('proposal_closed', `the proposal is ${proposal.status}; replays are recorded only on an open proposal`);
+    }
+    if (!REPLAYABLE_SURFACES.includes(proposal.surface)) {
+      throw new TransitionError('unsupported_surface', `${proposal.surface} cannot be replayed from frozen inputs`);
+    }
     const keys = splitKeys(proposal, split);
     const inSplit = new Set(keys);
     const byKey = new Map();
