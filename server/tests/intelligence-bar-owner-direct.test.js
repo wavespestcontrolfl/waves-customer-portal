@@ -286,6 +286,15 @@ describe('reads for the owner login', () => {
     expect(await Context.prepareReadInput(conflict, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     expect(await Context.prepareReadInput(conflict, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     expect(await Context.prepareReadInput(conflict, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    // Customer A's name with customer B's phone, with no task target or an
+    // unrelated one: judged on the name's matches, never forwarded.
+    rows.customers[0].phone = '+19415550001'; rows.customers[1].phone = '+19415550002';
+    const phoneConflict = { customer_name: 'Synthetic Person', phone: '9415550002' };
+    expect(await Context.prepareReadInput(phoneConflict, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput(phoneConflict, direct({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput(phoneConflict, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    const phoneAgrees = await Context.prepareReadInput({ customer_name: 'Synthetic Person', phone: '941-555-0001' }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
+    expect(phoneAgrees.input.customer_id).toBe(A);
     // The same name with its own id is fine.
     const agree = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
     expect(agree.input.customer_id).toBe(A);

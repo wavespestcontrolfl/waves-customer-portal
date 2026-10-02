@@ -855,12 +855,15 @@ async function resolveCustomerSelector(params, input, context, schema) {
   // readers resolve customer_id before customer_name and would answer about
   // the id while the owner asked about the name.
   const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
-  if (suppliedId && matches.length && !matches.some(customer => customer.id === suppliedId)) {
-    return { error: 'The customer name or phone and the customer id on this lookup name different customers', code: 'selector_conflict' };
-  }
+  const conflict = { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
+  if (suppliedId && matches.length && !matches.some(customer => customer.id === suppliedId)) return conflict;
+  // The same for a name plus a phone: judged on the name's matches before
+  // task authority narrows them, so an empty or unrelated task scope cannot
+  // turn the conflict into a bypassable scope refusal (pre-push on r3).
+  if (named && params.phone && matches.length && !matches.some(customer => digits(customer.phone) === digits(params.phone))) return conflict;
   const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
   const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
-  if (customer && selectorMismatch(customer, params, digits)) return { error: 'The customer name or phone and the customer id on this lookup name different customers', code: 'selector_conflict' };
+  if (customer && selectorMismatch(customer, params, digits)) return conflict;
   if (!customer) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
   input.customer_id = customer.id;
   delete input.customer_name;
