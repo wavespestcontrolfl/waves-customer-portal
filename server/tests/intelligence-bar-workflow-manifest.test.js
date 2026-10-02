@@ -616,6 +616,19 @@ describe('write calls', () => {
     expect(problems).toEqual([]);
   });
 
+  test('a step never receives a restock request and also restocks the product (receive already adds the stock)', () => {
+    const doubled = [];
+    for (const { c } of writeCases) {
+      for (const { label, holder } of stepsOf(c)) {
+        const calls = matrix.callList(holder);
+        const receives = calls.some((k) => k.tool === 'update_restock_request' && k.input.action === 'receive');
+        const restocks = calls.some((k) => k.tool === 'adjust_stock' && k.input.movement_type === 'restock');
+        if (receives && restocks) doubled.push(`${c.id} ${label}`);
+      }
+    }
+    expect(doubled).toEqual([]);
+  });
+
   test('the policy check sees a wrong card flag', () => {
     const owner = { actor: 'owner', mode: 'owner_direct_on' };
     expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { phone: 'x' } } }], ownerDirect)).toBe(false);

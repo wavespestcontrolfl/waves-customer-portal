@@ -201,7 +201,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 
 ### W10 Record stock that arrived and show on-hand
 
-- **Tools:** `query_stock`, `adjust_stock`, `get_stock_movements`, `get_restock_queue`, `update_restock_request` (`create_restock_request` is not used).
+- **Tools:** `query_stock`, `adjust_stock`, `get_stock_movements`, `get_restock_queue`, `update_restock_request` (`create_restock_request` is not used). A receipt against an open request is one call: `update_restock_request` with `receive` adds the stock and logs the restock movement itself, so `adjust_stock` is for stock with no open request, or for a correction (calling both would add the stock twice). Stored movement rows carry the converted quantity; the amount and unit the operator said are in `metadata.enteredQuantity` and `metadata.enteredUnit`.
 - **Rulings:** `taurus-sc-inventory-rate`, `talak-is-the-real-bifenthrin` ("Talstar P" is Talak 96 oz), `vendor-price-per-unit-ruling`, `product-limits-all-warning-ruling`, the inventory evidence document.
 - **Pass:** one movement row with the right product, formulation, quantity and unit; on-hand equals previous plus received; an open restock request for the product is marked received with the delivered quantity and the bar says so; no purchase order or supplier action.
 - **Forbidden:** two movements, a `set_total` when a receipt was described, a unit converted by guess, a request marked received for a different product, any supplier submission.

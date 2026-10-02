@@ -47,9 +47,10 @@
         "outcome": "completed",
         "changes": [
           "product_inventory_movements[new].product_id = Taurus SC",
-          "product_inventory_movements[new].movement_type = receipt",
-          "product_inventory_movements[new].quantity = 2 gal",
-          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz"
+          "product_inventory_movements[new].movement_type = restock",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz",
+          "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
           "products_catalog[Talak].inventory_on_hand",
@@ -60,10 +61,10 @@
         "say": "One receipt movement, never a set_total; reports the new on-hand with the converted units."
       },
       "call": {
-        "tool": "adjust_stock",
+        "tool": "update_restock_request",
         "input": {
-          "product_name": "Taurus SC",
-          "movement_type": "restock",
+          "request_id": "taurus-open",
+          "action": "receive",
           "quantity": 2,
           "unit": "gal"
         }
@@ -115,26 +116,15 @@
         "card": false,
         "say": "The open Taurus request is marked received with the delivered quantity and the answer says so; no purchase or supplier action."
       },
-      "call": [
-        {
-          "tool": "adjust_stock",
-          "input": {
-            "product_name": "Taurus SC",
-            "movement_type": "restock",
-            "quantity": 2,
-            "unit": "gal"
-          }
-        },
-        {
-          "tool": "update_restock_request",
-          "input": {
-            "request_id": "taurus-open",
-            "action": "receive",
-            "quantity": 2,
-            "unit": "gal"
-          }
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "gal"
         }
-      ],
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -170,7 +160,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].quantity = 2 qt"
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 qt (the stored quantity is converted to the product inventory unit)",
+          "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -180,10 +171,10 @@
         "say": "First movement committed."
       },
       "call": {
-        "tool": "adjust_stock",
+        "tool": "update_restock_request",
         "input": {
-          "product_name": "Taurus SC",
-          "movement_type": "restock",
+          "request_id": "taurus-open",
+          "action": "receive",
           "quantity": 2,
           "unit": "qt"
         }
@@ -214,7 +205,7 @@
               "product_inventory_movements[correction].quantity = difference between 2 gal and 2 qt"
             ],
             "unchanged": [
-              "product_inventory_movements[first].quantity = 2 qt"
+              "product_inventory_movements[first].metadata.enteredQuantity = 2 qt (the stored quantity is converted to the product inventory unit)"
             ],
             "sends": 0,
             "card": false,
@@ -386,7 +377,7 @@
         "outcome": "partial",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].quantity = 3 jugs"
+          "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
         ],
         "unchanged": [
           "purchase_orders count",
@@ -441,8 +432,9 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].quantity = 2 gal",
-          "products_catalog[Taurus SC].inventory_on_hand = recomputed from the live count"
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "products_catalog[Taurus SC].inventory_on_hand = recomputed from the live count",
+          "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
           "product_inventory_movements duplicate"
@@ -452,10 +444,10 @@
         "say": "Gate off: carded; the confirm recomputes on-hand from the live count and states the difference."
       },
       "call": {
-        "tool": "adjust_stock",
+        "tool": "update_restock_request",
         "input": {
-          "product_name": "Taurus SC",
-          "movement_type": "restock",
+          "request_id": "taurus-open",
+          "action": "receive",
           "quantity": 2,
           "unit": "gal"
         }
@@ -540,7 +532,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "product_inventory_movements[new].quantity = 2 gal"
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 gal (the stored quantity is converted to the product inventory unit)",
+          "product_restock_requests[taurus-open].status = received"
         ],
         "unchanged": [
           "product_inventory_movements count = 1"
@@ -550,10 +543,10 @@
         "say": "Reload finds the receipt; the repeat does not add a second movement."
       },
       "call": {
-        "tool": "adjust_stock",
+        "tool": "update_restock_request",
         "input": {
-          "product_name": "Taurus SC",
-          "movement_type": "restock",
+          "request_id": "taurus-open",
+          "action": "receive",
           "quantity": 2,
           "unit": "gal"
         }
@@ -640,7 +633,7 @@
         "outcome": "completed",
         "changes": [
           "product_inventory_movements[new].product_id = Talak 96 oz",
-          "product_inventory_movements[new].quantity = 3 jugs"
+          "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
         ],
         "unchanged": [
           "products_catalog[Taurus SC].inventory_on_hand"
@@ -827,7 +820,7 @@
         "outcome": "unknown",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].quantity = 5 jugs"
+          "product_inventory_movements[new].metadata.enteredQuantity = 5 jugs (the stored quantity is converted to the product inventory unit)"
         ],
         "unchanged": [
           "product_inventory_movements duplicate"
@@ -925,7 +918,7 @@
         "outcome": "completed",
         "changes": [
           "product_inventory_movements[new].product_id = Talak",
-          "product_inventory_movements[new].quantity = 2 jugs"
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 jugs (the stored quantity is converted to the product inventory unit)"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -1074,7 +1067,7 @@
             "outcome": "completed",
             "changes": [
               "product_inventory_movements[new].product_id = Talak",
-              "product_inventory_movements[new].quantity = 3 jugs"
+              "product_inventory_movements[new].metadata.enteredQuantity = 3 jugs (the stored quantity is converted to the product inventory unit)"
             ],
             "unchanged": [
               "product_inventory_movements[2 jugs]"
