@@ -259,6 +259,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
   });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
+    // ONE card-gate snapshot taken before the payload and its signature are
+    // built; the post-render fence compares against it (the browser fetches
+    // its own /data, so a flip anywhere in between skips the store).
+    cardGateAtRender = reserviceReportCardGateOn();
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
@@ -299,9 +303,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // resolvePestWeekWeather / resolvePestWeekWeatherForBuild is the ONE
     // canonical fetch+freeze every caller of buildReportV1Data shares — no
     // separate preflight fetch left here to disagree with the render).
-    // The browser fetches its own /data: a card-gate flip mid-render would
-    // put a card-less PDF under '-rcd1' (or the reverse). Checked after.
-    cardGateAtRender = reserviceReportCardGateOn();
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,

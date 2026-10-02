@@ -208,6 +208,8 @@ function buildYouToldUs(frozen, lane, scrub) {
 function productRows(products) {
   return (Array.isArray(products) ? products : []).map((row) => ({
     application_method: row?.application_method ?? row?.applicationMethod,
+    product_name: row?.product_name ?? row?.productName ?? row?.name,
+    product_category: row?.product_category ?? row?.productCategory ?? row?.category,
     targets: asStringArray(row?.targets),
   }));
 }

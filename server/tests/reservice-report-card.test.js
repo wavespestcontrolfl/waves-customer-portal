@@ -549,3 +549,19 @@ describe('pre-push P1 after r5 (#5542)', () => {
     expect(cardModule.activityLabelFor(svc, block, null)).toBe(payloadLabel);
   });
 });
+
+describe('Codex r6 (#5542)', () => {
+  test('a dry dust never adds the "until dry" line, by method or by formulation', () => {
+    const { hasLiquidApplication } = require('../services/reservice-fixed-recap');
+    expect(hasLiquidApplication([{ application_method: 'dust', targets: ['Roaches'] }])).toBe(false);
+    expect(hasLiquidApplication([{ application_method: 'spot_treatment', product_name: 'Delta Dust', targets: ['Roaches'] }])).toBe(false);
+    expect(hasLiquidApplication([{ application_method: 'spot_treatment', product_name: 'Alpine WSG', targets: ['Roaches'] }])).toBe(true);
+  });
+  test('both PDF paths snapshot the card gate BEFORE building the payload and its signature', () => {
+    const fs = require('fs'); const path = require('path');
+    const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    expect(route.indexOf('cardGateAtRender = reserviceReportCardGateOn();')).toBeLessThan(route.indexOf("const data = await buildServiceReportV1ResponseData(service, req.params.token, {\n            mode: 'pdf'"));
+    const queue = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'pdf-queue.js'), 'utf8');
+    expect(queue.indexOf('cardGateAtRender = reserviceReportCardGateOn();')).toBeLessThan(queue.indexOf('const data = await buildReportV1Data(service, reportToken, knex, {'));
+  });
+});

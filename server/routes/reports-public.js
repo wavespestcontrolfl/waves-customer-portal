@@ -2277,6 +2277,10 @@ router.get('/:token', async (req, res, next) => {
         laRenderSignature = canonical.signature;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
+          // ONE card-gate snapshot taken before the payload and its signature
+          // are built; the post-render fence compares against it (the browser
+          // fetches its own /data, so a flip anywhere in between skips the store).
+          cardGateAtRender = reserviceReportCardGateOn();
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
@@ -2290,9 +2294,6 @@ router.get('/:token', async (req, res, next) => {
           cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
           reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
           renderedData = data;
-          // The browser fetches its own /data: a card-gate flip mid-render
-          // would put a card-less PDF under '-rcd1' (or the reverse).
-          cardGateAtRender = reserviceReportCardGateOn();
           const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
