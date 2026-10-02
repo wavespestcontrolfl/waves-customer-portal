@@ -14487,7 +14487,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (deferredPmRowId) {
         try {
           const ConsentService = require('../services/payment-method-consents');
-          const consentMethodType = prepayChargePlan.method.methodType || 'card';
+          // Canonical tender (GitHub Codex #5567 r13): a legacy 'bank' /
+          // 'bank_account' row is a bank debit, and must snapshot the ACH text.
+          const consentMethodType = require('../services/autopay-eligibility').isBankMethodType(prepayChargePlan.method.methodType)
+            ? 'us_bank_account' : 'card';
           const already = await ConsentService.hasConsentSnapshotForVariant(
             customerId,
             prepayChargePlan.method.stripePaymentMethodId,

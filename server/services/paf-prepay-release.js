@@ -521,7 +521,7 @@ async function firstChargeCompletionFacts(svc, conn = db) {
       .first('id');
     if (optedOut) return null;
     if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(svc.customer_id, conn)) return null;
-    const bank = ['us_bank_account', 'ach'].includes(String(method.method_type || ''));
+    const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
     // The acknowledged total is a CEILING (owner R1): account credit the
     // charge will draw lowers it. Credit that covers the year means nothing
     // is charged, so the regular "nothing due today" text is the true one;
@@ -562,6 +562,7 @@ async function firstChargeCompletionFacts(svc, conn = db) {
 
 module.exports = {
   AWAITING,
+  planHasUnfinishedCompletion,
   firstChargeCompletionFacts,
   STALE_DAYS,
   releaseDeferredPrepayCharges,

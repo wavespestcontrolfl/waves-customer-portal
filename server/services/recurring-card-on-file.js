@@ -1727,6 +1727,26 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         }
         throw new Error('after-visit authorization only and no payer — delivering pay link');
       }
+      // A deferred job is charged only while its first visit still stands and
+      // no visit of the plan is mid-closeout (GitHub Codex #5567 r13): a visit
+      // reopened / cancelled / rescheduled since the release, or a closeout
+      // that started after it, sends the job back to wait for the next
+      // release pass — never a charge, never a pay link.
+      if (deferredToFirstVisit) {
+        const releasedVisit = job.released_for_visit_id
+          ? await db('scheduled_services').where({ id: job.released_for_visit_id }).first('status')
+          : null;
+        const visitStands = !job.released_for_visit_id || String(releasedVisit?.status || '') === 'completed';
+        const PafRelease = require('./paf-prepay-release');
+        if (!visitStands || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
+          await resolve(PafRelease.AWAITING, {
+            resolved_at: null, resolved_by: null, claim_token: null, claimed_at: null,
+            released_at: null, released_for_visit_id: null,
+            payer_scope_scheduled_service_id: job.scheduled_service_id || null,
+          });
+          continue;
+        }
+      }
       if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type')
@@ -1790,7 +1810,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       if (pmRow && jobConsentVersionCurrent) {
         try {
           const ConsentService = require('./payment-method-consents');
-          const consentMethodType = pmRow.method_type || 'card';
+          const consentMethodType = require('./autopay-eligibility').isBankMethodType(pmRow.method_type) ? 'us_bank_account' : 'card';
           const jobAuthorizedAt = (job.authorized_at || job.created_at)
             ? new Date(job.authorized_at || job.created_at) : null;
           const already = await ConsentService.hasConsentSnapshotForVariant(
@@ -1886,7 +1906,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // self_pay_override visit on a payer-billed account keeps its
           // customer-paid decision through recovery.
           ...(job.payer_scope_scheduled_service_id
-            ? { requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id }
+            ? {
+              requireSelfPayScheduledServiceId: job.payer_scope_scheduled_service_id,
+              // The released first visit must still be completed under the
+              // charge's own visit lock (GitHub Codex #5567 r13).
+              ...(deferredToFirstVisit && job.released_for_visit_id
+                && String(job.released_for_visit_id) === String(job.payer_scope_scheduled_service_id)
+                ? { requireCompletedVisit: true } : {}),
+            }
             : { requireSelfPayCustomerId: invoice.customer_id }),
         }));
         if (fencedCharge.ceded) {

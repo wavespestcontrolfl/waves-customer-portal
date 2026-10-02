@@ -388,6 +388,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await facts(f.parentId)).toMatchObject({ amount: 'up to $480.00' });
     });
 
+    it('a legacy bank alias reads as a saved bank account (Codex r13)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('payment_methods').where({ id: f.pmId }).update({ method_type: 'bank_account' });
+      expect(await facts(f.parentId)).toMatchObject({ methodLine: 'saved bank account' });
+    });
+
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
       const removed = await deferredAccept();
       await trx('payment_methods').where({ id: removed.pmId }).del();
@@ -702,6 +711,31 @@ postgres('annual prepay charged after the first visit', () => {
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect((await jobOf(f)).status).not.toBe('paid');
+    });
+
+    it('a first visit reopened after the release sends the job back to wait, never a charge or pay link (Codex r13)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ status: 'confirmed' });
+      const charge = require('../services/stripe').chargeInvoiceWithSavedCard;
+      await require('../services/recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+      expect(charge).not.toHaveBeenCalled();
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit' });
+      expect((await jobOf(f)).released_for_visit_id).toBeNull();
+      expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.childId, idempotency_key: `k-${attemptId}`, status: 'pending' });
+      const charge = require('../services/stripe').chargeInvoiceWithSavedCard;
+      await require('../services/recurring-card-on-file').sweepStrandedPrepayAutoCharges();
+      expect(charge).not.toHaveBeenCalled();
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
     it('a failed R2 alert is raised on the next pass; none is raised once the year is paid', async () => {
