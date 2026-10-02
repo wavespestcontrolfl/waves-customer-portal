@@ -119,8 +119,22 @@ describe('POST fast-complete/voice-fill', () => {
     const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
     expect(authIdx).toBeGreaterThan(-1);
     expect(router.stack.indexOf(layer)).toBeGreaterThan(authIdx);
-    // limiter, then the handler
-    expect(layer.route.stack).toHaveLength(2);
+    // dark gate, limiter, then the handler
+    expect(layer.route.stack).toHaveLength(3);
+  });
+
+  test('with the gate off the FIRST layer answers 404, so the limiter bucket is never spent', () => {
+    delete process.env.GATE_FAST_COMPLETE_VOICE_FILL;
+    const gate = routeLayer('post', PATH).route.stack[0].handle;
+    const res = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    const next = jest.fn();
+    gate({}, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    process.env.GATE_FAST_COMPLETE_VOICE_FILL = 'true';
+    gate({}, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
   test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p answers 404 {enabled:false} and reads and calls nothing', async (value) => {

@@ -192,6 +192,9 @@ async function loadPestReserviceContext(serviceId, knex = db) {
       aliases: (aliases.get(String(row.id)) || []).slice(0, 8),
       measure,
       units: [...UNITS_BY_MEASURE[measure]],
+      // the product's own catalog method, which the sheet offers on its row
+      // beside the four standard ways (FastCompleteSheet RowMethodPicker)
+      catalogMethod: catalogMethodOf(row),
     };
   });
   return {
@@ -203,9 +206,15 @@ async function loadPestReserviceContext(serviceId, knex = db) {
       areas: [...PEST_SHEET_AREAS],
       activity: [...PEST_SHEET_ACTIVITY],
       visitMethods: [...PEST_SHEET_VISIT_METHODS],
-      productMethods: [...PEST_SHEET_PRODUCT_METHODS],
+      productMethods: [...new Set([...PEST_SHEET_PRODUCT_METHODS, ...products.map((p) => p.catalogMethod).filter(Boolean)])],
     },
   };
+}
+
+// A catalog application_method as a sheet method key ("foliar_spray"), or ''.
+function catalogMethodOf(row) {
+  const method = String(row?.application_method || '').trim().toLowerCase();
+  return /^[a-z][a-z_]{2,40}$/.test(method) ? method : '';
 }
 
 // One sheet is built (pest_reservice). Another sheet adds its own loader, schema
@@ -292,7 +301,8 @@ Rules, in priority order:
 
 function productLine(product) {
   const aka = product.aliases.length ? ` | also called: ${product.aliases.join('; ')}` : '';
-  return `${product.id} | ${product.name}${aka} | units: ${product.units.join(', ')}`;
+  const own = product.catalogMethod && !PEST_SHEET_PRODUCT_METHODS.includes(product.catalogMethod) ? ` | own method: ${product.catalogMethod}` : '';
+  return `${product.id} | ${product.name}${aka} | units: ${product.units.join(', ')}${own}`;
 }
 
 function buildPrompt(ctx, transcript) {
@@ -638,6 +648,7 @@ function nameEvidence(product, tokens) {
 const APPLICATION_WORDS = new Set([
   'used', 'use', 'using', 'applied', 'apply', 'applying', 'sprayed', 'spraying', 'put', 'putting', 'mixed', 'mix', 'mixing',
   'added', 'add', 'treated', 'treating', 'dusted', 'dusting', 'baited', 'baiting', 'laid', 'spread', 'injected', 'hit',
+  'drench', 'drenched', 'drenching', 'sprayed', 'foliar', 'broadcast', 'granules',
   'same', 'usual',
 ]);
 const CONTEXT_WINDOW = 6;
@@ -707,6 +718,8 @@ const NEGATION_WINDOW = 6;
 const OTHER_VISIT_NEXT = new Set(['time', 'visit', 'week', 'month', 'service']);
 function isOtherVisitAt(tokens, j) {
   if (tokens[j] === 'previously') return true;
+  // "same as last time", "like last time": this visit, done the earlier way
+  if (tokens[j - 1] === 'as' || tokens[j - 1] === 'like') return false;
   return (tokens[j] === 'last' || tokens[j] === 'next') && OTHER_VISIT_NEXT.has(tokens[j + 1]);
 }
 function isNegationAt(tokens, j) {
@@ -733,9 +746,10 @@ function isNegatedMention(mention, world) {
   let from = mention.start;
   while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
   for (let j = from; j < mention.start; j += 1) if (isNegationAt(world.tokens, j)) return true;
-  // "Last time I used four ounces of Taurus": another visit's, anywhere earlier in the clause.
+  // "Last time I used four ounces of Taurus", "Last time, I used...": another
+  // visit's, anywhere earlier in the sentence (a comma does not end it).
   let clause = from;
-  while (clause > 0 && !world.breaks[clause]) clause -= 1;
+  while (clause > 0 && !world.stops[clause]) clause -= 1;
   for (let j = clause; j < from; j += 1) if (isOtherVisitAt(world.tokens, j)) return true;
   // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
   // a negation after the name, past auxiliary words, in the same clause.
@@ -785,7 +799,7 @@ const mentionClause = (mention, world) => {
 };
 // The positive words of a token range: negated and product-name words left out.
 const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
-  .filter((_, i) => !world.negated.has(from + i)).join(' ');
+  .filter((_, i) => !world.negated.has(from + i) && !world.masked.has(from + i)).join(' ');
 
 // The spoken quantities that belong to ONE mention of a product. A quantity joined
 // to a name by "of" ("four ounces of Taurus", "five of Talstar") belongs to that
@@ -889,10 +903,20 @@ const METHOD_LEXICON = {
 // The method the model chose for a product, kept only when its word is said, not
 // negated, in that product's own clause (mentionClause); otherwise cleared with a
 // Check.
+// A catalog method's evidence is its own distinctive words ("foliar", "drench",
+// "injection"), each at its start ("drenched", "injected").
+const GENERIC_METHOD_WORDS = new Set(['spray', 'treatment', 'application', 'placement', 'and', 'the', 'of']);
+function methodLexicon(method) {
+  if (METHOD_LEXICON[method]) return METHOD_LEXICON[method];
+  const words = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).map((w) => w.slice(0, Math.max(4, w.length - 3)));
+  return words.length ? new RegExp(`\\b(${words.join('|')})\\w*\\b`) : null;
+}
+
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
-  if (!ctx.productMethods.includes(raw.method)) return '';
+  const offered = PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
+  if (!offered) return '';
   const text = productMentions(product, heard, world).map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
-  if (METHOD_LEXICON[raw.method]?.test(text)) return raw.method;
+  if (methodLexicon(raw.method)?.test(text)) return raw.method;
   pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
@@ -1103,6 +1127,21 @@ function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '', 
   };
 }
 
+// A visit the model left EMPTY while the transcript says pests, areas or activity
+// (by the same evidence rules that admit a model value) gets a Check per value, so
+// a dropped visit is never mistaken for a complete fill. A partly filled visit is
+// the model's reading of those words and is left to the tech's taps.
+function visitOmissions(visit, ctx, world, unclear) {
+  if (visit.pests.length || visit.areas.length || visit.method || visit.activity || visit.linearFt !== null) return;
+  const evidence = visitEvidence(world);
+  const missing = [
+    ...ctx.pests.filter((v) => v !== 'Other' && !visit.pests.includes(v) && valueHeard('pests', v, evidence)),
+    ...ctx.areas.filter((v) => !visit.areas.includes(v) && valueHeard('areas', v, evidence)),
+    ...(visit.activity ? [] : ctx.activity.filter((v) => valueHeard('activity', v, evidence))),
+  ];
+  for (const value of missing) pushUnclear(unclear, value, 'visit_said_not_filled');
+}
+
 /**
  * The model's answer, checked against the sheet's own choices. Never throws and
  * never trusts: anything off-list, unspoken or malformed becomes an `unclear`
@@ -1115,8 +1154,10 @@ function validateFill(raw, ctx, transcript) {
   const world = transcriptWorld(ctx, transcript);
   const products = validateProducts(input.products, ctx, normTranscript, unclear, transcript, world);
   const visit = validateVisit(input.visit, ctx, normTranscript, unclear, transcript, world);
+  visitOmissions(visit, ctx, world, unclear);
+  // The model's own Checks show the tech's words back to them: only words really said.
   for (const item of Array.isArray(input.unclear) ? input.unclear : []) {
-    if (item && typeof item === 'object') pushUnclear(unclear, item.heard, item.reason || 'unclear_other');
+    if (item && typeof item === 'object' && heardInTranscript(item.heard, normTranscript)) pushUnclear(unclear, item.heard, item.reason || 'unclear_other');
   }
   return {
     products,
@@ -1137,7 +1178,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid|pay|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|dogs?|access|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|dogs?|access|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence) || accessCodeRe.test(sentence);
 
@@ -1162,6 +1203,7 @@ function spokenClauseScope(sentence, spoken) {
 
 function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
+  const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
   // After an office label ("Office: ...") the following sentences may still be the
   // aside: their audience is unclear, so they never go to the customer unasked.
   let afterOffice = false;
@@ -1179,6 +1221,9 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     const said = spokenClauseScope(text, spoken);
     const scope = said && isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : said;
     if (scope === 'office') office.push(text);
+    // no pesticide is "safe", "pet-safe" or "EPA-approved" on a customer surface
+    // (AGENTS.md compliance language): even said word for word, it is a Check
+    else if (scope === 'customer' && reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
     else if (scope === 'customer') customer.push(text);
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }

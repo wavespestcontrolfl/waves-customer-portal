@@ -4448,7 +4448,12 @@ const fastCompleteVoiceFillLimiter = require('express-rate-limit')({
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many voice fills. Keep typing for now.' },
 });
-router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillLimiter, async (req, res, next) => {
+// Dark gate ahead of the limiter: while off, a request is the 404 and never
+// spends the staff bucket.
+const fastCompleteVoiceFillGate = (req, res, next) => (
+  require('../config/feature-gates').fastCompleteVoiceFillLive() ? next() : res.status(404).json({ enabled: false })
+);
+router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillGate, fastCompleteVoiceFillLimiter, async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').fastCompleteVoiceFillLive()) return res.status(404).json({ enabled: false });
     if (!(await assertRecapOwnership(req, res))) return;
