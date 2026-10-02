@@ -223,21 +223,28 @@ async function loadLateAlert(allTodayRows, { conn, deriveWindow }) {
 // group stops-ahead.js uses): a lagging row is not "passed" when a sibling is
 // already underway or done.
 const stopKey = (r) => `${r.technician_id}|${calendarDay(r.scheduled_date)}|${r.window_start}`;
+// The stops (stopKey) on these days where some row is underway or done, by status
+// or tracker — shared by the passed-window and missed-visit reads.
+async function startedStopKeys(conn, customerId, rows) {
+  const dates = [...new Set(rows.map((r) => calendarDay(r.scheduled_date)).filter(Boolean))];
+  if (!dates.length) return new Set();
+  const advanced = await conn('scheduled_services').where({ customer_id: customerId })
+    .whereIn('scheduled_date', dates)
+    .where((b) => b.whereIn('status', ['en_route', 'on_site', 'completed']).orWhereIn('track_state', ['en_route', 'on_property', 'complete']))
+    .select('technician_id', 'scheduled_date', 'window_start');
+  return new Set((advanced || []).map(stopKey));
+}
 async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }) {
   const nowMin = nowEtMinutes(now);
   // the same not-started rule loadMissedVisit honors (tracker unset or
   // 'scheduled'), plus the service-record and sibling checks below
   const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
   if (!candidates.length) return null;
-  const [recorded, advanced] = await Promise.all([
+  const [recorded, startedStops] = await Promise.all([
     conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id'),
-    conn('scheduled_services').where({ customer_id: customerId })
-      .whereIn('scheduled_date', [...new Set(candidates.map((r) => calendarDay(r.scheduled_date)))])
-      .where((b) => b.whereIn('status', ['en_route', 'on_site', 'completed']).orWhereIn('track_state', ['en_route', 'on_property', 'complete']))
-      .select('technician_id', 'scheduled_date', 'window_start'),
+    startedStopKeys(conn, customerId, candidates),
   ]);
   const done = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
-  const startedStops = new Set((advanced || []).map(stopKey));
   for (const row of candidates) {
     if (done.has(String(row.id)) || startedStops.has(stopKey(row))) continue;
     const endMin = customerWindowEndMinutes(row);
@@ -276,13 +283,16 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
     })
     .orderBy('scheduled_date', 'desc')
     .limit(MISSED_SCAN_MAX)
-    .select('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
+    .select('id', 'technician_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
+  // A lagging row whose sibling at the same stop (tech, day, window) is underway
+  // or done is not a miss — the same rule the passed-window read applies.
+  const startedStops = await startedStopKeys(conn, customerId, unfinishedRows || []);
   // Yesterday's late visit whose window runs past midnight (23:00-01:00) is
   // still open, not missed, until that window ends.
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
   const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday && crossesIntoNow(row, nowMin);
-  const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row));
+  const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row) && !startedStops.has(stopKey(row)));
   if (!unfinished) return null;
   return {
     type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date), windowStart: unfinished.window_start || null,

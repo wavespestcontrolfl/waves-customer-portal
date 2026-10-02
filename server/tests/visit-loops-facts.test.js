@@ -295,6 +295,22 @@ describe('missedVisit', () => {
     expect(out.missedVisit).toEqual({ type: 'Lawn Care', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM', status: 'confirmed', reason: 'not_completed' });
   });
 
+  test("a lagging row whose sibling at the same stop finished is not missed after midnight", async () => {
+    const lagging = { id: 'v0', technician_id: 'tech-1', service_type: 'Lawn Care', scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed' };
+    const at = (advanced) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({
+      scheduled_services: (ops) => {
+        if (isUnfinishedQuery(ops)) return [lagging];
+        if (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date')) return advanced;
+        return [];
+      },
+      reschedule_log: () => [],
+    }) });
+    // the pest sibling at the same stop (tech, day, window) was completed yesterday
+    expect((await at([{ technician_id: 'tech-1', scheduled_date: '2026-09-30', window_start: '09:00:00' }])).missedVisit).toBeNull();
+    // a different stop that day finished: this one is still missed
+    expect((await at([{ technician_id: 'tech-1', scheduled_date: '2026-09-30', window_start: '13:00:00' }])).missedVisit).toMatchObject({ reason: 'not_completed' });
+  });
+
   test('queries the last 7 ET days, before today, pending/confirmed only', async () => {
     const conn = fakeConn({ scheduled_services: () => null, reschedule_log: () => null });
     await loadVisitLoops({ customerId: 'c1', upcomingServices: [], now: NOW, conn });
