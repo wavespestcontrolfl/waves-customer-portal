@@ -52,6 +52,17 @@ test('matchKey separates the same name in different counties', () => {
   expect(matchKey('Manatee', 'Oakwood Glen')).toBe(matchKey('manatee', 'OAKWOOD GLEN'));
 });
 
+test.each([
+  ['100 Bay Cove', '100 Bay Cv', true],
+  ['100 Pine Glen', '100 PINE GLN', true],
+  ['100 Sample Loop', '100 Sample Lp', true],
+  ['100 Main Street East', '100 Main St E', true],
+  ['100 Main St E', '100 Main St W', false],
+  ['100 Oak Dr', '100 Oak Ct', false],
+])('sameStreetLine(%s, %s) is %s', (a, b, expected) => {
+  expect(require('../services/neighborhood-access').sameStreetLine(a, b)).toBe(expected);
+});
+
 describe('parcelMatchesProperty', () => {
   const property = { address_line1: '100 Example Pl', zip: '34202' };
   test('own parcel: house number and ZIP agree', () => {

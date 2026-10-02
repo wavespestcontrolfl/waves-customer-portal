@@ -12,6 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { sameStreetLine } = require('./neighborhood-access');
 
 // 'family_occupied' (owner ruling 2026-09-08): a home the customer owns or
 // pays for that a FAMILY MEMBER lives in — neither owner-occupied nor a
@@ -521,20 +522,13 @@ async function completePrimaryCore(customerId, call, conn) {
  * primary already matches.
  */
 // The neighborhood columns to clear when the address moves to a different
-// street, city, state or ZIP — compared canonically (streetKey: suffix spelling
-// and unit tails ignored; directional long forms abbreviated; city/state case
-// and ZIP+4 ignored), so a unit-only or format-only edit ("Main Street East" →
-// "Main St E") clears nothing.
-const DIRECTION_WORDS = { north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw' };
-// streetKey canonicalizes the suffix but keeps "East" vs "E" apart; for the
-// move test they are the same street.
-const directionalStreetKey = (s) => streetKey(String(s || '').replace(
-  /\b(northeast|northwest|southeast|southwest|north|south|east|west)\b/gi, (w) => DIRECTION_WORDS[w.toLowerCase()],
-));
-
+// street, city, state or ZIP — compared canonically (the neighborhood
+// directory's own street normalizer: USPS suffix and directional spellings,
+// unit tails; city/state case and ZIP+4 ignored), so a unit-only or
+// format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
 function neighborhoodResetOnMove(from, to) {
   const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
-  const moved = directionalStreetKey(from.address_line1) !== directionalStreetKey(to.address_line1)
+  const moved = !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
     || !same(from.city, to.city)
     || !same(from.state, to.state)
     || normalizeZip(from.zip) !== normalizeZip(to.zip);

@@ -104,6 +104,22 @@ const ABBREVIATIONS = {
   PLACE: 'PL', CIRCLE: 'CIR', BOULEVARD: 'BLVD', TERRACE: 'TER', TRAIL: 'TRL',
   PARKWAY: 'PKWY', COVE: 'CV', POINTE: 'PT', POINT: 'PT', GLEN: 'GLN', PLAZA: 'PLZ',
   CROSSING: 'XING', BEND: 'BND', TRACE: 'TRCE', HIGHWAY: 'HWY', LP: 'LOOP',
+  // Further USPS Publication 28 suffix pairs common in the service area.
+  ALLEY: 'ALY', ANNEX: 'ANX', BAYOU: 'BYU', BLUFF: 'BLF', BRANCH: 'BR', BRIDGE: 'BRG',
+  BROOK: 'BRK', CANYON: 'CYN', CAUSEWAY: 'CSWY', CENTER: 'CTR', CLIFF: 'CLF', CLUB: 'CLB',
+  COMMON: 'CMN', COMMONS: 'CMNS', CORNER: 'COR', COURSE: 'CRSE', COURTS: 'CTS', CREEK: 'CRK',
+  CRESCENT: 'CRES', CREST: 'CRST', ESTATE: 'EST', ESTATES: 'ESTS', EXPRESSWAY: 'EXPY',
+  EXTENSION: 'EXT', FALLS: 'FLS', FIELD: 'FLD', FIELDS: 'FLDS', FOREST: 'FRST', FORK: 'FRK',
+  FREEWAY: 'FWY', GARDEN: 'GDN', GARDENS: 'GDNS', GATEWAY: 'GTWY', GLENS: 'GLNS', GREEN: 'GRN',
+  GROVE: 'GRV', HARBOR: 'HBR', HAVEN: 'HVN', HEIGHTS: 'HTS', HILL: 'HL', HILLS: 'HLS',
+  HOLLOW: 'HOLW', ISLAND: 'IS', ISLANDS: 'ISS', JUNCTION: 'JCT', KEY: 'KY', KNOLL: 'KNL',
+  LAKE: 'LK', LAKES: 'LKS', LANDING: 'LNDG', MANOR: 'MNR', MEADOW: 'MDW', MEADOWS: 'MDWS',
+  MILL: 'ML', MOUNT: 'MT', ORCHARD: 'ORCH', OVERPASS: 'OPAS', PASSAGE: 'PSGE', PINE: 'PNE',
+  PINES: 'PNES', PLAINS: 'PLNS', PORT: 'PRT', PRAIRIE: 'PR', RANCH: 'RNCH', RIDGE: 'RDG',
+  RIVER: 'RIV', ROUTE: 'RTE', SHOAL: 'SHL', SHORE: 'SHR', SHORES: 'SHRS', SPRING: 'SPG',
+  SPRINGS: 'SPGS', SQUARE: 'SQ', STATION: 'STA', STREAM: 'STRM', SUMMIT: 'SMT', TRAILS: 'TRLS',
+  TURNPIKE: 'TPKE', VALLEY: 'VLY', VIEW: 'VW', VILLAGE: 'VLG', VILLE: 'VL', VISTA: 'VIS',
+  WALKS: 'WALK', WELLS: 'WLS', TERR: 'TER', CRT: 'CT', CRCL: 'CIR', CIRC: 'CIR',
 };
 function streetLine(line, cities = []) {
   let s = ` ${String(line || '').toUpperCase().replace(/[^A-Z0-9,\s]/g, ' ').replace(/\s+/g, ' ').trim()} `;
@@ -279,7 +295,16 @@ async function fileNeighborhoodCode(conn, { neighborhoodId, value, source, sourc
   return { status: 'filed', id, written_at: written, flagged: [] };
 }
 
+// Same physical street, whatever the spelling: suffix and directional long
+// forms abbreviated, a trailing directional one side omits tolerated, two
+// different directionals never equal. Shared with customer-properties.js's
+// address-move check so both decide "same street" one way.
+function sameStreetLine(a, b) {
+  return sameStreet(streetLine(a), streetLine(b));
+}
+
 module.exports = {
+  sameStreetLine,
   neighborhoodNameFromSubdivision,
   isKeypadCode,
   matchKey,

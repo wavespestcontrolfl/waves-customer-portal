@@ -190,10 +190,12 @@ postgres('neighborhood access directory', () => {
     ['a new ZIP clears it', { zip: '34211' }, {}, null],
     ['a directional spelled out vs abbreviated keeps it', { address_line1: '100 Synthetic Way E' }, {}, 'kept', '100 Synthetic Way East'],
     ['a different directional clears it', { address_line1: '100 Synthetic Way W' }, {}, null, '100 Synthetic Way East'],
+    ['a suffix spelled out vs abbreviated keeps it', { address_line1: '100 Synthetic Cv' }, {}, 'kept', '100 Synthetic Cove'],
+    ['a different street name clears it', { address_line1: '100 Other Cove' }, {}, null, '100 Synthetic Cove'],
   ])('%s', async (_label, change, opts, expected, startLine = '100 Synthetic Way') => {
     const { syncPrimaryAddress } = require('../services/customer-properties');
     const p = await property({ is_primary: true, address_line1: startLine });
-    const { neighborhood } = await resolvePropertyNeighborhood(p, { conn: trx, lookup: stub('OAKWOOD GLEN PH IV PB66/57') });
+    const { neighborhood } = await resolvePropertyNeighborhood(p, { conn: trx, lookup: stub('OAKWOOD GLEN PH IV PB66/57', 'Manatee', startLine.toUpperCase()) });
     await trx('customers').where({ id: customerId }).update({ address_line1: startLine, city: 'Lakewood Ranch', zip: '34202', ...change });
     const customer = await trx('customers').where({ id: customerId }).first();
     await syncPrimaryAddress(customer, trx, opts);
