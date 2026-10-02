@@ -2997,6 +2997,15 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
+// Whether an add-on line can be due on any occurrence after the series
+// anchor, by lineDueOnRecurringDate's own rule: a one-time service key or a
+// 'one_time' pattern is due on the anchor only; every other line recurs.
+function addonRecursAfterAnchor(line) {
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) return false;
+  return (line?.recurringPattern || line?.recurring_pattern || null) !== 'one_time';
+}
+
 function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
     .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
@@ -23472,7 +23481,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         if (require('../config/feature-gates').rateReviewLive()) {
           const RateReviewApply = require('../services/rate-review-apply');
           const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
-            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, today: etDateString(), lock: true,
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, visitCount: mintPayload.visitCount ?? null, today: etDateString(), lock: true,
           });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
           if (noticed) {
@@ -27111,6 +27120,7 @@ router._test = {
   addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
+  addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,
