@@ -200,6 +200,23 @@ describe('unsupported point-lookup county', () => {
     expect(r.point).toMatchObject({ status: 'skipped', reason: 'point_lookup_unsupported_county' });
     expect(r.stop).toBe('point_lookup_unsupported');
   });
+
+  test('county name variants of a supported county still run the point query', async () => {
+    const { normalizeCountyName } = require('../services/property-lookup/county-parcel-gis');
+    for (const county of ['MANATEE', 'Manatee County', 'manatee']) {
+      const deps = {
+        auditAddressHouseNumber: jest.fn().mockResolvedValue(null),
+        lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
+        parcelGisPrecision: () => 'rooftop',
+        applyGisParcelGuards: jest.fn(),
+        pointLookupCounties: new Set(['Manatee', 'Sarasota', 'Charlotte']),
+        normalizeCountyName,
+      };
+      const row = { normalized_address: '100 EXAMPLE ST, BRADENTON, FL 34203', lat: '27.4', lng: '-82.5', county, parcel_id: null, last_attempt_status: 'no_parcel', snapshot: {} };
+      await replay.replayRow(row, deps, {});
+      expect(deps.lookupCountyParcelByPoint).toHaveBeenCalled();
+    }
+  });
 });
 
 describe('finalizeResult', () => {

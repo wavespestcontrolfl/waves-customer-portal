@@ -331,7 +331,8 @@ async function replayRow(row, deps, opts = {}) {
   out.countyUsed = countyHint;
   if (geo.lat === null || geo.lng === null) {
     out.point = { status: 'skipped', reason: 'no_coordinates', errors: [] };
-  } else if (countyHint && deps.pointLookupCounties && !deps.pointLookupCounties.has(countyHint)) {
+  } else if (countyHint && deps.pointLookupCounties
+    && !deps.pointLookupCounties.has((deps.normalizeCountyName || ((c) => c))(countyHint))) {
     // The county module answers situs searches only for this county (no
     // point layer): no point query is made, so it is inconclusive — never a
     // "no parcel at the point" miss.
@@ -612,6 +613,9 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     parcelGisPrecision: aiLookup._private.parcelGisPrecision,
     applyGisParcelGuards: aiLookup._private.applyGisParcelGuards,
     pointLookupCounties: new Set(Object.keys(countyGis._private.COUNTY_LAYERS)),
+    // Stored county text varies ("MANATEE", "Manatee County"); the live
+    // lookup canonicalizes it the same way before choosing a layer.
+    normalizeCountyName: countyGis.normalizeCountyName,
   };
 
   const results = await runReplay(rows, deps, {
