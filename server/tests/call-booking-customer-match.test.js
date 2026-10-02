@@ -198,11 +198,16 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: fresh, avPositiveForBooking: true, exactAddressForBooking: true })).toEqual([]);
   });
 
-  test('the list append takes the per-call triage lock before the row lock, so it serializes with Resolve / Dismiss / the sweep', () => {
+  test('dedup, append and fresh insert all run in ONE transaction under the per-call triage lock taken before the first read', () => {
     const start = source.indexOf('async function fileMissingFirstNameCard(');
     const block = source.slice(start, source.indexOf('async function missingFirstNameCardStillOpen', start));
-    expect(block.indexOf('await lockTriageCall(trx, callLogId);')).toBeGreaterThan(-1);
-    expect(block.indexOf('await lockTriageCall(trx, callLogId);')).toBeLessThan(block.indexOf('.forUpdate()'));
+    const lock = block.indexOf('await lockTriageCall(trx, callLogId);');
+    expect(lock).toBeGreaterThan(-1);
+    expect(block.indexOf('return conn.transaction(async (trx) => {')).toBeLessThan(lock);
+    expect(lock).toBeLessThan(block.indexOf("trx('triage_items').where({ call_log_id: callLogId"));
+    expect(lock).toBeLessThan(block.indexOf('.forUpdate()'));
+    // the insert is not an ignored-conflict write any more: under the lock a concurrent filer cannot slip in
+    expect(block).not.toContain('.ignore()');
   });
 
   test('the card text states the durable fact, not a booking', () => {

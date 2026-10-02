@@ -3776,38 +3776,35 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
   const { owedCustomerIds } = require('../utils/missing-first-name-card');
   const stamp = customerId ? String(customerId) : null;
   const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
-  const rows = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
-    .select('id', 'status', 'payload');
-  if (rows.some((row) => stamp && owedCustomerIds(row.payload).includes(stamp))) return false;
-  const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
-  if (live) {
-    // Append under a row lock so two passes listing different customers both land.
-    return conn.transaction(async (trx) => {
-      // The per-call triage lock FIRST (the global lock order): a Resolve / Dismiss / sweep
-      // judging this card's list holds it, so the append and the settlement serialize.
-      await lockTriageCall(trx, callLogId);
-      const fresh = await trx('triage_items').where({ id: live.id }).whereIn('status', ['open', 'in_progress']).forUpdate().first('payload');
-      if (!fresh) return false;
-      const ids = owedCustomerIds(fresh.payload);
-      if (!stamp || ids.includes(stamp)) return false;
+  // EVERYTHING — dedup, append, fresh insert — runs inside one transaction under the per-call
+  // triage lock (the global lock order), taken BEFORE the first read: a Resolve / Dismiss /
+  // sweep that closes the card, and a concurrent filer, serialize with this decision, so a
+  // newly owed customer is never dropped by a stale read or an ignored insert conflict.
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+      .select('id', 'status', 'payload');
+    if (rows.some((row) => stamp && owedCustomerIds(row.payload).includes(stamp))) return false;
+    const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
+    if (live) {
+      const ids = owedCustomerIds(live.payload);
+      if (!stamp) return false;
+      await trx('triage_items').where({ id: live.id }).forUpdate().first('id');
       await trx('triage_items').where({ id: live.id }).update({
         payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_ids: [...ids, stamp] })]),
         updated_at: new Date(),
       });
       return true;
-    });
-  }
-  await conn('triage_items')
-    .insert(buildTriageItem({
+    }
+    await trx('triage_items').insert(buildTriageItem({
       callLogId,
       flag: 'missing_first_name',
       extraction,
       severity: 'advisory',
       extraPayload: { customer_ids: stamp ? [stamp] : [], heard_name_v1: heard },
-    }))
-    .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-    .ignore();
-  return true;
+    }));
+    return true;
+  });
 }
 
 // Is the call's missing_first_name card still an open task (open or claimed)? Read under
