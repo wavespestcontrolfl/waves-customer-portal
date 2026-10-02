@@ -2021,10 +2021,6 @@ function buildProtocolPayload(record) {
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
           : {}),
       })),
-    // A Waves blog post picked at completion (GATE_REPORT_BLOG_POST): its
-    // title and live URL as frozen, checked again against the site's own
-    // host (report-blog-post.js).
-    blogPost: require('./report-blog-post').frozenBlogPost(structured.blogPost),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
 }
@@ -6753,9 +6749,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       : null,
     // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the
-    // client renders it above the footer). Null unless the gate is on and
-    // the record froze a post; the switch hides frozen posts too.
-    blogPost: featureGates.reportBlogPostLive?.() === true ? (protocol.blogPost || null) : null,
+    // client renders it above the footer): the post the record froze, its
+    // title and live URL checked again against the site's own host
+    // (report-blog-post.js). Null unless the gate is on; the switch hides
+    // frozen posts too. Read here only, never onto the protocol object the
+    // payload also returns, so this gated field is the post's one way out
+    // (pre-push P0 on #5547).
+    blogPost: featureGates.reportBlogPostLive?.() === true
+      ? require('./report-blog-post').frozenBlogPost(structured.blogPost)
+      : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the
     // estimate, the report token is a shareable bearer link the customer owns —

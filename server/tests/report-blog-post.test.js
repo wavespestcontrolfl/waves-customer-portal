@@ -361,7 +361,9 @@ describe('completion freeze contract', () => {
 describe('report payload', () => {
   const reportSource = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
   test('the frozen post is read back through the host check and shown only while the gate is on', () => {
-    expect(reportSource).toContain("blogPost: require('./report-blog-post').frozenBlogPost(structured.blogPost),");
-    expect(reportSource).toContain('blogPost: featureGates.reportBlogPostLive?.() === true ? (protocol.blogPost || null) : null,');
+    expect(reportSource).toMatch(/blogPost: featureGates\.reportBlogPostLive\?\.\(\) === true\s*\?\s*require\('\.\/report-blog-post'\)\.frozenBlogPost\(structured\.blogPost\)\s*:\s*null,/);
+    // Never onto the protocol object the payload also returns (pre-push P0
+    // on #5547; the whole payload is pinned in report-blog-post-payload.test.js).
+    expect(reportSource).not.toMatch(/protocol\??\.blogPost/);
   });
 });
