@@ -188,11 +188,13 @@ postgres('neighborhood access directory', () => {
     ['a unit-only edit keeps it even when the caller drops coords', { address_line2: 'Unit 4' }, { explicitLine2: true, preserveCoords: false }, 'kept'],
     ['a format-only edit (city case, ZIP+4) keeps it', { city: 'LAKEWOOD RANCH', zip: '34202-1234' }, {}, 'kept'],
     ['a new ZIP clears it', { zip: '34211' }, {}, null],
-  ])('%s', async (_label, change, opts, expected) => {
+    ['a directional spelled out vs abbreviated keeps it', { address_line1: '100 Synthetic Way E' }, {}, 'kept', '100 Synthetic Way East'],
+    ['a different directional clears it', { address_line1: '100 Synthetic Way W' }, {}, null, '100 Synthetic Way East'],
+  ])('%s', async (_label, change, opts, expected, startLine = '100 Synthetic Way') => {
     const { syncPrimaryAddress } = require('../services/customer-properties');
-    const p = await property({ is_primary: true });
+    const p = await property({ is_primary: true, address_line1: startLine });
     const { neighborhood } = await resolvePropertyNeighborhood(p, { conn: trx, lookup: stub('OAKWOOD GLEN PH IV PB66/57') });
-    await trx('customers').where({ id: customerId }).update({ address_line1: '100 Synthetic Way', city: 'Lakewood Ranch', zip: '34202', ...change });
+    await trx('customers').where({ id: customerId }).update({ address_line1: startLine, city: 'Lakewood Ranch', zip: '34202', ...change });
     const customer = await trx('customers').where({ id: customerId }).first();
     await syncPrimaryAddress(customer, trx, opts);
     const row = await trx('customer_properties').where({ id: p.id }).first();

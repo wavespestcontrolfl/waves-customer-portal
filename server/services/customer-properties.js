@@ -522,11 +522,19 @@ async function completePrimaryCore(customerId, call, conn) {
  */
 // The neighborhood columns to clear when the address moves to a different
 // street, city, state or ZIP — compared canonically (streetKey: suffix spelling
-// and unit tails ignored; city/state case and ZIP+4 ignored), so a unit-only or
-// format-only edit ("Main St" → "Main Street") clears nothing.
+// and unit tails ignored; directional long forms abbreviated; city/state case
+// and ZIP+4 ignored), so a unit-only or format-only edit ("Main Street East" →
+// "Main St E") clears nothing.
+const DIRECTION_WORDS = { north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw' };
+// streetKey canonicalizes the suffix but keeps "East" vs "E" apart; for the
+// move test they are the same street.
+const directionalStreetKey = (s) => streetKey(String(s || '').replace(
+  /\b(northeast|northwest|southeast|southwest|north|south|east|west)\b/gi, (w) => DIRECTION_WORDS[w.toLowerCase()],
+));
+
 function neighborhoodResetOnMove(from, to) {
   const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
-  const moved = streetKey(from.address_line1) !== streetKey(to.address_line1)
+  const moved = directionalStreetKey(from.address_line1) !== directionalStreetKey(to.address_line1)
     || !same(from.city, to.city)
     || !same(from.state, to.state)
     || normalizeZip(from.zip) !== normalizeZip(to.zip);

@@ -81,10 +81,14 @@ async function upsertNeighborhood(conn, { county, subdivision }) {
          WHEN neighborhoods.subdivision_names @> jsonb_build_array(?::text) THEN neighborhoods.subdivision_names
          ELSE neighborhoods.subdivision_names || jsonb_build_array(?::text) END,
        updated_at = now()
-     RETURNING id, name, (xmax = 0) AS inserted`,
+     RETURNING id, name, (xmax = 0) AS inserted, updated_at::text AS written_at`,
     [name, county || null, key, raw, raw, raw],
   ).then((r) => r.rows);
-  return { ...row, prior: row.inserted || !prior ? null : prior };
+  const existing = row.inserted || !prior ? null : prior;
+  // addedAlias: the one name this call appended (null when it was already
+  // there), so an undo can remove exactly it and leave later appends alone.
+  const addedAlias = existing && !(existing.subdivision_names || []).includes(raw) ? raw : null;
+  return { ...row, prior: existing, addedAlias };
 }
 
 
@@ -186,8 +190,11 @@ async function resolvePropertyNeighborhood(property, { conn = db, lookup = looku
       county_subdivision: subdivision,
       neighborhood_checked_at: conn.fn.now(),
     });
-  if (!neighborhood) return { status: 'no_name', subdivision, wrote: wrote > 0 };
-  return { status: 'linked', neighborhood, subdivision, wrote: wrote > 0 };
+  // The stamp this write left (the rollback applies only while it is still there).
+  const { t: checkedAt } = await conn('customer_properties').where({ id: property.id })
+    .first(conn.raw('neighborhood_checked_at::text AS t'));
+  if (!neighborhood) return { status: 'no_name', subdivision, wrote: wrote > 0, checkedAt };
+  return { status: 'linked', neighborhood, subdivision, wrote: wrote > 0, checkedAt };
 }
 
 // Mark live rows needs_confirm; returns [{ id, updated_at }] as they were
@@ -203,7 +210,15 @@ async function flagForConfirm(conn, ids) {
   await conn('neighborhood_access')
     .whereIn('id', before.map((r) => r.id))
     .update({ status: 'needs_confirm', updated_at: conn.fn.now() });
-  return before;
+  const after = await writtenAt(conn, 'neighborhood_access', before.map((r) => r.id));
+  return before.map((r) => ({ ...r, written_at: after.get(r.id) }));
+}
+
+// updated_at as Postgres text (microseconds intact) for each id, read after
+// a write — a rollback statement applies only while the row still carries it.
+async function writtenAt(conn, table, ids) {
+  const rows = await conn(table).whereIn('id', ids).select('id', conn.raw('updated_at::text AS t'));
+  return new Map(rows.map((r) => [r.id, r.t]));
 }
 
 // File one customer-given neighborhood gate value under the neighborhood.
@@ -247,7 +262,8 @@ async function fileNeighborhoodCode(conn, { neighborhoodId, value, source, sourc
     source_customer_id: sourceCustomerId || null,
   }).returning('id');
   const id = ins.id ?? ins;
-  if (!keypad) return { status: 'filed', id, flagged: [] };
+  const written = (await writtenAt(conn, 'neighborhood_access', [id])).get(id);
+  if (!keypad) return { status: 'filed', id, written_at: written, flagged: [] };
 
   const others = await conn('neighborhood_access')
     .where({ neighborhood_id: neighborhoodId })
@@ -257,10 +273,10 @@ async function fileNeighborhoodCode(conn, { neighborhoodId, value, source, sourc
     .pluck('id');
   if (others.length) {
     const flagged = await flagForConfirm(conn, others);
-    if (status === 'active') await flagForConfirm(conn, [id]);
-    return { status: 'filed_conflict', id, flagged };
+    const self = status === 'active' ? await flagForConfirm(conn, [id]) : [];
+    return { status: 'filed_conflict', id, written_at: self.length ? self[0].written_at : written, flagged };
   }
-  return { status: 'filed', id, flagged: [] };
+  return { status: 'filed', id, written_at: written, flagged: [] };
 }
 
 module.exports = {

@@ -155,27 +155,32 @@ async function linkOne(conn, p, parcel) {
     // locks them; the dry run keeps both phases' locks until its rollback.
     const customer = await trx('customers').where({ id: p.customer_id }).forUpdate()
       .first('deleted_at', 'active', 'pipeline_stage');
-    // The lookups ran minutes ago: re-check, under the lock, that this is
-    // still in scope — a live customer or one with a gate code on file, and an
-    // active property — before anything is written.
-    const prefs = await trx('property_preferences').where({ customer_id: p.customer_id })
-      .first('neighborhood_gate_code');
-    const live = customer && !customer.deleted_at
-      && ((customer.active && CUSTOMER_STAGES.includes(customer.pipeline_stage))
-        || String(prefs?.neighborhood_gate_code || '').trim() !== '');
-    const property = live && await trx('customer_properties').where({ id: p.id, active: true }).first('id');
-    if (!property) return { status: 'out_of_scope', wrote: false };
+    // The lookups ran minutes ago: re-check, under locks (customer →
+    // property → preferences, the filing step's order), that this is still in
+    // scope — an active property of a live customer, or of one whose gate
+    // code is on file — before anything is written.
+    const property = customer && !customer.deleted_at
+      && await trx('customer_properties').where({ id: p.id, active: true }).forUpdate().first('id');
+    const prefs = property && await trx('property_preferences').where({ customer_id: p.customer_id })
+      .forUpdate().first('neighborhood_gate_code');
+    const inScope = property && ((customer.active && CUSTOMER_STAGES.includes(customer.pipeline_stage))
+      || String(prefs?.neighborhood_gate_code || '').trim() !== '');
+    if (!inScope) return { status: 'out_of_scope', wrote: false };
     return resolvePropertyNeighborhood(p, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });
   });
+  // Every undo is guarded by the state this run left (its updated_at /
+  // checked_at stamp), so it is a no-op on a row someone changed since.
   const n = r.neighborhood;
   if (n && n.inserted) {
-    journal.push(`DELETE FROM neighborhoods n WHERE n.id = ${q1(n.id)} AND n.source = 'county' AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.neighborhood_id = n.id) AND NOT EXISTS (SELECT 1 FROM neighborhood_access a WHERE a.neighborhood_id = n.id);`);
+    journal.push(`DELETE FROM neighborhoods n WHERE n.id = ${q1(n.id)} AND n.source = 'county' AND n.updated_at = ${ts(n.written_at)} AND NOT EXISTS (SELECT 1 FROM customer_properties p WHERE p.neighborhood_id = n.id) AND NOT EXISTS (SELECT 1 FROM neighborhood_access a WHERE a.neighborhood_id = n.id);`);
   } else if (n && n.prior) {
-    journal.push(`UPDATE neighborhoods SET subdivision_names = ${q1(JSON.stringify(n.prior.subdivision_names))}::jsonb, updated_at = ${ts(n.prior.updated_at)} WHERE id = ${q1(n.id)};`);
+    // Remove only the alias this run appended (if any); later appends survive.
+    const names = n.addedAlias ? `subdivision_names - ${q1(n.addedAlias)}` : 'subdivision_names';
+    journal.push(`UPDATE neighborhoods SET subdivision_names = ${names}, updated_at = ${ts(n.prior.updated_at)} WHERE id = ${q1(n.id)} AND updated_at = ${ts(n.written_at)};`);
   }
   // The candidate query only takes rows with every neighborhood column NULL.
   if (r.wrote) {
-    journal.push(`UPDATE customer_properties SET neighborhood_id = NULL, neighborhood_source = NULL, county_subdivision = NULL, neighborhood_checked_at = NULL WHERE id = ${q1(p.id)} AND neighborhood_source IS DISTINCT FROM 'office';`);
+    journal.push(`UPDATE customer_properties SET neighborhood_id = NULL, neighborhood_source = NULL, county_subdivision = NULL, neighborhood_checked_at = NULL WHERE id = ${q1(p.id)} AND neighborhood_checked_at = ${ts(r.checkedAt)};`);
   }
   return { status: r.status, name: n ? n.name : null };
 }
@@ -224,10 +229,10 @@ async function fileCodes(conn) {
   for (const customerId of customerIds) {
     const { outcome, value, unconfirmed, result: r } = await conn.transaction((trx) => fileOne(trx, customerId));
     if (r && r.id && r.status !== 'duplicate') {
-      journal.push(`DELETE FROM neighborhood_access WHERE id = ${q1(r.id)} AND source = 'backfill';`);
+      journal.push(`DELETE FROM neighborhood_access WHERE id = ${q1(r.id)} AND source = 'backfill' AND updated_at = ${ts(r.written_at)};`);
     }
     for (const f of (r ? r.flagged : [])) {
-      journal.push(`UPDATE neighborhood_access SET status = 'active', updated_at = ${ts(f.updated_at)} WHERE id = ${q1(f.id)} AND status = 'needs_confirm';`);
+      journal.push(`UPDATE neighborhood_access SET status = 'active', updated_at = ${ts(f.updated_at)} WHERE id = ${q1(f.id)} AND status = 'needs_confirm' AND updated_at = ${ts(f.written_at)};`);
     }
     tally[outcome] = (tally[outcome] || 0) + 1;
     console.log(`  customer ${customerId}  ${outcome}${value ? `  ${shown(value)}` : ''}${unconfirmed ? ' (needs_confirm)' : ''}`);
@@ -240,7 +245,8 @@ function printRollback() {
     console.log(`${TAG} nothing written — no rollback needed`);
     return;
   }
-  console.log(`\n${TAG} ROLLBACK — ${journal.length} statement(s), newest write first; run inside one transaction:`);
+  console.log(`\n${TAG} ROLLBACK — ${journal.length} statement(s), newest write first; run inside one transaction.`);
+  console.log(`${TAG} Each statement applies only while its row is still as this run left it; a row changed since is left alone (0 rows).`);
   for (const line of [...journal].reverse()) console.log(`  ${line}`);
 }
 
