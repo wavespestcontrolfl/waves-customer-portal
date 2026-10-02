@@ -5,82 +5,81 @@
  * 2026-10-02: the terminal is the cockpit for the portal's AI and the Admin →
  * Agents UI is frozen, so the per-lane readout lives here instead of a screen.
  *
- *   railway run --service Postgres node ops/agents/agents-report.js
- *   railway run --service Postgres node ops/agents/agents-report.js --window=today   (today | 7d | 30d)
- *   railway run --service Postgres node ops/agents/agents-report.js --all           (idle lanes too)
- *   railway run --service Postgres node ops/agents/agents-report.js --json
+ *   railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/agents-report.js
+ *     --window=today|7d|30d   (default 7d)
+ *     --all                   idle lanes too
+ *     --json
+ *   (`~/.claude/bin/agents-report` is that command.)
  *
- * Reads exactly what the Control center reads, through the same modules —
- * server/services/agent-control/hub-read.js (readAreas / readLanes over the
- * call ledger + the model switchboard) and services/llm-cost.js (estimated
- * spend, unpriced calls) — so the numbers here and in the hub can never
- * disagree. Then two "waiting on you" counts: unlabeled typed-decision
- * reviews (decision_reviews, the daily review item's own window) and content
- * email approvals still awaiting a reply.
+ * NESTED on purpose: the outer run supplies DATABASE_PUBLIC_URL (only the
+ * Postgres service has it — the portal's DATABASE_URL is the unreachable
+ * internal host, so it is remapped onto the app's knexfile), the inner run
+ * supplies the portal's own variables — every GATE_* and MODEL_* pin — so the
+ * app's gate readers and the model switchboard resolve exactly what
+ * production resolves. Run without the portal service the script still
+ * works but says so: gate lines read "unknown", the typed-decision and
+ * approval queues are not counted, and --json carries no model fields.
  *
- * Connection: run under `railway run --service Postgres`, where DATABASE_URL
- * is the unreachable internal host — the script points the app's knexfile at
- * DATABASE_PUBLIC_URL (ops/agents/README.md recipe). The Postgres service does
- * not carry the portal's GATE_* variables, so:
- *   - the three pure READ sources the hub modules consult — cost tracking, the
- *     ops queue and the Activity feed (the last two are where a lane's "needs
- *     attention" reasons come from; without them a failed run would read as
- *     merely active) — are switched on for this process when unset; each only
- *     decides whether this process reads that source;
- *   - the two RECORDER gates (GATE_LLM_CALL_LEDGER, GATE_LLM_DISPATCH_METRICS)
- *     are never assumed: the wrapper (~/.claude/bin/agents-report) passes the
- *     portal service's live values through, and the report prints them —
- *     "unknown" when they were not passed — so a fallback rate over a window
- *     in which chain recording was off is never presented as complete. Chain
- *     rows already stored are read either way.
+ * One snapshot: hub-read.js loadHub (the Control center's own read of the
+ * call ledger + switchboard) feeds BOTH the area and the lane view, exactly
+ * as readAreas / readLanes build them, so the two cannot disagree and the
+ * production reads run once. Cost (estimated spend, unpriced calls) comes
+ * from llm-cost.js through the same path. Then two "waiting on you" counts:
+ * unlabeled typed-decision reviews (the daily review item's own ET window)
+ * and content email approvals that went out and await a reply — each only
+ * while its surface is live by the app's own gate reader.
+ *
+ * Read gates: the hub modules read the ops queue, the Activity feed, the cost
+ * table and the stored chain rows only under their gates. The portal's live
+ * values are captured first (and printed), then those four are switched on
+ * for this read-only process so every stored row is read whatever the
+ * recorder does — each only decides whether this process reads that source.
  * Nothing here writes.
  */
 
 if (!process.env.DATABASE_PUBLIC_URL) {
-  console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres node ops/agents/agents-report.js');
+  console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/agents-report.js');
   process.exit(2);
 }
 process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
-// The app's module-load warnings (push providers not configured, …) are noise
-// here, so modules load at `error`; the level goes back to `warn` before the
-// reads below, because hub-read / ops-queue report an unreadable attention
-// source only as a warning and that warning is the report's own signal.
+// Modules load at `error` (push providers, GBP and the like announce
+// themselves as warnings); the level returns to `warn` for the reads, where
+// hub-read / ops-queue report an unreadable source only as a warning and
+// that warning is the report's own signal.
 process.env.LOG_LEVEL = 'error';
-for (const gate of ['GATE_LLM_COST_TRACKING', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY']) process.env[gate] ??= 'true';
-const RECORDER_GATES = ['GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
-const recorderState = Object.fromEntries(RECORDER_GATES.map((g) => [g, process.env[g] == null ? null : ['1', 'true', 'on'].includes(String(process.env[g]).toLowerCase())]));
-// hub-read reads chain rows only under the dispatch-metrics gate: the portal's
-// value is captured above for display, then the gate is forced on for this
-// read-only process so stored chain rows are read whatever the recorder does.
-process.env.GATE_LLM_DISPATCH_METRICS = 'true';
-// The typed-decisions review surface is dark without its gate (the routes 404,
-// no review item is raised), so its queue is reported only when the portal's
-// gate was passed through and is on.
-const passedGate = (name) => (process.env[name] == null ? null : ['1', 'true', 'on'].includes(String(process.env[name]).toLowerCase()));
-const typedDecisionsGate = passedGate('GATE_TYPED_DECISIONS');
-// Likewise the content email approvals: with their gate off the scheduler
-// never polls replies and a reply never executes, so a sent approval is not
-// something the owner can act on.
-const emailApprovalsGate = passedGate('GATE_CONTENT_EMAIL_APPROVALS');
 
 // stdout is the report only (with --json, one document a consumer parses).
 // App modules print at load and inside reads with console.log as well as the
-// winston logger (e.g. call-recording-processor's flag line), so console
-// output is sent to stderr for the whole process and the report writes to
-// stdout directly.
+// winston logger, so console output goes to stderr for the whole process and
+// the report writes to stdout directly.
 const out = (line = '') => process.stdout.write(`${line}\n`);
 console.log = (...args) => console.error(...args);
 console.info = (...args) => console.error(...args);
 
 const path = require('path');
 const SERVER = path.join(__dirname, '..', '..', 'server');
-// The logger comes first, with every record routed to stderr BEFORE any other
-// app module loads, so no module-load line can reach stdout.
+// The logger first, every record routed to stderr BEFORE any other app
+// module loads, so no module-load line can reach stdout.
 const logger = require(path.join(SERVER, 'services', 'logger'));
 for (const t of logger.transports) if (t.name === 'console') t.stderrLevels = Object.fromEntries(Object.keys(logger.levels).map((l) => [l, true]));
+
+// Whether this process carries the portal's variables (the inner nested run).
+const PORTAL_ENV = process.env.RAILWAY_SERVICE_NAME === 'waves-customer-portal';
+// Live gate state through the app's own readers — exact production semantics
+// (contentEmailApprovals is the exact string 'true'; the ledger gates take
+// 1/true/on) — captured BEFORE the read gates below are switched on.
+const featureGates = require(path.join(SERVER, 'config', 'feature-gates'));
+const live = PORTAL_ENV ? {
+  ledgerRecording: featureGates.gateEnvValue('GATE_LLM_CALL_LEDGER'),
+  chainRecording: featureGates.gateEnvValue('GATE_LLM_DISPATCH_METRICS'),
+  typedDecisions: featureGates.typedDecisionsLive(),
+  contentEmailApprovals: featureGates.isEnabled('contentEmailApprovals'),
+} : { ledgerRecording: null, chainRecording: null, typedDecisions: null, contentEmailApprovals: null };
+for (const gate of ['GATE_LLM_COST_TRACKING', 'GATE_LLM_DISPATCH_METRICS', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY']) process.env[gate] = 'true';
+
 const db = require(path.join(SERVER, 'models', 'db'));
-const { readLanes } = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
+const hub = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
 const { AREAS } = require(path.join(SERVER, 'services', 'model-switchboard'));
 const { REVIEW_WINDOW_DAYS } = require(path.join(SERVER, 'services', 'typed-decisions', 'daily-review-item'));
 const { etDateString, addETDays, parseETDateTime } = require(path.join(SERVER, 'utils', 'datetime-et'));
@@ -91,12 +90,16 @@ const args = Object.fromEntries(process.argv.slice(2)
 const WINDOW = ['today', '7d', '30d'].includes(args.window) ? args.window : '7d';
 const SHOW_ALL = args.all === true;
 const JSON_OUT = args.json === true;
+const STATUS_RANK = { attention: 0, active: 1, idle: 2 };
 
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
 const ms = (v) => (v == null ? '—' : v >= 10_000 ? `${(v / 1000).toFixed(0)}s` : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`);
 const usd = (v) => (v == null ? '—' : v >= 100 ? `$${v.toFixed(0)}` : `$${v.toFixed(2)}`);
 const k = (n) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n));
 const pad = (s, w, right = false) => { s = String(s); return right ? s.padStart(w) : s.padEnd(w); };
+const gateWord = (v) => (v == null ? 'unknown' : v ? 'on' : 'OFF');
+const hasAttention = (att) => Object.values(att || {}).some((n) => n > 0);
+const attentionCell = (att) => Object.entries(att || {}).filter(([, n]) => n > 0).map(([p, n]) => `${p}:${n}`).join(' ') || '';
 
 function table(headers, rows, rightCols = new Set()) {
   const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
@@ -104,17 +107,32 @@ function table(headers, rows, rightCols = new Set()) {
   return [line(headers), line(widths.map((w) => '-'.repeat(w))), ...rows.map(line)].join('\n');
 }
 
+// The Control center's two views from ONE loadHub snapshot — the same
+// assembly readAreas / readLanes do, minus the second read.
+async function snapshot(now) {
+  const window = hub.resolveWindow(WINDOW, now);
+  const { ledger, laneRows, cost } = await hub.loadHub(window, now);
+  ledger.areaLatency = await hub.areaLatency(window.from, window.to, laneRows.map((l) => [l.id, l.area]));
+  const areas = hub.buildAreas({ areas: AREAS, laneRows, window, ledger });
+  const counts = { all: laneRows.length, active: 0, attention: 0, idle: 0 };
+  for (const l of laneRows) counts[l.status] += 1;
+  const lanes = [...laneRows].sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.calls - a.calls || a.name.localeCompare(b.name));
+  return { window, cost, areas, lanes, counts };
+}
+
 async function waitingOnYou(now) {
   // The daily review item's own cutoff: ET midnight, REVIEW_WINDOW_DAYS calendar
   // days back — so this count and the owner's review queue agree on the boundary day.
   const since = parseETDateTime(`${etDateString(addETDays(now, -REVIEW_WINDOW_DAYS))}T00:00:00`);
+  const count = (q) => q.count({ n: '*' }).first().then((r) => Number(r?.n || 0)).catch(() => null);
   const [typed, approvals] = await Promise.all([
-    typedDecisionsGate !== true ? Promise.resolve(typedDecisionsGate) : db('decision_reviews').where({ label_status: 'unreviewed' }).whereIn('sampled_for', ['disagreement', 'random_audit'])
-      .where('created_at', '>=', since).count({ n: '*' }).first().then((r) => Number(r?.n || 0)).catch(() => null),
-    // Only approvals whose email actually went out (email_sent_at is stamped
-    // after SMTP confirms): an in-flight or failed send is machinery's, not yours.
-    emailApprovalsGate !== true ? Promise.resolve(emailApprovalsGate) : db('content_email_approvals').where({ status: 'awaiting_reply' }).whereNotNull('email_sent_at').count({ n: '*' }).first()
-      .then((r) => Number(r?.n || 0)).catch(() => null),
+    // Dark surface (routes 404, no review item raised) = nothing to act on.
+    live.typedDecisions !== true ? live.typedDecisions : count(db('decision_reviews')
+      .where({ label_status: 'unreviewed' }).whereIn('sampled_for', ['disagreement', 'random_audit']).where('created_at', '>=', since)),
+    // Gate off = replies are never polled or executed; and only approvals whose
+    // email actually went out (email_sent_at is stamped after SMTP confirms).
+    live.contentEmailApprovals !== true ? live.contentEmailApprovals : count(db('content_email_approvals')
+      .where({ status: 'awaiting_reply' }).whereNotNull('email_sent_at')),
   ]);
   return { typedDecisionLabels: typed, contentEmailApprovals: approvals };
 }
@@ -125,49 +143,50 @@ const STARTUP_NOISE = /^\[(apns|fcm|push|gbp)\]/;
 const rawWarn = logger.warn.bind(logger);
 logger.warn = (msg, ...rest) => (typeof msg === 'string' && STARTUP_NOISE.test(msg) ? logger : rawWarn(msg, ...rest));
 
+// Switchboard fields resolve from THIS process's env: real only under the
+// portal's variables. Without them they are registry defaults, so they are
+// left out of --json rather than presented as live.
+const MODEL_FIELDS = ['modelNow', 'backup', 'retry', 'selector', 'via', 'envVar'];
+const stripModelFields = (lane) => Object.fromEntries(Object.entries(lane).filter(([key]) => !MODEL_FIELDS.includes(key)));
+
 async function main() {
   logger.level = 'warn';
+  if (!PORTAL_ENV) logger.warn('[agents-report] portal variables not present (run the nested railway command): gates read unknown, queues not counted, model fields omitted');
   const now = new Date();
-  // ONE hub read: the area table is folded from the same lane rows, so the
-  // two can never disagree and the production queries run once.
-  const [lanes, waiting] = await Promise.all([readLanes({ window: WINDOW, now }), waitingOnYou(now)]);
-  const hasAttention = (att) => Object.values(att || {}).some((n) => n > 0);
-  const shownLanes = lanes.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL);
-  const areas = AREAS.map((area) => {
-    const rows = lanes.lanes.filter((l) => l.area === area.key);
-    const attention = {};
-    for (const l of rows) for (const [p, n] of Object.entries(l.attention || {})) attention[p] = (attention[p] || 0) + n;
-    const priced = rows.filter((l) => l.estCostUsd != null);
-    return {
-      key: area.key, label: area.label, lanes: rows.length, active: rows.filter((l) => l.calls > 0).length,
-      calls: rows.reduce((n, l) => n + l.calls, 0), attention,
-      estCostUsd: priced.length ? Number(priced.reduce((n, l) => n + l.estCostUsd, 0).toFixed(4)) : null,
-    };
-  }).filter((a) => a.calls > 0 || hasAttention(a.attention) || SHOW_ALL);
-  // ledgerRecording / chainRecording in `basis` are what THIS process's env
-  // says, not the portal's — replaced with the passed-through portal values.
-  const basis = { ...lanes.basis, ledgerRecording: recorderState.GATE_LLM_CALL_LEDGER, chainRecording: recorderState.GATE_LLM_DISPATCH_METRICS, recorderGatesFrom: 'portal service via wrapper; null = not passed' };
+  const [snap, waiting] = await Promise.all([snapshot(now), waitingOnYou(now)]);
+  const areas = snap.areas.filter((a) => a.calls > 0 || hasAttention(a.attention) || SHOW_ALL);
+  const lanes = snap.lanes.filter((l) => l.status !== 'idle' || SHOW_ALL);
+  const costNote = snap.cost == null ? 'cost: unavailable' : snap.cost.priced === false ? 'cost: waiting for the first price pull' : null;
+
   if (JSON_OUT) {
-    process.stdout.write(`${JSON.stringify({ window: WINDOW, generatedAt: now.toISOString(), basis, counts: lanes.counts, areas, lanes: shownLanes, waiting }, null, 2)}\n`);
+    const basis = {
+      window: { key: snap.window.key, from: snap.window.from.toISOString(), to: snap.window.to.toISOString(), unit: snap.window.unit },
+      priorAvailable: snap.window.priorAvailable,
+      // The portal's live recorder gates (null = not run under the portal service).
+      ledgerRecording: live.ledgerRecording,
+      chainRecording: live.chainRecording,
+      portalEnv: PORTAL_ENV,
+      cost: snap.cost ? { estimate: true, priced: snap.cost.priced, pricesFetchedAt: snap.cost.pricesFetchedAt ? new Date(snap.cost.pricesFetchedAt).toISOString() : null } : null,
+    };
+    out(JSON.stringify({ window: WINDOW, generatedAt: now.toISOString(), basis, counts: snap.counts, areas, lanes: PORTAL_ENV ? lanes : lanes.map(stripModelFields), waiting }, null, 2));
     return;
   }
-  const costNote = basis.cost == null ? 'cost: unavailable' : basis.cost.priced === false ? 'cost: waiting for the first price pull' : null;
+
   out(`Agents report — ${WINDOW} — ${now.toISOString()}${costNote ? `  (${costNote})` : ''}`);
-  const gateWord = (v) => (v == null ? 'unknown' : v ? 'on' : 'OFF');
-  out(`lanes: ${lanes.counts.active} active, ${lanes.counts.attention} need attention, ${lanes.counts.idle} idle`);
-  out(`recording (portal gates): ledger ${gateWord(recorderState.GATE_LLM_CALL_LEDGER)}, chains ${gateWord(recorderState.GATE_LLM_DISPATCH_METRICS)}${recorderState.GATE_LLM_DISPATCH_METRICS === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
+  out(`lanes: ${snap.counts.active} active, ${snap.counts.attention} need attention, ${snap.counts.idle} idle`);
+  out(`recording (portal gates): ledger ${gateWord(live.ledgerRecording)}, chains ${gateWord(live.chainRecording)}${live.chainRecording === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
 
   const areaRows = areas.map((a) => [
-    a.label, `${a.active}/${a.lanes}`, a.calls, usd(a.estCostUsd),
-    Object.entries(a.attention).filter(([, n]) => n > 0).map(([p, n]) => `${p}:${n}`).join(' ') || '',
+    a.label, a.calls, pct(a.okRate), pct(a.fallbackRate), ms(a.p95LatencyMs), usd(a.estCostUsd),
+    `${attentionCell(a.attention)}${a.tokensUnknownRows > 0 ? ` (+${a.tokensUnknownRows} rows no usage)` : ''}`.trim(),
   ]);
-  out(table(['area', 'lanes', 'calls', 'est $', 'attention'], areaRows, new Set([1, 2, 3])));
+  out(table(['area', 'calls', 'ok', 'fallback', 'p95', 'est $', 'attention'], areaRows, new Set([1, 2, 3, 4, 5])));
 
-  const laneRows = shownLanes.map((l) => [
+  const laneRows = lanes.map((l) => [
     l.status === 'attention' ? '!' : l.status === 'active' ? '' : '·',
     l.id, l.area, l.calls, pct(l.okRate), pct(l.fallbackRate), ms(l.p50LatencyMs), ms(l.p95LatencyMs),
-    // Shown as the ledger's own counters, never summed: cached input is inside
-    // the input count for OpenAI / Gemini and beside it for Anthropic, cache
+    // The ledger's own counters, never summed: cached input is inside the
+    // input count for OpenAI / Gemini and beside it for Anthropic; cache
     // writes and reasoning / thought tokens are recorded apart (llm-cost.js).
     // "+N?" = rows whose usage could not be read; the sums are partial.
     `${k(l.tokens.input)}/${k(l.tokens.cachedInput)}/${k(l.tokens.cacheWrite)}/${k(l.tokens.output)}/${k(l.tokens.reasoning)}${l.tokens.unknownRows > 0 ? ` +${l.tokens.unknownRows}?` : ''}`,
@@ -176,18 +195,18 @@ async function main() {
   ]);
   out(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/cached/cw/out/think', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
 
-  const noUsage = lanes.lanes.filter((l) => l.tokens.unknownRows > 0);
+  const noUsage = snap.lanes.filter((l) => l.tokens.unknownRows > 0);
   if (noUsage.length) out(`\ntoken sums are partial (+N? = calls whose usage could not be read): ${noUsage.map((l) => `${l.id} ${l.tokens.unknownRows}`).join(', ')}`);
-  const unpriced = lanes.lanes.filter((l) => (l.unpricedCalls || 0) > 0);
+  const unpriced = snap.lanes.filter((l) => (l.unpricedCalls || 0) > 0);
   if (unpriced.length) out(`\nunpriced calls (model-name matching to check): ${unpriced.map((l) => `${l.id} ${l.unpricedCalls}`).join(', ')}`);
 
   const w = waiting;
   const items = [];
   if (w.typedDecisionLabels === false) items.push('typed decisions: review surface off (gate off)');
-  else if (w.typedDecisionLabels == null) items.push(typedDecisionsGate == null ? 'typed decisions: gate not passed (run via the wrapper)' : 'typed-decision labels: unreadable');
+  else if (w.typedDecisionLabels == null) items.push(PORTAL_ENV ? 'typed-decision labels: unreadable' : 'typed decisions: unknown (no portal variables)');
   else if (w.typedDecisionLabels > 0) items.push(`${w.typedDecisionLabels} typed-decision review${w.typedDecisionLabels === 1 ? '' : 's'} unlabeled (last ${REVIEW_WINDOW_DAYS} days)`);
   if (w.contentEmailApprovals === false) items.push('content email approvals: off (gate off)');
-  else if (w.contentEmailApprovals == null) items.push(emailApprovalsGate == null ? 'content email approvals: gate not passed (run via the wrapper)' : 'content email approvals: unreadable');
+  else if (w.contentEmailApprovals == null) items.push(PORTAL_ENV ? 'content email approvals: unreadable' : 'content email approvals: unknown (no portal variables)');
   else if (w.contentEmailApprovals > 0) items.push(`${w.contentEmailApprovals} content email approval${w.contentEmailApprovals === 1 ? '' : 's'} awaiting your reply`);
   out(`\nwaiting on you: ${items.length ? items.join('; ') : 'nothing'}`);
 }

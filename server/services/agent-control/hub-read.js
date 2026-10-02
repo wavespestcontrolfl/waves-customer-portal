@@ -565,6 +565,8 @@ module.exports = {
   readAreas,
   readLanes,
   readGateOn,
+  // One snapshot for a consumer that renders both views (ops/agents/agents-report.js).
+  loadHub,
   // exported for tests
   resolveWindow,
   buildLanes,
