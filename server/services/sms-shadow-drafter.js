@@ -4545,7 +4545,11 @@ function visitLoopItemLines(items, label, trailing) {
   for (const item of (Array.isArray(items) ? items : []).slice(0, 5)) {
     if (!item || typeof item !== 'object') continue;
     const kind = visitLoopText(item.kind, 40);
-    const description = visitLoopText(item.description, 120);
+    // model-extracted free text: banned customer copy ("pet-safe", fixed re-entry
+    // times, ...) never enters the facts — the shared compliance guard decides,
+    // fail closed, as for every other untrusted fact section
+    const raw = visitLoopText(item.description, 120);
+    const description = raw && hasBannedCustomerCopy(raw) ? 'details withheld (restricted wording)' : raw;
     if (!kind && !description) continue;
     lines.push(`- ${label}: ${[kind, description].filter(Boolean).join(' — ')}${trailing(item)}`);
   }

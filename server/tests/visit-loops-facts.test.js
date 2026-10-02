@@ -144,6 +144,13 @@ describe('lateAlert', () => {
       .toEqual({ type: 'unassigned_overdue', severity: 'critical', missingTracking: false, ...which });
   });
 
+  test('a no-show-detector STAGE 2 alert (30 min after the promised window, no arrival) is a delay, departed or not', async () => {
+    for (const departed of [true, false]) {
+      const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, departed, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+      expect((await run(alertRow({ payload }))).lateAlert).toMatchObject({ missingTracking: false, visitId: 'visit-1' });
+    }
+  });
+
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
     const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
     expect((await run(alertRow({ payload }))).lateAlert).toEqual({ type: 'tech_late', severity: 'warn', missingTracking: true, ...which });
@@ -260,6 +267,8 @@ describe('pastWindow', () => {
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', visit_id: 'g1' }, [{ visit_id: 'g2', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
     // the SAME visit group finished: not passed
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', visit_id: 'g1' }, [{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toBeNull();
+    // a frozen group member reassigned to ANOTHER tech the same day keeps its visit_id but is a separate stop
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', visit_id: 'g1', technician_id: 'tech-2' }, [{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
     // an unassigned row has no stop identity: an unassigned finished row never hides it
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', technician_id: null }, [{ technician_id: null, scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
   });
@@ -333,8 +342,9 @@ describe('missedVisit', () => {
     const dq = dst.calls.find((c) => c.table === 'scheduled_services' && isUnfinishedQuery(c.ops));
     expect(hasOp(dq.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-03-02')).toBe(true);
     expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
-    // a service record, and an uncleared street-level address hold, each exclude the row
-    expect(q.ops.filter((o) => o.op === 'whereNotExists')).toHaveLength(2);
+    // a service record, an uncleared street-level address hold, and a logged customer
+    // no-show (owned by the no-show read and its follow-up rules) each exclude the row
+    expect(q.ops.filter((o) => o.op === 'whereNotExists')).toHaveLength(3);
     // only an unset / 'scheduled' tracker is not started (live, complete, cancelled, skipped are excluded)
     const seen = [];
     const stub = { whereNull: (...a) => { seen.push(['whereNull', ...a]); return stub; }, orWhereIn: (...a) => { seen.push(['orWhereIn', ...a]); return stub; } };

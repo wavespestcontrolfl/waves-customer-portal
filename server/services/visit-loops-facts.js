@@ -206,11 +206,12 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
     return {
       type: row.type,
       severity: row.severity || null,
-      // no-show-detector raises the same two types on missing tracking alone (stage 1
-      // is 45 min into an open window): a tracking gap, not confirmed lateness. No
-      // minutes either way: payload.delay_minutes is frozen at insert and measured
-      // from the internal job block, never the customer's promised window.
-      missingTracking: payload?.evidence === 'missing_tracking',
+      // no-show-detector stage 1 (45 min into an open window, no departure) is a
+      // tracking gap, not confirmed lateness; its stage 2 (30 min after the promised
+      // window ended, no arrival — departed or not) IS a delay. No minutes either
+      // way: payload.delay_minutes is frozen at insert and measured from the
+      // internal job block, never the customer's promised window.
+      missingTracking: payload?.evidence === 'missing_tracking' && Number(payload?.stage) !== 2,
       visitId: String(row.id),
       windowStart: occ.startHms,
       scheduledDate: occ.date,
@@ -227,10 +228,16 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
 // A visit group's own id when it has one; otherwise the (tech, day, window) tuple —
 // but only when all three are known: a row that can't be shown to share a stop
 // (unassigned, windowless) never collapses into another (null = no sibling).
+// The visit group scoped by tech and day (a frozen member keeps its visit_id after a
+// same-day reassignment, so visit_id alone would join two physical stops — the
+// admin-schedule membership rule); otherwise the (tech, day, window) tuple. Either
+// needs a known tech and day; a row that can't be shown to share a stop never
+// collapses into another (null = no sibling).
 const stopKey = (r) => {
-  if (r.visit_id) return `v:${r.visit_id}`;
   const day = calendarDay(r.scheduled_date);
-  return r.technician_id && day && r.window_start ? `t:${r.technician_id}|${day}|${r.window_start}` : null;
+  if (!r.technician_id || !day) return null;
+  if (r.visit_id) return `v:${r.visit_id}|${r.technician_id}|${day}`;
+  return r.window_start ? `t:${r.technician_id}|${day}|${r.window_start}` : null;
 };
 // The stops (stopKey) on these days where some row is underway or done, by status
 // or tracker — shared by the passed-window and missed-visit reads.
@@ -313,6 +320,13 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
     // same exclusion the missed-appointment sweep and the no-show detector use)
     .whereNotExists(function unclearedAddressHold() {
       require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
+    })
+    // a row with a logged customer no-show belongs to loadOpenNoshow, which applies
+    // the follow-up rules (the missed-appointment sweep logs it and leaves the row
+    // pending/confirmed, so this read alone would keep it "missed" after a rebook)
+    .whereNotExists(function loggedNoshow() {
+      this.select(1).from('reschedule_log as rl_ns').whereRaw('rl_ns.scheduled_service_id = scheduled_services.id')
+        .where('rl_ns.reason_code', 'customer_noshow');
     })
     .orderBy('scheduled_date', 'desc').orderBy('id', 'asc')
     .offset(offset).limit(MISSED_SCAN_MAX)
