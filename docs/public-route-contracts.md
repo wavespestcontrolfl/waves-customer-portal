@@ -2004,7 +2004,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits. The web report mounts the lead card right under the watering
+until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2080,6 +2080,45 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that), until P14 writes guarded copy from it and this section
 is updated with the key it then exposes. Pure, no read, no write, and a failure
 cannot break a render.
+`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
+also live, so gate off, or lead off, leaves the lawn payload, render and PDF
+unchanged, key for key, and makes no model call, read or write) swaps the old
+`LAWN_REPORT_V2_NARRATIVE` overlay for the structural lawn copy writer
+(`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
+shrub; no new route, token, privacy or rate-limit surface). It adds NO top-level
+payload key and carries nothing of its own: its fields reach the customer only
+through `reportV2.lead`. `lead.headline` and `lead.applied` take the writer's
+`headline` and "what we did" line when each passed every guard (otherwise the
+deterministic sources they always had), and `lead` gains two optional keys,
+`whatToExpect` (at most 42 words) and `watching` (at most 20 words), that are
+absent (never `null`) unless the writer is live and has text for them. `whatToExpect` is
+SELECTED, never written: the model returns up to two expectation-row ids (and
+optional sentence keys within a row) from a closed list of rows the owner has
+approved (`approved: true` in `server/config/lawn-expectations.js`; every row ships
+`approved: false`, so the key is absent until the owner approves one), and the
+server prints the row's own sentences word for word, skipping any sentence that
+would pass the word cap or trips a copy rule, never cutting one. The model never
+writes a number, window, date, watering, rain, sprinkler, mowing or clock wording,
+a brand, rate or cause name; `headline`, "what we did" (at most 8 and 32 words) and
+`watching` (only when an issue exists) are plain text that must pass the banned
+copy list, the lawn copy guards (`lawn-copy-guards.js`), a word cap (a field over
+it is dropped whole, never truncated), a no-digit rule and the lead's watering
+wording test, and any failure leaves the deterministic sentence the lead used
+before (`watching` and `whatToExpect` then absent). The lead's word budget gives
+these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
+`whatToExpect`. The fields freeze into
+`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, promptVersion,
+assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
+migration, written at the first healthy render, which the completion write gate
+performs) and replay byte for byte afterwards without a model call. A degraded
+read creates no freeze and asks no model, and an unavailable model creates none
+either (the render is marked uncacheable, `weekWeatherUncacheable`, and the next
+render retries). The writer's fields reach the lead through a non-enumerable
+in-process hand-off (`reportV2.copyV6`, read first by
+`applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
+key, and the lawn PDF cache signature carries a
+`:copyv6=1` stamp while the gate is live. The progress block (P13) stays
+non-enumerable: P14 reads it to check progress words and exposes no `progress` key.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

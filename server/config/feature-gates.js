@@ -140,6 +140,7 @@
  *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the program focuses on this month, built from server/config/protocols.json months (lawn-program-line.js), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
+ *   GATE_LAWN_REPORT_COPY_V6=true (lawn report structural copy writer: headline, "what we applied" and "watching" are short model-written fields that must pass every copy guard, and "what to expect" is SELECTED by id from owner-approved expectation rows and printed verbatim, never model-written; any guard doubt falls back to the deterministic sentence the lead uses today; the fields freeze into service_records.structured_notes.lawnCopyV6[assessmentId], first writer wins; REQUIRES GATE_LAWN_REPORT_LEAD to be live too (the fields only render through reportV2.lead); lawn only; supersedes env LAWN_REPORT_V2_NARRATIVE while live; ships DARK, read at call time via lawnReportCopyV6Live(); off = byte-identical report payload, render and PDF)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
@@ -3760,6 +3761,14 @@ const gates = {
   // lawnVisitMemoryLive().
   lawnVisitMemory: gateEnvValue('GATE_LAWN_VISIT_MEMORY'),
 
+  // Lawn report structural copy writer (lawn report rebuild P14): short guarded
+  // model fields plus expectation sentences SELECTED by id from approved rows,
+  // frozen per assessment in structured_notes.lawnCopyV6. Ships DARK; needs
+  // GATE_LAWN_REPORT_LEAD too. This entry is for logGateStatus only:
+  // report-data.js reads GATE_LAWN_REPORT_COPY_V6 at call time via
+  // lawnReportCopyV6Live().
+  lawnReportCopyV6: gateEnvValue('GATE_LAWN_REPORT_COPY_V6'),
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -4291,6 +4300,17 @@ function lawnVisitMemoryLive() {
   return gateEnvValue('GATE_LAWN_VISIT_MEMORY');
 }
 
+// GATE_LAWN_REPORT_COPY_V6 read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the lawn v6 copy writer. It is
+// effective only while GATE_LAWN_REPORT_LEAD is live too: the writer's fields
+// reach a customer only through reportV2.lead, so with the lead off there is
+// nothing to write for (and no model call is made). Off = the payload, render
+// and PDF are byte-identical to before and the old LAWN_REPORT_V2_NARRATIVE
+// path is untouched.
+function lawnReportCopyV6Live() {
+  return gateEnvValue('GATE_LAWN_REPORT_COPY_V6') && lawnReportLeadLive();
+}
+
 // GATE_LAWN_WATERING_SMS read at CALL time — strict `=== 'true'`, dark in every
 // environment (customer messaging, explicit opt-in; owner 2026-09-30). The one
 // canonical reader for the separate lawn watering text sent after the lawn
@@ -4773,6 +4793,7 @@ module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;
+module.exports.lawnReportCopyV6Live = lawnReportCopyV6Live;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;

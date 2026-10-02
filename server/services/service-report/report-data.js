@@ -2696,6 +2696,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // stamp rides only while the gate is live: gate off leaves every signature,
   // and so every cached PDF key, byte-identical to before.
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
+  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
+  // its PDF key moves with it; the stamp rides only while the gate is live.
+  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -5543,6 +5546,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // a real upcoming scheduled_services row (same allow-list as context-aggregator);
       // otherwise a clearly-labeled cadence ESTIMATE from the service frequency; else
       // omitted entirely. Never invent a precise date the data can't back.
+      // The visit / next-visit calendar days the v6 copy writer reads (it needs
+      // the gap in days, which the label cannot give it).
+      const lawnCopyTiming = { visitDate: null, nextVisitIso: null };
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5573,8 +5579,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .first('scheduled_date')
             .catch(() => null);
           let nextVisit = null;
+          lawnCopyTiming.visitDate = svcIso || null;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
+            lawnCopyTiming.nextVisitIso = nextRow.scheduled_date instanceof Date ? nextRow.scheduled_date.toISOString().slice(0, 10) : String(nextRow.scheduled_date).slice(0, 10);
           } else if (svcIso) {
             const t = String(service.service_type || '').toLowerCase();
             const m = t.match(/every\s+(\d+)\s+week/);
@@ -5594,6 +5602,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               // date as the "next visit".
               if (est.getTime() > Date.now()) {
                 nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
+                lawnCopyTiming.nextVisitIso = est.toISOString().slice(0, 10);
               }
             }
           }
@@ -5601,7 +5610,54 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         } catch { /* next-visit lookup is best-effort */ }
       }
 
-      if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
+      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
+        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
+        // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
+        // read while this is live). Frozen copy replays; a degraded read, an
+        // unverifiable treatment or an unavailable model ships the deterministic
+        // lead copy. The fields ride the in-process report as `copyV6` for the
+        // lead derivation (a non-enumerable hand-off, like reportV2.progress, so
+        // the payload gains a key only through reportV2.lead).
+        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
+          console.warn('[report-data] lawn v6 copy skipped — treatment data unverifiable');
+          // Not reproducible: a later healthy render would write the copy this
+          // one did not, so this render must not be durably cached.
+          lawnAssessment.weekWeatherUncacheable = true;
+        } else {
+          try {
+            const { resolveLawnCopyV6ForRender } = require('./lawn-copy-v6');
+            const gapDays = lawnCopyTiming.visitDate && lawnCopyTiming.nextVisitIso
+              ? Math.round((Date.parse(`${lawnCopyTiming.nextVisitIso}T12:00:00Z`) - Date.parse(`${lawnCopyTiming.visitDate}T12:00:00Z`)) / 86400000)
+              : null;
+            const guard = lawnTreatmentGuard?.guardProducts?.length
+              ? (text) => lawnTreatmentGuard.treatmentGuard.contradictsAppliedProducts(text, lawnTreatmentGuard.guardProducts)
+              : null;
+            const outcome = await resolveLawnCopyV6ForRender({
+              structuredNotes: service.structured_notes,
+              serviceRecordId: service.id,
+              assessmentId: lawnAssessment.assessmentId,
+              reportV2,
+              ctx: {
+                grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
+                visitDate: lawnCopyTiming.visitDate,
+                nextVisitGapDays: Number.isFinite(gapDays) && gapDays >= 0 ? gapDays : null,
+                progress: lawnProgress,
+                extraGuard: guard,
+              },
+              // Never CREATE the first-writer-wins entry (or call the model)
+              // from a degraded read: any input read that failed is in readFailures.
+              degraded: readFailures.size > 0,
+              knex,
+            });
+            if (outcome.copy) {
+              Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy, enumerable: false, writable: true, configurable: true });
+            }
+            if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
+          } catch {
+            lawnAssessment.weekWeatherUncacheable = true;
+          }
+        }
+      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
         // The overlay rewrites customer-facing prose and validates only
         // banned-copy + rain-window rules — it can reintroduce advice that
         // contradicts today's applications (codex P1 r28). Skip it entirely

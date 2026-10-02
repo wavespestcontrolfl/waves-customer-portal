@@ -18,6 +18,13 @@
  * a field that is all watering falls to its next source, or to null, and the
  * client falls back to the status label for a null headline). The stock "No
  * action is needed" sentence is never emitted: an empty list renders nothing.
+ *
+ * `whatToExpect` and `watching` (GATE_LAWN_REPORT_COPY_V6) are not read off the
+ * payload either: the v6 copy writer (lawn-copy-v6.js) selects / guards them in
+ * report-data.js and hands them in. Its `headline` and `whatWeDid` take the
+ * place of the headline / applied sources when each passed every guard. The two
+ * keys exist only when there is text, so a lead without the writer is
+ * byte-identical to the lead before it.
  */
 
 const { aftercareCustomerTask, normalizeLawnAftercare } = require('./lawn-aftercare');
@@ -34,7 +41,11 @@ const LEAD_WORD_BUDGET = 250;
 // generated treatment narrative can run to 1,200 characters (codex P2 #5496
 // r4); what was applied is still listed in full under "What Waves did today"
 // and Products Applied further down, so it goes last of the three.
-const BUDGET_DROP_ORDER = ['why', 'applied'];
+// Writer fields (GATE_LAWN_REPORT_COPY_V6): `watching` goes right after why
+// (optional, and the top finding card carries the same concern), and
+// `whatToExpect` last of the lead's own text, since it is the only place an
+// approved expectation sentence appears.
+const BUDGET_DROP_ORDER = ['why', 'watching', 'applied', 'whatToExpect'];
 // Per-field word caps. Model-written copy (the narrative overlay, a generated
 // treatment narrative) reaches these fields unbounded, so any one field over
 // its cap is left out of the lead rather than cut mid-sentence; the same
@@ -42,7 +53,24 @@ const BUDGET_DROP_ORDER = ['why', 'applied'];
 // field capped and the drop order above, the region fits the budget for any
 // banner of up to about 85 words: after the drops the most that remains is
 // headline 12 + yourPart 2 x 30 + next 30 + visit date ~9 + labels 24.
-const FIELD_WORD_CAPS = { headline: 12, why: 40, applied: 60, yourPart: 30, next: 30 };
+const FIELD_WORD_CAPS = { headline: 12, why: 40, applied: 60, yourPart: 30, next: 30, whatToExpect: 42, watching: 20 };
+// The client's "What to expect" / "Watching" labels, counted only when the
+// block renders.
+const WHAT_TO_EXPECT_LABEL_WORDS = 3;
+const WATCHING_LABEL_WORDS = 1;
+// Every lead field and the strings it puts on screen: the one list the word
+// count and the budget read, so a new field is one row here.
+const LEAD_FIELDS = {
+  headline: (lead) => [lead.headline],
+  why: (lead) => [lead.why],
+  applied: (lead) => [lead.applied],
+  whatToExpect: (lead) => [lead.whatToExpect],
+  watching: (lead) => [lead.watching],
+  yourPart: (lead) => (Array.isArray(lead.yourPart) ? lead.yourPart : []),
+  next: (lead) => [lead.next],
+};
+// Fields that are absent, not null, when they have nothing to say.
+const OPTIONAL_FIELDS = new Set(['whatToExpect', 'watching']);
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -118,23 +146,39 @@ function deriveNext(reportV2, topIssue, bannerPresent) {
   return pick([topIssue && topIssue.nextVisitPlan], bannerPresent);
 }
 
+function dropField(lead, field) {
+  if (OPTIONAL_FIELDS.has(field)) delete lead[field];
+  else lead[field] = null;
+}
+
+// The writer's fields, or null when the gate is off / nothing was written.
+function v6CopyOf(copyV6) {
+  return copyV6 && typeof copyV6 === 'object' && !Array.isArray(copyV6) ? copyV6 : null;
+}
+
 /**
  * @param {object} reportV2 a finished (reconciled) lawn reportV2 payload
+ * @param {object} [extras]
+ * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
+ *   v6 copy writer's guarded fields (lawn-copy-v6.js), when its gate is live;
+ *   each is a string or null (null falls to the source the lead always used)
  * @returns {{ headline: string|null, why: string|null,
- *   applied: string|null, yourPart: string[], next: string|null } | null}
+ *   applied: string|null, yourPart: string[], next: string|null,
+ *   whatToExpect?: string, watching?: string } | null}
  *   null when there is no snapshot to lead with.
  */
-function deriveLawnLead(reportV2) {
+function deriveLawnLead(reportV2, { copyV6 = null } = {}) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
   const topIssue = topIssueOf(reportV2);
+  const v6 = v6CopyOf(copyV6);
   const lead = {
-    headline: pick([snapshot.statusHeadline], bannerPresent),
+    headline: pick([v6 && v6.headline, snapshot.statusHeadline], bannerPresent),
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
     // What Waves applied is a statement of record, not watering advice: a
     // product summary that says "watered in" keeps its place in the lead.
-    applied: clean(snapshot.treatmentSummary),
+    applied: clean(v6 && v6.whatWeDid) || clean(snapshot.treatmentSummary),
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
     next: deriveNext(reportV2, topIssue, bannerPresent),
   };
@@ -142,9 +186,18 @@ function deriveLawnLead(reportV2) {
     if (countWords(lead[field]) > FIELD_WORD_CAPS[field]) lead[field] = null;
   }
   lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
+  // Approved expectation sentences and the guarded watching line: under a
+  // banner the same wording test that guards every lead field applies, and a
+  // field over its cap is left out whole.
+  if (v6) {
+    for (const field of ['whatToExpect', 'watching']) {
+      const text = pick([v6[field]], bannerPresent);
+      if (text && countWords(text) <= FIELD_WORD_CAPS[field]) lead[field] = text;
+    }
+  }
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;
-    lead[field] = null;
+    dropField(lead, field);
   }
   return lead;
 }
@@ -165,8 +218,9 @@ function nextVisitDateWords(nextVisit) {
 
 /**
  * Visible-word total of the lead region: the banner lines (and mow hold line)
- * the page prints right above it, every lead field, the next-visit date the
- * client joins to lead.next, and a constant for the static labels. The
+ * the page prints right above it, every lead field (LEAD_FIELDS), the next-visit
+ * date the client joins to lead.next, the writer-field labels when those blocks
+ * render, and a constant for the static labels. The
  * word-budget test holds this at 250 or less.
  */
 function leadWords(reportV2) {
@@ -175,12 +229,12 @@ function leadWords(reportV2) {
   const parts = [];
   if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
   if (banner && banner.mowHold) parts.push(banner.mowHold.line);
-  if (lead) {
-    parts.push(lead.headline, lead.why, lead.applied, lead.next);
-    if (Array.isArray(lead.yourPart)) parts.push(...lead.yourPart);
-  }
+  if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
-  return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + STATIC_LABEL_WORDS;
+  const writerLabelWords = lead
+    ? (LEAD_FIELDS.whatToExpect(lead)[0] ? WHAT_TO_EXPECT_LABEL_WORDS : 0) + (LEAD_FIELDS.watching(lead)[0] ? WATCHING_LABEL_WORDS : 0)
+    : 0;
+  return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + writerLabelWords + STATIC_LABEL_WORDS;
 }
 
 module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS, LEAD_WORD_BUDGET, FIELD_WORD_CAPS };

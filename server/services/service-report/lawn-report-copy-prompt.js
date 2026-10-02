@@ -227,4 +227,36 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback]);
 }
 
-module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, selectReportCopyPrompt, writerRulesInScope };
+// Lawn report v6 writer (P14, GATE_LAWN_REPORT_COPY_V6). The structural
+// contract: the model writes three short fields under hard vocabulary limits
+// and SELECTS expectation sentences by id. Software prints the selected
+// sentences verbatim and checks every free-text field; a field that fails is
+// thrown away and a standard sentence is shown, so plain wording is the only
+// wording that survives. Where this adapter and the core above disagree, this
+// adapter wins.
+const LAWN_V6_FIELDS_ADAPTER = `## LAWN REPORT V6: OUTPUT CONTRACT (this section wins over anything above)
+
+You do not write about timing, results, watering or comparisons. The facts carry no numbers because you write none. Return JSON with exactly the fields the schema names.
+
+FIELDS
+- headline: at most 8 words. The lawn's condition in general terms, from overall.status and the category labels. No product, no cause, no comparison to a past visit.
+- whatWeDid: at most 32 words, past tense, plain. What we applied and what each product does for the lawn, using products[].role and products[].tags. If products is empty, return an empty string. Never name a brand, an ingredient, a rate or an amount. Describe the job, not the chemistry.
+- watching: at most 20 words. Only when issuesExist is true; otherwise an empty string. Say in general terms which area of the lawn we are keeping an eye on, from issues[].category. Never name a cause, pest, disease or weed species. Say "signs of" when you describe anything.
+- expectRows: only when the facts list approvedExpectationRows. Choose up to 2 rows by id. For each, list the sentence keys worth showing (from that row's sentences). You never write expectation text; the server prints the row's own approved sentences word for word. Choose rows that match what was applied. When no row fits, return an empty list.
+
+VOCABULARY LIMITS (headline, whatWeDid and watching are machine-checked; one slip discards the whole field)
+- No digits. No number words or fractions (one, two, three, half, quarter, a couple, dozen, first, second ...).
+- No time words: day, week, month, season, year, hour, minute, night, daily, weekly, soon, later, next, coming, following, within, ago, yesterday, tomorrow, tonight, weekend, eventually, immediately. Do not write the word "today"; "today's" is allowed.
+- No watering, irrigation, sprinkler, rain, moisture, wet, dry, drought, zone, mowing, cutting or height wording.
+- No comparison or progress words: improving, better, worse, recovering, responding, declining, up, down, higher, lower, behind, on track, ahead, healing, rebound. Nothing here compares today with a past visit.
+- No cleared, resolved, gone, eliminated, cured, guaranteed, permanent, safe, natural, organic, non-toxic.
+- No brand names, product names, ingredient names, EPA numbers, rates, dates, weekdays or clock times. No county, ordinance or law.
+- Plain text, one or two short sentences per field. No lists, markdown, quotes, emojis or em dashes.
+- Never describe the whole lawn as a fact; photos cover sampled areas. Say "in the areas we photographed" when you generalize.
+- If doNotRestate lines are supplied, they are already on the page; do not repeat or paraphrase them.
+
+Good: headline "Healthy overall, with a few spots to watch". whatWeDid "We applied a selective weed control to the broadleaf weeds and a liquid feed to support color." watching "Thin areas along the driveway edge, which may be signs of heat stress."
+
+FINAL CHECK (silent): no digit, no number word, no time word, no watering word, no comparison word, no brand, no cause named; every sentence is something the facts support.`;
+
+module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, LAWN_V6_FIELDS_ADAPTER, selectReportCopyPrompt, writerRulesInScope };
