@@ -111,6 +111,7 @@ describe('anchorSoleProperty — a series child follows its series (ops 2026-10-
       if (table === 'customer_properties') {
         const q = { _f: {} };
         q.where = (f) => { Object.assign(q._f, f); return q; };
+        q.forShare = () => { q._locked = true; (seriesConn.locks = seriesConn.locks || []).push(q._f.id); return q; };
         q.first = async () => properties.find((p) => p.id === q._f.id && p.customer_id === q._f.customer_id && p.active === q._f.active);
         q.limit = () => q;
         q.select = async () => properties.filter((p) => p.customer_id === q._f.customer_id && p.active === q._f.active).map((p) => ({ id: p.id }));
@@ -174,10 +175,24 @@ describe('anchorSoleProperty — a series child follows its series (ops 2026-10-
     const conn = seriesConn({ properties, visits: [
       { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: UUID_RENTAL },
     ] });
-    const cols = { ...COLS, service_address_line2: true, service_address_city: true, service_address_state: true, service_address_zip: true, lat: true, lng: true };
-    const row = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    const cols = { ...COLS, service_address_line2: true, service_address_city: true, service_address_state: true, service_address_zip: true, lat: true, lng: true, zone: true };
+    const row = { customer_id: 'c', property_id: null, recurring_parent_id: 'root', zone: 'root-zone' };
     await anchorSoleProperty(row, cols, conn);
-    expect(row).toMatchObject({ property_id: UUID_RENTAL, service_address_line1: '200 Rental Ave', service_address_city: 'Venice', service_address_zip: '34285', lat: 27.1, lng: -82.4 });
+    expect(row).toMatchObject({ property_id: UUID_RENTAL, service_address_line1: '200 Rental Ave', service_address_city: 'Venice', service_address_zip: '34285', lat: 27.1, lng: -82.4, zone: null });
+  });
+
+  test('inside a transaction the inferred property is read FOR SHARE (held through the child insert)', async () => {
+    const base = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: UUID_RENTAL },
+    ] });
+    seriesConn.locks = [];
+    const trx = (t) => base(t);
+    trx.isTransaction = true;
+    trx.transaction = async (fn) => fn(base);
+    const row = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(row, COLS, trx);
+    expect(row.property_id).toBe(UUID_RENTAL);
+    expect(seriesConn.locks).toEqual([UUID_RENTAL]);
   });
 
   test('a legacy NULL-status visit counts as live', async () => {

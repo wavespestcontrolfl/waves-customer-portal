@@ -883,7 +883,11 @@ async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
 /** bookingPropertyStamp for a resolved id, or null (incomplete, gone, or a failed read). */
 async function propertyStampOrNull(customerId, propertyId, conn) {
   try {
-    const read = (c) => bookingPropertyStamp({ customerId, propertyId: String(propertyId) }, c);
+    // Inside a caller's transaction the row is read FOR SHARE (the direct
+    // booking path's rule), held through the caller's commit, so the
+    // property cannot be deactivated or moved between this read and the
+    // child insert.
+    const read = (c) => bookingPropertyStamp({ customerId, propertyId: String(propertyId) }, c, { lock: !!conn.isTransaction });
     return await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
   } catch {
     return null;
@@ -914,7 +918,11 @@ async function anchorSoleProperty(target, cols, conn = db) {
       }
       // Dispatch reads the visit's stamped address (falling back to the
       // customer's primary), so the house's address and pin ride with its id.
+      // The zone copied from the root belonged to the root's address; it is
+      // cleared so routing derives it from this house (appointment-address.js
+      // does the same on an address change).
       for (const [field, value] of Object.entries(stamp)) if (cols[field]) target[field] = value;
+      if (cols.zone) target.zone = null;
       return;
     }
   }
