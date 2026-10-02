@@ -5681,11 +5681,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           if (outcome.unfrozen) {
             lawnAssessment.weekWeatherUncacheable = true;
             // DELIVERY: an emailed PDF is permanent, so it must not carry copy a
-            // later render could freeze differently. Held only for what a retry
-            // can fix (a failed read, or a failed freeze write: copy present but
-            // unfrozen); unverifiable treatment data alone never freezes, live
-            // or emailed, so it does not hold the send.
-            if (readFailures.size > 0 || outcome.copy) lawnAssessment.lawnCopyV6Unfrozen = true;
+            // later render could freeze differently. Every unfrozen cause is one
+            // a retry can fix (a failed read, an unverifiable treatment, which
+            // is itself a failed products or catalog read, or a failed freeze
+            // write), so the send waits.
+            lawnAssessment.lawnCopyV6Unfrozen = true;
           }
         } catch {
           Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });

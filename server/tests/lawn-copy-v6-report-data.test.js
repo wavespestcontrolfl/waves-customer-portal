@@ -331,6 +331,27 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
+    test('a failed treatment-catalog check (the guard\'s own lookup, not in readFailures) still holds the email: no freeze, flag set', async () => {
+      live();
+      const recs = records();
+      const products = [{ id: 'sp-9', service_record_id: 'svc-cur', product_name: 'Test Herbicide B', product_id: 'pc-1', created_at: '2026-09-30T18:00:00Z' }];
+      const { knex: base } = withRecords({ ...fixtures(), service_products: products, products_catalog: [{ id: 'pc-1', name: 'Test Herbicide B' }] }, recs);
+      const knex = (table) => {
+        const q = base(table);
+        if (table !== 'products_catalog') return q;
+        const select = q.select;
+        // Only the guard's direct category lookup fails.
+        q.select = (...cols) => (cols.length === 2 && cols[0] === 'id' && cols[1] === 'category'
+          ? Promise.reject(new Error('read failed'))
+          : select(...cols));
+        return q;
+      };
+      knex.raw = base.raw;
+      const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, {});
+      expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
+      expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
+    });
+
     test('gate off never sets it', async () => {
       const { data } = await render(records(), { service_products: FAIL });
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBeUndefined();

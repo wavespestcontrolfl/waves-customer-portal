@@ -2214,7 +2214,8 @@ render, so the lead's banner fallback and the PDF's Overall line replay it too. 
 creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
 such a render's lead keeps the snapshot headline and has no applied line (never
 the AI treatment narrative). A render whose copy a retry could still freeze
-differently (a failed read, or a failed freeze write) sets
+differently (a failed read, an unverifiable treatment, or a failed freeze write)
+sets
 `lawnAssessment.lawnCopyV6Unfrozen`, and the pinned (emailed) PDF defers with a
 retryable `lawn_copy_v6_unfrozen` error instead of sending it.
 The fields reach the lead through a non-enumerable
