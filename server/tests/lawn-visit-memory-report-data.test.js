@@ -628,14 +628,13 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     expect(data.reportV2.progress.overall.direction).toBe('unknown');
   });
 
-  test('a prior that froze no memory still gets a direction, with no items', async () => {
+  test('a prior that froze no memory pins nothing, so nothing is compared (no live fallback)', async () => {
     live();
     setHistory([PRIOR, CUR]);
     const recs = records();
     recs['svc-prior'].structured_notes = {};
     const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] });
     expect(data.reportV2.sinceLast).toBeUndefined();
-    expect(data.reportV2.progress).toMatchObject({ eligible: true, items: [] });
-    expect(data.reportV2.progress.overall.direction).toBe('flat');
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, reason: 'no_prior', items: [] });
   });
 });

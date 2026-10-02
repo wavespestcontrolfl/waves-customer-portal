@@ -5466,9 +5466,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         try {
           const input = visitMemoryOut.progressInput;
           const frozenPriorId = visitMemorySinceLast?.priorAssessmentId;
+          // Only a FROZEN prior identity is compared: with no frozen sinceLast
+          // the live resolver could pick a different (backfilled) visit on a
+          // later render of the same permanent report, so nothing is judged.
           const prior = frozenPriorId != null && typeof input?.priorInputFor === 'function'
             ? input.priorInputFor(frozenPriorId)
-            : input?.prior;
+            : null;
           // This visit's FROZEN date (a corrected schedule date must not move a
           // permanent report across a treatment window); the prior's frozen
           // date rides sinceLast.priorDate.
