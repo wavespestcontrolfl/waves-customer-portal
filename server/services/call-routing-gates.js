@@ -1025,9 +1025,10 @@ function buildTriageItem({
     // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
     // collects the first name; never holds the booking.
     missing_first_name: 'name_review',
-    // Caller from a number not on file linked to the one account at the call's
-    // service address (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH) — the office confirms.
-    household_contact_linked: 'customer_field_conflict',
+    // Caller from a number not on file at the address of exactly ONE existing
+    // account (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH) — a SUGGESTION only; the call
+    // is not linked until the office books it on that account.
+    household_address_match: 'customer_field_conflict',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-

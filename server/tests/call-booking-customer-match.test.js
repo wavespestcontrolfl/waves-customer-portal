@@ -17,24 +17,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: () => false, isOwnedNumber: () => false }));
-let mockCaptured = null;
-jest.mock('../services/service-contact-events', () => ({ recordServiceContactChanges: jest.fn(async () => ({})) }));
-const mockApplyUpdates = jest.fn(async (args) => { mockCaptured = JSON.parse(JSON.stringify(args.updates)); return { emailApplied: true }; });
-jest.mock('../services/customer-email-fanout', () => ({
-  applyCustomerUpdatesWithEmailClaimGuard: (...args) => mockApplyUpdates(...args),
-  propagateCustomerEmailChange: jest.fn(async () => ({})),
-}));
-
 const fs = require('fs');
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
-const {
-  validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
-  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller, householdContactWouldRevokeConsent, persistCallSecondaryContact,
-} = _test;
+const { validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -113,150 +102,32 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(source).toMatch(/const customerExpected = !!\(\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone/);
   });
 
-  test('the household link runs only for a no-phone-match call, never backfills the account holder, saves the caller as a service contact and files the card', () => {
-    const lookupStep = source.slice(source.indexOf('const householdMatch = ('), source.indexOf('if (existing) {', source.indexOf('const householdMatch = (')));
-    expect(lookupStep).toContain('!existing && !sharedPhoneAmbiguity.candidates');
-    expect(lookupStep).toContain('callHouseholdAddressMatchLive()');
-    expect(lookupStep).toContain('!v2ThirdPartyCallNature');
-    const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
-    expect(lookupStep).toContain('addressValidation: effectiveAddressValidation');
-    expect(lookupStep).toContain('service_address?.street_line_2');
-    expect(lookupStep).toContain('effectiveAddressValidation?.normalized?.street_line_1');
-    expect(branch).not.toContain('backfillLinkedCustomerFromExtraction');
-    const completion = source.slice(source.indexOf('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
-    expect(completion).toContain('persistCallSecondaryContact(customerId, householdContact');
-    expect(completion).toContain("flag: 'household_contact_linked'");
-    expect(completion).not.toContain('backfillLinkedCustomerFromExtraction');
-    expect(source).toContain('phoneMatchedThisPass: phoneMatchedThisPass || householdIdentityProtected');
-    expect(source).toContain('householdContact: householdIdentityProtected');
+  test('FIX 2 is a SUGGESTION: a no-phone-match call files ONE card and links, writes and books nothing', () => {
+    const start = source.indexOf('if (!existing && !sharedPhoneAmbiguity.candidates');
+    const step = source.slice(start, source.indexOf('if (existing) {', start));
+    expect(step).toContain('callHouseholdAddressMatchLive()');
+    expect(step).toContain('!v2ThirdPartyCallNature');
+    expect(step).toContain('findHouseholdCustomerByAddress({');
+    expect(step).toContain('addressValidation: effectiveAddressValidation');
+    expect(step).toContain('service_address?.street_line_2');
+    expect(step).toContain('effectiveAddressValidation?.normalized?.street_line_1');
+    expect(step).toContain("flag: 'household_address_match'");
+    expect(step).toContain('suggested_customer_id: String(account.id)');
+    expect(step).toContain("book on that account?`");
+    // read-only: no link, no contact write, no stamp, no backfill, no consent change
+    for (const forbidden of ['customerId =', 'persistCallSecondaryContact', 'household_link', 'backfill', 'update(', "db('call_log')"]) {
+      expect(step).not.toContain(forbidden);
+    }
+    // every obsolete auto-link piece is gone (CLAUDE.md rule 19)
+    for (const gone of ['householdLinkFromCall', 'householdLinkCompleted', 'slotOnlyCaller', 'householdIdentityProtected',
+      'protectedServiceContactCaller', 'serviceContactOnlyPhone', 'householdContactWouldRevokeConsent', 'preserveExistingConsent',
+      'suppressEmail', 'household_contact_linked', "skipped: 'household_contact'"]) {
+      expect(source).not.toContain(gone);
+    }
   });
 
   test('the confirmation greeting falls back to "there"', () => {
     expect(source).toContain("const firstName = customerValidation.details.firstName || 'there';");
-  });
-});
-
-describe('FIX 2: household identity survives reprocess, retry and later backfills', () => {
-  const ACCOUNT = '11111111-1111-4111-8111-111111111111';
-  const OTHER = '22222222-2222-4222-8222-222222222222';
-  const stamped = (customerId = ACCOUNT, asString = false) => {
-    const metadata = { household_link: { customer_id: customerId, matched_by: 'service_address' } };
-    return { metadata: asString ? JSON.stringify(metadata) : metadata };
-  };
-
-  test('householdLinkFromCall reads the persisted stamp for the linked customer only', () => {
-    expect(householdLinkFromCall(stamped(), ACCOUNT)).toBe(true);
-    expect(householdLinkFromCall(stamped(ACCOUNT, true), ACCOUNT)).toBe(true);
-    expect(householdLinkFromCall(stamped(), OTHER)).toBe(false); // an operator relink to someone else is not a household link
-    expect(householdLinkFromCall({ metadata: {} }, ACCOUNT)).toBe(false);
-    expect(householdLinkFromCall({ metadata: 'not json' }, ACCOUNT)).toBe(false);
-    expect(householdLinkFromCall(null, ACCOUNT)).toBe(false);
-    expect(householdLinkFromCall(stamped(), null)).toBe(false);
-  });
-
-  const extracted = { first_name: 'Sally', last_name: 'Example', email: 'sally@example.com', phone: '+19415550177', address_line1: '1083 Example Shell Loop' };
-  const account = { id: ACCOUNT, first_name: '', last_name: null, phone: null, email: null, address_line1: '1083 Example Shell Loop', city: 'Sarasota', state: 'FL', zip: '34240' };
-
-  test('REPROCESS: the pre-linked backfill gate is closed once the stamp is seeded, open without it', () => {
-    const base = { customerId: ACCOUNT, createdCustomerFromCall: false, extracted, thirdPartyCallNature: false };
-    const reprocessed = { customer_id: ACCOUNT, from_phone: '+19415550177', direction: 'inbound', ...stamped() };
-    // processRecording seeds householdLinkedThisPass from the stamp and ORs it into phoneMatchedThisPass.
-    expect(prelinkedBackfillGate({ ...base, call: reprocessed, phoneMatchedThisPass: householdLinkFromCall(reprocessed, ACCOUNT) }).eligible).toBe(false);
-    const ordinary = { customer_id: ACCOUNT, from_phone: '+19415550177', direction: 'inbound', metadata: {} };
-    expect(prelinkedBackfillGate({ ...base, call: ordinary, phoneMatchedThisPass: householdLinkFromCall(ordinary, ACCOUNT) }).eligible).toBe(true);
-  });
-
-  test('REPROCESS: the appointment backfill never writes the caller name, phone or email onto the account', async () => {
-    mockApplyUpdates.mockClear();
-    const out = await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', { householdContact: true });
-    expect(out).toBe(account);
-    expect(mockApplyUpdates).not.toHaveBeenCalled();
-  });
-
-  test('control: without the household flag the same backfill does write them', async () => {
-    mockApplyUpdates.mockClear();
-    await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', {}).catch(() => {});
-    expect(mockApplyUpdates).toHaveBeenCalled();
-    expect(mockCaptured).toMatchObject({ first_name: 'Sally', phone: '+19415550177', email: 'sally@example.com' });
-  });
-
-  test('SECOND CALL: a number saved only as a service-contact slot is a household contact, never the account holder', async () => {
-    const SALLY = '+19415550177';
-    const holder = { id: ACCOUNT, phone: '+19415550100', secondary_phone: null, service_contact_phone: SALLY, service_contact2_phone: null, service_contact3_phone: null };
-    expect(serviceContactOnlyPhone(holder, SALLY)).toBe(true);
-    expect(serviceContactOnlyPhone(holder, '(941) 555-0177')).toBe(true);
-    expect(serviceContactOnlyPhone(holder, '+19415550100')).toBe(false); // the holder's own number
-    expect(serviceContactOnlyPhone({ ...holder, secondary_phone: SALLY }, SALLY)).toBe(false); // an account-holder number
-    expect(serviceContactOnlyPhone({ ...holder, phone: SALLY }, SALLY)).toBe(false);
-    expect(serviceContactOnlyPhone(holder, '+19415550999')).toBe(false);
-    expect(serviceContactOnlyPhone(holder, null)).toBe(false);
-    expect(serviceContactOnlyPhone(null, SALLY)).toBe(false);
-    // The second call has NO household_link stamp, yet the protected flag still closes every backfill:
-    const secondCall = { customer_id: ACCOUNT, from_phone: SALLY, direction: 'inbound', metadata: {} };
-    expect(householdLinkFromCall(secondCall, ACCOUNT)).toBe(false);
-    const protectedNow = serviceContactOnlyPhone(holder, SALLY);
-    mockApplyUpdates.mockClear();
-    const out = await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, SALLY, { householdContact: protectedNow });
-    expect(out).toBe(account);
-    expect(mockApplyUpdates).not.toHaveBeenCalled();
-    expect(prelinkedBackfillGate({ call: secondCall, customerId: ACCOUNT, createdCustomerFromCall: false, extracted, thirdPartyCallNature: false, phoneMatchedThisPass: protectedNow }).eligible).toBe(false);
-  });
-
-  test('wiring: the phone-match branch and the pre-linked path both derive slot-only protection (gated), and every backfill reads it', () => {
-    expect(source).toContain('slotOnlyCaller = await protectedServiceContactCaller(existing, phone);');
-    expect(source).toContain('slotOnlyCaller = await protectedServiceContactCaller(slotRow, identityPhone);');
-    expect(source).toContain('const identityPhone = prelinkedBackfillIdentityPhone(call);');
-    expect(source).not.toMatch(/!createdCustomerFromCall && !isOutboundCall\(call\)\s*&& require/);
-    expect(source).toContain('const householdIdentityProtected = householdLinkedThisPass || slotOnlyCaller;');
-    expect(source).toContain('if (customerId && householdIdentityProtected) {');
-  });
-
-  test('a household contact never revokes the row-level consent of contacts already authorized', () => {
-    const stamp = new Date();
-    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact_phone: '+19415550150' })).toBe(true);
-    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact3_phone: '+19415550150' })).toBe(true);
-    // stamp with no contact phone has nobody to protect; no stamp means nothing to clear
-    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: stamp, service_contact_phone: ' ' })).toBe(false);
-    expect(householdContactWouldRevokeConsent({ service_contacts_consent_at: null, service_contact_phone: '+19415550150' })).toBe(false);
-    expect(householdContactWouldRevokeConsent(null)).toBe(false);
-    // wiring: the check precedes the slot write and the outcome is final (marked complete), the contact stays on the card payload
-    expect(source).toContain("householdPersist = 'deferred_existing_contact_consent';");
-    expect(source).toContain('preserveExistingConsent: true');
-    expect(source).toContain('if (householdContactWouldRevokeConsent(consentRow)) {');
-    const cardPayload = source.slice(source.indexOf("matched_customer_id: String(customerId),"));
-    expect(cardPayload.slice(0, 600)).toContain('household_contact: {');
-  });
-
-  test('RETRY: a persisted link whose contact/card writes never finished is resumed; a completed one is not repeated', () => {
-    const half = { customer_id: ACCOUNT, ...stamped() };
-    expect(householdLinkFromCall(half, ACCOUNT)).toBe(true);
-    expect(householdLinkCompleted(half)).toBe(false);
-    const done = { metadata: { household_link: { customer_id: ACCOUNT, completed_at: '2026-10-02T00:00:00.000Z' } } };
-    expect(householdLinkCompleted(done)).toBe(true);
-    expect(householdLinkCompleted({ metadata: JSON.stringify(done.metadata) })).toBe(true);
-    expect(householdLinkCompleted({ metadata: {} })).toBe(false);
-    expect(householdLinkCompleted(null)).toBe(false);
-    // The completion block runs for ANY household-linked pass that is not yet complete (first pass or retry),
-    // checks the card exists before inserting, and only stamps completed_at when the contact write did not error.
-    expect(source).toContain('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {');
-    expect(source).toContain("{household_link,completed_at}");
-    expect(source).toContain("householdIncomplete = householdPersist === 'skipped_slot_race';");
-    expect(source).toContain('if (!householdIncomplete) {');
-    expect(source).toContain("incomplete.code = 'HOUSEHOLD_COMPLETION_INCOMPLETE';");
-    // an incomplete write throws into the bounded retry; it is never swallowed into a 'processed' finish
-    const tail = source.slice(source.indexOf('if (householdIncomplete) {'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
-    expect(tail).toContain('throw incomplete;');
-    expect(source).toContain("reason_code: 'household_contact_linked' }).first('id')");
-  });
-
-  test('wiring: stamp + customer link are one token-fenced write, a retry that re-finds the account by the saved slot phone is still protected, and the drip enroll is skipped', () => {
-    const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
-    expect(branch).toContain("where('processing_token', procToken)");
-    expect(branch).toContain("'{household_link}'");
-    expect(branch).toContain('customer_id: householdMatch.customer.id');
-    expect(source).toContain('if (existing && householdLinkFromCall(call, existing.id)) {');
-    expect(source).toContain('let householdLinkedThisPass = householdLinkFromCall(call, customerId);');
-    expect(source).toContain("beehiivResult = { skipped: 'household_contact' }");
   });
 });
 
@@ -270,7 +141,6 @@ const SKIP = !process.env.DATABASE_URL;
     trx = await database.transaction();
     await trx.raw('CREATE TEMP TABLE customers (LIKE public.customers INCLUDING DEFAULTS) ON COMMIT DROP');
     await trx.raw('CREATE TEMP TABLE customer_properties (LIKE public.customer_properties INCLUDING DEFAULTS) ON COMMIT DROP');
-    await trx.raw('CREATE TEMP TABLE call_log (LIKE public.call_log INCLUDING DEFAULTS) ON COMMIT DROP');
   });
   afterEach(async () => { await trx.rollback(); });
   afterAll(async () => { await database.destroy(); });
@@ -427,59 +297,6 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').del();
     await trx('customers').insert(member({ pipeline_stage: 'new_lead' }));
     expect((await lookup()).reason).toBe('not_established_customer');
-  });
-
-  test('protectedServiceContactCaller: gate-independent for a contact a household call once linked, either direction', async () => {
-    const holder = member({ service_contact_phone: NOT_ON_FILE });
-    await trx('customers').insert(holder);
-    delete process.env[HOUSEHOLD_GATE];
-    // gate OFF, no household history -> an ordinary slot contact is untouched (pre-existing behaviour)
-    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(false);
-    // gate OFF, an earlier INBOUND call from that number was household-linked -> protected
-    const sid = () => `CA${randomUUID().replace(/-/g, '')}`;
-    await trx('call_log').insert({ twilio_call_sid: sid(), customer_id: holder.id, from_phone: NOT_ON_FILE, to_phone: '+19415550000', direction: 'inbound', metadata: { household_link: { customer_id: holder.id } } });
-    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
-    // the account holder's own number and a stranger are never "protected contacts"
-    expect(await protectedServiceContactCaller(holder, holder.phone, trx)).toBe(false);
-    expect(await protectedServiceContactCaller(holder, '+19415550999', trx)).toBe(false);
-    // OUTBOUND to the saved contact (the number we dialed is on to_phone) after a linked call
-    await trx('call_log').del();
-    await trx('call_log').insert({ twilio_call_sid: sid(), customer_id: holder.id, from_phone: '+19415550000', to_phone: NOT_ON_FILE, direction: 'outbound', metadata: { household_link: { customer_id: holder.id } } });
-    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
-    // gate ON -> any slot-only contact is protected, with or without history
-    await trx('call_log').del();
-    process.env[HOUSEHOLD_GATE] = 'true';
-    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
-    delete process.env[HOUSEHOLD_GATE];
-  });
-
-  test('CONCURRENT consent: a stamp that lands after the writer read the row is neither cleared nor inherited (guard is inside the conditional UPDATE)', async () => {
-    const dbMock = require('../models/db');
-    const SALLY = '+19415550177';
-    const holder = member({ service_contact_phone: '+19415550150', service_contact_name: 'Existing Contact' });
-    await trx('customers').insert(holder);
-    const stamp = new Date('2026-10-01T12:00:00Z');
-    // The writer's snapshot is STALE: it read the row before the consent stamp landed.
-    const stale = { ...holder, service_contacts_consent_at: null };
-    await trx('customers').where({ id: holder.id }).update({ service_contacts_consent_at: stamp, service_contacts_consent_source: 'portal' });
-    const run = async (opts) => {
-      let first = true;
-      dbMock.mockImplementation((table) => {
-        if (first && table === 'customers') { first = false; return { where: () => ({ first: async () => stale }) }; }
-        return trx(table);
-      });
-      dbMock.raw = (...args) => trx.raw(...args);
-      return persistCallSecondaryContact(holder.id, { first_name: 'Sally', last_name: 'Example', phone: SALLY, wants_notifications: true }, opts);
-    };
-    expect(await run({ smsConsentExplicit: false, preserveExistingConsent: true })).toBe('skipped_consent_preserved');
-    const after = await trx('customers').where({ id: holder.id }).first();
-    expect(after.service_contacts_consent_at).toEqual(stamp);
-    expect(after.service_contact2_phone).toBeNull();
-    expect(after.service_contact_phone).toBe('+19415550150');
-    // control: the ordinary writer (no guard) would have cleared the stamp and slotted the unconsented phone
-    expect(await run({ smsConsentExplicit: false })).toBe('written');
-    expect((await trx('customers').where({ id: holder.id }).first()).service_contact2_phone).toBe(SALLY);
-    dbMock.mockReset();
   });
 
   test('a number stored only in secondary_phone is identity evidence, never "unknown"', async () => {
