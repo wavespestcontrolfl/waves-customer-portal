@@ -192,6 +192,7 @@ postgres('neighborhood access directory', () => {
     ['a different directional clears it', { address_line1: '100 Synthetic Way W' }, {}, null, '100 Synthetic Way East'],
     ['a suffix spelled out vs abbreviated keeps it', { address_line1: '100 Synthetic Cv' }, {}, 'kept', '100 Synthetic Cove'],
     ['a different street name clears it', { address_line1: '100 Other Cove' }, {}, null, '100 Synthetic Cove'],
+    ['a new house number on the same street clears it', { address_line1: '900 Synthetic Cove' }, {}, null, '100 Synthetic Cove'],
   ])('%s', async (_label, change, opts, expected, startLine = '100 Synthetic Way') => {
     const { syncPrimaryAddress } = require('../services/customer-properties');
     const p = await property({ is_primary: true, address_line1: startLine });

@@ -528,7 +528,10 @@ async function completePrimaryCore(customerId, call, conn) {
 // format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
 function neighborhoodResetOnMove(from, to) {
   const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
-  const moved = !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
+  // sameStreetLine compares the street only, so the house number is its own test.
+  const houseNumber = (line) => (String(line || '').match(/^\s*(\d+)/) || [])[1] || '';
+  const moved = houseNumber(from.address_line1) !== houseNumber(to.address_line1)
+    || !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
     || !same(from.city, to.city)
     || !same(from.state, to.state)
     || normalizeZip(from.zip) !== normalizeZip(to.zip);
