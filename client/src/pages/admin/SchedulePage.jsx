@@ -20462,6 +20462,9 @@ export function CompletionPanel({
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
                     serviceId={service.id}
+                    // The property this form loaded the visit at: a save that lands after
+                    // the office moved the visit is refused (Codex #5538).
+                    expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                     customerName={service.customerName || "Customer"}
                     address={service.address || ""}
                     lat={service.lat ?? service.customer_latitude}
@@ -22343,6 +22346,9 @@ export function CompletionPanel({
               {zoneMapOpen && (
                 <TechTreatmentZoneModal
                   serviceId={service.id}
+                  // The property this form loaded the visit at: a save that lands after
+                  // the office moved the visit is refused (Codex #5538).
+                  expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                   customerName={service.customerName || "Customer"}
                   address={service.address || ""}
                   lat={service.lat ?? service.customer_latitude}

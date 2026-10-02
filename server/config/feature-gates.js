@@ -151,6 +151,7 @@
  *   GATE_LAWN_SINCE_LAST=true (lawn report "Since your last visit" block: the lead (GATE_LAWN_REPORT_LEAD) gains reportV2.lead.sinceLast { priorDate, lines } and the web report prints it above "What we applied today": what the last visit applied, the overall direction and at most two per-treatment states from the progress engine, and which watched topics are still on today's list. Every sentence is a fixed string selected by key in lawn-since-last-copy.js (no model, no number, no timing word), and a state is spoken only for an owner-approved expectation row; photos that cannot support a comparison say nothing. Needs GATE_LAWN_VISIT_MEMORY (the memory it reads) and GATE_LAWN_REPORT_LEAD (the block it renders in); with either off it does nothing. Live web view only (mode 'live'): PDF and static builds never carry the key, so the PDF and its cache key are unchanged. Ships DARK, read at call time via lawnSinceLastLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
+ *   GATE_FAST_COMPLETE_REPORT=true (Fast Complete report flow, owner "ok go" 2026-10-01: the tech portal opens the one-screen sheet for pest re-services AND regular untyped pest visits; the tech talks into a text box, taps customer home / pest activity 1-5 / one tip / the promise check, generates the AI report, reads it, traces the spray and completes through the full /complete path, billing and customer text as the full form. The schedule payload carries `fastCompleteReportEnabled`; POST /admin/dispatch/:id/voice-facts reads where the tech treated, the pests they named and how the sprays went down from the note, each quoted word for word. Strict opt-in: exactly 'true' in every environment, read at call time via fastCompleteReportLive(). Ships DARK; off = the flag is false, the route answers 404 {enabled:false} and the tech portal routes pest visits exactly as before.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   GATE_NOTE_BOX_PHOTOS=true (Photos in the notes box, owner "ok go" 2026-10-02 on the Fast Complete mockup v8: the office Complete Service form puts the visit's photos inside the notes box, each with a short description typed or dictated that rides as the photo's caption to the report writer and the customer's report, and the separate photo section goes away. The schedule payload carries `noteBoxPhotosEnabled` per service, never for lawn or tree, shrub & palm. Strict opt-in: exactly 'true', read at call time via noteBoxPhotosLive(). Ships DARK; off = the form's photo section exactly as before.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
@@ -3778,6 +3779,12 @@ const gates = {
   // GATE_TS_FAST_COMPLETE at call time via tsFastCompleteLive().
   tsFastComplete: process.env.GATE_TS_FAST_COMPLETE === 'true',
 
+  // Fast Complete report flow (owner "ok go" 2026-10-01): pest re-services
+  // and regular untyped pest visits complete on the one-screen sheet with the
+  // AI report read before it goes. Ships DARK in every environment. This
+  // entry is for logGateStatus only: admin-schedule.js and admin-dispatch.js
+  // read GATE_FAST_COMPLETE_REPORT at call time via fastCompleteReportLive().
+  fastCompleteReport: process.env.GATE_FAST_COMPLETE_REPORT === 'true',
   // Lawn re-service Fast Complete (owner 2026-10-01): the one-screen completion
   // sheet for the free between-visit lawn callback (lawn_re_service). Ships DARK
   // in every environment. This entry is for logGateStatus only: admin-dispatch.js
@@ -4021,6 +4028,13 @@ function llmCostTrackingLive() {
 // the estimate converter's rider seeding (quarterly riders on 6-week / monthly lawn).
 function pestRidesLawnAtAcceptLive() {
   return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
+}
+
+// GATE_FAST_COMPLETE_REPORT read at CALL time — strict `=== 'true'`, dark in
+// every environment. The canonical reader for the schedule payload's
+// `fastCompleteReportEnabled` and the voice-facts route.
+function fastCompleteReportLive() {
+  return process.env.GATE_FAST_COMPLETE_REPORT === 'true';
 }
 
 // GATE_NEIGHBORHOOD_ACCESS read at CALL time — strict `=== 'true'`; unset = kill.
@@ -4983,6 +4997,9 @@ module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
 module.exports.noteBoxPhotosLive = noteBoxPhotosLive;
 // GATE_LLM_COST_TRACKING reader, on its own line.
 module.exports.llmCostTrackingLive = llmCostTrackingLive;
+// GATE_FAST_COMPLETE_REPORT reader, on its own line so gate PRs adding lines
+// above never touch this one.
+module.exports.fastCompleteReportLive = fastCompleteReportLive;
 // GATE_KB_CUSTOMER_AUDIENCE reader, on its own line.
 module.exports.kbCustomerAudienceLive = kbCustomerAudienceLive;
 // GATE_NEIGHBORHOOD_ACCESS reader, on its own line.
