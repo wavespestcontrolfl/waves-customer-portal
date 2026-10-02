@@ -163,7 +163,7 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         // The canonical ownership fence binds the customer id (five times).
         const custs = entry.calls.filter(([m, sql]) => m === 'whereRaw' && /estimates\.customer_id = \?/.test(sql)).map(([, , v]) => v[0]);
         const base = { handed_off_at: '2100-01-01T00:00:00Z', ...fields };
-        if (custs.length) return custs.map((c) => ({ id: `est-${c}`, customer_id: c, customer_phone: null, ...base }));
+        if (custs.length) return [...new Set(custs)].map((c) => ({ id: `est-${c}`, customer_id: c, owner_customer_id: c, customer_phone: null, ...base }));
         return [{ id: 'est-1', customer_id: null, customer_phone: phones[0] || null, ...base }];
       }
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
@@ -747,6 +747,25 @@ describe('an estimate sent to the customer keeps a quote promise; a callback onl
     expect(fence[0]).toMatch(/estimates\.customer_id IS NULL/);
     expect(fence[0]).toMatch(/l\.deleted_at IS NULL/);
     expect(fence[1]).toEqual(Array(5).fill('cust-a'));
+  });
+
+  test('N linked customers cost ONE estimates query per pass (it can run under the publishing lock), each matched to its own owner', async () => {
+    const estimateQueries = async (ids, activity = { estimates: true }) => {
+      mockDb({ activity });
+      listOpenCommitments.mockResolvedValue(ids.map((id) => row(id, { kind: 'send_estimate' })));
+      const result = await runFollowUpSlaWatcher({ now: NOW });
+      return { result, count: queriesOn('estimates').length, fences: argsOf('estimates', 'whereRaw').filter(([sql]) => /estimates\.customer_id = \?/.test(sql)).length };
+    };
+    const one = await estimateQueries(['a']);
+    const many = await estimateQueries(['a', 'b', 'c', 'd', 'e']);
+    expect(many.result.missed).toBe(0);
+    expect(one.count).toBeGreaterThan(0);
+    // Same number of estimates queries for five customers as for one; five fences inside each.
+    expect(many.count).toBe(one.count);
+    expect(many.fences).toBe(5 * many.count);
+    // Another customer's estimate never clears the promise: only the matched owner counts.
+    const foreign = await estimateQueries(['a', 'b'], { estimates: { owner_customer_id: 'someone-else' } });
+    expect(foreign.result.missed).toBe(2);
   });
 
   test('a callback is NOT closed by an unrelated estimate to the customer ("we will call back with availability")', async () => {

@@ -407,13 +407,15 @@ async function quoteEstimateIds(conn, scoped) {
   const done = new Set();
   const quotes = scoped.filter((x) => x.r.kind === 'send_estimate');
   const linked = quotes.filter((x) => x.r.customer_id);
-  for (const customerId of [...new Set(linked.map((x) => String(x.r.customer_id)))]) {
-    const group = linked.filter((x) => String(x.r.customer_id) === customerId);
-    const lowest = new Date(Math.min(...group.map((x) => x.since.getTime())));
-    const sent = await commitments.handedOffWithin(conn('estimates'), lowest)
-      .modify((b) => commitments.whereEstimateCustomerOwnership(b, customerId))
-      .select(...commitments.HANDOFF_COLS(conn));
-    for (const x of group) if (sent.some((e) => commitments.witnessAt(e, x.since))) done.add(x.r.id);
+  if (linked.length) {
+    // One query for every customer (this can run under the publishing lock):
+    // each customer's fence OR'd, the matched owner read back per row.
+    const lowest = new Date(Math.min(...linked.map((x) => x.since.getTime())));
+    const sent = await commitments.whereEstimateOwnedByAny(commitments.handedOffWithin(conn('estimates'), lowest), linked.map((x) => x.r.customer_id))
+      .select(...commitments.HANDOFF_COLS(conn), conn.raw(`${commitments.ESTIMATE_OWNER_SQL} AS owner_customer_id`));
+    for (const x of linked) {
+      if (sent.some((e) => String(e.owner_customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since))) done.add(x.r.id);
+    }
   }
   const unlinked = quotes.filter((x) => x.phone);
   if (!unlinked.length) return done;
