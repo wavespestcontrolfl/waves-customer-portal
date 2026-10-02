@@ -252,3 +252,47 @@ describe('decision_reviews keeps the old unique key for this deployment (2026100
   });
 });
 
+describe('decision_reviews legacy conflict target (20261002005000; sorts before the provider key so an arbiter exists at every commit)', () => {
+  const legacy = require('../models/migrations/20261002005000_decision_reviews_legacy_conflict_target');
+  const fs = require('fs');
+  const path = require('path');
+
+  test('up adds a second five-column unique under its own name, before the provider column exists', async () => {
+    const { knex, state } = buildKnex({ column: false });
+    await legacy.up(knex);
+    expect(state.raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_legacy_uniq',
+      'ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_subject_question_legacy_uniq UNIQUE (capability, package_id, subject_type, subject_id, question_id)',
+    ]);
+    expect(state.wheres).toEqual([]); // no provider column yet: nothing to check
+  });
+
+  test('on a database that already ran the later files it still adds the key while only the default provider has rows, and skips with a warning otherwise', async () => {
+    const clean = buildKnex({ column: true });
+    await legacy.up(clean.knex);
+    expect(clean.state.raw).toHaveLength(2);
+    expect(clean.state.wheres).toEqual([['whereNot', { provider: 'typesafe' }]]);
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const mixed = buildKnex({ column: true, otherProviderRow: { id: 'r1' } });
+    await legacy.up(mixed.knex);
+    expect(mixed.state.raw).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/legacy conflict target is not added/));
+    warn.mockRestore();
+  });
+
+  test('down drops only its own constraint; both directions no-op without the table', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await legacy.down(knex);
+    expect(state.raw).toEqual(['ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_legacy_uniq']);
+    const none = buildKnex({ table: false });
+    await legacy.up(none.knex); await legacy.down(none.knex);
+    expect(none.state.raw).toEqual([]);
+  });
+
+  test('it sorts before the frozen provider migration, so it runs first in the same batch', () => {
+    const names = fs.readdirSync(path.join(__dirname, '..', 'models', 'migrations')).filter((n) => n.includes('decision_reviews_')).sort();
+    expect(names.indexOf('20261002005000_decision_reviews_legacy_conflict_target.js')).toBeLessThan(names.indexOf('20261002010000_decision_reviews_provider.js'));
+    expect(names.indexOf('20261002005000_decision_reviews_legacy_conflict_target.js')).toBeGreaterThan(-1);
+  });
+});
+
