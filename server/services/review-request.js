@@ -4667,10 +4667,16 @@ const ReviewService = {
     // by now, linked by scheduled_service_id.
     // Record first, like the visit-context recovery above: the completed
     // record's date, technician and type win over the scheduled row's.
+    // service_records.scheduled_service_id is one-to-many: the CANONICAL
+    // sibling is the record the visit's committed completion attempt pinned,
+    // else the newest (the same rule closeout-status.js reads).
     const linkedRecord = serviceRecordId || !voiceVisitType || !scheduledServiceId ? null
-      : await db("service_records").where({ scheduled_service_id: scheduledServiceId })
-        .orderBy("created_at", "desc").first("id", "service_date", "technician_id", "service_type")
-        .catch(() => null);
+      : await (async () => {
+        const rows = await db("service_records").where({ scheduled_service_id: scheduledServiceId })
+          .orderBy("created_at", "desc").select("id", "service_date", "technician_id", "service_type");
+        const attempt = await require("./completion-attempts").completionStatusForService({ serviceId: scheduledServiceId }).catch(() => null);
+        return (attempt?.serviceRecordId && rows.find((r) => r.id === attempt.serviceRecordId)) || rows[0] || null;
+      })().catch(() => null);
     const voiceVisit = !voiceVisitType ? null : {
       serviceRecordId: serviceRecordId || linkedRecord?.id || null,
       serviceDate: linkedRecord?.service_date || serviceDate,
@@ -4769,7 +4775,11 @@ const ReviewService = {
           // today's rules before reuse (neutral wording, Google named): one
           // saved before them ("Reply if anything's off") is dropped and the
           // step drafts afresh.
-          const reusable = prior?.custom_body && sameDay && (priorTechVoice
+          // A tech-voice draft speaks as a technician about a visit type: it is
+          // reused only while the row's attribution still matches the visit.
+          const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
+            && (prior.service_type || null) === (serviceType || null));
+          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
               { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
           if (reusable) persistedBody = prior.custom_body;
@@ -4838,7 +4848,9 @@ const ReviewService = {
             ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
             : !priorTechVoice;
           // Same re-check for an older personalized email intro.
-          const reusable = prior?.custom_body && sameDay && (priorTechVoice
+          const sameAttribution = !priorTechVoice || ((prior.technician_id || null) === (technicianId || null)
+            && (prior.service_type || null) === (serviceType || null));
+          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyEmailIntro(prior.custom_body,
               { firstName: firstNameFrom(emailContact.name) || customer.first_name || "" }) === null);
           if (reusable) persistedBody = prior.custom_body;

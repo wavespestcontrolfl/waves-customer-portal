@@ -5011,6 +5011,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.tech_name == null).toBe(true);
     });
 
+    test('#5524 r20 P1: the canonical sibling (the record the completion attempt pinned) wins over a newer row', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-12', first_name: 'Ravi', last_name: 'P', phone: '+19410000085', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-12', customer_id: 'tv-12', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: null }],
+        service_records: [
+          { id: 'sr-done', customer_id: 'tv-12', scheduled_service_id: 'ss-tv-12', service_type: 'Quarterly Pest Control', technician_id: 'tech-real', status: 'completed', service_date: new Date(), created_at: new Date(Date.now() - 3600000) },
+          { id: 'sr-failed', customer_id: 'tv-12', scheduled_service_id: 'ss-tv-12', service_type: 'Termite Inspection', technician_id: 'tech-other', status: 'incomplete', service_date: new Date(), created_at: new Date() },
+        ],
+        service_completion_attempts: [{ id: 'att-1', service_id: 'ss-tv-12', status: 'succeeded', service_record_id: 'sr-done', updated_at: new Date() }],
+        technicians: [{ id: 'tech-real', name: 'Maria Lopez' }, { id: 'tech-other', name: 'Other Tech' }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv12', sequenceStep: 1, scheduledServiceId: 'ss-tv-12',
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0]).toMatchObject({ serviceRecordId: 'sr-done', serviceType: 'Quarterly Pest Control', techName: 'Maria' });
+    });
+
     test('#5524 r9: a visit whose service type cannot be read is not drafted (a stale cached type is never trusted)', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({
@@ -5518,7 +5539,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const fresh = "It's Adam, thanks again for Tuesday. A Google review would really help: {review_url}";
     mockDraftTechVoice.mockResolvedValue(fresh);
     const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
-      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey }],
+      // A real row records the visit it was drafted about.
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey, service_type: 'pest control', technician_id: null }],
       service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
       review_sequences: [{
         id: `seq-${id}`, customer_id: id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
@@ -5541,9 +5563,20 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockDraftTechVoice).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me this morning');
 
+    // #5524 r20: same day, but the visit's technician changed since: never reused.
+    mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
+    mock = fixture('tvd-4', new Date());
+    mock.__state.rows.review_requests.find((r) => r.id === 'rr-tvd-4').technician_id = 'tech-someone-else';
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+
     // Same day, but persisted by the older drafter before the switch: never
     // reused, since it skipped the fact check.
     mockSendCustomerMessage.mockClear();
+    mockDraftTechVoice.mockClear();
     mock = fixture('tvd-3', new Date(), 'soft_reminder_personalized');
     db.mockImplementation(mock);
     expect((await ReviewService.processReviewSequences()).sent).toBe(1);
