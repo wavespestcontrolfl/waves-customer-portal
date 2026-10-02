@@ -165,25 +165,14 @@ const isPayerLinked = (p) => {
     const num = descriptionInvoiceNumberOf(p);
     return !!(num && payerInvoiceNumbers.has(num));
   };
-  let total;
-  if (payerInvoiceIds.size === 0) {
-    // Hold-deferral placeholders are never shown (getPaymentHistory drops them), so
-    // they are not counted either: `total` must match what pagination serves.
-    const countRow = await excludeHoldDeferralPlaceholders(db('payments')
-      .where({ customer_id: customerId }), 'payments')
-      .count('* as count')
-      .first();
-    total = Number(countRow?.count || 0);
-  } else {
-    const rows = await excludeHoldDeferralPlaceholders(db('payments')
-      .where({ customer_id: customerId }), 'payments')
-      // Every field isPayerLinked reads — metadata alone under-counts the
-      // exclusion for rows payer-linked only through their PaymentIntent or
-      // invoice-number description, leaving `total` above the number of
-      // rows pagination will ever serve (pre-push P1).
-      .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
-    total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
-  }
+  // `total` counts exactly the rows pagination will serve: the same
+  // hold-deferral exclusion and the same payer predicate (a payer stamp on
+  // the row itself counts even with no payer invoice on file). Every field
+  // isPayerLinked reads is selected.
+  const countRows = await excludeHoldDeferralPlaceholders(db('payments')
+    .where({ customer_id: customerId }), 'payments')
+    .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
+  const total = countRows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
 
   // `cursor` is the raw payment-history offset. Scan bounded chunks so a
   // page still contains up to `limit` customer-visible rows when third-party

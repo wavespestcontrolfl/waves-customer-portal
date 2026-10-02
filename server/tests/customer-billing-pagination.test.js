@@ -123,8 +123,8 @@ test('filters third-party payer rows while keeping visible cursor pagination com
 // A row the ledger stamps as the payer's directly (payments.payer_id, or
 // metadata.payer_id on statement refunds/disputes) is excluded whatever it
 // links to — the chat payment card reads this same list.
-test('filters rows stamped payer-owned directly, by column or metadata', async () => {
-  payerInvoiceIds = ['payer-invoice'];
+test('filters rows stamped payer-owned directly, by column or metadata, with no payer invoice on file', async () => {
+  payerInvoiceIds = [];
   rawPayments[1].payer_id = 7;
   rawPayments[2].metadata = { payer_id: 7, source: 'statement_refund' };
 
