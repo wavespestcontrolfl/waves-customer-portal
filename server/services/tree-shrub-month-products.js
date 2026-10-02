@@ -51,7 +51,11 @@ const PROTOCOL_PRODUCTS = [
 // "Fe/Mn micros" has no verified catalog product: the old mapping was LESCO
 // Chelated Iron Plus, a 12-0-0 nitrogen source the owner dropped from T&S
 // (2026-10-01, #5089), and June sits inside the summer N blackout.
-const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b/i;
+// A line whose application method is still unverified ("verify container
+// label and method", "no verified … injector recipe") is withheld too: a
+// suggested row's method is fixed on the sheet, so a guessed foliar/drench
+// method would be saved on the record (KPHITE, Sequestar; Codex r2 #5089).
+const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report|mn combo\b|fe\/mn micros\b)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b/i;
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
