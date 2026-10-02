@@ -293,10 +293,19 @@ async function intentEvidence(invoice, database) {
   return { intents, attempts, rows, unpaired };
 }
 
+// Conflicting evidence is never bank: any source that names a NON-bank tender (a card payment row, a card attempt, a
+// card invoice method) keeps the reconciliation hold, whatever another source says.
+function tenderConflict(invoice, { attempts, rows }) {
+  const rowTender = (row) => row.live_method_type || row.payment_method_type || (parseJson(row.metadata) || {}).payment_method;
+  const nonBank = (tender) => Boolean(tender) && !isBankTender(tender);
+  return nonBank(invoice.payment_method) || rows.some((row) => nonBank(rowTender(row))) || attempts.some((attempt) => nonBank(attempt.tender));
+}
+
 // Bank-tender evidence from any durable source the pay paths record: the invoice's payment_method, a processing
 // payments row's method (the live payment_methods join, then its snapshot, then metadata.payment_method), or the
 // unresolved attempt's own tender.
 function hasBankTender(invoice, { attempts, rows }) {
+  if (tenderConflict(invoice, { attempts, rows })) return false;
   if (isBankTender(invoice.payment_method)) return true;
   const rowTender = (row) => row.live_method_type || row.payment_method_type || (parseJson(row.metadata) || {}).payment_method;
   if (rows.length && rows.every((row) => isBankTender(rowTender(row)))) return true;
@@ -343,7 +352,8 @@ async function processingStatusOutcome(invoice, database, terminalError) {
   // classifier (recurring-card-on-file.js) reads a non-bank processing invoice as an unfinished CARD intent
   // (chargeInvoiceWithSavedCard maps every non-succeeded intent to processing).
   const classified = require('../recurring-card-on-file').classifySavedMethodChargeInvoice(invoice);
-  if (classified === 'bank_processing' || hasBankTender(invoice, await intentEvidence(invoice, database))) return held('bank_payment_processing', fenceReason(terminalError.message));
+  const evidence = await intentEvidence(invoice, database);
+  if (!tenderConflict(invoice, evidence) && (classified === 'bank_processing' || hasBankTender(invoice, evidence))) return held('bank_payment_processing', fenceReason(terminalError.message));
   return held('needs_reconciliation', CARD_INCOMPLETE_REASON);
 }
 
@@ -734,6 +744,9 @@ async function loadRecordedPayments(customerId, invoice, database) {
       if (invoice.stripe_charge_id) this.orWhereRaw('payments.stripe_charge_id = ?', [String(invoice.stripe_charge_id)]);
       if (/^[A-Za-z0-9-]+$/.test(String(invoice.invoice_number || ''))) this.orWhereRaw('payments.description LIKE ?', [`Invoice ${invoice.invoice_number} — %`]);
     })
+    // A row that names ANOTHER invoice explicitly (a combined payment's sibling share) is excluded in SQL, before the
+    // LIMIT, so sibling rows can never crowd this invoice's own payments out of the history.
+    .whereRaw(`(${INVOICE_LINK_KEYS.map((key) => `NULLIF(payments.metadata::jsonb ->> '${key}', '') IS NULL`).join(' AND ')} OR ${INVOICE_LINK_KEYS.map((key) => `payments.metadata::jsonb ->> '${key}' = ?`).join(' OR ')})`, INVOICE_LINK_KEYS.map(() => String(invoice.id)))
     .orderBy('payments.created_at', 'desc')
     .limit(PAYMENT_ROW_CAP + 1)
     .select(RECORDED_PAYMENT_COLUMNS);

@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2;
   const inv = {};
   const tokens = [];
 
@@ -156,6 +156,16 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: new Date() });
     const [term] = await db('annual_prepay_terms').insert({ customer_id: T, prepay_invoice_id: prepayInvoice.id, status: 'active', term_start: day(-30), term_end: day(335), prepay_amount: 600 }).returning('id');
     inv.prepayTermId = term.id || term;
+    // Conflicting tender evidence: the invoice says bank, its processing payments row says card. And sibling rows that
+    // would crowd this invoice's own payment out of a limited history.
+    R2 = await customer(`Mixed${run}`, `Tender${run}`);
+    const mixed = await invoice('r2_mixed', R2, { total: 44, payment_method: 'us_bank_account', stripe_payment_intent_id: `pi_r2_mixed_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: mixed.id, stripe_payment_method_id: 'pm_r2', idempotency_key: `k-r2-${run}`, status: 'ambiguous', amount: 44, stripe_payment_intent_id: `pi_r2_mixed_${run}`, submitted_at: new Date() });
+    await db('payments').insert({ customer_id: R2, payment_date: day(0), amount: 44, status: 'processing', processor: 'stripe', payment_method_type: 'card', stripe_payment_intent_id: `pi_r2_mixed_${run}`, description: 'Card row', metadata: json({ invoice_id: mixed.id }) });
+    const flood = await invoice('r2_flood', R2, { total: 15, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_r2_flood_${run}` });
+    await db('payments').insert({ customer_id: R2, payment_date: day(-9), amount: 15, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`, description: 'Own payment', metadata: json({ invoice_id: flood.id }), created_at: new Date(Date.now() - 86400e3) });
+    await db.batchInsert('payments', Array.from({ length: 55 }, (_, n) => ({ customer_id: R2, payment_date: day(-1), amount: 1, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`,
+      description: `Sibling share ${n}`, metadata: json({ invoice_id: uid() }) })), 55);
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -564,6 +574,20 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.error).toBeUndefined();
     expect(detail.invoice.id).toBe('12345678-1234-4123-8123-123456789012');
     expect(detail.customer.id).toBe(N);
+  });
+
+  test('conflicting tender evidence (invoice bank, payment row card) is never bank processing', async () => {
+    const list = await read('get_customer_invoices', { customer_id: R2, limit: 50 });
+    expect(by(list, 'r2_mixed')).toMatchObject({ collectible: false, needs_reconciliation: true, bank_payment_processing: false });
+    expect(list.account_summary.processing.bank_payment_in_flight).toBe(0);
+    // A processing-status invoice with a card row and a bank invoice method conflicts too.
+    expect(by(await read('get_customer_invoices', { customer_id: Y, limit: 50 }), 'y_ach')).toMatchObject({ bank_payment_processing: true });
+  });
+
+  test('sibling rows that name other invoices are excluded before the history limit', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.r2_flood.id });
+    expect(detail.recorded_payments.map((p) => p.amount)).toEqual([15]);
+    expect(detail.unknowns.join(' ')).not.toMatch(/More payment rows/);
   });
 
   test('annual prepay linkage resolves through the term\'s prepay_invoice_id when the invoice has no term id of its own', async () => {
