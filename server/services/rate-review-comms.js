@@ -259,13 +259,16 @@ async function ratesMovedFor(dbh, notices, { customers, visitById }) {
     if (live === noticedCurrent(n)) ok.add(String(n.id));
   }
   const termIds = notices.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
-  const terms = new Map((termIds.length ? await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'prepay_amount') : []).map((t) => [String(t.id), t]));
+  const terms = new Map((termIds.length ? await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'prepay_amount', 'term_end') : []).map((t) => [String(t.id), t]));
   for (const n of notices) {
     const meta = parseJson(n.metadata, {});
     if (n.billing_lane === 'monthly_membership' && !ok.has(String(n.id))) moved.add(String(n.id));
     if (n.billing_lane === 'annual_prepay') {
       const term = terms.get(String(meta.term_id || ''));
-      if (!term || Math.round(Number(term.prepay_amount) * 100) !== noticedCurrent(n)) moved.add(String(n.id));
+      // ...and its renewal is still the day the notice names (term_end + 1;
+      // the apply's renewal_window_changed).
+      const renewalDay = term && ymd(term.term_end) ? new Date(Date.parse(`${ymd(term.term_end)}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10) : null;
+      if (!term || Math.round(Number(term.prepay_amount) * 100) !== noticedCurrent(n) || renewalDay !== ymd(n.effective_date)) moved.add(String(n.id));
     }
     if (n.billing_lane === 'per_application') {
       const visit = visitById.get(String(meta.first_visit_id || ''));
@@ -289,13 +292,13 @@ async function liveMonthlyCents(dbh, n, customer) {
 }
 
 // The live lane per unsent notice; an unreadable lane reads as null (held).
-async function liveLanesFor(dbh, notices, { snapshots, customers, today }) {
+async function liveLanesFor(dbh, notices, { snapshots, customers, today, includeSent = false }) {
   const { resolveLiveLane } = require('./rate-review-apply')._private;
   const snapshotByNotice = new Map(snapshots.map((s) => [String(s.notice_id), s]));
   const customerById = new Map(customers.map((c) => [String(c.id), c]));
   const out = new Map();
   for (const n of notices) {
-    if (n.sent_at) continue;
+    if (n.sent_at && !includeSent) continue;
     const customer = customerById.get(String(n.customer_id));
     try {
       out.set(String(n.id), customer ? await resolveLiveLane(dbh, { customer, familyKey: n.family_key, cadence: snapshotByNotice.get(String(n.id))?.cadence || null, today }) : null);
@@ -595,9 +598,17 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
 async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
   const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
-  const customer = entry.customer;
+  // The recipient is re-read after the claim (a corrected address or phone
+  // since the preview is the one used): the letter and both legs are built
+  // from the live row. A customer gone inactive meanwhile releases the
+  // claim untouched.
+  const customer = await dbh('customers').where({ id: entry.customerId }).first();
+  if (!customer || customer.deleted_at || customer.active === false) {
+    await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
+    return { outcome: 'in_flight' };
+  }
   const claimKey = claimKeyFor(claimed);
-  const payload = letterPayload({ customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  const payload = letterPayload({ customer, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
   const email = await PriceChangeNotices.sendNoticeEmail({
@@ -794,7 +805,7 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // term's amount is written then), but the customer's rate only changes at
   // renewal — it stays upcoming until its effective date. Every other lane
   // drops off once the nightly apply writes the new rate.
-  const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('id', 'monthly_rate', 'billing_day') : null;
+  const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('id', 'monthly_rate', 'billing_day', 'billing_mode', 'waveguard_tier') : null;
   const declinedTerms = await declinedPrepayTermIds(dbh, rows);
   // A change the nightly apply is holding (apply_hold_reason) is not a
   // guaranteed rate — not shown until it applies or the hold clears.
@@ -806,9 +817,13 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // stamped price moved). A prepaid term's amount is checked by the apply
   // the night after delivery and holds there (apply_hold_reason above).
   const applicable = new Set(monthly.map((n) => String(n.id)));
+  // ...and every lane: the account's live billing lane must still be the
+  // notice's (the apply's billing_lane_changed).
+  const lanes = await liveLanesFor(dbh, pending, { snapshots: [], customers: customer ? [customer] : [], today, includeSent: true });
   const perApp = pending.filter((n) => n.billing_lane === 'per_application');
   const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp) });
-  return pending.filter((n) => (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
+  return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane
+    && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),
     current: money(n.noticed_current_cents ?? n.current_amount_cents),
