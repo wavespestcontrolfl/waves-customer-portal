@@ -395,6 +395,25 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect(staff.reservationId).toBeNull();
   });
 
+  test('a dashboard/assistant/leads reply (manual-send wrapper) while the claim is mid-send is refused, not sent', async () => {
+    await waitingSuggestion();
+    const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
+    let staff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      if (input.entryPoint === 'sms_auto_send_executor') {
+        staff = await sendManualCustomerSms({
+          to: CUSTOMER_PHONE, body: 'Thursday, see you then.', channel: 'sms', audience: 'customer',
+          purpose: 'conversational', customerId, entryPoint: 'admin_dashboard_ops_inbox_reply',
+          metadata: { original_message_type: 'manual', fromNumber: WAVES_LINE },
+        });
+      }
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'c'.repeat(32)}` };
+    });
+    expect((await sweep()).sent).toBe(1);
+    expect(staff).toMatchObject({ sent: false, code: 'AUTO_REPLY_IN_FLIGHT' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('a staff reply in flight before the sweep keeps the card for the person', async () => {
     const s = await waitingSuggestion();
     const staff = await suggest.reserveHumanReply({ to: CUSTOMER_PHONE, customerId, fromNumber: WAVES_LINE, body: 'Thursday, see you then.' });

@@ -157,39 +157,40 @@ function candidatePage({ now, limit = SWEEP_LIMIT, after = null }) {
  * come after it (readinessRefusal, claimGuard, handoffCheck).
  */
 function candidateRefusal({ row, meta, snapshot, now, dueAt }) {
-  const suggest = require('./sms-suggest-mode');
-  const { autoSendActionsSafe } = require('./sms-auto-send');
-  const reply = row.suggested_message;
   if (!meta || !snapshot) return 'unreadable_draft';
-  if (!suggest.suggestionEligible({
-    reply, customerId: row.customer_id, smsLogId: row.sms_log_id,
-    intent: row.detected_intent, schedulingIntent: row.scheduling_intent === true,
-  })) return 'ineligible_base';
-  // The card a person would have sent must be the verified draft, word for word.
-  if (reply !== row.draft_response) return 'draft_mismatch';
-  if (!ORDINARY_INTENTS.includes(row.detected_intent) || row.draft_intent !== row.detected_intent) return 'intent_not_ordinary';
-
-  const stamp = jsonObject(meta.unanswered);
-  if (!stamp || stamp.policy_version !== STAMP_VERSION) return 'not_stamped';
-  if (stamp.verifier_enabled !== true || jsonObject(meta.verify)?.converged !== true) return 'not_verified';
-  if (stamp.require_review !== false) return 'review_required';
-  if (stamp.lint_pass !== true || (Array.isArray(snapshot.comms_lint) && snapshot.comms_lint.length)) return 'lint_flagged';
-  if (stamp.actions_verified_safe !== true || !autoSendActionsSafe(meta.actions)) return 'action_required';
-  // A gap the drafter recorded is a promise nobody owns, whatever the Real Answers gate says.
-  if (typeof meta.missing_info === 'string' ? meta.missing_info.trim() : meta.missing_info) return 'missing_info';
-  // A photo the drafter never saw stays with staff (Twilio's attachment list; unknown = refuse).
-  if (require('./sms-gratitude-context').mediaCountFromMetadata(row.inbound_metadata) !== 0) return 'media_or_unknown';
-  if (suggest.hasRedactionPlaceholder(reply)) return 'redaction_placeholder';
-  if (suggest.hasPriceQuote(reply)) return 'price_quote';
-  const followupSla = require('./sms-followup-sla');
-  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)) return 'unowned_followup';
-
-  if (!(dueAt instanceof Date) || Number.isNaN(dueAt.getTime()) || dueAt.getTime() > now.getTime()) return 'not_due';
-  // Same ET day as the facts the reply was written from: a reply drafted
-  // yesterday evening says "tomorrow" about today.
+  const suggest = require('./sms-suggest-mode');
+  const reply = row.suggested_message;
+  const stamp = jsonObject(meta.unanswered) || {};
+  const lintFindings = Array.isArray(snapshot.comms_lint) ? snapshot.comms_lint.length : 0;
   const factsAt = factsReadAt(row, snapshot);
-  if (!factsAt || etDateString(factsAt) !== etDateString(now)) return 'not_same_day';
-  return null;
+  // First failing check wins; the order is the order a reviewer would read the card in.
+  const checks = [
+    ['ineligible_base', () => !suggest.suggestionEligible({
+      reply, customerId: row.customer_id, smsLogId: row.sms_log_id,
+      intent: row.detected_intent, schedulingIntent: row.scheduling_intent === true,
+    })],
+    // The card a person would have sent must be the verified draft, word for word.
+    ['draft_mismatch', () => reply !== row.draft_response],
+    ['intent_not_ordinary', () => !ORDINARY_INTENTS.includes(row.detected_intent) || row.draft_intent !== row.detected_intent],
+    ['not_stamped', () => stamp.policy_version !== STAMP_VERSION],
+    ['not_verified', () => stamp.verifier_enabled !== true || jsonObject(meta.verify)?.converged !== true],
+    ['review_required', () => stamp.require_review !== false],
+    ['lint_flagged', () => stamp.lint_pass !== true || lintFindings > 0],
+    ['action_required', () => stamp.actions_verified_safe !== true || !require('./sms-auto-send').autoSendActionsSafe(meta.actions)],
+    // A gap the drafter recorded is a promise nobody owns, whatever the Real Answers gate says.
+    ['missing_info', () => Boolean(String(meta.missing_info ?? '').trim())],
+    // A photo the drafter never saw stays with staff (Twilio's attachment list; unknown = refuse).
+    ['media_or_unknown', () => require('./sms-gratitude-context').mediaCountFromMetadata(row.inbound_metadata) !== 0],
+    ['redaction_placeholder', () => suggest.hasRedactionPlaceholder(reply)],
+    ['price_quote', () => suggest.hasPriceQuote(reply)],
+    // Any follow-up promise in the words themselves, under either prompt: nobody would own it.
+    ['unowned_followup', () => require('./sms-followup-sla').replyPromisesFollowup(reply)],
+    ['not_due', () => !(dueAt instanceof Date) || !(dueAt.getTime() <= now.getTime())],
+    // Same ET day as the facts the reply was written from: a reply drafted
+    // yesterday evening says "tomorrow" about today.
+    ['not_same_day', () => !factsAt || etDateString(factsAt) !== etDateString(now)],
+  ];
+  return checks.find(([, refused]) => refused())?.[0] || null;
 }
 
 function factsReadAt(row, snapshot) {
@@ -264,8 +265,14 @@ async function visitChangedSince(dbh, { customerId, factsAt }) {
 
 /** Did anyone call this customer, or the customer call in, since the text? */
 async function callSinceInbound(dbh, { threadLast10, customerId, smsLogId }) {
-  if (!threadLast10 && !customerId) return true; // no thread identity → cannot rule a call out
-  const q = dbh('call_log')
+  const q = callSinceInboundQuery(dbh, { threadLast10, customerId, smsLogId });
+  if (!q) return true; // no thread identity → cannot rule a call out
+  return Boolean(await q.first('id'));
+}
+
+function callSinceInboundQuery(dbh, { threadLast10, customerId, smsLogId }) {
+  if (!threadLast10 && !customerId) return null;
+  return dbh('call_log')
     .whereRaw('created_at > (SELECT created_at FROM sms_log WHERE id = ?)', [smsLogId])
     // Sandy's test line never carries a real customer conversation.
     .whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'")
@@ -276,7 +283,22 @@ async function callSinceInbound(dbh, { threadLast10, customerId, smsLogId }) {
         this.orWhereRaw(last10('from_phone'), [threadLast10]).orWhereRaw(last10('to_phone'), [threadLast10]);
       }
     });
-  return Boolean(await q.first('id'));
+}
+
+/** A newer customer text on the thread (job-application texts excluded). */
+function newerInboundQuery(dbh, { threadLast10, customerId, smsLogId }) {
+  return dbh('sms_log')
+    .where({ direction: 'inbound' })
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
+    .whereRaw('created_at > (SELECT created_at FROM sms_log WHERE id = ?)', [smsLogId])
+    .whereNot('id', smsLogId)
+    .where(function thread() {
+      if (threadLast10) {
+        this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+      } else {
+        this.where({ customer_id: customerId });
+      }
+    });
 }
 
 /**
@@ -305,34 +327,28 @@ async function claimGuard(trx, { suggestionId, draftId, smsLogId, threadLast10, 
  */
 function handoffCheck(claim) {
   const check = async ({ dbi = db } = {}) => {
-    if (!unansweredReplyLive()) return { ok: false, code: 'gate_off', reason: 'gate_off' };
-    // The executor's sends are conversational, so the shared validator never
-    // defers them: a sweep that started at 7:58 PM must not deliver at 8:01.
-    if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
     const { threadLast10, customerId, smsLogId, factsAt, fromPhone, toPhone } = claim.unanswered;
-    const newerInbound = await dbi('sms_log')
-      .where({ direction: 'inbound' })
-      .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
-      .whereRaw('created_at > (SELECT created_at FROM sms_log WHERE id = ?)', [smsLogId])
-      .whereNot('id', smsLogId)
-      .where(function thread() {
-        if (threadLast10) {
-          this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
-        } else {
-          this.where({ customer_id: customerId });
-        }
-      })
-      .first('id');
-    if (newerInbound) return { ok: false, code: 'newer_inbound', reason: 'newer_inbound' };
-    if (await callSinceInbound(dbi, { threadLast10, customerId, smsLogId })) {
-      return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
-    }
+    // Slower-moving state first: the phone's owner and the customer's visits.
     const owner = await threadOwnerRefusal(dbi, { customerId, fromPhone, toPhone });
     if (owner) return { ok: false, code: owner, reason: owner };
     // A reschedule during the claim or provider preparation makes the reply stale.
     if (await visitChangedSince(dbi, { customerId, factsAt: factsAt ? new Date(factsAt) : null })) {
       return { ok: false, code: 'visit_changed', reason: 'visit_changed' };
     }
+    // Then the thread, in ONE statement, as the last read: a text or a call
+    // landing between two separate queries cannot slip past.
+    const thread = { threadLast10, customerId, smsLogId };
+    const callQ = callSinceInboundQuery(dbi, thread);
+    if (!callQ) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
+    const { rows: [moved] } = await dbi.raw('SELECT EXISTS (?) AS newer_inbound, EXISTS (?) AS called', [
+      newerInboundQuery(dbi, thread).select(dbi.raw('1')), callQ.select(dbi.raw('1')),
+    ]);
+    if (moved?.newer_inbound !== false) return { ok: false, code: 'newer_inbound', reason: 'newer_inbound' };
+    if (moved.called !== false) return { ok: false, code: 'call_since_inbound', reason: 'call_since_inbound' };
+    // Gate and clock after every await: conversational sends skip the shared
+    // send-window validator, so a check that began at 7:59 PM must not pass at 8:00.
+    if (!unansweredReplyLive()) return { ok: false, code: 'gate_off', reason: 'gate_off' };
+    if (!isWithinSendWindowET(new Date())) return { ok: false, code: 'outside_send_window', reason: 'outside_send_window' };
     return { ok: true };
   };
   return require('./agent-decision-send-checks').markRepeatable(check);
