@@ -286,6 +286,7 @@ const { pestReportV2PdfSignature } = require('../services/service-report/pest-re
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
+const { reserviceCardRenderFence } = require('../services/service-report/reservice-report-card');
 const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
@@ -2253,6 +2254,7 @@ router.get('/:token', async (req, res, next) => {
       let apRenderedSignature = apSignature;
       let cockroachRenderedSignature = cockroachV2Signature;
       let reserviceRenderedSignature = reserviceV2Signature;
+      let cardFenceAtRender = null;
       // The canonical snapshot the render is pinned to. Declared out here so
       // the storage block below keys the object by what was RENDERED, not by
       // the cache-lookup value; assigned inside the try so an unreadable
@@ -2275,6 +2277,11 @@ router.get('/:token', async (req, res, next) => {
         laRenderSignature = canonical.signature;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
+          // ONE card snapshot (gate + the score row its "Activity seen" word
+          // reads) taken before the payload and its signature are built; the
+          // post-render fence compares against it (the browser fetches its own
+          // /data, so a change anywhere in between skips the store).
+          cardFenceAtRender = await reserviceCardRenderFence(service, db);
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
@@ -2369,6 +2376,8 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (cardFenceAtRender === null || await reserviceCardRenderFence(service, db) !== cardFenceAtRender) {
+          logger.warn(`[reports-public] re-service card gate or activity label changed during PDF render for ${service.id} — not caching this render`);
         } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.

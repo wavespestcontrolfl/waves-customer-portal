@@ -51,112 +51,9 @@ function defaultRelationshipForContactRole(contactRole) {
   return String(contactRole || '').trim().toLowerCase() === 'property_manager' ? 'managed_for_client' : null;
 }
 
-/** Case/space/punctuation-insensitive street key — "12338 Amber Creek" ≠ "12398 Amber Creek". */
-const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Canonical street-suffix forms. We EXPAND abbreviations to one canonical spelling
-// (st -> street) so "123 Main St" and "123 Main Street" key identically — but we
-// never STRIP the suffix, so "Main St" and "Main Ave" stay DISTINCT streets.
-const STREET_SUFFIX_CANON = {
-  st: 'street', street: 'street', ave: 'avenue', avenue: 'avenue', rd: 'road', road: 'road',
-  dr: 'drive', drive: 'drive', ln: 'lane', lane: 'lane', ct: 'court', court: 'court',
-  blvd: 'boulevard', boulevard: 'boulevard', cir: 'circle', circle: 'circle',
-  pl: 'place', place: 'place', ter: 'terrace', terrace: 'terrace', way: 'way',
-  trl: 'trail', trail: 'trail', pkwy: 'parkway', parkway: 'parkway', hwy: 'highway', highway: 'highway',
-  // USPS forms added 2026-10-01: a call re-recorded a "... Gln" signup address
-  // as "... Glen" and minted a second property for one house. Changing this
-  // map changes stored keys: migration 20261002090000 recomputes them.
-  gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
-  xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
-  rdg: 'ridge', ridge: 'ridge', crk: 'creek', creek: 'creek', holw: 'hollow', hollow: 'hollow',
-  sq: 'square', square: 'square', bnd: 'bend', bend: 'bend', aly: 'alley', alley: 'alley',
-  vw: 'view', view: 'view', vis: 'vista', vista: 'vista', cswy: 'causeway', causeway: 'causeway',
-  plz: 'plaza', plaza: 'plaza', pt: 'point', point: 'point', mdw: 'meadow', meadow: 'meadow',
-  mdws: 'meadows', meadows: 'meadows', hts: 'heights', heights: 'heights', psge: 'passage', passage: 'passage',
-};
-const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
-  .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
-
-/** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
-const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
-
-// Strip a trailing unit designator so a STREET-ONLY comparison ignores units
-// (units are compared separately and preserved in the full addressKey): a legacy
-// "100 Main St Apt 4" and a later "100 Main St" share the same street key.
-const stripTrailingUnit = (s) => String(s || '').replace(/\s+(?:apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+\s*$/i, '').trim();
-
-/** Suffix-canonical, unit-stripped street key — "123 Main St" == "123 Main Street", but != "123 Main Ave". */
-const streetKey = (s) => canonicalizeAddress(stripTrailingUnit(s)).replace(/[^a-z0-9]/g, '');
-
-// Interchangeable unit designators are written loosely for the SAME unit, so
-// strip the designator WORD wherever it appears (in line2 OR embedded in line1) —
-// "Apt 4" / "Unit 4" / "Ste 4" / "#4" / "4", and "100 Main St Apt 4" vs
-// "100 Main St" + "Apt 4", all key identically. The bare unit id is preserved so
-// different units stay distinct. Same designator set stripTrailingUnit recognizes.
-const stripUnitDesignators = (s) => String(s || '')
-  .replace(/[.,#]/g, ' ')
-  .replace(/\b(?:apt|apartment|unit|ste|suite)\b\.?/gi, ' ')
-  .replace(/\s+/g, ' ')
-  .trim();
-
-/**
- * Normalized key for the FULL service address — street + unit + locality — so
- * two units at one street ("100 Main Unit A" vs "Unit B") stay DISTINCT.
- * Suffix-canonical ("123 Main St" == "123 Main Street", "Gln" == "Glen") and
- * ZIP+4-insensitive. Only the STREET words are suffix-mapped; the unit keeps
- * unitKey's normalization, so a unit "PT" is never rewritten.
- *
- * Locality is the 5-digit ZIP when there is one, else the city: one ZIP
- * carries several mailing names (Parrish / Duette 34219, Bradenton /
- * Lakewood Ranch 34211), so the same house arrives under either, while
- * "100 Main St, Bradenton" vs "100 Main St, Sarasota" with no ZIP stay
- * distinct. Stored in customer_properties.address_key and uniquely indexed,
- * so the DB uniqueness uses this same normalization (no JS/SQL drift); any
- * change here needs a migration that recomputes the stored keys.
- */
-const INLINE_UNIT_TAIL_RE = /\s(?:(?:apt|apartment|unit|ste|suite)\b|#)\s*(\S.*)$/i;
-
-function addressKey({ address_line1, address_line2, city, zip } = {}) {
-  // Punctuation first, so the unit is found the same way however it was
-  // typed: "Apt 4." / "St#4" / "St, #4" all read as "St #4".
-  const line1 = String(address_line1 || '').replace(/[.,]/g, ' ').replace(/#/g, ' #').replace(/\s+/g, ' ').trim();
-  // The unit typed in line 1 is everything from its first designator on
-  // ("Apt 4 Building A" / "Unit PT Building A" key like the same text in
-  // line 2), so no unit is ever dropped or suffix-mapped. A street that is
-  // itself named "Unit ..." reads as a unit too; both spellings of it then
-  // still key alike, and the worst case is a second property, never a merge.
-  const inline = line1.match(INLINE_UNIT_TAIL_RE);
-  const street = streetKey(inline ? line1.slice(0, inline.index) : line1);
-  // Both unit sources count ("100 Main St Apt 4" + "Building A" is not Apt
-  // 5 in Building A); the same unit given twice counts once.
-  const embedded = inline ? unitKey(inline[1]) : '';
-  const line2 = unitKey(address_line2);
-  const unit = embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2);
-  const locality = normalizeZip(zip) || normStreet(city);
-  return `${street}${unit}${locality}`;
-}
-
-/**
- * The bare unit token from a UNIT string (a line2 like "Apt 4" / "Unit 4" / "#4" /
- * "4"), with interchangeable designators stripped, so they all collapse to "4" —
- * the SAME normalization addressKey applies. Use this (not a raw normStreet, which
- * keeps the designator word) when comparing two units for equality, so the
- * classifier can't disagree with the dedup key. Pass a unit string, NOT a street.
- */
-function unitKey(s) {
-  return normStreet(stripUnitDesignators(s));
-}
-
-/**
- * The trailing unit embedded in a ONE-LINE street ("100 Main St Apt 4" → "4"),
- * anchored to a designator + end-of-string so a bare number is NOT pulled out of a
- * house number ("14 Main St" → ""). '#' is kept OUT of the \b group — \b is a word
- * boundary and '#' is a non-word char, so "\b#" never matches "St #4".
- */
-function streetEmbeddedUnitKey(s) {
-  const m = String(s || '').match(/(?:\b(?:apt|apartment|unit|ste|suite)|#)\.?\s*([a-z0-9-]+)\s*$/i);
-  return m ? normStreet(m[1]) : '';
-}
+const {
+  normStreet, canonicalizeAddress, normalizeZip, stripTrailingUnit, streetKey, stripUnitDesignators, addressKey, unitKey, streetEmbeddedUnitKey,
+} = require('./customer-property-address-keys');
 
 /** Coerce to a known occupancy enum value (pure). */
 function normalizeOccupancy(v) {
@@ -853,11 +750,107 @@ async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { loc
   };
 }
 
+/**
+ * The one active property a recurring series' own visits agree on: the root
+ * and its live (not cancelled/skipped) children, among this customer's
+ * ACTIVE properties. null when they name none or more than one. Ops
+ * 2026-10-02: a series root left without a property (its visits were linked
+ * later by the 20260829000050 backfill, which skips terminal roots) made the
+ * nightly top-up add each next visit with no property for a multi-property
+ * customer, though every other visit in the series sat at one house.
+ */
+async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
+  if (!rootId || !customerId) return null;
+  const read = (c) => c('scheduled_services as ss')
+    .join('customer_properties as p', 'p.id', 'ss.property_id')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId, 'p.customer_id': customerId, 'p.active': true })
+    // A legacy NULL status is a live visit (20260829000050's rule).
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
+    .distinct('ss.property_id')
+    .limit(2);
+  // Live visits of the series with NO property are evidence too (the
+  // 20260829000050 backfill leaves ambiguous ones unlinked): one stamped
+  // with another address, or unstamped (it reads as the customer's primary)
+  // while the candidate is not the primary, makes the series unresolved.
+  const unlinked = (c) => c('scheduled_services as ss')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId })
+    .whereNull('ss.property_id')
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
+    .select('ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip');
+  const candidate = (c, id) => c('customer_properties').where({ id, customer_id: customerId, active: true })
+    .first('address_line1', 'address_line2', 'city', 'zip', 'is_primary');
+  const decide = async (c) => {
+    const rows = await read(c);
+    if (rows.length !== 1) return null;
+    const id = rows[0].property_id;
+    const [others, house] = await Promise.all([unlinked(c), candidate(c, id)]);
+    if (!house) return null;
+    const houseKey = addressKey(house);
+    for (const o of others) {
+      if (o.service_address_line1) {
+        if (addressKey({ address_line1: o.service_address_line1, address_line2: o.service_address_line2, city: o.service_address_city, zip: o.service_address_zip }) !== houseKey) return null;
+      } else if (!house.is_primary) {
+        return null;
+      }
+    }
+    return id;
+  };
+  try {
+    return await (conn.isTransaction ? conn.transaction((sp) => decide(sp)) : decide(conn));
+  } catch {
+    return null;
+  }
+}
+
+/** bookingPropertyStamp for a resolved id, or null (incomplete, gone, or a failed read). */
+async function propertyStampOrNull(customerId, propertyId, conn) {
+  try {
+    // Inside a caller's transaction the row is read FOR SHARE (the direct
+    // booking path's rule), held through the caller's commit, so the
+    // property cannot be deactivated or moved between this read and the
+    // child insert.
+    const read = (c) => bookingPropertyStamp({ customerId, propertyId: String(propertyId) }, c, { lock: !!conn.isTransaction });
+    return await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
+  } catch {
+    return null;
+  }
+}
+
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
-  if (cols.service_address_line1 && target.service_address_line1) return;
   if (cols.source_estimate_id && target.source_estimate_id) return;
+  const stamped = !!(cols.service_address_line1 && target.service_address_line1);
+  // A series child follows the house its series is already at, before the
+  // sole-property fallback (which only resolves a one-property customer).
+  if (target.recurring_parent_id) {
+    const agreed = await seriesAgreedPropertyId(target.recurring_parent_id, target.customer_id, conn);
+    const stamp = agreed ? await propertyStampOrNull(target.customer_id, agreed, conn) : null;
+    if (stamp) {
+      if (stamped) {
+        // An address copied from the root wins; the property is adopted only
+        // when it is that same address.
+        const copied = {
+          address_line1: target.service_address_line1, address_line2: target.service_address_line2,
+          city: target.service_address_city, zip: target.service_address_zip,
+        };
+        const own = { address_line1: stamp.service_address_line1, address_line2: stamp.service_address_line2, city: stamp.service_address_city, zip: stamp.service_address_zip };
+        if (addressKey(copied) === addressKey(own)) target.property_id = stamp.property_id;
+        return;
+      }
+      // Dispatch reads the visit's stamped address (falling back to the
+      // customer's primary), so the house's address and pin ride with its id.
+      // The zone copied from the root belonged to the root's address; it is
+      // cleared so routing derives it from this house (appointment-address.js
+      // does the same on an address change).
+      for (const [field, value] of Object.entries(stamp)) if (cols[field]) target[field] = value;
+      if (cols.zone) target.zone = null;
+      return;
+    }
+  }
+  if (stamped) return;
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 

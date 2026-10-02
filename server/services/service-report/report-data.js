@@ -17,7 +17,10 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
+const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = require('./lawn-visit-memory');
+const {
+  buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
+} = require('./lawn-progress');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -62,6 +65,7 @@ const {
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
+const { buildReserviceReportCard } = require('./reservice-report-card');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
@@ -3232,6 +3236,45 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     observations: photo.observations || '',
     takenAt: photo.taken_at || photo.created_at || null,
   })));
+  // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
+  // out through the same internal out-param (never the payload). The prior is
+  // the property-scoped history row selectPriorVisit chose; confidence is read
+  // from what this render already loaded (the visible photos' quality and the
+  // models' divergence flags), so there is no extra query.
+  if (visitMemoryOut && typeof visitMemoryOut === 'object') {
+    // A prior is any strictly earlier history row (property-scoped, capped at
+    // this visit). The call site resolves it by the FROZEN sinceLast's
+    // priorAssessmentId, so treatments are never judged on another visit's
+    // scores when history changes after the freeze.
+    const currentDay = String(visitMemoryOut.serviceDate || '').slice(0, 10);
+    const priorInputFor = (assessmentId) => {
+      if (assessmentId == null) return null;
+      const row = historyRows.find((r) => String(r.id) === String(assessmentId));
+      const date = row ? ymd(row.service_date) : null;
+      if (!row || !date || !currentDay || date >= currentDay) return null;
+      return {
+        assessmentId: String(row.id),
+        date,
+        season: row.season || null,
+        scores: scoresFromAssessmentRow(row),
+        divergentMetrics: divergentMetricsFrom(parseJsonArray(row.divergence_flags)),
+      };
+    };
+    visitMemoryOut.progressInput = {
+      current: {
+        date: visitMemoryOut.serviceDate,
+        season: assessment.season || null,
+        isBaseline: !!assessment.is_baseline,
+        scores: scoresFromAssessmentRow(assessment),
+        confidence: deriveAssessmentConfidence({
+          photos: latestPhotos.map(photoQualityForConfidence),
+          divergenceFlags: parseJsonArray(assessment.divergence_flags),
+        }),
+      },
+      prior: priorInputFor(visitMemoryOut.priorVisit?.assessmentId),
+      priorInputFor,
+    };
+  }
 
   let beforeAfter = null;
   if (historyRows.length >= 2) {
@@ -5396,6 +5439,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // after the narrative overlay so no rewrite can touch it. Failure only
       // marks the render uncacheable; it never breaks the report.
       let visitMemorySinceLast;
+      let lawnProgress = null;
       if (reportV2 && visitMemoryLive) {
         try {
           const outcome = await resolveVisitMemoryForRender({
@@ -5417,6 +5461,46 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
         } catch {
           lawnAssessment.weekWeatherUncacheable = true;
+        }
+        // P13 progress engine: pure over the inputs above, so it cannot
+        // fail a render. Server-internal until P14 writes copy from it.
+        try {
+          const input = visitMemoryOut.progressInput;
+          const frozenPriorId = visitMemorySinceLast?.priorAssessmentId;
+          // Only a FROZEN prior identity is compared: with no frozen sinceLast
+          // the live resolver could pick a different (backfilled) visit on a
+          // later render of the same permanent report, so nothing is judged.
+          const prior = frozenPriorId != null && typeof input?.priorInputFor === 'function'
+            ? input.priorInputFor(frozenPriorId)
+            : null;
+          // This visit's FROZEN date (a corrected schedule date must not move a
+          // permanent report across a treatment window); the prior's frozen
+          // date rides sinceLast.priorDate.
+          const frozenEntry = storedVisitMemoryFor(service.structured_notes, lawnAssessment.assessmentId);
+          const current = input?.current
+            ? { ...input.current, date: frozenEntry?.serviceDate || input.current.date }
+            : input?.current;
+          let priorForProgress = prior;
+          if (prior) {
+            // The prior read's own photo confidence, read the way this visit's
+            // is (top five visible). A failed read is UNKNOWN: fail closed.
+            const priorPhotos = await knex('lawn_assessment_photos')
+              .where({ assessment_id: prior.assessmentId, customer_visible: true })
+              .orderBy('is_best_photo', 'desc')
+              .orderBy('quality_score', 'desc')
+              .orderBy('photo_order', 'asc')
+              .limit(5)
+              .catch(() => null);
+            priorForProgress = {
+              ...prior,
+              confidence: Array.isArray(priorPhotos)
+                ? deriveAssessmentConfidence({ photos: priorPhotos.map(photoQualityForConfidence) })
+                : 'unknown',
+            };
+          }
+          lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
+        } catch {
+          lawnProgress = null;
         }
       }
       // AI "What we applied today" narrative — same contract as the T&S path
@@ -5567,6 +5651,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.
       if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = visitMemorySinceLast;
+      // P13: the progress block rides the report object but NOT the public
+      // payload (non-enumerable: JSON, spread and Object.keys never see it), so
+      // no state word reaches a customer before P14's guarded copy does.
+      if (reportV2 && lawnProgress) {
+        Object.defineProperty(reportV2, 'progress', { value: lawnProgress, enumerable: false, writable: true, configurable: true });
+      }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
@@ -6516,6 +6606,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   );
   const callbackNonPerformed = Boolean(reserviceReportBlock)
     && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
+  // Re-service report card (GATE_RESERVICE_REPORT_CARD, reservice-report-card.js):
+  // null while the gate is dark or no reserviceReport block composed — and
+  // then NO key joins the payload, so a dark gate leaves it byte-identical.
+  // The customer's words come from the copy FROZEN on the record at
+  // completion (service_data.reserviceRequest), never from the live booking.
+  const reserviceReportCardBlock = buildReserviceReportCard(service, {
+    block: reserviceReportBlock,
+    products,
+    // The gauge's own per-record visibility decision (switches, service
+    // lines, recurring-only, one-time exclusion, typed specialty): no gauge
+    // on this report, no pressure word on the card (Codex r12).
+    pestPressureScore: pestPressure !== null ? (pestPressureRow || null) : null,
+  });
 
   // The four-section report's "What's next" visit: the next booking on this
   // report's own line AT this report's property (same-line-visit.js; a
@@ -6638,6 +6741,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
     reserviceReport: reserviceReportBlock,
+    ...(reserviceReportCardBlock ? { reserviceReportCard: reserviceReportCardBlock } : {}),
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.

@@ -76,8 +76,46 @@ const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|
 // …and never a product roundup, even one naming a service ("best lawn care
 // products", "top pest control sprays").
 const PRODUCT_PATH_RE = /\b(products?|killers?|sprays?|repellents?|traps?|baits?|granules|fertilizers?|herbicides?|insecticides?|pesticides?|seeds?|mowers?|spreaders?|tools|equipment|devices?|gear|kits?|brands?|reviews?)\b/;
-function isProviderListPath(words) {
-  return PROVIDER_LIST_PATH_RE.test(words) && !PRODUCT_PATH_RE.test(words);
+// Never an informational article or a directory route, by words that always
+// mean one (every inflection): cost, price, DIY, identification, signs, tips,
+// a "vs" comparison, a listing / directory / profile / claim route.
+const NOT_A_ROUNDUP_RE = /\b(costs?|pric(e|es|ing)|diy|identif\w*|signs?|tips?|vs|versus|listings?|director(y|ies)|biz|profiles?|claim\w*)\b/;
+// Words that only USUALLY mean an article or a directory route ("what-are-the-
+// best-…-companies", "best-…-businesses-in-sarasota"): explicit roundup
+// evidence (best/top + providers in the plural) outranks them.
+const AMBIGUOUS_RE = /\b(how|what|why|when|business|businesses)\b/;
+
+// Sites whose pages ARE local provider roundups (dedicated recommendation
+// sites, not news and not general home-advice publishers): a provider path on
+// them is a roundup without a best/top word in the address (owner 2026-10-01
+// "loosen the rule": smarfle.com/fl/bradenton/pest-control). Mixed-content
+// publishers stay out — Today's Homeowner's roundups carry "near-me" in the
+// address anyway, while its guides ("types of pest control") do not.
+const ROUNDUP_SITES = Object.freeze(['smarfle.com', 'floridist.com']);
+// "best"/"top" plus providers in the plural: an explicit roundup, whatever
+// other words its address carries ("what-are-the-best-pest-control-companies…").
+const PLURAL_PROVIDERS_RE = /\b(companies|businesses|exterminators|services|pros|contractors|providers)\b/;
+
+/**
+ * isListPage(page, url) → whether the cited-page pitch fits this page: an
+ * editorial page about service providers, read with tracking parameters
+ * stripped, never a product roundup. Then, first match wins:
+ *   1. a word that always means an article or directory (NOT_A_ROUNDUP_RE) → not;
+ *   2. best/top/near-me + providers in the plural → a roundup;
+ *   3. a word that usually means an article or directory (AMBIGUOUS_RE) → not;
+ *   4. a best/top/near-me word, or a ROUNDUP_SITES host → a roundup.
+ * Anything else — a news story, a company's own service-area page
+ * (greenteampest.com/service-areas/parrish) — is not. A /biz/ profile is one
+ * company, and a directory is joined by signing up, not by a pitch.
+ */
+function isListPage(page, url) {
+  const words = pathWords(url);
+  if (page.category !== 'editorial' || !PROVIDER_LIST_PATH_RE.test(words) || PRODUCT_PATH_RE.test(words)) return false;
+  if (NOT_A_ROUNDUP_RE.test(words)) return false;
+  const best = hasBestToken(displayUrl(url));
+  if (best && PLURAL_PROVIDERS_RE.test(words)) return true;
+  if (AMBIGUOUS_RE.test(words)) return false;
+  return best || ROUNDUP_SITES.some((d) => page.host === d || page.host.endsWith(`.${d}`));
 }
 function pathWords(urlString) {
   try {
@@ -173,16 +211,9 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
   return {
     ...p,
     url: displayUrl(topUrl),
-    // evidence about the PAGE, not the question that cited it: an editorial
-    // best / top / rated / near-me page about SERVICE PROVIDERS (its path names
-    // companies, exterminators or a service like pest control — never "best
-    // ant killer", a product list), read with tracking parameters
-    // stripped, so ?utm_campaign=best proves nothing), the roundup an editor
-    // can add Waves to. Never a directory (a /biz/ profile is one company, and
-    // a directory is joined by signing up, not by a pitch), never a listicle
-    // candidate on a place name alone, never a cost guide cited for "who
-    // should I hire".
-    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)) && isProviderListPath(pathWords(topUrl)),
+    // evidence about the PAGE, not the question that cited it — a provider
+    // roundup an editor can add Waves to (isListPage)
+    listPage: isListPage(p, topUrl),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),

@@ -490,6 +490,7 @@ function sanitizeServiceType(serviceType) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
+const { deferredCommitScope } = require('../utils/trx-commit-promise');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -985,17 +986,20 @@ function occupancyBlockFor(row) {
 // (pre-probe, these walks inserted with NO cross-series check at all), and a
 // same-instant booking commit is the accepted residual. The update-details
 // path keeps its full peek → rung-1 → guardRecurrenceDestination gate.
-async function seriesCandidateDateClashes(conn, template, date) {
+async function seriesCandidateDateClashRows(conn, template, date) {
   const block = occupancyBlockFor(template);
-  if (!block) return false;
-  const clash = await findConflictingVisits({
+  if (!block) return [];
+  return findConflictingVisits({
     db: conn,
     date,
     windowStart: block.start,
     windowEnd: block.end,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
-  return clash.length > 0;
+}
+
+async function seriesCandidateDateClashes(conn, template, date) {
+  return (await seriesCandidateDateClashRows(conn, template, date)).length > 0;
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -4439,7 +4443,12 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // statement leaves a PostgreSQL transaction aborted (25P02) even when
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
-async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+//
+// `commitScope` (default `conn`) is what the operator alerts wait on: a caller
+// writing inside a savepoint it may roll back (extendSeriesOnceLocked's
+// grouped-or-nothing attempts) hands a deferredCommitScope, so a thrown-away
+// row files nothing.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null, commitScope = conn) {
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   let resolvedTerm = null;
   const run = async (c) => {
@@ -4462,7 +4471,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
       // savepoint's executionPromise resolves on RELEASE, so filing against
       // it would let a later rollback leave a false cancellation alert that
       // dedupes the real retry for seven days.
-      notifyConn: conn,
+      notifyConn: commitScope,
     });
   };
   try {
@@ -4482,7 +4491,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
     logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
     if (resolvedTerm) {
       await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
-        conn, resolvedTerm, 'generator_coverage_failed',
+        commitScope, resolvedTerm, 'generator_coverage_failed',
         'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
       ).catch(() => {});
     }
@@ -19018,11 +19027,235 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
+// The stop's technician for a grouped placement, through the SAME eligibility
+// fence a template technician gets (employment, field dispatchability, absence
+// that day, FOR SHARE on a trx). Not assignable = the grouped attempt fails and
+// its savepoint rolls back; an unassigned stop stays unassigned.
+async function assignablePlacementTechnicianId(conn, parent, technicianId, date) {
+  if (!technicianId) return null;
+  const checked = await assignableRecurringTemplateTechnicianId(conn, {
+    ...parent, recurring_technician_override: true, recurring_technician_id: technicianId,
+  }, date);
+  if (!checked || String(checked) !== String(technicianId)) throw new Error('the stop\'s technician is not assignable on that date');
+  return checked;
+}
+
+// Does a just-placed row's own window overlap any booking OUTSIDE its visit?
+async function placedRowOverlapsOutsideVisit(conn, rowId) {
+  const row = await conn('scheduled_services').where({ id: rowId })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+  const block = row && occupancyBlockFor(row);
+  if (!block) return false;
+  const members = row.visit_id
+    ? await conn('scheduled_services').where({ visit_id: row.visit_id }).pluck('id')
+    : [row.id];
+  const outside = await findConflictingVisits({
+    db: conn, date: dateOnly(row.scheduled_date), windowStart: block.start, windowEnd: block.end,
+    excludeServiceIds: members, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  return outside.length > 0;
+}
+
+// Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
+// The proof a grouped-or-nothing placement is judged by: the canonical
+// maybeGroupRow decided, we only read what it did.
+async function rowsShareVisit(conn, rowId, otherIds) {
+  const rows = await conn('scheduled_services').whereIn('id', [rowId, ...otherIds]).select('id', 'visit_id');
+  const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
+  const mine = visitOf(rowId);
+  return !!mine && otherIds.every((id) => String(visitOf(id) || '') === String(mine));
+}
+
+// Grouped-or-nothing placement of ONE extension row:
+// insert it inside a SAVEPOINT (extendSeriesOnceLocked re-entered with a forced
+// date, so the insert stays the one canonical insert), let the canonical
+// maybeGroupRow decide, and keep the row only if it actually shares a visit with
+// every row in `mustShare`; otherwise roll the savepoint back and treat the date
+// as taken. Never a prediction of whether it will group. `stop` = { technicianId,
+// window? }: the stop's own technician (and, for a ride, its window), carried on
+// the template row the insert copies, so no member is re-assigned. Post-commit
+// work waits on a deferredCommitScope: it fires only for a KEPT row, once every
+// enclosing transaction completes. Returns the spawned-visit payload, or null
+// (nothing left behind).
+async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
+  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
+  if (cols.recurring_ongoing) {
+    const fresh = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
+    if (!fresh || !fresh.recurring_ongoing) return null;
+  }
+  const scope = deferredCommitScope(conn);
+  try {
+    const placed = await conn.transaction(async (sp) => {
+      const technicianId = await assignablePlacementTechnicianId(sp, parent, stop.technicianId, dateStr);
+      const template = {
+        ...parent, ...stop.window, recurring_technician_override: true, recurring_technician_id: technicianId,
+      };
+      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
+        ...opts, onSkip: undefined, forceDate: dateStr, commitScope: scope,
+      });
+      if (!visit) throw new Error('nothing placed');
+      if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
+      // The placed row's OWN window (a ride ends by the rider's duration, so it
+      // can run past the stop) must not overlap anything outside its visit —
+      // another customer, a hold. Top-up keeps its advisory-only overlap policy.
+      if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
+        throw new Error('overlaps a booking outside the stop');
+      }
+      return visit;
+    });
+    scope.keep();
+    return placed;
+  } catch (err) {
+    scope.drop(err);
+    logger.info(`[recurring] parent=${parentId} ${dateStr} does not group (${err.message}) — treated as taken`);
+    return null;
+  }
+}
+
+// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a rider series (rides_parent_id) puts its
+// next visit on a lawn occurrence, at that occurrence's CURRENT window and
+// technician (dispatch may have moved it), ending by the rider's own duration.
+// The candidate is not derived here: it is the next date the read-only pair
+// preview (rider-series-preview.previewRiderPair) says the plan still wants to
+// insert — the real anchor, the today+8 plan floor, override-aware property
+// scope, lawn-service identity of the host and of each occurrence, blackouts and
+// weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
+// that rule a ride out). null = no ride: the caller walks its normal cadence.
+async function rideLawnExtension(ctx) {
+  const {
+    conn, parent, parentId, cols, opts, latest, existingDates,
+  } = ctx;
+  const fg = require('../config/feature-gates');
+  if (!fg.pestRidesLawnAtAcceptLive?.() || !fg.gates?.visitGroups || !cols.rides_parent_id || !parent.rides_parent_id) return null;
+  const Preview = require('../services/rider-series-preview');
+  let plan;
+  try {
+    // Savepoint: the preview swallows its own read failures, which would leave
+    // the caller's transaction aborted (25P02) without it.
+    plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
+  } catch (err) {
+    logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
+    return null;
+  }
+  if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
+  // The preview's insert list assumes its proposed MOVES happen too; this
+  // extension only appends. So spacing is enforced against the latest rider
+  // visit that is actually still booked: at least the rule's minimum gap after
+  // it (never, say, D168 next to a kept off-cadence D160).
+  const after = dateOnly(latest.scheduled_date);
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
+  // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
+  const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
+  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  if (!window || window.unplaceable) return null;
+  return placeGroupedExtension(ctx, date, [host.id], {
+    technicianId: host.technician_id || null,
+    window: { window_start: window.start, window_end: window.end },
+  });
+}
+
+// The customer's OWN visit at the candidate's stop (their lawn visit) is not a
+// clash if the new row joins it. Anyone else's visit, a hold, own rows on two
+// technicians (not one stop), or an own visit the row cannot join
+// (placeGroupedExtension rolls back) stays a clash. The row takes the stop's own
+// technician, so no member is re-assigned.
+async function joinOwnStopExtension(ctx, candidate, clashRows) {
+  const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
+  const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
+  if (!ownOnly || stopTechs.length !== 1) return null;
+  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+}
+
+// The next-date search of extendSeriesOnceLocked: a ride on the lawn first
+// (rideLawnExtension), else the cadence walk. Returns { joined } (a grouped
+// placement already made), or { nextStr, hitMaxDate } for the caller to insert.
+async function walkExtensionCandidates(ctx) {
+  const {
+    conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
+    blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
+  } = ctx;
+  const { maxDate = null } = opts;
+  const ridden = await rideLawnExtension(ctx);
+  if (ridden) return { joined: ridden };
+  // Advance until we find an open date or give up. Each step
+  // moves one cadence interval forward from latestStr; capped to
+  // avoid runaway loops on degenerate patterns.
+  let attempt = 1;
+  let nextStr = null;
+  // Set whenever the maxDate cap (top-up's horizon — never set by the
+  // completion path) rejects a candidate. Dates only advance forward as
+  // `attempt` climbs, so once one candidate falls past maxDate every
+  // later attempt does too — this loop can only exit with `nextStr`
+  // still null AND hitMaxDate true because the horizon, not a busy
+  // calendar, is why nothing more got booked (Codex GitHub r1 P2).
+  let hitMaxDate = false;
+  while (attempt <= 12) {
+    const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+    const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+    if (!candidate) {
+      attempt++;
+      continue;
+    }
+    if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+      attempt++;
+      continue;
+    }
+    // Never seed a past-dated visit (+ its reminder) off a stale anchor.
+    if (candidate <= etDateString()) {
+      attempt++;
+      continue;
+    }
+    // topUp's horizon / annual-prepay term_end cap — refuse rather than
+    // insert (never a compensating delete after the fact): a candidate
+    // past the cap is not "the next date", it's "stop for this series".
+    if (maxDate && candidate > maxDate) {
+      hitMaxDate = true;
+      attempt++;
+      continue;
+    }
+    if (existingDates.has(candidate)) { attempt++; continue; }
+    // The blackout nudge can land a candidate on an adjacent day
+    // another visit already occupies (the series dedupe above only
+    // covers THIS series) — probe global occupancy before accepting,
+    // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
+    // (top-up only — never set by the completion path, so its own
+    // behavior is unchanged): seriesCandidateDateClashes is tech-blind
+    // (it has no idea which technician the office actually intends), and
+    // guardRecurrenceDestination's own ruling for every OTHER admin write
+    // path is that an overlap is advisory, never a hard block (staff-side
+    // saves never block on schedule conflicts, owner ruling 2026-08-25).
+    // Treating a clash as a hard skip here on an unattended nightly loop
+    // silently drops whole cadence slots on a busy calendar — a monthly
+    // series can lose most of a year's candidates to one recurring
+    // conflict. Insert on the cadence date and log the overlap instead.
+    if (opts.overlapAdvisoryOnly) {
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+      }
+    } else {
+      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
+      if (clashRows.length) {
+        const joined = await joinOwnStopExtension(ctx, candidate, clashRows);
+        if (joined) return { joined };
+        attempt++; continue;
+      }
+    }
+    nextStr = candidate;
+    break;
+  }
+  return { nextStr, hitMaxDate };
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
 async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
-  const { maxDate = null, onSkip } = opts;
+  const { onSkip } = opts;
+  // opts.forceDate / opts.commitScope are set only by placeGroupedExtension's
+  // grouped-or-nothing attempts: insert on exactly that date (the template
+  // `parent` then carries the stop's window and technician), skip the candidate
+  // search, and file post-commit work only if the attempt is kept.
   let spawnedVisit = null;
   // Find the latest LIVE visit (pending/confirmed or completed) to
   // calculate the next date — shared anchor query (cancelled/rescheduled
@@ -19088,67 +19321,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    // Advance until we find an open date or give up. Each step
-    // moves one cadence interval forward from latestStr; capped to
-    // avoid runaway loops on degenerate patterns.
-    let attempt = 1;
-    let nextStr = null;
-    // Set whenever the maxDate cap (top-up's horizon — never set by the
-    // completion path) rejects a candidate. Dates only advance forward as
-    // `attempt` climbs, so once one candidate falls past maxDate every
-    // later attempt does too — this loop can only exit with `nextStr`
-    // still null AND hitMaxDate true because the horizon, not a busy
-    // calendar, is why nothing more got booked (Codex GitHub r1 P2).
-    let hitMaxDate = false;
-    while (attempt <= 12) {
-      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
-      if (!candidate) {
-        attempt++;
-        continue;
-      }
-      if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
-        attempt++;
-        continue;
-      }
-      // Never seed a past-dated visit (+ its reminder) off a stale anchor.
-      if (candidate <= etDateString()) {
-        attempt++;
-        continue;
-      }
-      // topUp's horizon / annual-prepay term_end cap — refuse rather than
-      // insert (never a compensating delete after the fact): a candidate
-      // past the cap is not "the next date", it's "stop for this series".
-      if (maxDate && candidate > maxDate) {
-        hitMaxDate = true;
-        attempt++;
-        continue;
-      }
-      if (existingDates.has(candidate)) { attempt++; continue; }
-      // The blackout nudge can land a candidate on an adjacent day
-      // another visit already occupies (the series dedupe above only
-      // covers THIS series) — probe global occupancy before accepting,
-      // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
-      // (top-up only — never set by the completion path, so its own
-      // behavior is unchanged): seriesCandidateDateClashes is tech-blind
-      // (it has no idea which technician the office actually intends), and
-      // guardRecurrenceDestination's own ruling for every OTHER admin write
-      // path is that an overlap is advisory, never a hard block (staff-side
-      // saves never block on schedule conflicts, owner ruling 2026-08-25).
-      // Treating a clash as a hard skip here on an unattended nightly loop
-      // silently drops whole cadence slots on a busy calendar — a monthly
-      // series can lose most of a year's candidates to one recurring
-      // conflict. Insert on the cadence date and log the overlap instead.
-      if (opts.overlapAdvisoryOnly) {
-        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-        }
-      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-        attempt++; continue;
-      }
-      nextStr = candidate;
-      break;
-    }
+    // Grouped riding, then the cadence walk (walkExtensionCandidates); a
+    // forced date (a grouped attempt re-entering this function) has neither.
+    const walked = opts.forceDate ? { nextStr: opts.forceDate } : await walkExtensionCandidates({
+      conn, parent, parentId, cols, svcLike, opts, latest, latestStr, rOpts, skipParent, dirParent,
+      blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
+    });
+    if (walked.joined) return walked.joined;
+    const { nextStr, hitMaxDate } = walked;
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
     // portal auto-processor or an admin churn) can stop the series
@@ -19262,7 +19442,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           // completion path (no onSkip passed there) or by any other
           // extendSeriesOnceLocked caller (reconcile, etc.) — this is
           // top-up-only plumbing.
-          if (onSkip) onSkip('unbillable');
+          onSkip?.('unbillable');
           return spawnedVisit;
         }
       }
@@ -19286,7 +19466,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The transient completion-race bell is quiet (this fires per
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.commitScope || conn);
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -23261,6 +23441,24 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             });
         }
 
+        // Coverage money only — the setup line is not per-visit coverage.
+        const switchTermAmount = Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100;
+        // Annual rate review (GATE_RATE_REVIEW): a switch whose term succeeds
+        // one carrying a noticed renewal amount charges that amount unless
+        // staff confirm a different one (acknowledgeNoticedAmount) — the
+        // same guard as the Customer 360 renewal routes, under this
+        // customer's annual-prepay lock, before the term is written.
+        if (require('../config/feature-gates').rateReviewLive()) {
+          const RateReviewApply = require('../services/rate-review-apply');
+          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, today: etDateString(), lock: true,
+          });
+          if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+          if (noticed) {
+            await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: liveVisit.customer_id, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'schedule_prepay_switch', invoiceId: invoice.id });
+          }
+        }
+
         const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: liveVisit.customer_id,
           // Estimate-origin switches carry their provenance so a later
@@ -23270,8 +23468,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           prepayInvoiceId: invoice.id,
           planLabel: mintPayload.planLabel,
           monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
-          // Coverage money only — the setup line is not per-visit coverage.
-          prepayAmount: Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100,
+          prepayAmount: switchTermAmount,
           termStart: mintPayload.termStart,
           coverageServiceType: mintPayload.serviceType,
           coverageVisitCount: mintPayload.visitCount,
@@ -23311,6 +23508,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
       if (err && err.switchConflict) return res.status(409).json({ error: err.message });
       throw err;
     }
@@ -27035,6 +27233,10 @@ router._test = {
   overlayRecurringTemplateOverrides,
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
+  // The lock-and-refuse phase on its own — the annual rate review apply lane
+  // (services/rate-review-apply.js) validates the locked targets before it
+  // lets the propagation write.
+  lockAndGuardFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
   retiredGateInputsForVisitEdit,
   retiredSaleKeysVouchedByAcceptedEstimate,

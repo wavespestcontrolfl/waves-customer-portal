@@ -87,13 +87,13 @@ describe('gate on', () => {
     expect(system).toContain('COMPANY FACTS:\n- The COMPANY FACTS section');
     expect(system).not.toMatch(/general pest knowledge/i);
     expect(system).toContain('COMPANY FACTS section in the context block is owner-approved and authoritative');
-    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, the thread');
+    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // both cohorts stay distinct: the company-facts token, the re-service token (PR #5336) AND the LIVE ETA bump (PR #5334): "3" supersedes "2"
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cfl');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cfl');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflv');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
