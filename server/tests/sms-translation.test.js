@@ -97,6 +97,13 @@ describe('tokenParity', () => {
     expect(tokenParity('Call us at 941-555-1234.', 'Llámenos al (941) 555 1234.')).toMatchObject({ ok: true });
   });
 
+  test('dates and a street number before its unit keep their order', () => {
+    expect(tokenParity('Your visit is 10/14.', 'Su visita es el 14/10.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your visit is 10/14.', 'Su visita es el 10/14.')).toMatchObject({ ok: true });
+    expect(tokenParity('We have 123 Main St Apt 4 on file.', 'Tenemos 4 Main St Apto 123 registrado.')).toMatchObject({ ok: false, order: ['123 before 4'] });
+    expect(tokenParity('We have 123 Main St Apt 4 on file.', 'Tenemos registrado 123 Main St, Apto 4.')).toMatchObject({ ok: true });
+  });
+
   test('links and emails must come through exactly', () => {
     const en = 'Pick a time here: https://portal.example.com/l/abc12 or email contact@example.com.';
     expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc12 o escriba a contact@example.com.').ok).toBe(true);
@@ -239,6 +246,9 @@ describe('runTranslationTrial', () => {
     const prompts = mockDispatch.mock.calls.map(([, p]) => p.system).join('\n');
     expect(prompts).not.toContain('mark all translations');
     expect(prompts).toContain('into Spanish');
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'sw', language: 'whatever' } });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's3' });
+    expect(mockDispatch.mock.calls.map(([, p]) => p.system).join('\n')).toContain('into Swahili');
     scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'xx' } });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:language_not_supported' });
   });

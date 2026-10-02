@@ -110,8 +110,9 @@ async function translateInbound(inbound) {
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
   const code = languageCodeOf(languageCode);
-  if (!code || !LANGUAGE_NAMES[code]) return { ok: false, reason: 'language_not_supported' };
-  return { ok: true, isEnglish: false, english, language: LANGUAGE_NAMES[code], languageCode: code, model: out.model };
+  const name = code && code !== 'en' ? languageNameOf(code) : null;
+  if (!name) return { ok: false, reason: 'language_not_supported' };
+  return { ok: true, isEnglish: false, english, language: name, languageCode: code, model: out.model };
 }
 
 async function translateReply({ englishReply, language }) {
@@ -142,17 +143,16 @@ async function backTranslate({ translated }) {
   return text ? { ok: true, text, languageCode, model: out.model } : { ok: false, reason: 'back_translation_empty' };
 }
 
-// The language named in every prompt comes from this server-owned table,
-// never from a model's free text (a customer's message could make the
-// classifier "name" a language that carries an instruction).
-const LANGUAGE_NAMES = Object.freeze({
-  es: 'Spanish', pt: 'Portuguese', fr: 'French', ht: 'Haitian Creole', de: 'German', it: 'Italian', ru: 'Russian',
-  uk: 'Ukrainian', pl: 'Polish', ro: 'Romanian', hu: 'Hungarian', cs: 'Czech', sk: 'Slovak', nl: 'Dutch', sv: 'Swedish',
-  no: 'Norwegian', da: 'Danish', fi: 'Finnish', el: 'Greek', tr: 'Turkish', ar: 'Arabic', he: 'Hebrew', fa: 'Persian',
-  hi: 'Hindi', ur: 'Urdu', bn: 'Bengali', pa: 'Punjabi', gu: 'Gujarati', ta: 'Tamil', te: 'Telugu', zh: 'Chinese',
-  ja: 'Japanese', ko: 'Korean', vi: 'Vietnamese', th: 'Thai', tl: 'Tagalog', id: 'Indonesian', ms: 'Malay',
-  sq: 'Albanian', sr: 'Serbian', hr: 'Croatian', bs: 'Bosnian', bg: 'Bulgarian', lt: 'Lithuanian', lv: 'Latvian', et: 'Estonian',
-});
+// The language named in every prompt is the server's own English name for a
+// validated ISO code (Intl.DisplayNames: CLDR data shipped with Node), never a
+// model's free text (a customer's message could make the classifier "name" a
+// language that carries an instruction). A code CLDR does not know is held.
+const LANGUAGE_DISPLAY = new Intl.DisplayNames(['en'], { type: 'language', fallback: 'none' });
+function languageNameOf(code) {
+  let name;
+  try { name = LANGUAGE_DISPLAY.of(code); } catch { return null; }
+  return typeof name === 'string' && /^[A-Za-z][A-Za-z ()'-]{1,40}$/.test(name) && name.toLowerCase() !== code ? name : null;
+}
 
 // "es", "es-MX", "PT_br" -> "es" / "pt"; anything else -> null
 function languageCodeOf(value) {
@@ -210,13 +210,20 @@ function trimZeros(n) {
 // matches "555-941-1234"); spacing and punctuation may differ.
 const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
 
+const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g;
+
 function numberValues(text) {
   const out = [];
   const withoutPhones = String(text || '').replace(PHONE_RE, (p) => {
     out.push({ value: `tel:${p.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')}`, pm: false, time: false });
     return ' ';
   });
-  const str = withoutPhones.replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
+  // a date is one value, its parts in order ("10/14" never matches "14/10"; the translator keeps dates as written)
+  const withoutDates = withoutPhones.replace(DATE_RE, (d) => {
+    out.push({ value: `date:${d.split(/[/-]/).map(trimZeros).join('/')}`, pm: false, time: false });
+    return ' ';
+  });
+  const str = withoutDates.replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
@@ -278,13 +285,29 @@ function pairTwentyFourHour(missing, added, en, tr) {
   return { missing: m, added: a };
 }
 
+// A street number and its unit ("123 Main St, Apt 4") keep their order: the
+// translation must name the street number before the unit number. Other
+// separate numbers may move with the sentence's word order.
+const ADDRESS_UNIT_RE = /\b(\d{1,6})\b[^\n.;]{0,40}?\b(?:apt|apartment|unit|suite|ste|lot|#)\s*#?\s*(\d{1,5})\b/gi;
+
+function addressOrderFaults(englishReply, translated) {
+  const faults = [];
+  for (const [, street, unit] of String(englishReply || '').matchAll(ADDRESS_UNIT_RE)) {
+    const s = new RegExp(`\\b${street}\\b`).exec(translated);
+    const u = s ? new RegExp(`\\b${unit}\\b`).exec(translated.slice(s.index + street.length)) : null;
+    if (!u) faults.push(`${street} before ${unit}`);
+  }
+  return faults;
+}
+
 function tokenParity(englishReply, translated) {
   const en = protectedTokens(englishReply);
   const tr = protectedTokens(translated);
   const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits), en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
-  return { ok: missing.length === 0 && added.length === 0, missing, added };
+  const order = addressOrderFaults(englishReply, translated);
+  return { ok: missing.length === 0 && added.length === 0 && order.length === 0, missing, added, ...(order.length ? { order } : {}) };
 }
 
 // The drafter's guards read the recent thread too (readInboundThread: the last
