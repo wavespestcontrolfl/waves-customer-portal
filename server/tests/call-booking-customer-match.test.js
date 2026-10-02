@@ -21,7 +21,7 @@ const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
 const { validatePhoneCallAppointmentCustomer, advisoryBookingAddressHoldFields,
-  fileMissingFirstNameCard, firstNameAdvisoryAddressOk, storedAddressMatchesVerdict, missingFirstNameCardStillOpen } = _test;
+  fileMissingFirstNameCard, firstNameAdvisoryAddressOk, addressesExactlyMatch, missingFirstNameCardStillOpen } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 const FIRST_NAME_GATE = 'GATE_CALL_FIRST_NAME_ADVISORY';
@@ -94,115 +94,98 @@ describe('FIX 1: validatePhoneCallAppointmentCustomer with a last name only', ()
 describe('FIX 1: a first-name-less booking needs the BOOKED address validated (shadow mode)', () => {
   const ok = (advisory) => ({ ok: true, missing: [], advisory });
   test('outside enforce mode, a first_name advisory holds unless the verdict validates the address being booked (V1/V2 disagreement keeps avPositiveForBooking false)', () => {
-    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: false })).toEqual(['first_name']);
-    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['email', 'first_name', 'last_name']), avPositiveForBooking: false })).toEqual(['email', 'first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: true, exactAddressForBooking: false })).toEqual(['first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['email', 'first_name', 'last_name']), avPositiveForBooking: false, exactAddressForBooking: false })).toEqual(['email', 'first_name']);
     // an email on file does NOT lift the hold for a first-name-less booking
-    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name', 'last_name']), avPositiveForBooking: false })).toEqual(['first_name']);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name', 'last_name']), avPositiveForBooking: true })).toEqual(['first_name']);
   });
   test('no hold when the verdict validates the booked address, in enforce mode (canAutoRoute owns it), for a named caller, or when the customer is already not ok', () => {
-    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: true })).toEqual([]);
+    expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['first_name']), avPositiveForBooking: false, exactAddressForBooking: true })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: true, customerValidation: ok(['first_name']), avPositiveForBooking: false })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: ok(['last_name']), avPositiveForBooking: false })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: { ok: false, missing: ['phone'], advisory: ['first_name'] }, avPositiveForBooking: false })).toEqual([]);
     expect(advisoryBookingAddressHoldFields({})).toEqual([]);
   });
   test('wiring: the hold decision uses the helper and reports the advisory fields', () => {
-    expect(source).toContain('advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking })');
+    expect(source).toContain('advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking })');
     expect(source).toContain('customerValidation.ok ? advisoryHoldFields : customerValidation.missing');
   });
 });
 
-describe('FIX 1: the address a first-name-less customer is created at must be the validated premise', () => {
-  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE',
-    normalized: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' } };
-  const stored = { address_line1: '100 Example Lp', city: 'Sarasota', zip: '34240-1111' };
-  test('explicit PREMISE granularity is required; a missing one no longer passes', () => {
-    expect(firstNameAdvisoryAddressOk(AV, stored)).toBe(true);
-    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: undefined }, stored)).toBe(false);
-    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'ROUTE' }, stored)).toBe(false);
-    // A validated unit (SUB_PREMISE) is premise-level too, as in the canonical validator.
-    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'SUB_PREMISE' }, stored)).toBe(true);
-    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'ambiguous' }, stored)).toBe(false);
-    expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored)).toBe(false);
-    expect(firstNameAdvisoryAddressOk(null, stored)).toBe(false);
-  });
-  test('the FULL subpremise must agree: building + apartment, lot and space; a line-1/line-2 conflict refuses', () => {
-    const v2 = (line1, line2 = null) => ({ street_line_1: line1, street_line_2: line2 });
-    const at = (line1, line2 = null) => ({ ...stored, address_line1: line1, address_line2: line2 });
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9 Apt 204'), v2('100 Example Loop Bldg 9 Apt 204'))).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9 Apt 204'), v2('100 Example Loop Bldg 10 Apt 204'))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Lot 12'), v2('100 Example Loop Lot 14'))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Space 7'), v2('100 Example Loop'))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Apt 3', 'Apt 4'), v2('100 Example Loop', 'Apt 4'))).toBe(false);
+describe('FIX 1: "book only on an exact match" — ONE predicate for creation and the booking hold', () => {
+  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE' };
+  const V2 = { street_line_1: '100 Example Loop', street_line_2: null, city: 'Sarasota', postal_code: '34240' };
+  const stored = { address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34240' };
+  const ok = (st, v2 = V2) => firstNameAdvisoryAddressOk(AV, st, v2);
+
+  test('an exact match passes; case, whitespace, punctuation, ZIP+4 and the suffix alias table are the only cleanup', () => {
+    expect(ok(stored)).toBe(true);
+    expect(ok({ ...stored, address_line1: ' 100  example LOOP. ', city: 'sarasota', zip: '34240-1111' })).toBe(true);
+    expect(ok({ ...stored, address_line1: '100 Example Lp' })).toBe(true);
+    expect(ok(stored, { ...V2, street_line_1: '100 Example Lp' })).toBe(true);
+    expect(ok({ ...stored, address_line1: '100 Example Ln' }, { ...V2, street_line_1: '100 Example Lane' })).toBe(true);
+    expect(ok({ ...stored, address_line1: '100 Example Apt 3' }, { ...V2, street_line_1: '100 Example Apt 3' })).toBe(true);
+    expect(addressesExactlyMatch(stored, V2)).toBe(true);
   });
 
-  test('a building on line 1 and an apartment on line 2 read as one unit', () => {
-    const v2 = (line1, line2 = null) => ({ street_line_1: line1, street_line_2: line2 });
-    const at = (line1, line2 = null) => ({ ...stored, address_line1: line1, address_line2: line2 });
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop Bldg 9 Apt 204'))).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop', 'Bldg 9 Apt 204'))).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop Bldg 10 Apt 204'))).toBe(false);
+  test.each([
+    ['Apt 3 vs Unit 3', { address_line2: 'Apt 3' }, { street_line_2: 'Unit 3' }],
+    ['Apt 3 vs a bare 3', { address_line2: 'Apt 3' }, { street_line_2: '3' }],
+    ['a unit on one side only', { address_line2: 'Apt 3' }, {}],
+    ['a unit on the verdict side only', {}, { street_line_2: 'Apt 3' }],
+    ['differing units', { address_line2: 'Apt 3' }, { street_line_2: 'Apt 4' }],
+    ['Bldg 9 + 204 split across lines vs Bldg 9 Apt 204', { address_line1: '100 Example Loop Bldg 9', address_line2: '204' }, { street_line_1: '100 Example Loop Bldg 9 Apt 204' }],
+    ['Bldg 9 / Apt 204 vs Bldg 9 Apt 204', { address_line1: '100 Example Loop Bldg 9', address_line2: 'Apt 204' }, { street_line_1: '100 Example Loop Bldg 9 Apt 204' }],
+    ['a different street', { address_line1: '102 Example Loop' }, {}],
+    ['a different street type', { address_line1: '100 Example Ave' }, {}],
+    ['a different city', { city: 'Parrish' }, {}],
+    ['a different ZIP', { zip: '34241' }, {}],
+    ['a missing ZIP', { zip: '' }, {}],
+    ['a missing city', { city: '' }, {}],
+    ['a missing street', { address_line1: '' }, {}],
+    ['a missing verdict input piece', {}, { postal_code: '' }],
+  ])('%s holds (no auto-create, no auto-book)', (_label, storedOver, v2Over) => {
+    expect(ok({ ...stored, ...storedOver }, { ...V2, ...v2Over })).toBe(false);
+  });
+
+  test('no verdict input (V2 invalid or absent) is never exact', () => {
+    expect(firstNameAdvisoryAddressOk(AV, stored, null)).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, stored, undefined)).toBe(false);
+  });
+
+  test('the verdict must be an accepted in-area PREMISE / SUB_PREMISE address', () => {
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'SUB_PREMISE' }, stored, V2)).toBe(true);
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected' }, stored, V2)).toBe(true);
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: undefined }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'ROUTE' }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'ambiguous' }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk(null, stored, V2)).toBe(false);
+  });
+
+  test('wiring: creation and the booking hold call the same predicate, a recovery-rewritten input is never exact, and the superseded unit machinery is gone (rule 19)', () => {
+    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
+    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2StatedAddress)');
+    expect(source.match(/!addressRecovery\?\.recovered/g).length).toBeGreaterThanOrEqual(2);
+    for (const gone of ['storedAddressMatchesVerdict', 'function addressLineUnit', 'function addressRenderingsAgree', 'addressZip5']) {
+      expect(source).not.toContain(gone);
+    }
   });
 
   test('wiring: the booking path marks the call for review while the first-name card is open', () => {
     expect(source).toContain("if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)");
   });
 
-  test('the unit must agree with the address the verdict was computed on (none = none)', () => {
-    const v2 = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Unit 3'))).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Apt 4'))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2(null))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, stored, v2('Apt 4'))).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, stored, v2(null))).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, stored)).toBe(true);
-    // a unit riding inside the stored street line counts
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' }, v2('Apt 4'))).toBe(false);
-    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
+  test('wiring: the fenced re-read that files the card late also counts it toward review while it stays open', () => {
+    const start = source.indexOf("if (freshValidation.advisory?.includes('first_name')) {");
+    const block = source.slice(start, start + 700);
+    expect(block).toContain('await missingFirstNameCardStillOpen(trx, call.id)');
+    expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
-  test('shadow mode: a verdict for a DIFFERENT street, ZIP or city than the V1 address being inserted means no creation', () => {
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '102 Example Loop' })).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, zip: '34241' })).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Parrish' })).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '' })).toBe(false);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, zip: '' })).toBe(false);
-    expect(firstNameAdvisoryAddressOk({ ...AV, normalized: {} }, stored)).toBe(false);
-    // a missing city on either side is silent; suffix aliases are equivalent
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: '' })).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' }, { street_line_1: '100 Example Loop', street_line_2: 'Apt 3' })).toBe(true);
-  });
-});
-
-describe('FIX 1: creation and the booking hold share ONE address-agreement predicate', () => {
-  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE',
-    normalized: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' } };
-  const verdictAddr = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
-  // Each input creation ACCEPTS must also be accepted by the booking predicate (and vice versa).
-  const cases = [
-    ['ZIP+4 vs a 5-digit verdict ZIP', { address_line1: '100 Example Loop', zip: '34240-1111' }, null],
-    ['a unit embedded in the street line', { address_line1: '100 Example Loop Apt 3', zip: '34240' }, 'Apt 3'],
-    ['Apt 3 vs Unit 3 (same unit, different designator)', { address_line1: '100 Example Loop', address_line2: 'Apt 3', zip: '34240' }, 'Unit 3'],
-  ];
-  test.each(cases)('%s: accepted by creation AND by the booking predicate', (_label, stored, verdictUnit) => {
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Sarasota' }, verdictAddr(verdictUnit))).toBe(true);
-    expect(storedAddressMatchesVerdict(stored, AV.normalized, verdictAddr(verdictUnit))).toBe(true);
-  });
-  test.each([
-    ['a different unit', { address_line1: '100 Example Loop', address_line2: 'Apt 3', zip: '34240' }, 'Apt 4'],
-    ['a stored unit the verdict address lacks', { address_line1: '100 Example Loop Apt 3', zip: '34240' }, null],
-    ['a different ZIP', { address_line1: '100 Example Loop', zip: '34241' }, null],
-    ['a missing ZIP', { address_line1: '100 Example Loop', zip: '' }, null],
-  ])('%s: refused by both', (_label, stored, verdictUnit) => {
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: 'Sarasota' }, verdictAddr(verdictUnit))).toBe(false);
-    expect(storedAddressMatchesVerdict(stored, AV.normalized, verdictAddr(verdictUnit))).toBe(false);
-  });
-  test('the divergent booking-side comparison is gone (rule 19): street, ZIP and unit go through the shared predicate', () => {
-    const start = source.indexOf('const avValidatesBookedAddress =');
-    const block = source.slice(start, source.indexOf('const avPositiveForBooking', start));
-    expect(block).toContain('storedAddressMatchesVerdict(extracted, avNormalized, v2StatedAddress)');
-    expect(block).not.toMatch(/streetCompareKey|postal_code \|\| ''\)\.trim\(\)|unitKey\(extracted/);
-    expect(source).toContain('const n = av.normalized || {};\n  if (!storedAddressMatchesVerdict(extracted, n, verdictAddress)) return false;');
+  test('the card text states the durable fact, not a booking', () => {
+    expect(source).toContain('missing_first_name: "customer created without a first name — get it"');
+    expect(source).not.toContain('booked on the last name alone');
   });
 });
 
@@ -215,7 +198,7 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
     expect(block).toContain("(r !== 'missing_first_name' || firstNameStillOwed)");
   });
 
-  test('the customer-create branch opens only behind the first-name gate and the validated-premise predicate', () => {
+  test('the customer-create branch opens only behind the first-name gate and the exact-match predicate', () => {
     expect(source).toMatch(/\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature/);
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
     expect(predicate).toContain('callFirstNameAdvisoryLive()');
@@ -270,6 +253,26 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('triage_items').update({ status: 'resolved' }); // a resolved card is not re-opened by the other site
     expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(1);
+    // RELINK: the call moves to a DIFFERENT blank-name customer B. A's open card cannot be duplicated
+    // (one open card per call+reason), so it is RETARGETED to B — B gets its task, A's stamp moves.
+    const other = randomUUID();
+    await trx('triage_items').update({ status: 'open' });
+    expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(true);
+    let rows = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload.customer_id).toBe(other);
+    // filing again for B, or back for A's stamp-less retry of B, never duplicates
+    expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(false);
+    // a TERMINAL card for A does not block a fresh card for B
+    await trx('triage_items').update({ status: 'resolved', payload: trx.raw("payload || ?::jsonb", [JSON.stringify({ customer_id: customerId })]) });
+    expect(await fileMissingFirstNameCard(trx, { ...args, customerId: other })).toBe(true);
+    rows = await trx('triage_items').where({ call_log_id: callLogId }).orderBy('created_at');
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.status === 'open')).toHaveLength(1);
+    // A's resolved card is not re-opened by A's own retry
+    expect(await fileMissingFirstNameCard(trx, args)).toBe(false);
+    await trx('triage_items').where({ call_log_id: callLogId }).del();
+    await fileMissingFirstNameCard(trx, args);
     // the finalization recheck: only an open / claimed card keeps the reason counting toward review_status
     await trx('triage_items').update({ status: 'open' });
     expect(await missingFirstNameCardStillOpen(trx, callLogId)).toBe(true);

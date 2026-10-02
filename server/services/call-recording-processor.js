@@ -891,7 +891,7 @@ const CONFIRM_REASON_TEXT = {
   service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
-  missing_first_name: "no first name captured — get the account holder's first name (booked on the last name alone)",
+  missing_first_name: "customer created without a first name — get it",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
@@ -3722,96 +3722,83 @@ async function avAddressUniqueOwner(matches, opts) {
   }
 }
 
-// ── First-name advisory: address agreement helpers ──────────────────────────
-// Street equivalence below is the shared sameHouseNumberStreet (suffix aliases such
-// as loop/lp, directionals, unit-first and trailing units).
+// ── First-name advisory: exact address match ───────────────────────────────
 
-const addressZip5 = (value) => require('./customer-properties').normalizeZip(value);
-
-// The unit a street line / line-2 pair carries, in any supported position.
-// The FULL unit of an address, keyed by the canonical address normalizer: the
-// unit text on line 1 and line 2 is read as ONE unit line, so a building on
-// line 1 and an apartment on line 2 ("Bldg 9" + "Apt 204") key the same as
-// "Bldg 9 Apt 204" on one line. Structural and dwelling parts both count, and
-// Lot / Space values are kept. Contradictory parts ("Apt 3" + "Apt 4") never
-// equal a real unit, so the comparison refuses them without a special case.
-function addressLineUnit(line, line2) {
-  const { normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine } = require('../utils/address-normalizer');
-  const unit = [unitAnywhereOnLine(String(line || '')), String(line2 || '').trim()].filter(Boolean).join(' ');
-  return unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
-}
-
-// Do two renderings of ONE address agree? A missing street or ZIP on either side
-// is silent unless `strict`, which demands both be present on both sides.
-function addressRenderingsAgree(a = {}, b = {}, { strict = false } = {}) {
-  const lines = [String(a.address_line1 || '').trim(), String(b.address_line1 || '').trim()];
-  const zips = [addressZip5(a.zip), addressZip5(b.zip)];
-  if (strict && (lines.includes('') || zips.includes(''))) return false;
-  if (lines[0] && lines[1] && !sameHouseNumberStreet(lines[0], lines[1])) return false;
-  return !(zips[0] && zips[1] && zips[0] !== zips[1]);
-}
-
-// An accepted Address Validation verdict for an in-area address; `requirePremise`
-// demands an explicit premise-level granularity (a missing one then fails).
-// PREMISE and SUB_PREMISE (a validated unit) are both premise-level, as in the
-// canonical validator (address-validation/index.js); the unit itself is checked
-// by storedAddressMatchesVerdict.
+// An accepted Address Validation verdict for an in-area PREMISE-level address
+// (PREMISE and SUB_PREMISE both qualify, as in the canonical validator
+// address-validation/index.js).
 const PREMISE_LEVEL_GRANULARITIES = new Set(['PREMISE', 'SUB_PREMISE']);
-function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
-  if (!['validated_accept', 'corrected'].includes(av?.status) || av.inServiceArea !== true) return false;
-  return requirePremise ? PREMISE_LEVEL_GRANULARITIES.has(av.granularity) : !av.granularity || PREMISE_LEVEL_GRANULARITIES.has(av.granularity);
+function verdictAcceptsAddress(av) {
+  return ['validated_accept', 'corrected'].includes(av?.status) && av.inServiceArea === true
+    && PREMISE_LEVEL_GRANULARITIES.has(av.granularity);
 }
 
-// ONE normalized agreement predicate for the address a call STORES / BOOKS against the
-// verdict that validated it — shared by customer creation (firstNameAdvisoryAddressOk)
-// and the booking hold (avValidatesBookedAddress), so an input creation accepts can
-// never be re-judged differently at booking. Street (suffix aliases, directionals,
-// unit-first) and ZIP (ZIP+4 tolerant) must be present on both sides and agree with
-// the verdict's normalized form, and the stored UNIT — from either line — must equal
-// the unit of the address the verdict was computed on (none = none; "Apt 3" and
-// "Unit 3" are the same unit). Pure.
-function storedAddressMatchesVerdict(stored = {}, normalized = {}, verdictAddress = {}) {
-  return addressRenderingsAgree(
-    { address_line1: stored.address_line1, zip: stored.zip },
-    { address_line1: normalized?.street_line_1, zip: normalized?.postal_code },
-    { strict: true },
-  ) && addressLineUnit(stored.address_line1, stored.address_line2)
-    === addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2);
+// "Book only on an exact match" (owner ruling 2026-10-02). ONE rule for both customer
+// creation and the booking hold: the address the call STORED (line 1, line 2, city,
+// ZIP-5) must equal the address the verdict's Address Validation RAN ON, after basic
+// cleanup only — case, whitespace, punctuation, ZIP+4 -> ZIP-5, and the street-suffix
+// alias table (St/Street, Lp/Loop). Nothing else is interpreted: a unit spelled
+// differently (Apt vs Unit vs bare), a building split across lines, a missing piece,
+// or a verdict input that recovery rewrote all mean "not exact" and the call goes to
+// the office through the existing hold / card. Pure.
+function addressesExactlyMatch(stored = {}, verdictInput = {}) {
+  const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
+  const clean = (v) => String(v || '').toLowerCase().replace(/[.,#]/g, ' ').replace(/\s+/g, ' ').trim();
+  const street = (v) => clean(v).split(' ').map((w) => String(STREET_SUFFIX_ALIASES[w] || w).toLowerCase()).join(' ');
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const mine = [street(stored.address_line1), clean(stored.address_line2), clean(stored.city), zip5(stored.zip)];
+  const theirs = [street(verdictInput?.street_line_1), clean(verdictInput?.street_line_2), clean(verdictInput?.city), zip5(verdictInput?.postal_code)];
+  // Line 2 may be empty on both sides; line 1, city and ZIP must be present.
+  return [0, 2, 3].every((i) => mine[i] && theirs[i]) && mine.every((v, i) => v === theirs[i]);
 }
 
-// GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be
-// the premise the verdict validated — explicit PREMISE granularity, and the stored
-// street + ZIP (and city, when both carry one) agree with the verdict's normalized
-// form, and its unit equals the unit of the address the verdict was computed on. With V2 in shadow the verdict can describe a different address than the V1
-// one being inserted; that means no creation. Pure.
-function firstNameAdvisoryAddressOk(av, extracted = {}, verdictAddress = {}) {
-  if (!verdictAcceptsAddress(av, { requirePremise: true })) return false;
-  const n = av.normalized || {};
-  if (!storedAddressMatchesVerdict(extracted, n, verdictAddress)) return false;
-  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  return !cityKey(extracted.city) || !cityKey(n.city) || cityKey(extracted.city) === cityKey(n.city);
+// GATE_CALL_FIRST_NAME_ADVISORY: a last-name-only customer is created — and booked —
+// only when the verdict is an accepted in-area premise AND the stored address exactly
+// matches the address the verdict ran on (`verdictInput`: the V2 service_address; a
+// street recovery that rewrote it is not exact). Used by customer creation and by the
+// booking hold, so neither can re-judge what the other accepted. Pure.
+function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
+  return verdictAcceptsAddress(av) && !!verdictInput && addressesExactlyMatch(extracted, verdictInput);
 }
 
-// The ONE missing_first_name card per call (GATE_CALL_FIRST_NAME_ADVISORY), filed at
-// customer creation AND on the booking path: any existing card for the call — open,
-// claimed or already resolved — is the card, so neither site duplicates or re-opens
-// it; the conditional insert also covers a concurrent pass. Advisory; the card's
-// heard_name_v1 snapshot is what the auto-resolve rule reads.
+// The missing_first_name card for a (call, customer), filed at customer creation AND on
+// the booking path. "Already filed" means a card for this call AND this stamped
+// payload.customer_id — never merely this call: a call relinked from blank-name customer
+// A to blank-name customer B must not leave B without a task. The one-open-card-per-
+// (call, reason) unique index forbids a second OPEN card, so when the call's open /
+// claimed card is stamped for a DIFFERENT customer it is RETARGETED to this one (payload
+// customer_id + heard names); a terminal card (resolved / dismissed) for a different
+// customer lets a fresh card be filed. A card for this customer in ANY status is
+// never duplicated or re-opened. Advisory; heard_name_v1 is what auto-resolve reads.
+// Returns true when a card for this customer was filed or retargeted.
 async function fileMissingFirstNameCard(conn, { callLogId, customerId, extraction, extracted = {} }) {
-  const existing = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' }).first('id');
-  if (existing) return false;
+  const stamp = customerId ? String(customerId) : null;
+  const rows = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+    .select('id', 'status', 'payload');
+  const stampOf = (row) => {
+    const payload = typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return {}; } })() : (row.payload || {});
+    return payload.customer_id ? String(payload.customer_id) : null;
+  };
+  if (rows.some((row) => stampOf(row) === stamp)) return false;
+  const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
+  const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
+  if (live) {
+    const moved = await conn('triage_items').where({ id: live.id }).whereIn('status', ['open', 'in_progress'])
+      .update({
+        payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_id: stamp, heard_name_v1: heard })]),
+        updated_at: new Date(),
+      });
+    return moved > 0;
+  }
   await conn('triage_items')
     .insert(buildTriageItem({
       callLogId,
       flag: 'missing_first_name',
       extraction,
       severity: 'advisory',
-      extraPayload: {
-        // The customer this card is filed FOR: the auto-resolve rule reads THIS record,
-        // never whoever the call is later relinked to.
-        customer_id: customerId ? String(customerId) : null,
-        heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
-      },
+      // The customer this card is filed FOR: the auto-resolve rule reads THIS record,
+      // never whoever the call is later relinked to.
+      extraPayload: { customer_id: stamp, heard_name_v1: heard },
     }))
     .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
     .ignore();
@@ -6707,9 +6694,13 @@ function hasUsablePhone(value) {
 // must still have its ACTUAL destination positively validated (the verdict must
 // validate the street/unit being booked, not just some address V2 heard).
 // Returns the advisory fields that put the booking on hold; [] = no hold. Pure.
-function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking } = {}) {
-  if (enforceModeActive || !customerValidation?.ok || avPositiveForBooking) return [];
-  return ['email', 'first_name'].filter((field) => customerValidation.advisory?.includes(field));
+function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking } = {}) {
+  if (enforceModeActive || !customerValidation?.ok) return [];
+  const advisory = customerValidation.advisory || [];
+  return [
+    ...(advisory.includes('email') && !avPositiveForBooking ? ['email'] : []),
+    ...(advisory.includes('first_name') && !exactAddressForBooking ? ['first_name'] : []),
+  ];
 }
 
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
@@ -12065,6 +12056,7 @@ const CallRecordingProcessor = {
     const firstNameAdvisoryCreate = !extracted.first_name
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
       && !!String(extracted.last_name || '').trim()
+      && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
@@ -16873,6 +16865,7 @@ const CallRecordingProcessor = {
             ? { street_line_1: addressRecovery.recovered.address_line1, city: addressRecovery.recovered.city }
             : null;
           const v2ValidatedAddress = recoveredVerdictInput || v2StatedAddress;
+          const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
           // City included (codex final-round P1): ZIP almost always pins the
           // city, but multi-city ZIPs exist and deriveCallReviewBridge
           // refuses adoption on a city disagreement — the gate matches that
@@ -16890,18 +16883,23 @@ const CallRecordingProcessor = {
           // verdict's own normalized city below is what keeps this safe:
           // the booked city always has to be the validated one.
           const requireStatedCityMatch = String(effectiveAddressValidation?.status || '') === 'validated_accept';
-          // Street + ZIP + unit agreement is the SAME shared predicate customer creation
-          // uses (storedAddressMatchesVerdict); city keeps its own bar below.
           const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress && !!v2StatedAddress
-            && storedAddressMatchesVerdict(extracted, avNormalized, v2StatedAddress)
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
+            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
             && cityKey(extracted.city) === cityKey(avNormalized.city)
-            && sameHouseNumberStreet(extracted.address_line1, v2ValidatedAddress.street_line_1)
-            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city));
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
+            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city))
+            && unitKey(extracted.address_line2) === unitKey(v2StatedAddress.street_line_2);
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true
             && avValidatesBookedAddress;
-          const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking });
+          // A last-name-only booking needs the SAME exact-match rule customer creation used
+          // (a recovery-rewritten verdict input is never exact); the email advisory keeps its
+          // own long-standing validated-address bar above.
+          const exactAddressForBooking = !addressRecovery?.recovered
+            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2StatedAddress);
+          const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking });
           const emailAdvisoryHold = advisoryHoldFields.length > 0;
           if (!customerValidation.ok || emailAdvisoryHold) {
             const missingFields = customerValidation.ok ? advisoryHoldFields : customerValidation.missing;
@@ -17312,6 +17310,10 @@ const CallRecordingProcessor = {
                   }
                   if (freshValidation.advisory?.includes('first_name')) {
                     await fileFirstNameAdvisoryCard(trx);
+                    // A card this fenced path left open must count toward review (the
+                    // finalization recheck drops the reason again if it closes meanwhile).
+                    if (await missingFirstNameCardStillOpen(trx, call.id)
+                      && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
                   }
                   // Geographic veto re-runs on the fenced row (Codex #5403
                   // r6): when the call stated no locality, the pre-fence
@@ -22394,7 +22396,7 @@ CallRecordingProcessor._test = {
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   advisoryBookingAddressHoldFields,
-  storedAddressMatchesVerdict,
+  addressesExactlyMatch,
   fileMissingFirstNameCard,
   missingFirstNameCardStillOpen,
   slotOnlyLinkAllowed,
