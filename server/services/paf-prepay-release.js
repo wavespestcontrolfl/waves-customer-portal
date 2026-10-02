@@ -566,7 +566,12 @@ async function announcedAmount(job, conn) {
   const invStatus = String(invoice?.status || '').toLowerCase();
   if (!invoice || ['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
   const credit = require('./customer-credit');
-  let creditLowers = Number(invoice.credit_applied) > 0;
+  // The sweep charges the CURRENT bill (no exact-total freeze): an invoice
+  // retotaled since the approval, or credit applied to it, makes the amount
+  // a ceiling too (GitHub Codex #5640 r2).
+  const currentDueCents = Math.round((Number(invoice.total) - (Number(invoice.credit_applied) || 0)) * 100);
+  let creditLowers = Number(invoice.credit_applied) > 0
+    || (Number.isInteger(job.authorized_base_cents) && currentDueCents !== job.authorized_base_cents);
   if (await credit.autoApplyWouldApply(invoice, conn)) {
     const balance = await credit.getBalance(invoice.customer_id, conn);
     if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;

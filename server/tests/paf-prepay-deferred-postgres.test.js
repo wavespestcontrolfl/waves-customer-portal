@@ -418,6 +418,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect([a, b].filter(Boolean)).toHaveLength(1);
     });
 
+    it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      await trx('invoices').where({ id: f.invoiceId }).update({ total: 450, subtotal: 450 });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toMatchObject({ amount: 'up to $480.00' });
+    });
+
     it('outside the send window the text never says "being charged now" (GitHub Codex #5640 r1)', async () => {
       windowSpy.mockReturnValue(false);
       const f = await deferredAccept();
