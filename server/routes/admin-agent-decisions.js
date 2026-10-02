@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { upsertReplyExampleFromAgentReview, NON_HUMAN_REPLY_MESSAGE_TYPES } = require('../services/reply-training-capture');
+const { readCorrectionReason } = require('../services/correction-reasons');
 const { SUGGEST_WORKFLOW } = require('../services/sms-suggest-mode');
 const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
 
@@ -77,6 +78,7 @@ function mapDecision(row) {
     humanVerdict: row.human_verdict || null,
     correctedActions: parseJson(row.corrected_actions, []),
     correctionNote: row.correction_note || null,
+    correctionReason: row.correction_reason || null,
     reviewedBy: row.reviewed_by || null,
     reviewedAt: row.reviewed_at || null,
     createdAt: row.created_at,
@@ -567,6 +569,9 @@ router.post('/:id/review', async (req, res, next) => {
       ? req.body.correctedActions.map((item) => String(item || '').trim()).filter(Boolean)
       : [];
     const correctionNote = String(req.body?.correctionNote || req.body?.note || '').trim().slice(0, 4000);
+    const reasonRead = readCorrectionReason(req.body?.reason);
+    if (reasonRead.error) return res.status(400).json({ error: reasonRead.error });
+    if (reasonRead.reason && verdict === 'accepted') return res.status(400).json({ error: 'reason applies to corrected or dismissed only' });
 
     if (verdict === 'corrected' && !correctedActions.length && !correctionNote) {
       return res.status(400).json({ error: 'corrected decisions require correctedActions or a correctionNote' });
@@ -590,6 +595,8 @@ router.post('/:id/review', async (req, res, next) => {
         human_verdict: verdict,
         corrected_actions: verdict === 'corrected' ? JSON.stringify(correctedActions) : null,
         correction_note: correctionNote || null,
+        // The one-tap reason (five values); an accepted decision carries none.
+        correction_reason: reasonRead.reason,
         reviewed_by: actorName(req),
         reviewed_at: new Date(),
         updated_at: new Date(),
