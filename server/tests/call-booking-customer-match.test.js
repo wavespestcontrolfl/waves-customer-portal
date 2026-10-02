@@ -205,9 +205,6 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(start).toBeGreaterThan(source.indexOf('} catch (schedErr) {'));
     const block = source.slice(start, start + 900);
     expect(block).toContain("skippedReason: 'missing_required_customer_fields', missingFields: ['first_name']");
-    expect(block).toContain('await fileFirstNameAdvisoryCard(db)');
-    expect(block).toContain('await missingFirstNameCardStillOpen(db, call.id)');
-    expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
   test('no transcript cleanup closes an owed first-name card (codex #5559 r13)', () => {
@@ -235,10 +232,16 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(source).toContain("if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)");
   });
 
-  test('wiring: the fenced re-read that files the card late also counts it toward review while it stays open', () => {
-    const start = source.indexOf("if (freshValidation.advisory?.includes('first_name')) {");
-    const block = source.slice(start, start + 700);
-    expect(block).toContain('await missingFirstNameCardStillOpen(trx, call.id)');
+  test('wiring: the fenced re-read only RECORDS the owed card; it is filed after the booking transaction settles, committed or rolled back (codex #5559 r14)', () => {
+    expect(source).not.toContain('fileFirstNameAdvisoryCard(trx)');
+    const reread = source.slice(source.indexOf('const freshHoldFields = advisoryBookingAddressHoldFields({') - 300, source.indexOf('const fencedGeoVeto = legacyGeographicVeto({'));
+    expect(reread).toContain("if (freshValidation.advisory?.includes('first_name')) fencedFirstNameOwed = true;");
+    const catchAt = source.indexOf('} catch (schedErr) {');
+    const filedAt = source.indexOf('if (fencedFirstNameOwed) {');
+    expect(filedAt).toBeGreaterThan(catchAt);
+    const block = source.slice(filedAt, filedAt + 700);
+    expect(block).toContain('await fileFirstNameAdvisoryCard(db)');
+    expect(block).toContain('await missingFirstNameCardStillOpen(db, call.id)');
     expect(block).toContain("bridgeNeedsConfirmation.push('missing_first_name')");
   });
 
@@ -250,7 +253,7 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     expect(block).toContain('firstNameErr.firstNameHold = true;');
     // the card is NOT filed inside the transaction this throw rolls back (codex #5559 r12 P2)
     const holdBranch = block.slice(block.indexOf("if (freshHoldFields.includes('first_name')) {"), block.indexOf('throw firstNameErr;'));
-    expect(holdBranch).not.toContain('fileFirstNameAdvisoryCard(trx)');
+    expect(holdBranch).toContain('fencedFirstNameOwed = true;');
     // the same decision the pre-fence hold makes: a fresh first_name advisory without an exact address holds; with one it does not
     const fresh = { ok: true, missing: [], advisory: ['first_name'] };
     expect(advisoryBookingAddressHoldFields({ enforceModeActive: false, customerValidation: fresh, avPositiveForBooking: true, exactAddressForBooking: false })).toEqual(['first_name']);

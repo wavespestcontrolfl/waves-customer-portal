@@ -17036,6 +17036,11 @@ const CallRecordingProcessor = {
           // missed fence changes nothing about the booking.
           let bookingFence = null;
           let followUpFence = null;
+          // The fenced reread found the customer owes a first name. The card is NEVER filed
+          // inside the booking transaction — any later throw (hold, geo veto, insert failure)
+          // would roll it back — but once the try below settles, committed or not
+          // (codex #5559 r12 + r14).
+          let fencedFirstNameOwed = false;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -17344,19 +17349,12 @@ const CallRecordingProcessor = {
                   const freshHoldFields = advisoryBookingAddressHoldFields({
                     enforceModeActive, customerValidation: freshValidation, avPositiveForBooking, exactAddressForBooking,
                   });
+                  if (freshValidation.advisory?.includes('first_name')) fencedFirstNameOwed = true;
                   if (freshHoldFields.includes('first_name')) {
-                    // The card is filed by the schedErr catch AFTER this transaction rolls
-                    // back — filed here it would roll back with the booking (codex #5559 r12 P2).
+                    fencedFirstNameOwed = true;
                     const firstNameErr = new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
                     firstNameErr.firstNameHold = true;
                     throw firstNameErr;
-                  }
-                  if (freshValidation.advisory?.includes('first_name')) {
-                    await fileFirstNameAdvisoryCard(trx);
-                    // A card this fenced path left open must count toward review (the
-                    // finalization recheck drops the reason again if it closes meanwhile).
-                    if (await missingFirstNameCardStillOpen(trx, call.id)
-                      && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
                   }
                   // Geographic veto re-runs on the fenced row (Codex #5403
                   // r6): when the call stated no locality, the pre-fence
@@ -19347,19 +19345,13 @@ const CallRecordingProcessor = {
                 });
               }
             }
-            // A fenced first-name hold is a HOLD too: the booking rolled back, so the
-            // first-name card is filed now on its own connection (no transaction locks
-            // are held any more) and the call goes to review exactly like the
-            // pre-fence hold.
+            // A fenced first-name hold is a HOLD too, surfaced like the pre-fence hold (its
+            // first-name card is filed after this catch, with every other fenced outcome).
             if (schedErr.firstNameHold) {
               appointmentResult = {
                 ...appointmentResult, scheduleCreated: false,
                 skippedReason: 'missing_required_customer_fields', missingFields: ['first_name'],
               };
-              await fileFirstNameAdvisoryCard(db)
-                .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
-              if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
-                && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
               if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
                 await fileSkippedBookingCard({
                   call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
@@ -19369,6 +19361,15 @@ const CallRecordingProcessor = {
                 });
               }
             }
+          }
+          // The owed first-name card from the fenced reread, filed on its own connection now
+          // that the booking transaction has committed or rolled back (no locks held), and
+          // counted toward review while it stays open (the finalizer rechecks under the lock).
+          if (fencedFirstNameOwed) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
