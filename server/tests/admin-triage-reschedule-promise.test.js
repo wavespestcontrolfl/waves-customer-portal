@@ -23,7 +23,7 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technician = { id: 'tech-1', role: 'admin' };
     req.technicianId = 'tech-1';
-    req.techRole = 'admin';
+    req.techRole = req.headers['x-test-role'] || 'admin';
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -111,7 +111,18 @@ function makeFakeDb(seed = {}) {
   }
   const conn = (table) => builder(String(table).split(' ')[0]);
   conn.transaction = async (fn) => fn(conn);
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  conn.raw = (sql, bindings) => {
+    // The first-name fulfilment query (utils/missing-first-name-card): each listed id is
+    // named when its row is live with a nonblank first name (no merge journal in this fake).
+    if (String(sql).includes('customer_merge_journal') && String(sql).includes('as named')) {
+      const ids = bindings?.[0] || [];
+      return { rows: ids.map((id) => {
+        const row = (tables.customers || []).find((c) => String(c.id) === String(id));
+        return { id, named: !!row && row.deleted_at == null && String(row.first_name || '').trim() !== '' };
+      }) };
+    }
+    return { __raw: sql, bindings };
+  };
   conn.schema = { hasTable: async () => false };
   return { conn, tables };
 }
@@ -145,9 +156,9 @@ async function withServer(fn) {
   }
 }
 
-function put(baseUrl, path, body = {}) {
+function put(baseUrl, path, body = {}, headers = {}) {
   return fetch(`${baseUrl}/admin/triage${path}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
 }
 function post(baseUrl, path, body = {}) {
@@ -308,7 +319,99 @@ test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the p
   expect(tables.outbox_messages[0].status).toBe('review');
 });
 
+describe('PUT /admin/triage/:id/resolve on a missing_first_name card', () => {
+  const seed = () => {
+    const f = fixture({ customers: [{ id: '33333333-3333-4333-8333-333333333333', first_name: 'Sam', deleted_at: null }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_ids: ['33333333-3333-4333-8333-333333333333'], heard_name_v1: { first_name: null, last_name: 'Murphy' } };
+    return f;
+  };
+  test('a non-admin Resolve is refused (403) and the card stays open; Dismiss stays available', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION }, { 'x-test-role': 'technician' });
+      expect(res.status).toBe(403);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+  test('Resolve is refused (409, plain message) until EVERY listed customer is live with a nonblank first name; Dismiss stays the waiver', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '22222222-2222-4222-8222-222222222222';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: null }, { id: B, first_name: '', deleted_at: null }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_ids: [A, B] };
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      let res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe('Enter the first name on the customer record first');
+      expect(f.tables.triage_items[0].status).toBe('open');
+      // B gets a name -> allowed
+      f.tables.customers[1].first_name = 'Lee';
+      res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('resolved');
+  });
+  test('a list that grew after the operator loaded the card (version moved) refuses BOTH Resolve and Dismiss; the check runs on the live payload', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '22222222-2222-4222-8222-222222222222';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: null }, { id: B, first_name: '', deleted_at: null }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_ids: [A] };
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      // reprocess appends B (bumping updated_at) after the operator loaded the card showing only A
+      f.tables.triage_items[0].payload = { customer_ids: [A, B] };
+      f.tables.triage_items[0].updated_at = '2030-01-07T12:05:00.000Z';
+      for (const action of ['resolve', 'dismiss']) {
+        const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('STALE_CARD_VERSION');
+      }
+      // a request without any version is refused too
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, {})).status).toBe(409);
+    });
+    expect(f.tables.triage_items[0].status).toBe('open');
+  });
+  test('a deleted or missing listed customer blocks Resolve; Dismiss still works', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: '2026-10-01T00:00:00Z' }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_id: A }; // pre-list scalar shape
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION })).status).toBe(409);
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+    });
+    expect(f.tables.triage_items[0].status).toBe('dismissed');
+  });
+  test('an admin Resolve closes it', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_VERSION });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+  });
+});
+
 describe('POST /admin/triage/:id/verdict', () => {
+  test('rejects a direct call verdict on a missing_first_name card (an owed capture)', async () => {
+    const { conn, tables } = fixture();
+    tables.triage_items[0].reason_code = 'missing_first_name';
+    tables.triage_items[0].payload = { heard_name_v1: { first_name: null, last_name: 'Murphy' } };
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/not a call verdict/);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
   test('rejects a direct call verdict on a reschedule_link_promise card', async () => {
     const { conn, tables } = fixture();
     wireDb(db, { conn });

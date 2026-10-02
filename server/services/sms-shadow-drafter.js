@@ -6209,6 +6209,9 @@ module.exports = {
   parseOpenTimesDaysFromFactsBlock,
   stripOpenTimesSection,
   planOpenTimesRecheck,
+  // The day label every scheduler-backed offer is rendered with (sms-offers.js
+  // reads a sent offer's calendar date back through it).
+  schedulerDayLabel,
   looksLikeOfferText,
   computeOpenTimesSnapshot,
   openTimesStillOffered,

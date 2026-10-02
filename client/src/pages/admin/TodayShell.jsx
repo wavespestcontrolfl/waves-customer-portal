@@ -56,6 +56,7 @@ export default function TodayShell() {
       {documentsGated ? <p>Staff documents are unavailable.</p> : <Outlet context={{
         fieldWorkspace: false,
         techRole: user?.role,
+        staffProfile: user || null,
         documentsAvailable,
         payGrowthAvailable,
         setNavigationBusy: lock?.setNavigationBusy,
@@ -68,6 +69,7 @@ export default function TodayShell() {
         embedded
         techName={user?.name || 'Staff'}
         techRole={user?.role}
+        staffProfile={user || null}
         documentsAvailable={documentsAvailable}
         payGrowthAvailable={payGrowthAvailable}
       >

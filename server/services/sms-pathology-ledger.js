@@ -760,6 +760,26 @@ async function getIncidentSummary({ dbi = db, days = 30, area = INCIDENT_AREA, n
   }));
 }
 
+/**
+ * Weekly (Sunday, after the classic proposer): the correction loop's fix
+ * proposals for SMS, counted from confirmed ai_incidents on the live prompt
+ * version. Writes ai_fix_proposals only — no model call, no bell; the Monday
+ * correction-loop lane reads the rows. PATHOLOGY_FIX_PROPOSAL_MIN is the
+ * distinct-incident threshold per cell (same default as the classic proposer).
+ */
+async function proposeSmsFixes({ dbi = db, now = new Date() } = {}) {
+  const { proposeFromIncidents } = require('./ai-incidents/fix-proposals');
+  const promptVersion = require('./sms-shadow-drafter').currentPromptVersion();
+  return proposeFromIncidents({
+    dbi,
+    area: INCIDENT_AREA,
+    promptVersion,
+    minEvidence: envNum('PATHOLOGY_FIX_PROPOSAL_MIN', PROPOSAL_MIN_EVIDENCE),
+    maxCells: envNum('PATHOLOGY_FIX_PROPOSAL_MAX_CELLS', 3),
+    now,
+  });
+}
+
 /* ── Read models + review ─────────────────────────────────────────────── */
 
 /**
@@ -851,6 +871,7 @@ async function reviewPatchProposal({ id, action, reviewedBy, adminUserId, dbi = 
 
 module.exports = {
   SCHEMA_VERSION,
+  proposeSmsFixes,
   SURFACES,
   FAILURE_MODES,
   classifyPathologies,

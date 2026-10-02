@@ -12,7 +12,7 @@ import './tech-field.css';
 // owns the entire workspace; child routes consume the outlet context.
 // embedded adjusts the chrome for the admin scroll container and adds a Menu
 // tab back into the rest of Waves Admin.
-export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable, embedded = false }) {
+export default function TechFieldShell({ children, techName, techRole, staffProfile = null, documentsAvailable, payGrowthAvailable, embedded = false }) {
   const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
   const base = useTechBasePath();
   const { pathname, search } = useLocation();
@@ -46,7 +46,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
-            : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
+            : <Outlet context={{ fieldWorkspace: true, techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
         </div>
       </main>
       <nav className="tf-nav" aria-label="Field navigation">

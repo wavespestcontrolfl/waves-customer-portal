@@ -5,6 +5,13 @@ import './styles/brand-tokens.css';
 import App from './App';
 import { initNativePush } from './native/nativePush';
 import { initNativeLinks } from './native/nativeLinks';
+import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
+import { installStaffSessionGuard } from './lib/staffSessionGuard';
+
+// A staff session the server refuses anywhere in the app (admin pages too)
+// deletes the offline route copy and offline pass, so a later no-signal
+// reopen of /tech cannot show customer data from a refused session.
+installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDeviceData });
 
 // Stale-chunk healing for tabs that live across a deploy: Vite's dependency
 // preloader throws a plain Error that lazyWithRetry's chunk-message regex never

@@ -860,6 +860,22 @@ function initScheduledJobs() {
   cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — SMS offer ledger backfill (GATE_SMS_OFFER_LEDGER, dark):
+  // re-records an offer whose post-send write failed after the carrier took
+  // the text. Gate off, the sweep returns before touching the database.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    try {
+      await runExclusive('sms-offer-ledger-backfill', async () => {
+        const result = await require('./sms-offers').backfillMissedOffers();
+        if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // A failed scan or write must fail job health, not read as a green tick.
+        if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+      });
+    } catch (err) {
+      logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8
@@ -1950,6 +1966,34 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // A pass in which any customer's filing or any conflict bell failed is
+      // reported to job health as failed (both retry next pass).
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
+        const result = await require('./neighborhood-access').sweepSavedGateCodes();
+        if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
+        if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        return result;
+      });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3231,6 +3275,25 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
+  // cell with enough DISTINCT confirmed ai_incidents on the live prompt
+  // version gets one pending ai_fix_proposals row with its dev/holdout
+  // split. No model call, no bell: the Monday correction-loop lane reads the
+  // rows. Same gate as the ledger; PATHOLOGY_FIX_PROPOSAL_MAX_CELLS=0 stops it.
+  // =========================================================================
+  cron.schedule('45 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS correction-loop fix proposals');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeSmsFixes } = require('./sms-pathology-ledger');
+      await runExclusive('sms-fix-proposals', () => proposeSmsFixes());
+    } catch (err) {
+      logger.error(`SMS correction-loop fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
