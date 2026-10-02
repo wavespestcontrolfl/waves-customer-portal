@@ -8,9 +8,14 @@ const mockInsert = jest.fn();
 const mockDraft = jest.fn();
 let mockGateOn = true;
 
-jest.mock('../models/db', () => jest.fn(() => ({
-  insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
-})));
+const mockPrior = jest.fn(async () => []);
+jest.mock('../models/db', () => jest.fn(() => {
+  const q = {
+    insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
+    where: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q, select: () => mockPrior(),
+  };
+  return q;
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
 jest.mock('../config/feature-gates', () => {
@@ -158,6 +163,11 @@ describe('tokenParity', () => {
     expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontrol.com.')).toMatchObject({ ok: true });
     expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontol.com.')).toMatchObject({ ok: false });
     expect(protectedTokens('Email contact@wavespestcontrol.com').links).toEqual([]);
+  });
+
+  test('a signed rate keeps its sign: -10% is not 10%', () => {
+    expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un 10%.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un -10 %.')).toMatchObject({ ok: true });
   });
 
   test('a signed number keeps its sign; a range dash is not a sign', () => {
@@ -410,10 +420,24 @@ describe('runTranslationTrial', () => {
   test('a re-entry sentence copied from the facts block is not held for the re-entry rule; it is still recorded', async () => {
     const withTime = 'Thanks! Pets can go back out in 2 hours. Next visit: Tuesday, Oct 14 at 2 PM.';
     scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Las mascotas pueden salir en 2 horas. Próxima visita: martes 14 de octubre, 14 h.', back: withTime });
-    mockDraft.mockResolvedValueOnce({ parsed: { reply: withTime }, converged: true, passes: 1, factsBlock: 'LABEL FACTS:\nPets can go back out in 2 hours.' });
+    const sentence = 'For the products applied at your Sep 30 visit, the label says to keep people and pets off treated areas until dry.';
+    const reply = `Thanks! ${sentence}`;
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Para los productos aplicados en su visita del 30 de septiembre, la etiqueta dice mantener a personas y mascotas fuera de las áreas tratadas hasta que se seque.', back: reply });
+    const labelFacts = require('../services/sms-label-facts');
+    const section = jest.spyOn(labelFacts, 'labelFactsSectionFrom').mockReturnValue(`LABEL FACTS (from the labels of products applied at the last visit on Tuesday, Sep 30):\n- ${sentence}`);
+    mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1, factsBlock: 'facts' });
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    section.mockRestore();
     expect(row.hold_reason).not.toBe('reply_failed_comms_lint');
     expect(Array.isArray(row.checks.english_lint)).toBe(true);
+  });
+
+  test('a sentence found elsewhere in the facts block (the customer\'s own thread) is still linted', async () => {
+    const claim = 'The treatment is pet-safe for my family.';
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'El tratamiento es seguro para mascotas.', back: claim });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: claim }, converged: true, passes: 1, factsBlock: `RECENT TEXTS:\n${claim}` });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'reply_failed_comms_lint' });
   });
 
   test('an English lint failure in the drafter\'s own words holds the trial (it could not have sent)', async () => {
@@ -473,6 +497,17 @@ describe('runTranslationTrial', () => {
       : base(policy, payload)));
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'thread_translation_failed:figures_changed' });
     expect(mockDraft).not.toHaveBeenCalled();
+  });
+
+  test('a thread row an earlier trial already translated and checked is reused, not translated again', async () => {
+    const ctx = require('../services/context-aggregator');
+    const OLDER = 'Mi código de la puerta es 4821, ¿pueden pasar el jueves?';
+    ctx.getContextForCustomer.mockResolvedValueOnce({ customer: { id: 'c1' }, smsHistory: [{ direction: 'inbound', body: OLDER, fromPhone: '+19415550100' }] });
+    mockPrior.mockResolvedValueOnce([{ inbound_original: OLDER, inbound_english: 'My gate code is 4821, can you come Thursday?' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(mockDispatch.mock.calls.some(([, p]) => p.text.includes(OLDER))).toBe(false);
+    expect(mockDraft.mock.calls[0][0].context.smsHistory[0]).toMatchObject({ body: 'My gate code is 4821, can you come Thursday?', translatedFrom: OLDER });
   });
 
   test('a thread row whose translation changes the meaning holds the trial', async () => {

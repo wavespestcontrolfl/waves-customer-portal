@@ -187,7 +187,7 @@ const LANGUAGE_DISPLAY = new Intl.DisplayNames(['en'], { type: 'language', fallb
 function languageNameOf(code) {
   let name;
   try { name = LANGUAGE_DISPLAY.of(code); } catch { return null; }
-  return typeof name === 'string' && /^\p{L}[\p{L}\p{M} ()'-]{1,40}$/u.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
+  return typeof name === 'string' && /^\p{L}[\p{L}\p{M} ()'\u2018\u2019\u02BC,.-]{1,40}$/u.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
 }
 
 // Any BCP-47 tag a model returns ("es", "spa", "es-MX", "zh-TW", "zh-Hant")
@@ -352,7 +352,9 @@ function numberValues(text, { strictTimes = false } = {}) {
     else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
     else values = raw.split(/[.,:]/);
     if ((money || percent) && values.length === 1) {
-      out.push({ value: `${money}${values[0].replace(/^\d+/, trimZeros)}${percent ? '%' : ''}`, ...flags });
+      // a signed rate keeps its sign ("-10%" is not "10%"); an amount's sign is in its money prefix
+      const sign = !money && /(?:^|[\s(])[-\u2212]\s*$/.test(str.slice(0, m.index)) ? '-' : '';
+      out.push({ value: `${sign}${money}${values[0].replace(/^\d+/, trimZeros)}${percent ? '%' : ''}`, ...flags });
       continue;
     }
     // a signed plain number ("-2°F", "(-3)") keeps its sign; a range's dash ("2-3") follows a digit and is not one
@@ -472,9 +474,26 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
 // The trial drafts on a COPY of the context whose foreign rows (either
 // direction) carry their English translation (the original kept beside it);
 // the real context is untouched.
-async function translateThread(context, inboundMessage, inboundEnglish) {
+// A customer's earlier text never changes, so the English an earlier trial
+// already checked for it (figures and meaning both passed: the trial got past
+// its inbound checks) is reused rather than translated and checked again.
+const INBOUND_CHECK_HOLDS = ['figures_changed_in_inbound_translation', 'meaning_changed_in_inbound_translation'];
+async function checkedEarlierTranslations(customerId) {
+  try {
+    const rows = await db(TRIAL_TABLE).where({ customer_id: customerId }).whereNotNull('inbound_english')
+      .where((q) => q.whereNull('hold_reason').orWhere((q2) => q2.whereNotIn('hold_reason', INBOUND_CHECK_HOLDS).andWhereNot('hold_reason', 'like', 'inbound_%')))
+      .orderBy('id', 'desc').limit(50).select('inbound_original', 'inbound_english');
+    return new Map(rows.map((r) => [String(r.inbound_original).trim(), r.inbound_english]));
+  } catch (err) {
+    logger.warn(`[sms-translation] earlier translations not read: ${err.code || err.name || 'error'}`);
+    return new Map();
+  }
+}
+
+async function translateThread(context, inboundMessage, inboundEnglish, customerId) {
   const rows = Array.isArray(context?.smsHistory) ? context.smsHistory : [];
-  const cache = new Map([[String(inboundMessage).trim(), inboundEnglish]]);
+  const cache = await checkedEarlierTranslations(customerId);
+  cache.set(String(inboundMessage).trim(), inboundEnglish);
   let translatedRows = 0;
   const out = [];
   for (const [i, m] of rows.entries()) {
@@ -525,14 +544,16 @@ function lintFailures(text, context = null) {
 // redaction placeholder and an amount the billing facts do not hold. A
 // comms-lint failure keeps a live draft from sending on its own, so a trial
 // answer with one is held too ("ready" = could have gone out). A sentence
-// copied word for word from the facts block (an approved LABEL FACTS timing,
-// which the re-entry rule flags) is the server's own copy and is not linted;
+// copied word for word from the rendered LABEL FACTS section (an approved
+// label timing, which the re-entry rule flags) is not linted; nothing else in
+// the facts block is exempt (it carries the customer's own thread);
 // the SMS length rule is the translation's (checked on the translated text).
 // Every rule the reply trips is still recorded (checks.english_lint).
 function withoutCopiedFacts(reply, factsBlock) {
-  const facts = String(factsBlock || '');
-  if (!facts) return reply;
-  return reply.split(/(?<=[.!?])\s+/).filter((s) => !(s.trim().length >= 20 && facts.includes(s.trim()))).join(' ');
+  const labelFacts = require('./sms-label-facts');
+  let own = reply;
+  for (const { text } of labelFacts.labelSentencesIn(labelFacts.labelFactsSectionFrom(factsBlock || ''))) own = own.split(text).join(' ');
+  return own;
 }
 
 function postDraftFault(englishReply, context, factsBlock) {
@@ -603,7 +624,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!inboundMeaning.ok) return { stop: `inbound_meaning_check_failed:${inboundMeaning.reason}`, fields, checks: { inbound_parity: inboundParity } };
   if (!inboundMeaning.same) return { stop: 'meaning_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity, inbound_meaning: { differences: inboundMeaning.differences } } };
 
-  const thread = await translateThread(liveContext, inboundMessage, inbound.english);
+  const thread = await translateThread(liveContext, inboundMessage, inbound.english, customer.id);
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
   const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
   // both read off the English: the webhook's own reads ran on the foreign text
