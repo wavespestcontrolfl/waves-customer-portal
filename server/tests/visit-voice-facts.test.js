@@ -360,6 +360,37 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'spot', quote: 'Spot sprayed around the house where ants trailed' })).toMatchObject({ spray: { method: 'spot' }, unclearSpray: false });
   });
 
+  test('a pest named after its sentence\'s treatment shares it (codex local r18 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('Treated for ants outside and roaches inside.', [
+      { name: 'ants', quote: 'Treated for ants outside' },
+      { name: 'roaches', quote: 'roaches inside' },
+    ])).toEqual(['ants', 'roaches']);
+    expect(read('Saw ants inside, treated outside for spiders.', [
+      { name: 'ants', quote: 'Saw ants inside' },
+      { name: 'spiders', quote: 'treated outside for spiders' },
+    ])).toEqual(['spiders']);
+    expect(read("Didn't treat for ants or roaches. Sprayed for spiders.", [
+      { name: 'roaches', quote: 'roaches' },
+      { name: 'spiders', quote: 'Sprayed for spiders' },
+    ])).toEqual(['spiders']);
+  });
+
+  test('a place is judged by the treatment of its own clause (codex local r18 on #5538)', () => {
+    const note = 'Did not treat inside but sprayed outside for ants.';
+    const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Did not treat inside but sprayed outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(read('outside')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
+    expect(read('inside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+  });
+
+  test('a perimeter may name the house with ordinary words in between (codex local r18 on #5538)', () => {
+    const note = "Sprayed around the entire house for ants. Sprayed around the customer's house too. Sprayed around the back of the house.";
+    const read = (quote) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'perimeter', quote } }, note);
+    expect(read('Sprayed around the entire house for ants').spray).toMatchObject({ method: 'perimeter' });
+    expect(read("Sprayed around the customer's house too").spray).toMatchObject({ method: 'perimeter' });
+    expect(read('Sprayed around the back of the house')).toMatchObject({ spray: null, unclearSpray: true });
+  });
+
   test('a fact said twice stands when one saying is not denied', () => {
     const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
     const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

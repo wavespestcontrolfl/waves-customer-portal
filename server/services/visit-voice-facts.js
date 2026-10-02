@@ -134,6 +134,26 @@ function treatmentAssertion(quote) {
   return match ? { offset: match.index, length: match[0].length } : null;
 }
 
+// What a place's quote asserts there: the treatment word of the clause that
+// names the place ("did not treat inside but sprayed outside" asserts
+// "sprayed" for outside and "treat" for inside), so a denial about one
+// place never decides another (codex local r18 on #5538). A quote that does
+// not name the place in its plain words is judged at its first treatment
+// word, as before.
+const CLAUSE_BREAK_RE = /[,;.!?]|\bbut\b/g;
+function areaAssertion(area) {
+  const placeRe = new RegExp(String.raw`\b(?:${AREA_WORDS[area]})\b`);
+  return (quote) => {
+    const place = placeRe.exec(quote);
+    if (!place) return treatmentAssertion(quote);
+    const breaks = [...quote.matchAll(CLAUSE_BREAK_RE)].map((m) => m.index);
+    const from = Math.max(0, ...breaks.filter((at) => at < place.index));
+    const to = Math.min(quote.length, ...breaks.filter((at) => at > place.index));
+    const match = TREATMENT_WORD_RE.exec(quote.slice(from, to));
+    return match ? { offset: from + match.index, length: match[0].length } : treatmentAssertion(quote);
+  };
+}
+
 // What a pest quote asserts: the pest's own name, as a whole word.
 function nameAssertion(name) {
   return (quote) => {
@@ -161,6 +181,21 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 }
 
 const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
+
+// A pest named after its sentence's treatment shares it: "treated for ants
+// outside and roaches inside" treats the roaches too. Only a treatment word
+// earlier in the same sentence that the note does not deny counts, so "saw
+// ants inside, treated outside for spiders" still leaves the ants out.
+const SENTENCE_BREAK_RE = /[.!?;\n]/g;
+function treatedEarlierInSentence(name, quote, note) {
+  const at = note.indexOf(quote);
+  if (at < 0) return false;
+  const nameAt = at + quote.indexOf(name);
+  const start = Math.max(0, ...[...note.matchAll(SENTENCE_BREAK_RE)].map((m) => m.index + 1).filter((i) => i <= nameAt));
+  const before = note.slice(start, nameAt);
+  const words = [...before.matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))];
+  return words.some((m) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, start + m.index)));
+}
 
 // An area whose own word the quote denies ("sprayed outside but not the
 // garage", "treated everything except inside") is not heard there: the
@@ -238,7 +273,7 @@ function validateVoiceFacts(json, note) {
   const unresolvedAreas = new Set();
   for (const entry of listOf(answer.areas)) {
     if (!AREA_LABELS[entry?.area]) continue;
-    const read = readQuote(entry.quote, grounding, TREATMENT_FACT);
+    const read = readQuote(entry.quote, grounding, { assertion: areaAssertion(entry.area), denialAfter: TRAILING_DENIAL.treatment });
     // Heard, but the note does not hold the quote, denies it there, or the
     // quote only names the place ("ants in the kitchen" is a sighting, not a
     // treated inside): never recorded, and never silently dropped either,
@@ -259,9 +294,9 @@ function validateVoiceFacts(json, note) {
   // one pest heard, each must be tied to the treatment in its own words
   // ("treated outside for spiders"), so one only seen ("saw ants inside") is
   // left out (Codex #5538). A single pest is the note's one subject.
-  const targets = [...pests].filter(([, quote]) => (treatmentAssertion(quote)
+  const targets = [...pests].filter(([name, quote]) => (treatmentAssertion(quote)
     ? !deniedInNote(quote, grounding, TREATMENT_FACT)
-    : pests.size === 1));
+    : pests.size === 1 || treatedEarlierInSentence(name, quote, grounding)));
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
@@ -277,7 +312,9 @@ function validateVoiceFacts(json, note) {
 // sprayed around the house where ants trailed" names where the spots were)
 // or does not claim the way around the house. Anything else contradicts
 // itself and is unclear.
-const PERIMETER_WORDS_RE = /\b(?:perimeter|foundation|all\s+(?:the\s+way\s+)?around|around\s+(?:the\s+)?(?:outside|exterior|house|home|building|structure)|outside\s+of\s+the\s+(?:house|home))\b/;
+// "around the entire house", "around the customer's house": up to two
+// words may sit between "around the" and the house (codex local r18).
+const PERIMETER_WORDS_RE = /\b(?:perimeter|foundation|all\s+(?:the\s+way\s+)?around|around\s+(?:the\s+)?(?:[a-z']+\s+){0,2}?(?:outside|exterior|house|home|building|structure)|outside\s+of\s+the\s+(?:house|home))\b/;
 const SPOT_WORDS_RE = /\bspot(?:s|ted|ting)?\b/;
 const METHOD_SUPPORTED = {
   perimeter: (quote) => PERIMETER_WORDS_RE.test(quote) && !SPOT_WORDS_RE.test(quote),
