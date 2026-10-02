@@ -1926,7 +1926,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
               // charge's own visit lock (GitHub Codex #5567 r13).
               ...(deferredToFirstVisit && job.released_for_visit_id
                 && String(job.released_for_visit_id) === String(job.payer_scope_scheduled_service_id)
-                ? { requireCompletedVisit: true } : {}),
+                ? { requireCompletedVisit: true, requirePerformedVisit: true } : {}),
             }
             : { requireSelfPayCustomerId: invoice.customer_id }),
         }));

@@ -311,11 +311,18 @@ async function reconcileJobAlerts(estimateId) {
       // hand the work to the unbilled-visits alert, like a cancel after the
       // visit.
       await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice was closed unpaid.');
+      // The customer comes from the held visit when the invoice row is gone,
+      // so the office alert links to the customer (GitHub Codex #5567 r16).
+      const heldVisitId = job.performed_visit_id || job.released_for_visit_id || null;
+      const heldCustomerId = job.customer_id
+        || (heldVisitId ? (await db('scheduled_services').where({ id: heldVisitId }).first('customer_id'))?.customer_id : null)
+        || null;
       await patchJob(estimateId, {
         charge_alert_closed_at: nowIso,
         status: 'cancelled_after_visit',
         reason: `invoice_${invStatus || 'missing'}_after_failed_charge`,
-        performed_visit_id: job.performed_visit_id || job.released_for_visit_id || null,
+        performed_visit_id: heldVisitId,
+        ...(heldCustomerId ? { customer_id: heldCustomerId } : {}),
       }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'delivered_fallback'`));
     } else if (outcome === 'paid') {
       // Closed whether or not the raised stamp landed: a raise that persisted
@@ -358,10 +365,13 @@ async function reconcileJobAlerts(estimateId) {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
     const invStatus = String(invoice?.status || '').toLowerCase();
     if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
+      const releasedCustomerId = job.customer_id
+        || (await db('scheduled_services').where({ id: job.released_for_visit_id }).first('customer_id'))?.customer_id || null;
       await patchJob(estimateId, {
         status: 'cancelled_after_visit',
         reason: `invoice_${invStatus || 'missing'}_after_release`,
         performed_visit_id: job.released_for_visit_id,
+        ...(releasedCustomerId ? { customer_id: releasedCustomerId } : {}),
       }, (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [job.status]));
       return;
     }

@@ -332,6 +332,21 @@ postgres('annual prepay charged after the first visit', () => {
     expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toEqual([]);
   });
 
+  it('a reopened held visit closed again as paid another way loses its stamp (Codex r16)', async () => {
+    const f = await deferredAccept();
+    const techId = randomUUID();
+    const catalogId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+    await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+    await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId, prepaid_method: 'cash', prepaid_amount: 120,
+      technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: techId, technician: null },
+      body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false } });
+    expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+  });
+
   it('a reopened visit completed again re-decides its stamp, never trusting a stale one (Codex r15)', async () => {
     const f = await deferredAccept();
     const techId = randomUUID();
@@ -810,7 +825,7 @@ postgres('annual prepay charged after the first visit', () => {
       StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(
         Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }));
       await sweep();
-      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true }));
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true, requirePerformedVisit: true }));
       expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', released_for_visit_id: null });
       expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
