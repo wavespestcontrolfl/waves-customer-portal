@@ -78,9 +78,16 @@ describe('which writes skip the card', () => {
   });
 
   test('the lead and schedule edits the owner asked for execute directly', () => {
-    for (const name of ['update_lead_contact', 'update_lead_status', 'reschedule_appointment', 'assign_technician', 'update_property_access']) {
+    for (const name of ['update_lead_contact', 'update_lead_status', 'reschedule_appointment', 'update_property_access']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, true]);
     }
+  });
+
+  test('assign_technician is direct for one stop and carded for several', () => {
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A], technician_name: 'Synthetic Tech' })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A, B], technician_name: 'Synthetic Tech' })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [], technician_name: 'Synthetic Tech' })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' })).toBe(false);
   });
 
   test('update_customer skips the card only for name, phone, address, pipeline, source and note fields', () => {

@@ -82,6 +82,11 @@ function ownerDirectLive(req) {
 
 function executesWithoutCard(toolName, input = {}) {
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
+  // assign_technician takes a list of stops; one stop is an internal edit,
+  // several is a bulk change and keeps its card (pre-push P1).
+  if (toolName === 'assign_technician') {
+    return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
+  }
   if (toolName === 'update_customer') {
     const updates = input?.updates;
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
@@ -119,7 +124,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, pipeline stage, lead source and notes; an email, tier, rate, active or Churned change still shows a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, pipeline stage, lead source and notes; an email, tier, rate, active or Churned change still shows a card. assign_technician executes directly for one stop; several stops show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.
