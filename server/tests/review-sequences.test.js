@@ -4924,6 +4924,18 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
     });
 
+    test('#5524 pre-push: on a later touch the anchored visit\'s own service type wins over the sequence\'s cached type', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock(reminderStepFixture('seq-st', { id: 'st-1', first_name: 'Stan', last_name: 'P', phone: '+19410000062', nearest_location_id: 'bradenton' }, {
+        service_records: [{ id: 'sr-st', customer_id: 'st-1', technician_id: null, service_type: 'Termite Inspection', service_date: new Date() }],
+      }));
+      mock.__state.rows.review_sequences[0].service_record_id = 'sr-st'; // anchored on Day 0; cached type is 'pest control'
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Termite Inspection');
+    });
+
     test('#5524 r3: a visit-less cadence with no recent visit never calls the writer (fixed copy), one with a visit drafts about it', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

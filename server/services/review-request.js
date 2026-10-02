@@ -4653,7 +4653,13 @@ const ReviewService = {
     // customer's newest completed visit from the last 30 days, for drafting
     // only; none = no draft (fixed copy), never an unscoped history.
     const voiceVisit = !techVoice ? null
-      : (serviceRecordId || scheduledServiceId) ? { serviceRecordId, serviceDate, technicianId, serviceType }
+      : (serviceRecordId || scheduledServiceId) ? {
+        serviceRecordId, serviceDate, technicianId,
+        // The record's own service type decides (it gates the termite rule),
+        // never a sequence's cached type, on every touch.
+        serviceType: (serviceRecordId && await db("service_records").where({ id: serviceRecordId }).first("service_type")
+          .then((sr) => sr?.service_type || null).catch(() => null)) || serviceType,
+      }
         : await db("service_records")
           .where({ customer_id: customer.id })
           .where("service_date", ">=", new Date(Date.now() - 30 * 86400000))
