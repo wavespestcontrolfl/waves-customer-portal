@@ -4271,6 +4271,38 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset three minutes) — Unanswered-text replies
+  // A suggested reply still waiting after two open hours goes out on its own
+  // (sms-unanswered-reply.js, GATE_SMS_UNANSWERED_REPLY read at call time).
+  // Same shape as the gratitude sweep above: no cron lease (each send holds
+  // pool connections through the provider call), claims are send-once per
+  // inbound under the thread lock, and the in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let unansweredSweepRunning = false;
+  cron.schedule('3-59/5 * * * *', async () => {
+    const unanswered = require('./sms-unanswered-reply');
+    // Runs while the variable is present at all: after a rollback to false it
+    // still repairs answered-card labels, and sends nothing.
+    if (!unanswered.unansweredClaimsPossible() || unansweredSweepRunning) return;
+    unansweredSweepRunning = true;
+    try {
+      const result = await unanswered.processUnansweredReplyCandidates();
+      // Every run that read anything, refusals included: the rollout is judged
+      // on what was held back and why (docs/sms-unanswered-reply.md).
+      if (result?.scanned || result?.attempted) {
+        const refused = Object.entries(result.refused || {}).map(([why, n]) => `${why}=${n}`).join(' ') || 'none';
+        logger.info(`[sms-unanswered] sweep: scanned=${result.scanned} attempted=${result.attempted} sent=${result.sent} refused: ${refused}`);
+      }
+    } catch (err) {
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[sms-unanswered] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+    } finally {
+      unansweredSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
@@ -4609,6 +4641,11 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            // GATE_SMS_SCHEDULING_SUGGEST rollback (Codex #5617 r2): a scheduling
+            // card queued while the gate was on must not fire after it is unset.
+            // Gate on, this reads nothing. Same block+retire path as the checks below.
+            const schedulingGated = !anchorStale
+              && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
             // anchor check can't see it). Non-human-authored agent text
@@ -4794,7 +4831,7 @@ function initScheduledJobs() {
               }
             }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
+            const priorStale = anchorStale || schedulingGated || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4807,7 +4844,9 @@ function initScheduledJobs() {
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
-                : amountsStale
+                : schedulingGated
+                  ? 'scheduling_suggest_gate_off'
+                  : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
@@ -4845,7 +4884,9 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : amountsStale
+                    : schedulingGated
+                      ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
+                      : amountsStale
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`

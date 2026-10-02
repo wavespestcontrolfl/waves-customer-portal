@@ -65,6 +65,7 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
@@ -110,6 +111,57 @@ function isReserviceFastCompleteEligible(service) {
     // editor, which updates an existing record; /complete would only
     // answer service_already_completed and drop the tech's corrections.
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go"
+// 2026-10-01): with `fastCompleteReportEnabled` on the schedule row, every
+// open untyped pest visit, a re-service or a regular visit, opens the
+// one-screen sheet in its report flow (talk, generate the AI report, read
+// it, trace, send; billed and texted as the full form). Off, pest visits
+// route exactly as before.
+function isFastCompleteReportEligible(service) {
+  return service?.fastCompleteReportEnabled === true
+    && isPestControlService(service)
+    // The report flow traces a perimeter: a visit traced as an outline (a
+    // yard treatment such as tick control, under trace eligibility) keeps its
+    // existing path, whose tracer draws that outline (codex local r15).
+    && service?.traceVariant !== 'outline'
+    // A closed visit stays on the recap editor, which updates the existing
+    // record (/complete would answer service_already_completed).
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
+// visit whose lane the reader reads (bed bug, fire ant, tick, bee & wasp,
+// mud dauber, mosquito; the schedule row's `laneVoiceFillEnabled`) opens the
+// one-screen sheet in the report flow, its own record read from the note,
+// while the report flow is on. Off, it opens the project editor as before,
+// and so does a visit that completes through a project (its profile says
+// so, a project is already linked, or the profile could not be read).
+function isLaneReportEligible(service) {
+  const profile = service?.completionProfile;
+  return service?.laneVoiceFillEnabled === true
+    && service?.fastCompleteReportEnabled === true
+    && service?.completionProfileLookupFailed !== true
+    && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+const laneKeyOf = (service) => resolveSpecialtyServiceKey({
+  serviceKey: service?.completionProfile?.serviceKey,
+  serviceType: service?.serviceTypeRaw || service?.serviceType || service?.service_type,
+});
+
+// What the sheet reads of the report flow from the row: whether it runs, and
+// for a lane visit its lane, read from the note, and no trace on the sheet
+// (an outline trace stays on the full form).
+function reportFlowFields(service) {
+  const laneFlow = isLaneReportEligible(service);
+  return {
+    reportFlow: isFastCompleteReportEligible(service) || laneFlow,
+    laneFlow,
+    laneKey: laneFlow ? laneKeyOf(service) : null,
+    traceEligible: service.traceEligible !== false && !laneFlow,
+  };
 }
 
 // Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
@@ -756,6 +808,12 @@ export default function TechHomePage({ section = 'today' }) {
     }
     openProjectForService(service);
   }, [openProjectForService]);
+  // Every entry point that would open the project editor for a visit: a lane
+  // visit under the lane voice fill opens the report-flow sheet instead.
+  const openProjectOrLane = useCallback((service) => {
+    if (isLaneReportEligible(service)) setFastCompleteService(service);
+    else openProjectOrContinue(service);
+  }, [openProjectOrContinue]);
   const projectServices = fieldWorkspace
     ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
         !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
@@ -768,7 +826,8 @@ export default function TechHomePage({ section = 'today' }) {
   // Complete sheet instead of the full recap modal. Everything else routes
   // exactly as before.
   const openPestCompletion = useCallback((service) => {
-    if (isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
+    // A lane visit filed under pest control still opens as its lane.
+    if (isLaneReportEligible(service) || isFastCompleteReportEligible(service) || isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
     else setRecapService(service);
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
@@ -790,12 +849,12 @@ export default function TechHomePage({ section = 'today' }) {
       } else if (isPestControlService(only)) {
         openPestCompletion(only);
       } else {
-        openProjectOrContinue(only);
+        openProjectOrLane(only);
       }
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrContinue, openPestCompletion, openTypedVisit]);
+  }, [projectServices, openProjectOrLane, openPestCompletion, openTypedVisit]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -809,7 +868,7 @@ export default function TechHomePage({ section = 'today' }) {
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrContinue(service);
+    else openProjectOrLane(service);
   };
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`/tech/protocols${visitSearch}`) },
@@ -1164,7 +1223,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedVisit(s)
-                    : isPestControlService(s) ? openPestCompletion(s) : openProjectOrContinue(s)
+                    : isPestControlService(s) ? openPestCompletion(s) : openProjectOrLane(s)
                 )}
                 onPhotos={(s) => setPhotoTarget({
                   id: s.id,
@@ -1250,7 +1309,7 @@ export default function TechHomePage({ section = 'today' }) {
             setShowProjectPicker(false);
             if (usesDispatchCompletion(service)) openTypedVisit(service);
             else if (isPestControlService(service)) openPestCompletion(service);
-            else openProjectOrContinue(service);
+            else openProjectOrLane(service);
           }}
         />
       )}
@@ -1294,10 +1353,26 @@ export default function TechHomePage({ section = 'today' }) {
             // address the context resolves) for visits without a property.
             routedPropertyId: 'propertyId' in fastCompleteService ? fastCompleteService.propertyId : undefined,
             routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
+            // The row's service, so the report flow (any open pest visit) can
+            // tell an office edit to another service from the one tapped: its
+            // stored label (the schedule's serviceType is cleaned up) and key.
+            routedServiceType: fastCompleteService.serviceTypeRaw ?? null,
+            routedServiceKey: fastCompleteService.completionProfile?.serviceKey || null,
             // GATE_FAST_COMPLETE_RECAP rides the same schedule row: only an
             // exact true turns the customer recap on (see the sheet). Absent
             // (an older payload) or false = the sheet sends no customer text.
             recapEnabled: fastCompleteService.fastCompleteRecapEnabled === true,
+            // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
+            // step needs from the row (the tracer's map center and whether
+            // this visit takes a satellite trace at all).
+            ...reportFlowFields(fastCompleteService),
+            // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
+            // the visit's photos in the note's box (the report flow only;
+            // never lawn or tree, shrub & palm, which the payload leaves off).
+            noteBoxPhotosEnabled: fastCompleteService.noteBoxPhotosEnabled === true,
+            technicianName: fastCompleteService.technicianName || fastCompleteService.technician_name || null,
+            lat: fastCompleteService.lat ?? null,
+            lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
           onClose={(options) => {
@@ -1314,6 +1389,9 @@ export default function TechHomePage({ section = 'today' }) {
           onFullForm={() => {
             const raw = fastCompleteService;
             setFastCompleteService(null);
+            // A lane visit's too: its own completion form (the lane's places,
+            // findings and actions), never the project editor, whose bed bug
+            // form is retired (codex local r1 on #5629).
             openTypedCompletion(raw);
           }}
         />
@@ -1395,6 +1473,9 @@ export default function TechHomePage({ section = 'today' }) {
       {zoneTarget && (
         <TechTreatmentZoneModal
           serviceId={zoneTarget.id}
+          // The property the schedule row was loaded at: a save that lands
+          // after the office moved the visit is refused (Codex #5538).
+          expectedPropertyId={'propertyId' in zoneTarget ? (zoneTarget.propertyId ?? null) : undefined}
           customerName={zoneTarget.customer_name || zoneTarget.customerName || 'Customer'}
           address={zoneTarget.address || ''}
           lat={zoneTarget.lat}

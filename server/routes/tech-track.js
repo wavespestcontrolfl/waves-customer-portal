@@ -311,6 +311,8 @@ const {
 const {
   promoteStagedPhotosForCompletedVisit,
   sanitizeCustomerFacingPhotoCaption,
+  updateStagedServicePhotoCaption,
+  deleteStagedServicePhoto,
   uploadServicePhotoBuffer,
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
@@ -1137,6 +1139,55 @@ router.get('/:id/photos', async (req, res, next) => {
   }
 });
 
+// PATCH / DELETE /api/tech/services/:id/photos/:photoId — the tech sheet's
+// notes box changes a staged photo's description or removes the photo before
+// the visit is completed (GATE_NOTE_BOX_PHOTOS, dark: off answers 404). Same
+// ownership rule as the photo routes above; a completed visit's photos are
+// on its record and are never changed here (409 visit_completed).
+const STAGED_PHOTO_REFUSALS = {
+  photo_not_found: 'Photo not found',
+  service_not_found: 'Service not found',
+  not_assigned: 'Not assigned to this service',
+  visit_completed: 'This visit is completed; its photos are on the report.',
+};
+function refuseStagedPhotoChange(res, { status, code }) {
+  return res.status(status).json({ error: STAGED_PHOTO_REFUSALS[code], code });
+}
+
+router.patch('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await updateStagedServicePhotoCaption({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      caption: req.body?.caption,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    return res.json({ photo: { ...result.photo, staged: true } });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo description failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+router.delete('/:id/photos/:photoId', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').noteBoxPhotosLive()) return res.status(404).json({ enabled: false });
+    const result = await deleteStagedServicePhoto({
+      scheduledServiceId: req.params.id,
+      photoId: req.params.photoId,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+    });
+    if (result.error) return refuseStagedPhotoChange(res, result.error);
+    logger.info(`[tech-track] staged photo removed service=${req.params.id} tech=${req.technicianId}`);
+    return res.json({ ok: true, id: result.photo.id });
+  } catch (err) {
+    logger.error(`[tech-track] staged photo removal failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 // ── Treated-point marks on a service photo (GATE_PHOTO_MARKS, dark) ────────────
 // The technician photographs the area they actually treated and taps the
 // treated points on it. Marks are metadata keyed on the photo's S3 KEY — never
@@ -1404,6 +1455,7 @@ router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
 const featureGates = require('../config/feature-gates');
 const {
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
@@ -1422,7 +1474,7 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type', 'property_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
@@ -1437,6 +1489,17 @@ router.post('/:id/treatment-zone', upload.fields([
       payload = JSON.parse(req.body?.payload || '');
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    // A caller that loaded the visit at a property (the Fast Complete report
+    // flow) binds the trace to it: a visit the office has moved to another
+    // property since is refused, so a map of the old home never lands on the
+    // new one. Callers that send nothing are unchanged.
+    if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId')
+      && String(payload.expectedPropertyId ?? '') !== String(svc.property_id ?? '')) {
+      return res.status(409).json({
+        error: 'This visit moved to another property. Close it and reopen it from the schedule.',
+        code: 'visit_property_changed',
+      });
     }
     {
       // Eligibility AND capture-mode agreement (codex P2 r19) — the
@@ -1467,7 +1530,19 @@ router.post('/:id/treatment-zone', upload.fields([
       snapshotPngBuffer: snapshotFile?.buffer || null,
       maskPngBuffer: maskFile?.buffer || null,
       captureMode: payload.captureMode,
+      // Rechecked under the visit row's lock at the write (the read above is
+      // unlocked): a move that commits in between is refused too.
+      ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
+      // The report flow's trace is judged with the report: refused once the
+      // visit is completed.
+      openVisitOnly: payload.openVisitOnly === true,
+    }).catch((err) => {
+      if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
+      throw err;
     });
+    if (row?.refused) {
+      return res.status(409).json({ error: row.refused.message, code: row.refused.code });
+    }
 
     logger.info(
       `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +
@@ -1487,6 +1562,39 @@ router.post('/:id/treatment-zone', upload.fields([
     return res.json({ treatmentZone: row });
   } catch (err) {
     logger.error(`[tech-track] treatment zone save failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+// DELETE /api/tech/services/:id/treatment-zone — "Remove the trace" on the
+// Fast Complete report flow: a trace that no longer matches the note (it now
+// says spots only, or not inside) comes off before the visit is completed.
+// Same gate as the save; the actor's current assignment is judged on the
+// locked visit row (a technician reassigned meanwhile is refused).
+// `expectedPropertyId` binds it to the property the sheet loaded, as the
+// save does; a completed visit keeps its trace (409).
+const TRACE_REMOVE_REFUSALS = { visit_property_changed: 409, visit_completed: 409, service_not_assigned: 403, not_found: 404 };
+router.delete('/:id/treatment-zone', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const removed = await deleteTreatmentZoneMap({
+      scheduledServiceId: req.params.id,
+      actor: req,
+      ...(Object.prototype.hasOwnProperty.call(req.query, 'expectedPropertyId') ? { expectedPropertyId: req.query.expectedPropertyId || null } : {}),
+    }).catch((err) => {
+      if (TRACE_REMOVE_REFUSALS[err?.code]) return { refused: err };
+      throw err;
+    });
+    if (removed?.refused) {
+      const { code, message } = removed.refused;
+      return res.status(TRACE_REMOVE_REFUSALS[code]).json({ error: message, code });
+    }
+    logger.info(`[tech-track] treatment zone removed service=${req.params.id} tech=${req.technicianId} removed=${!!removed}`);
+    return res.json({ removed: !!removed });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone remove failed: ${err.message}`);
     return next(err);
   }
 });

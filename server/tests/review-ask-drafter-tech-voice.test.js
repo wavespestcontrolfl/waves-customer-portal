@@ -191,8 +191,12 @@ describe('draftTechVoice', () => {
           ? { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ["I can't wait too long, I need to go to work"] }
           : { sentence, ask_only: true, greeting_only: false, off_limits: false, supported: false, quotes: [] })) },
     }));
-    // The visit was a week ago, so "a week since the first treatment" is provable.
-    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    // The visit was a week ago, at 08:00 ET like the base texts, so "a week
+    // since the first treatment" and "that morning" (proved by the cited
+    // text's ET clock time) hold whatever time of day the suite runs; a
+    // fixture stamped at now minus 7 days failed every run after noon ET.
+    const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
+    const weekAgo = parseETDateTime(`${etCalendarDayOf(new Date(Date.now() - 7 * 86400000))}T08:00`);
     mockTables.sms_log = SMS.map((m) => ({ ...m, created_at: weekAgo }));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email', serviceDate: weekAgo })).toBe(email.body);
   });

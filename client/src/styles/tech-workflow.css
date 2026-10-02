@@ -122,6 +122,23 @@
 /* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
 .tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
 .tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the words and the photos
+   share one box. */
+.tech-visit-note-box { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--tech-border); border-radius: 10px; background: var(--tech-card); }
+.tech-visit-note-box .ui-control.tech-visit-control { border: none; border-radius: 10px 10px 0 0; background: transparent; }
+.tech-note-photo-after { display: grid; gap: 8px; padding: 0 12px 12px; }
+.tech-note-photo-confirm { display: grid; gap: 8px; }
+.tech-note-photo-confirm p { margin: 0; }
+.tech-note-photo-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Lane voice fill (GATE_LANE_VOICE_FILL): "<Lane> record heard from you",
+   one row per field with what was heard and a Change. */
+.tech-lane-record { display: grid; gap: 12px; }
+.tech-lane-row { display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--tech-border); }
+.tech-lane-row .tech-visit-section-head { margin: 0; }
+.tech-lane-label { color: var(--tech-muted); font-size: 14px; font-weight: 600; }
+.tech-lane-value { margin: 0; color: var(--tech-text); font-size: 16px; }
+.tech-lane-value--empty { color: var(--tech-muted); }
+.tech-lane-value--empty.tech-visit-status--warn { color: #fcd34d; }
 /* Fast Complete tip options: label over one line of the customer copy. */
 .tech-visit-tip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .ui-action.tech-visit-tip { justify-content: flex-start; height: auto; min-height: 56px; padding: 8px 12px; text-align: left; white-space: normal; }
@@ -263,3 +280,19 @@
 .tech-ts-finding { margin-bottom: 8px; }
 .tech-ts-finding-label { margin: 0; font-weight: 700; }
 .tech-ts-finding--rejected .tech-ts-finding-label { text-decoration: line-through; opacity: 0.7; }
+/* Fast Complete report flow (GATE_FAST_COMPLETE_REPORT): the 1–5 tracker,
+   the photo strip, the promise check, the report the customer will see. */
+.tech-visit-tile-grid--5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.tech-visit-head-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.tech-report-photo-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }
+.tech-report-photo { min-width: 0; border: 1px solid var(--tech-border); border-radius: 10px; overflow: hidden; background: var(--tech-card); }
+.tech-report-photo img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.tech-report-photo-caption { display: block; padding: 4px 6px; color: var(--tech-muted); font-size: 14px; line-height: 1.3; overflow-wrap: anywhere; }
+.tech-visit-promise { border-top: 1px solid var(--tech-border); padding-top: 10px; margin-top: 4px; }
+.tech-visit-promise-text { margin: 0; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+.tech-report-sources { margin: 4px 0 0; padding-left: 20px; color: var(--tech-text); font-size: 14px; }
+.tech-report-parts { margin-bottom: 8px; }
+.tech-report-part-title { margin: 12px 0 2px; color: var(--tech-muted); font-size: 14px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.tech-report-part-text { margin: 0; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
+.tech-report-confirm { box-sizing: border-box; width: 100%; margin: 0; }
+.ui-action.tech-report-back { margin-bottom: 12px; }

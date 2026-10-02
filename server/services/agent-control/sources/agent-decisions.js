@@ -62,6 +62,7 @@ const STATUS_MAP = Object.freeze({
   qualification_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'incorrect' },
   auto_applied: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // contact-correction
   auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // reschedule-intent-watcher
+  auto_answered: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // sms-unanswered-reply ANSWERED_STATUS
   reviewed: { lifecycle: 'terminal', result: 'succeeded' },
   // the owner's verdict is persisted as the row status too (admin-agent-
   // decisions' review route, the SMS composer send in admin-communications,
