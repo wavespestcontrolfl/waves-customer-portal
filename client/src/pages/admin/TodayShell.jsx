@@ -48,7 +48,7 @@ export default function TodayShell() {
     <div style={{ minHeight: '100%', margin: isMobile ? '0 -16px' : '-24px -28px', padding: 16, background: '#0f1923', color: '#e2e8f0', fontFamily: "'Nunito Sans', sans-serif" }} data-legacy-field-shell>
       <nav aria-label="Field links" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
         {legacyLinks.map((item) => (
-          <NavLink key={item.to} to={item.to} end={item.end} style={({ isActive }) => ({ padding: '8px 12px', minHeight: 44, display: 'inline-flex', alignItems: 'center', borderRadius: 8, fontSize: 14, fontWeight: isActive ? 700 : 500, color: isActive ? '#0f1923' : '#e2e8f0', background: isActive ? '#e2e8f0' : 'rgba(226,232,240,0.12)', textDecoration: 'none' })}>
+          <NavLink key={item.to} to={item.to} end={item.end} aria-disabled={lock?.navigationBusy || undefined} onClick={(e) => { if (lock?.navigationBusy) e.preventDefault(); }} style={({ isActive }) => ({ padding: '8px 12px', minHeight: 44, display: 'inline-flex', alignItems: 'center', borderRadius: 8, fontSize: 14, fontWeight: isActive ? 700 : 500, color: isActive ? '#0f1923' : '#e2e8f0', background: isActive ? '#e2e8f0' : 'rgba(226,232,240,0.12)', textDecoration: 'none' })}>
             {item.label}
           </NavLink>
         ))}

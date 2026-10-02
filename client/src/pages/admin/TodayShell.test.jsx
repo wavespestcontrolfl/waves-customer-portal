@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router-dom';
-import TechNavigationLock from '../../components/tech/TechNavigationLock';
+import TechNavigationLock, { useTechNavigationLock } from '../../components/tech/TechNavigationLock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const flags = vi.hoisted(() => ({ shellEnabled: false, shellReads: [] }));
@@ -107,6 +107,26 @@ describe('/admin/today field shell', () => {
     mount();
     const gated = await screen.findByRole('navigation', { name: 'Field links' });
     expect(within(gated).queryByRole('link', { name: 'Documents' })).toBeNull();
+  });
+
+  it('flag off: the field links do not navigate while the navigation lock is held (Codex #5573 r7)', async () => {
+    flags.shellEnabled = false;
+    function Busy() { const lock = useTechNavigationLock(); return <button type="button" onClick={() => lock.setNavigationBusy(true)}>hold</button>; }
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    localStorage.setItem('waves_admin_user', JSON.stringify(TECH));
+    render(<TechNavigationLock><MemoryRouter initialEntries={['/admin/today']}><Where /><Busy /><Routes>
+      <Route path="/admin" element={<Outlet context={{ user: TECH }} />}>
+        <Route path="today" element={<TodayShell />}>
+          <Route index element={<div>Route page</div>} />
+          <Route path="protocols" element={<div>Protocols page</div>} />
+        </Route>
+      </Route>
+    </Routes></MemoryRouter></TechNavigationLock>);
+    const links = await screen.findByRole('navigation', { name: 'Field links' });
+    fireEvent.click(screen.getByRole('button', { name: 'hold' }));
+    fireEvent.click(within(links).getByRole('link', { name: 'Protocols' }));
+    expect(screen.getByTestId('where')).toHaveTextContent('/admin/today');
+    expect(screen.queryByText('Protocols page')).toBeNull();
   });
 
   it('flag off + documents unavailable: /admin/today/documents shows the unavailable notice, not the library', async () => {

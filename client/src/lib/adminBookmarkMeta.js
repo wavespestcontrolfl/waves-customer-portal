@@ -44,6 +44,8 @@ export const FIELD_BOOKMARK_META = {
   themeColor: "#0f1923",
 };
 
+const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];
+
 export function isFieldPath(pathname) {
   return pathname === "/admin/today" || pathname.startsWith("/admin/today/");
 }
@@ -80,7 +82,9 @@ export function snapshotBookmarkMeta() {
   // A legacy /tech URL is server-rendered with the field identity and then
   // redirected into /admin/today: that transient identity is not a pre-admin
   // state, so leaving admin restores the customer defaults (Codex #5573 r6).
-  if (manifest?.getAttribute("href") === FIELD_BOOKMARK_META.manifest) return null;
+  // Both field manifests count: the client's own and the one server/index.js
+  // renders for a /tech section load (Codex #5573 r7).
+  if (FIELD_MANIFESTS.includes(manifest?.getAttribute("href"))) return null;
   return {
     manifest:
       manifest?.getAttribute("href") ?? CUSTOMER_BOOKMARK_META.manifest,

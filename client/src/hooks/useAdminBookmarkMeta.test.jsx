@@ -177,4 +177,18 @@ describe("useAdminBookmarkMeta", () => {
     expect(document.title).toBe("Waves Customer Portal");
     expect(document.documentElement.classList.contains("admin-app")).toBe(false);
   });
+
+  it("the server-rendered /tech manifest is a transient field identity too (Codex #5573 r7)", () => {
+    seedHead({
+      manifest: "/tech-manifest.json",
+      appTitle: "Waves Tech",
+      description: "Waves field technician tools",
+      themeColor: "#0f1923",
+      title: "Waves Tech",
+    });
+    const { unmount } = render(<Harness active />);
+    unmount();
+    expect(document.querySelector('link[rel="manifest"]').getAttribute("href")).toBe("/manifest.json");
+    expect(document.title).toBe("Waves Customer Portal");
+  });
 });
