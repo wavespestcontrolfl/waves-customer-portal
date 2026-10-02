@@ -54,12 +54,6 @@ exports.up = async function up(knex) {
   // A re-run must not overwrite the state down() needs.
   if ((await knex.schema.hasTable('system_settings'))
     && (await knex('system_settings').where({ key: STATE_KEY }).first())) return;
-  // Serialize against concurrent property writes (address edits, call
-  // pipeline inserts) for the scan → fold → recompute span, so every
-  // decision below reads the rows as they are written (same pattern as
-  // 20260903000060). Knex runs each migration in a transaction; the lock is
-  // released at its commit. Reads stay open.
-  await knex.raw('LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE');
   const rows = await knex('customer_properties')
     .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip', 'address_key', 'active', 'is_primary', 'created_at');
   const state = { keys: {}, merged: [] };
@@ -119,7 +113,6 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('system_settings'))) return;
   const row = await knex('system_settings').where({ key: STATE_KEY }).first();
   if (!row) return;
-  await knex.raw('LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE');
   const state = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
   // Old keys first: the retired copies' old keys are distinct from their
   // keepers', so reactivating them below cannot meet the unique index.

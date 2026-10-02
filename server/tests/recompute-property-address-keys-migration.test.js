@@ -9,6 +9,7 @@
 jest.mock('../models/db', () => ({}), { virtual: false });
 const { addressKey } = require('../services/customer-properties');
 const migration = require('../models/migrations/20261001200000_recompute_property_address_keys');
+const reconcile = require('../models/migrations/20261001200100_reconcile_property_address_keys_locked');
 
 function fakeKnex(db) {
   const rowsOf = (t) => (db[t] = db[t] || []);
@@ -107,12 +108,6 @@ describe('20261001200000 recompute property address keys', () => {
     expect(row(db, 'keep-a').address_key).toBe(row(db, 'dup-a').address_key);
   });
 
-  test('up() locks customer_properties before it reads', async () => {
-    const db = seed();
-    await migration.up(fakeKnex(db));
-    expect(db.__raw[0]).toBe('LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE');
-  });
-
   test('up() is idempotent', async () => {
     const db = seed();
     await migration.up(fakeKnex(db));
@@ -133,5 +128,36 @@ describe('20261001200000 recompute property address keys', () => {
     expect(db.estimates[0].property_id).toBe('dup-a');
     expect(db.scheduled_services.find((v) => v.id === 'v-new').property_id).toBe('keep-a');
     expect(db.system_settings).toEqual([]);
+  });
+});
+
+describe('20261001200100 locked reconcile', () => {
+  test('locks customer_properties before it reads, and is a no-op after an undisturbed recompute', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    const snapshot = JSON.stringify(db.customer_properties);
+    await reconcile.up(fakeKnex(db));
+    expect(db.__raw).toEqual(['LOCK TABLE customer_properties IN SHARE ROW EXCLUSIVE MODE']);
+    expect(JSON.stringify(db.customer_properties)).toBe(snapshot);
+  });
+
+  test('repairs a row written while the recompute ran: stale key rewritten, new same-house copy folded', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    // an address edit that landed mid-run with an old-format key ...
+    Object.assign(row(db, 'other-b'), { address_line1: '402 Test Creek Court', address_key: 'stale' });
+    // ... and a call-pipeline copy of keeper-a inserted with an old-format key
+    db.customer_properties.push(prop('late-a', 'c1', { address_line1: '200 Example Glen.', city: 'Parrish', zip: '34219' }));
+    db.scheduled_services.push({ id: 'v-late', property_id: 'late-a' });
+    await reconcile.up(fakeKnex(db));
+    expect(row(db, 'other-b').address_key).toBe(addressKey(row(db, 'other-b')));
+    expect(row(db, 'late-a')).toMatchObject({ active: false, address_key: row(db, 'keep-a').address_key });
+    expect(db.scheduled_services.find((v) => v.id === 'v-late').property_id).toBe('keep-a');
+
+    await reconcile.down(fakeKnex(db));
+    expect(row(db, 'late-a')).toMatchObject({ active: true, address_key: legacyKey({ address_line1: '200 Example Glen.', city: 'Parrish', zip: '34219' }) });
+    expect(row(db, 'other-b').address_key).toBe('stale');
+    expect(db.scheduled_services.find((v) => v.id === 'v-late').property_id).toBe('late-a');
+    expect(db.system_settings.find((r) => r.key === reconcile.STATE_KEY)).toBeUndefined();
   });
 });
