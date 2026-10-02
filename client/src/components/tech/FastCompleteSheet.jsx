@@ -1048,6 +1048,7 @@ function ReportFlowForm({
     <TechTreatmentZoneModal
       serviceId={service.id}
       expectedPropertyId={loadedPropertyId}
+      openVisitOnly
       customerName={customerNameOf(ctx.visit, service) || 'Customer'}
       address={service.routedAddress || service.address || ''}
       lat={service.lat}

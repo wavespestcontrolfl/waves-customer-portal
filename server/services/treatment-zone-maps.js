@@ -78,10 +78,13 @@ function propertyChangedError() {
 // Every save takes the visit row's lock, the one a completion holds while
 // it judges the trace (complete-scheduled-service.js, traceSeen), so a save
 // either lands before that read or waits for the completion (Codex #5538).
-// A caller that loaded the visit at a property (the Fast Complete report
-// flow) is refused, at the write itself, when the office has moved the visit
-// since or it is already completed: its trace was judged with the report.
-async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId) {
+// A caller that loaded the visit at a property (every trace opener sends it)
+// is refused, at the write itself, when the office has moved the visit since:
+// a save that waited on this lock behind the move never lands a map of the
+// old home on the new one (Codex #5538). The report flow, whose trace is
+// judged with the report, is also refused once the visit is completed
+// (openVisitOnly); the Zone action may still add a trace to a completed visit.
+async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly) {
   const visit = await conn('scheduled_services')
     .where({ id: scheduledServiceId })
     .forUpdate()
@@ -90,7 +93,7 @@ async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId) {
   if (!visit || String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
     throw propertyChangedError();
   }
-  if (visit.status === 'completed') throw visitCompletedError();
+  if (openVisitOnly && visit.status === 'completed') throw visitCompletedError();
 }
 
 // One visit's row: the keys it replaces, then the upsert.
@@ -123,12 +126,14 @@ async function saveTreatmentZoneMap({
   // report animates this over the snapshot (owner 2026-07-30).
   maskPngBuffer = null,
   captureMode = null,
-  // Optional: the property the caller loaded the visit at (the Fast Complete
-  // report flow). Checked under the visit row's lock at the write itself, so
-  // an office move that commits after the route's read still refuses the
-  // save, and so does a completion. Undefined (every other caller) writes as
-  // before, under the same lock.
+  // Optional: the property the caller loaded the visit at. Checked under the
+  // visit row's lock at the write itself, so an office move that commits
+  // after the route's read still refuses the save. Undefined (a caller that
+  // sends none) writes as before, under the same lock.
   expectedPropertyId,
+  // The report flow's trace is judged with the report: also refused once the
+  // visit is completed.
+  openVisitOnly = false,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -214,7 +219,7 @@ async function saveTreatmentZoneMap({
     updated_at: knex.fn.now(),
   });
   const persist = async (conn) => {
-    await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId);
+    await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
     return upsertZoneRow(conn, scheduledServiceId, buildRecord);
   };
 

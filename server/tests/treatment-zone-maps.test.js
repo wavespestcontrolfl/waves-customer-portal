@@ -352,12 +352,18 @@ describe('saveTreatmentZoneMap bound to a property', () => {
     expect(plain.state.visitLocks).toBe(1);
   });
 
-  test('a bound save on a completed visit is refused under the lock, with the upload removed (Codex #5538)', async () => {
+  test('the report flow\'s save on a completed visit is refused under the lock, with the upload removed (Codex #5538)', async () => {
     const knex = lockedKnex({ propertyId: 'prop-1', status: 'completed' });
-    await expect(saveTreatmentZoneMap(args(knex, 'prop-1'))).rejects.toMatchObject({ code: 'visit_completed', statusCode: 409 });
+    await expect(saveTreatmentZoneMap({ ...args(knex, 'prop-1'), openVisitOnly: true })).rejects.toMatchObject({ code: 'visit_completed', statusCode: 409 });
     expect(knex.state.inserted).toBeNull();
     const put = mockS3Send.mock.calls.find(([cmd]) => cmd.commandType === 'put')[0].input.Key;
     expect(mockS3Send.mock.calls.some(([cmd]) => cmd.commandType === 'delete' && cmd.input.Key === put)).toBe(true);
+  });
+
+  test('the Zone action may still add a trace to a completed visit at its loaded property (Codex #5538)', async () => {
+    const knex = lockedKnex({ propertyId: 'prop-1', status: 'completed' });
+    await saveTreatmentZoneMap(args(knex, 'prop-1'));
+    expect(knex.state.inserted).not.toBeNull();
   });
 });
 

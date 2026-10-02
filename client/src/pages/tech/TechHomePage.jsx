@@ -1309,6 +1309,9 @@ export default function TechHomePage({ section = 'today' }) {
       {zoneTarget && (
         <TechTreatmentZoneModal
           serviceId={zoneTarget.id}
+          // The property the schedule row was loaded at: a save that lands
+          // after the office moved the visit is refused (Codex #5538).
+          expectedPropertyId={'propertyId' in zoneTarget ? (zoneTarget.propertyId ?? null) : undefined}
           customerName={zoneTarget.customer_name || zoneTarget.customerName || 'Customer'}
           address={zoneTarget.address || ''}
           lat={zoneTarget.lat}

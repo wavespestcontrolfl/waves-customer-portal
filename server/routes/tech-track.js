@@ -1482,6 +1482,9 @@ router.post('/:id/treatment-zone', upload.fields([
       // Rechecked under the visit row's lock at the write (the read above is
       // unlocked): a move that commits in between is refused too.
       ...(Object.prototype.hasOwnProperty.call(payload, 'expectedPropertyId') ? { expectedPropertyId: payload.expectedPropertyId ?? null } : {}),
+      // The report flow's trace is judged with the report: refused once the
+      // visit is completed.
+      openVisitOnly: payload.openVisitOnly === true,
     }).catch((err) => {
       if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') return { refused: err };
       throw err;

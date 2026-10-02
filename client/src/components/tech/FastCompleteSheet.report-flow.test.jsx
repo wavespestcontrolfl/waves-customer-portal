@@ -10,8 +10,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onSaved, onClose, expectedPropertyId }) => (
-    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)}>
+  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly }) => (
+    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)}>
       <button type="button" onClick={() => onSaved({ linear_ft: 182, capture_mode: 'perimeter' })}>Save trace</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
@@ -650,6 +650,9 @@ describe('complete and send', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
     // The tracer saves bound to the property this sheet loaded (Codex #5538).
     expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-expected-property')).toBe('prop-1');
+    // The report flow's trace is judged with the report: its save is refused
+    // once the visit is completed (Codex #5538).
+    expect(screen.getByRole('dialog', { name: 'Tracer' }).getAttribute('data-open-visit-only')).toBe('true');
     fireEvent.click(await screen.findByRole('button', { name: 'Save trace' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
     expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();

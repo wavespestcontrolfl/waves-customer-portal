@@ -99,9 +99,12 @@ const CLOSE_TAP_CSS_PX = 22;
 export default function TechTreatmentZoneModal({
   serviceId, customerName, address, lat, lng, onClose, onSaved,
   // Optional: the property the caller loaded the visit at. Sent with the
-  // save so the server refuses a visit moved to another property since.
-  // Absent (every caller but the Fast Complete report flow), nothing changes.
+  // save so the server refuses a visit moved to another property since, even
+  // a save that waited behind the move (Codex #5538). Absent, nothing changes.
   expectedPropertyId,
+  // The Fast Complete report flow judges its trace with the report, so its
+  // save is also refused once the visit is completed.
+  openVisitOnly = false,
   appearance = 'dark',
   // Lawn visits outline the treated AREA (clean pulsing outline on the report)
   // instead of the perimeter spray-mist metaphor (owner 2026-07-28).
@@ -512,6 +515,7 @@ export default function TechTreatmentZoneModal({
           ? (yardMode ? 'yard' : (lawnMask ? 'lawn_highlight' : 'lawn'))
           : (interior ? 'interior' : 'perimeter'),
         ...(expectedPropertyId !== undefined ? { expectedPropertyId } : {}),
+        ...(openVisitOnly ? { openVisitOnly: true } : {}),
       }));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone`, {
@@ -530,7 +534,7 @@ export default function TechTreatmentZoneModal({
     } catch (err) {
       setSaveState(err.message || 'Save failed');
     }
-  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, yardMode, interior, expectedPropertyId]);
+  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, yardMode, interior, expectedPropertyId, openVisitOnly]);
 
   useEffect(() => {
     // Back to trace = the trace may change; the next Play must save fresh.
