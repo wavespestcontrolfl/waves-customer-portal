@@ -87,7 +87,13 @@ const { etDateString, addETDays, parseETDateTime } = require(path.join(SERVER, '
 const args = Object.fromEntries(process.argv.slice(2)
   .filter((a) => a.startsWith('--'))
   .map((a) => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
-const WINDOW = ['today', '7d', '30d'].includes(args.window) ? args.window : '7d';
+// Default only when the flag is absent; an explicit unsupported value fails,
+// as the hub readers themselves do, rather than silently reporting 7d.
+const WINDOW = args.window == null ? '7d' : args.window;
+if (!['today', '7d', '30d'].includes(WINDOW)) {
+  console.error(`agents-report: --window must be today, 7d or 30d (got ${JSON.stringify(WINDOW)})`);
+  process.exit(2);
+}
 const SHOW_ALL = args.all === true;
 const JSON_OUT = args.json === true;
 const STATUS_RANK = { attention: 0, active: 1, idle: 2 };
@@ -111,13 +117,13 @@ function table(headers, rows, rightCols = new Set()) {
 // assembly readAreas / readLanes do, minus the second read.
 async function snapshot(now) {
   const window = hub.resolveWindow(WINDOW, now);
-  const { ledger, laneRows, cost } = await hub.loadHub(window, now);
+  const { ledger, laneRows, cost, activityUnavailableSources } = await hub.loadHub(window, now);
   ledger.areaLatency = await hub.areaLatency(window.from, window.to, laneRows.map((l) => [l.id, l.area]));
   const areas = hub.buildAreas({ areas: AREAS, laneRows, window, ledger });
   const counts = { all: laneRows.length, active: 0, attention: 0, idle: 0 };
   for (const l of laneRows) counts[l.status] += 1;
   const lanes = [...laneRows].sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.calls - a.calls || a.name.localeCompare(b.name));
-  return { window, cost, areas, lanes, counts };
+  return { window, cost, areas, lanes, counts, activityUnavailableSources: activityUnavailableSources || [] };
 }
 
 async function waitingOnYou(now) {
@@ -166,6 +172,9 @@ async function main() {
       ledgerRecording: live.ledgerRecording,
       chainRecording: live.chainRecording,
       portalEnv: PORTAL_ENV,
+      // Activity tables the feed could not read: the Activity half of every
+      // attention count is incomplete when this is non-empty.
+      activityUnavailableSources: snap.activityUnavailableSources,
       cost: snap.cost ? { estimate: true, priced: snap.cost.priced, pricesFetchedAt: snap.cost.pricesFetchedAt ? new Date(snap.cost.pricesFetchedAt).toISOString() : null } : null,
     };
     out(JSON.stringify({ window: WINDOW, generatedAt: now.toISOString(), basis, counts: snap.counts, areas, lanes: PORTAL_ENV ? lanes : lanes.map(stripModelFields), waiting }, null, 2));
@@ -174,7 +183,9 @@ async function main() {
 
   out(`Agents report — ${WINDOW} — ${now.toISOString()}${costNote ? `  (${costNote})` : ''}`);
   out(`lanes: ${snap.counts.active} active, ${snap.counts.attention} need attention, ${snap.counts.idle} idle`);
-  out(`recording (portal gates): ledger ${gateWord(live.ledgerRecording)}, chains ${gateWord(live.chainRecording)}${live.chainRecording === false ? ' — fallback rates cover only what was recorded' : ''}\n`);
+  out(`recording (portal gates): ledger ${gateWord(live.ledgerRecording)}, chains ${gateWord(live.chainRecording)}${live.chainRecording === false ? ' — fallback rates cover only what was recorded' : ''}`);
+  if (snap.activityUnavailableSources.length) out(`attention is PARTIAL: Activity feed could not read ${snap.activityUnavailableSources.join(', ')}`);
+  out();
 
   const areaRows = areas.map((a) => [
     a.label, a.calls, pct(a.okRate), pct(a.fallbackRate), ms(a.p95LatencyMs), usd(a.estCostUsd),
