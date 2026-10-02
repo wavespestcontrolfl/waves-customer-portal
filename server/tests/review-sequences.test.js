@@ -4962,6 +4962,10 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftTechVoice.mock.calls[0][0].serviceRecordId).toBe('sr-tv-8');
       // #5524 r13: the completed record's technician speaks, not the scheduled row's.
       expect(mockDraftTechVoice.mock.calls[0][0].techName).toBe('Maria');
+      // #5524 r15: the request row describes the same visit (rate page, attribution).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.service_record_id).toBe('sr-tv-8');
+      expect(row.technician_id).toBe('tech-real');
     });
 
     test('#5524 r9: a visit whose service type cannot be read is not drafted (a stale cached type is never trusted)', async () => {

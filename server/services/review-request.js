@@ -4676,6 +4676,18 @@ const ReviewService = {
       technicianId: linkedRecord?.technician_id || technicianId,
       serviceType: linkedRecord?.service_type || voiceVisitType,
     };
+    // The request row (rate page name / photo / date, tech attribution) must
+    // describe the same visit the text speaks about: the linked record's
+    // fields replace the scheduled row's before the row is written.
+    if (linkedRecord) {
+      serviceRecordId = linkedRecord.id;
+      serviceDate = voiceVisit.serviceDate;
+      serviceType = voiceVisit.serviceType;
+      if (linkedRecord.technician_id && linkedRecord.technician_id !== technicianId) {
+        technicianId = linkedRecord.technician_id;
+        techName = null; // resolved from technicianId below, never the scheduled tech's name
+      }
+    }
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
