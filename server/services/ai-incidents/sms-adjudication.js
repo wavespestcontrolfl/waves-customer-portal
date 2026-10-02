@@ -12,8 +12,8 @@
  *      QUOTES the unsupported claim — and the quote is verified here to be
  *      text the draft really contains (a model cannot invent the evidence);
  *   2. AND one of: a deterministic predicate below fires for that same
- *      failure mode; for a schedule claim, the person's reply names a
- *      different day or time than the draft; or the judge itself deducted
+ *      failure mode; for a schedule claim, the person's reply names one
+ *      different weekday or calendar date than the draft; or the judge deducted
  *      for invention (safety <= SAFETY_CONFIRM_MAX on its 0-10 scale).
  * Anything short of that is a `lead`: reported, never counted.
  *
@@ -154,26 +154,27 @@ function runPredicates({ draft, facts }) {
 }
 
 /**
- * The person gave a CONFLICTING value for a schedule component the draft also
- * stated: a different weekday, a different calendar date, or a different clock
- * time. Added detail is not a conflict ("Tuesday at 2pm" then "Tuesday at 2pm
- * on October 6"), nor is a list or window that still includes the draft's
- * value ("Tuesday or Wednesday", "2-4pm"). Each component is compared only
- * with itself, and only when BOTH sides state it.
+ * The person gave ONE conflicting value for a discrete schedule component the
+ * draft also stated: a different weekday, or a different calendar date.
+ *
+ * Deliberately narrow, because this reading can confirm a mistake:
+ *   - Clock times are NOT compared. Arrival times are spoken as windows
+ *     ("2-4pm", "between 1 and 3", "by noon"), and whether a window contains
+ *     the draft's time cannot be settled from free text. A wrong clock time
+ *     still confirms through the other second readers (the facts-block
+ *     predicate, the judge's safety score).
+ *   - A reply that names two or more values of a component is a list or a
+ *     range ("Tuesday or Wednesday", "Monday through Wednesday", "between Oct
+ *     5 and Oct 8") and is never a conflict, whether or not it spells out the
+ *     draft's value.
+ *   - Added detail is not a conflict ("Tuesday at 2pm" then "Tuesday at 2pm
+ *     on October 6"): a component is compared only with itself, and only when
+ *     both sides state it.
  */
 function humanContradictsSchedule({ draft, humanReply }) {
-  const disjoint = (mine, theirs) => mine.size > 0 && theirs.size > 0 && ![...theirs].some((t) => mine.has(t));
-  if (disjoint(weekdayTokens(draft), weekdayTokens(humanReply))) return true;
-  if (disjoint(monthDayTokens(draft), monthDayTokens(humanReply, { numeric: true }))) return true;
-  const mine = clockTokens(draft);
-  const theirs = clockTokens(humanReply);
-  if (disjoint(mine, theirs)) {
-    // A window that starts or ends on the draft's hour is the same time said
-    // as a range ("2-4pm", "between 2 and 4 pm"): the bare hour is in the reply.
-    const reply = norm(humanReply);
-    const hourRestated = [...mine].some((c) => new RegExp(`\\b${c.match(/^\d{1,2}/)[0]}\\b(?!:)`).test(reply.replace(/\b\d{1,2}(?::[0-5]\d)?\s?[ap]\.?m\b\.?/g, ' ')));
-    if (!hourRestated) return true;
-  }
+  const conflicts = (mine, theirs) => mine.size > 0 && theirs.size === 1 && !mine.has([...theirs][0]);
+  if (conflicts(weekdayTokens(draft), weekdayTokens(humanReply))) return true;
+  if (conflicts(monthDayTokens(draft, { numeric: true }), monthDayTokens(humanReply, { numeric: true }))) return true;
   return false;
 }
 
@@ -199,10 +200,10 @@ function decideDisposition({ model, predicates = [], safety = null, draft, human
     if (quoteVerified && hitModes.has(model.failure_mode)) {
       return { disposition: 'confirmed_mistake', rule: 'model+predicate', quoteVerified, ...cell };
     }
-    // The facts can support the draft's time while the person, who knows the
+    // The facts can support the draft's day while the person, who knows the
     // real schedule, names a different one: no predicate fires (the draft
     // matches the facts) and the judge may not have deducted. The person's own
-    // differing day or time is the second reader for a schedule claim.
+    // differing weekday or date is the second reader for a schedule claim.
     if (quoteVerified && contradictsSchedule && model.failure_mode === 'invented_schedule_eta') {
       return { disposition: 'confirmed_mistake', rule: 'model+human_contradiction', quoteVerified, ...cell };
     }
