@@ -71,6 +71,25 @@ describe('assistant reply buttons', () => {
   });
 });
 
+describe('payment card', () => {
+  it('renders the server-rendered rows and only Waves receipt links', async () => {
+    await ask({
+      reply: 'The card below has your recent payments.',
+      cards: [{ type: 'payments', title: 'Your last 2 payments', rows: [
+        { id: 'p1', description: 'Invoice WV-1042', dateLabel: 'Sep 28, 2026', amountLabel: '$129.00', statusLabel: 'Paid', methodLabel: 'Visa ending in 4242', receiptUrl: '/receipt/tok_abc' },
+        { id: 'p2', description: 'Silver WaveGuard Monthly', dateLabel: 'Aug 28, 2026', amountLabel: '$1,250.50', statusLabel: 'Failed', methodLabel: '', receiptUrl: 'https://evil.example/receipt/x' },
+      ] }, { type: 'unknown', rows: [{ id: 'z' }] }],
+    });
+    expect(screen.getByText('Your last 2 payments')).toBeInTheDocument();
+    expect(screen.getByText('$129.00')).toBeInTheDocument();
+    expect(screen.getByText('Sep 28, 2026 · Visa ending in 4242 · Paid')).toBeInTheDocument();
+    expect(screen.getByText('Aug 28, 2026 · Failed')).toBeInTheDocument();
+    const links = screen.getAllByRole('link', { name: 'View receipt' });
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toMatch(/\/receipt\/tok_abc$/);
+  });
+});
+
 describe('hand-off notice', () => {
   it('is shown when the server rang the bell', async () => {
     await ask({ reply: "I've sent this to our team.", escalated: true, teamNotified: true });

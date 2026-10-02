@@ -16228,6 +16228,50 @@ function chatActionsOf(actions) {
   )).slice(0, 9);
 }
 
+// Fact cards the assistant may show under a reply (GATE_PORTAL_CHAT_FACTS).
+// The server renders every label; the client shows only a payments card
+// whose receipt links are Waves receipt pages.
+const CHAT_CARD_TEXT = (v) => (typeof v === 'string' ? v.slice(0, 120) : '');
+function chatCardsOf(cards) {
+  if (!Array.isArray(cards)) return [];
+  return cards.filter((c) => c && c.type === 'payments' && Array.isArray(c.rows) && c.rows.length).slice(0, 2).map((c) => ({
+    type: 'payments',
+    title: CHAT_CARD_TEXT(c.title) || 'Recent payments',
+    rows: c.rows.slice(0, 5).map((r, i) => ({
+      id: typeof r.id === 'string' ? r.id : String(i),
+      description: CHAT_CARD_TEXT(r.description),
+      dateLabel: CHAT_CARD_TEXT(r.dateLabel),
+      amountLabel: CHAT_CARD_TEXT(r.amountLabel),
+      statusLabel: CHAT_CARD_TEXT(r.statusLabel),
+      methodLabel: CHAT_CARD_TEXT(r.methodLabel),
+      receiptUrl: typeof r.receiptUrl === 'string' && /^\/receipt\/[A-Za-z0-9_-]+$/.test(r.receiptUrl) ? r.receiptUrl : null,
+    })),
+  }));
+}
+
+function ChatCards({ cards }) {
+  if (!cards?.length) return null;
+  return cards.map((card, ci) => (
+    <div key={ci} data-chat-card={card.type} style={{ marginTop: 8, borderRadius: 8, background: '#fff', border: `1px solid ${PORTAL_SHELL.border}`, padding: 12, maxWidth: '84%' }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text, marginBottom: 6 }}>{card.title}</div>
+      {card.rows.map((r) => (
+        <div key={r.id} style={{ padding: '8px 0', borderTop: `1px solid ${PORTAL_SHELL.border}`, fontSize: 14, color: PORTAL_SHELL.text }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span style={{ fontWeight: 700, minWidth: 0 }}>{r.description}</span>
+            <span style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{r.amountLabel}</span>
+          </div>
+          <div style={{ color: PORTAL_SHELL.muted, marginTop: 2 }}>
+            {[r.dateLabel, r.methodLabel, r.statusLabel].filter(Boolean).join(' · ')}
+          </div>
+          {r.receiptUrl && (
+            <a href={receiptApiUrl(r.receiptUrl)} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 4, color: PORTAL_SHELL.text, textDecoration: 'underline', minHeight: 44, lineHeight: '44px' }}>View receipt</a>
+          )}
+        </div>
+      ))}
+    </div>
+  ));
+}
+
 // A /ai/chat response as the chat rows it adds: the assistant's reply (with
 // its buttons), then the "team notified" line only when the server says the
 // bell rang (teamNotified false = the request is saved but nobody was paged,
@@ -16240,6 +16284,7 @@ function chatRowsFor(data) {
     content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.",
     reportable: !!data.reply && data.canReport !== false,
     actions: chatActionsOf(data.actions),
+    cards: chatCardsOf(data.cards),
   }];
   if (data.escalated && data.teamNotified !== false) {
     rows.push({ role: 'system', content: 'A team member has been notified and will follow up shortly.' });
@@ -16427,6 +16472,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
               }}>
                 {msg.content}
               </div>
+              <ChatCards cards={msg.cards} />
               <ChatActions actions={msg.actions} onNavigate={onNavigate} />
               {msg.reportable && (
                 reportState[i] === 'done' ? (

@@ -10,6 +10,7 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
+const { listPortalPayments } = require('../portal-payment-history');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -101,7 +102,27 @@ const PORTAL_TOOLS = [
   },
 ];
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link']);
+// GATE_PORTAL_CHAT_FACTS: the portal tools plus the account-fact tools. A
+// fact tool renders the customer's own rows into a CARD the chat shows (the
+// same rows the portal tab shows); the model is told only that the card is
+// there, never the figures, so there is no money-shaped text for it to
+// misstate (owner ruling 2026-10-01: the AI states a payment fact only by
+// copying a system-rendered sentence; here it copies nothing).
+const RECENT_PAYMENTS_SHOWN = 3;
+// Payment statuses the card knows how to label. Anything else is left off
+// the card and reported to the model as "other" so it hands off.
+const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 'Failed', refunded: 'Refunded' };
+const PORTAL_FACTS_TOOLS = [
+  ...PORTAL_TOOLS.slice(0, 4),
+  {
+    name: 'show_recent_payments',
+    description: 'Show the customer a card with their most recent payments: date, amount, what it was for, the card or bank used, status, and a receipt link, plus an Open Billing button. Use for any question about a charge, a payment, a receipt, or whether a payment went through. You will be told only that the card was shown and how many payments it lists; the figures are on the card, not in your reply.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  PORTAL_TOOLS[4],
+];
+
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments']);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -114,8 +135,9 @@ function addAction(actions, action) {
 }
 
 // Tool execution. `actions` collects the buttons a portal tool wants shown
-// under the reply; callers that cannot render buttons leave it out.
-async function executeToolCall(toolName, input, contextCustomerId, actions = null) {
+// under the reply and `cards` the fact cards; callers that cannot render
+// them leave both out.
+async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null) {
   try {
     input = input && typeof input === 'object' ? input : {};
 
@@ -140,6 +162,8 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return await offerRescheduleLink(contextCustomerId, actions);
       case 'open_portal_section':
         return openPortalSection(input.section, actions);
+      case 'show_recent_payments':
+        return await showRecentPayments(contextCustomerId, actions, cards);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -251,6 +275,66 @@ async function offerRescheduleLink(customerId, actions) {
   };
 }
 
+// Money for a card: whole dollars and cents, as the Billing tab prints them.
+const moneyLabel = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const longDateLabel = (value) => {
+  const key = dateKeyOf(value);
+  const d = new Date(`${key}T12:00:00Z`);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+};
+const methodLabel = (p) => {
+  if (!p.lastFour) return '';
+  const isBank = ['us_bank_account', 'bank', 'ach'].includes(String(p.methodType || '').toLowerCase());
+  const brand = isBank ? (p.bankName || 'Bank account') : (p.cardBrand ? p.cardBrand.charAt(0).toUpperCase() + p.cardBrand.slice(1) : 'Card');
+  return `${brand} ending in ${p.lastFour}`;
+};
+
+async function showRecentPayments(customerId, actions, cards) {
+  const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
+  if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
+  let page;
+  try {
+    page = await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
+  } catch (err) {
+    logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
+    return NOT_SHOWN;
+  }
+  const rows = [];
+  let otherStatuses = 0;
+  for (const p of page.payments) {
+    const statusLabel = PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()];
+    if (!statusLabel) { otherStatuses += 1; continue; }
+    rows.push({
+      id: String(p.id),
+      description: String(p.description || 'Payment').replace(/\s+[—-]\s+per (application|visit)\s*$/i, ''),
+      dateLabel: longDateLabel(p.date),
+      amountLabel: moneyLabel(p.amount),
+      statusLabel: p.refundAmount > 0 && statusLabel === 'Paid' ? `Paid, ${moneyLabel(p.refundAmount)} refunded` : statusLabel,
+      methodLabel: methodLabel(p),
+      receiptUrl: p.receiptUrl || null,
+    });
+  }
+  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
+  if (!rows.length) {
+    return {
+      shown: false,
+      count: 0,
+      instruction: otherStatuses
+        ? 'The recent payments are in a state the card cannot show. Tell the customer the Billing page has the details and offer to pass the question to the team.'
+        : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
+    };
+  }
+  cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
+  return {
+    shown: true,
+    count: rows.length,
+    // Status words only, so the model can say whether the latest payment
+    // went through. Dates, amounts and descriptions stay on the card.
+    statuses: rows.map((r) => r.statusLabel.split(',')[0]),
+    instruction: `A card listing the customer's last ${rows.length} payment${rows.length === 1 ? '' : 's'} (date, amount, description, payment method, status, receipt) is now shown under your reply, with an Open Billing button. Point the customer to it. Do not state any amount, date or description yourself. If the customer asks why a charge is what it is, or disputes it, use the escalate tool.`,
+  };
+}
+
 function openPortalSection(section, actions) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
@@ -268,4 +352,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_SECTIONS, executeToolCall };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, executeToolCall };

@@ -4686,6 +4686,16 @@ function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
 
+// GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the portal assistant's account-fact tools
+// (services/ai-assistant): on, the portal chat can show the customer a
+// server-rendered card of their recent payments (the Billing tab's own
+// rows) and the model is told only that it was shown; off, the chat has the
+// PORTAL_CHAT_SELF_SERVE behavior alone (buttons, no account facts).
+function portalChatFactsLive() {
+  return process.env.GATE_PORTAL_CHAT_FACTS === 'true';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
@@ -4740,6 +4750,8 @@ module.exports.kbSpeciesQaLive = kbSpeciesQaLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.portalYardCalendarLive = portalYardCalendarLive;
+// GATE_PORTAL_CHAT_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.portalChatFactsLive = portalChatFactsLive;
 // GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
