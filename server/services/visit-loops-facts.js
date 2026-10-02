@@ -33,7 +33,6 @@ const logger = require('./logger');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { calendarDay } = require('./live-eta-destination');
-const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const DESCRIPTION_MAX = 120;
@@ -116,24 +115,6 @@ function windowLabel(row, deriveWindow) {
 }
 
 // ── today's visits ──────────────────────────────────────────────────────────
-// ALL of the customer's live visits today (ET), earliest first — not the
-// aggregator's upcoming list, which caps at three rows (a four-service day exists).
-async function loadTodayRows(customerId, { conn, now }) {
-  const today = etDateString(now);
-  const yesterday = etDateString(addETDays(now, -1));
-  const rows = await conn('scheduled_services as ss')
-    .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
-    .where('ss.customer_id', customerId)
-    .whereIn('ss.scheduled_date', [today, yesterday])
-    .whereIn('ss.status', UPCOMING_SERVICE_STATUSES)
-    .orderByRaw('ss.window_start ASC NULLS LAST, ss.route_order ASC NULLS LAST, ss.id ASC')
-    .select('ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.route_order', 'ss.scheduled_date', 'ss.status', 'ss.track_state',
-      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
-  // yesterday's rows only while their arrival window still runs past midnight
-  // (a 23:00 visit is live until 01:00)
-  const nowMin = nowEtMinutes(now);
-  return (rows || []).filter((r) => calendarDay(r.scheduled_date) === today || crossesIntoNow(r, nowMin));
-}
 // A visit dated yesterday whose customer-facing window rolls past midnight and has
 // not yet ended at nowMin (ET minutes of today).
 function crossesIntoNow(row, nowMin) {
@@ -248,11 +229,49 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
     .select('visit_id', 'technician_id', 'scheduled_date', 'window_start');
   return new Set((advanced || []).map(stopKey).filter(Boolean));
 }
-async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }) {
+// The occurrence the customer was PROMISED for each candidate: the no-show detector's
+// own promise evidence (loadPromiseEvents + latestPromises: the newest window a
+// message actually delivered), so an uncommunicated internal move never changes it.
+// No known promise: the row's schedule (what booking showed them). { date, startHms }.
+async function promisedOccurrences(conn, rows, now) {
+  const detector = require('./no-show-detector');
+  const events = await detector.loadPromiseEvents(conn, rows.map((r) => r.id), { now });
+  const latest = detector.latestPromises(events || [], now);
+  const out = new Map();
+  for (const row of rows) {
+    const start = toDate(latest.get(String(row.id))?.start_at);
+    out.set(String(row.id), start
+      ? { date: etDateString(start), startHms: `${start.toLocaleTimeString('en-US', ET_HHMM)}:00` }
+      : { date: calendarDay(row.scheduled_date), startHms: row.window_start || null });
+  }
+  return out;
+}
+
+// Every not-started visit whose PROMISED customer-facing window has ended: the
+// earliest is rendered, all of them ride in `passedKeys` for the send-time
+// signature (a second window passing while a card waits must change it).
+// Candidates are the customer's live rows near today — not only today's schedule —
+// since an uncommunicated move can take a row off today while its promise is today.
+async function findPastWindow({ conn, now, deriveWindow, customerId }) {
+  const today = etDateString(now);
+  const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
-  // not started (tracker unset or 'scheduled'), plus the service-record,
-  // street-level-hold and sibling checks below
-  const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
+  const rows = ((await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', yesterday).where('scheduled_date', '<=', etDateString(addETDays(now, 60)))
+    .whereIn('status', NOT_STARTED_STATUSES)
+    .select('id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_end',
+      'window_display', 'time_window', 'service_type')) || [])
+    // not started (tracker unset or 'scheduled'), plus the service-record,
+    // street-level-hold and sibling checks below
+    .filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
+  if (!rows.length) return null;
+  const promised = await promisedOccurrences(conn, rows, now);
+  // the promised occurrence is today (or yesterday's, running past midnight)
+  const candidates = rows.filter((row) => {
+    const occ = promised.get(String(row.id));
+    return occ.date === today || occ.date === yesterday;
+  });
   if (!candidates.length) return null;
   const ids = candidates.map((r) => r.id);
   const [recorded, held, startedStops] = await Promise.all([
@@ -264,14 +283,29 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }
     startedStopKeys(conn, customerId, candidates),
   ]);
   const done = new Set([...(recorded || []).map((r) => String(r.scheduled_service_id)), ...(held || []).map((r) => String(r.id))]);
+  const passed = [];
   for (const row of candidates) {
     const key = stopKey(row);
     if (done.has(String(row.id)) || (key && startedStops.has(key))) continue;
-    const endMin = customerWindowEndMinutes(row);
-    if (endMin == null || endMin >= nowMin) continue;
-    return { visitId: String(row.id), windowStart: row.window_start || null, scheduledDate: calendarDay(row.scheduled_date), type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
+    const occ = promised.get(String(row.id));
+    // minutes since the promised day's midnight; yesterday's occurrence is +1440 behind
+    const endMin = customerWindowEndMinutes({ window_start: occ.startHms });
+    const nowOnDay = occ.date === today ? nowMin : nowMin + 1440;
+    if (endMin == null || endMin >= nowOnDay) continue;
+    passed.push({ row, occ, minutesPast: nowOnDay - endMin });
   }
-  return null;
+  if (!passed.length) return null;
+  passed.sort((x, y) => `${x.occ.date}T${x.occ.startHms}`.localeCompare(`${y.occ.date}T${y.occ.startHms}`));
+  const { row, occ, minutesPast } = passed[0];
+  return {
+    visitId: String(row.id),
+    windowStart: occ.startHms,
+    scheduledDate: occ.date,
+    type: row.service_type || null,
+    windowDisplay: windowLabel({ ...row, window_start: occ.startHms }, deriveWindow),
+    minutesPast,
+    passedKeys: passed.map((p) => `${p.row.id}@${p.occ.date}T${p.occ.startHms}`),
+  };
 }
 
 // ── open promises / asks ────────────────────────────────────────────────────
@@ -306,6 +340,20 @@ async function allOpenCallCommitments(conn, { customerId, now = new Date() }) {
   return rows;
 }
 
+// Every open SMS/email commitment in one lane ('promise' | 'request'), paged to the
+// end: the reader orders by due / oldest source, the facts render the newest five.
+async function allSmsLane(conn, { customerId, now = new Date(), channels = null, lane }) {
+  const { listSmsCommitments } = require('./sms-operational-actions');
+  const rows = [];
+  for (let p = 0; p < CALL_PAGES_MAX; p += 1) {
+    const page = (await listSmsCommitments(conn, { customerId, limit: SMS_PAGE, offset: p * SMS_PAGE, now, channels, lane })) || [];
+    rows.push(...page);
+    if (page.length < SMS_PAGE) break;
+  }
+  return rows;
+}
+const SMS_PAGE = 200;
+
 async function loadCommitments({ conn, customerId, now, strict }) {
   // strict (a send-time rebuild): every nested read throws instead of reading as empty
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
@@ -318,26 +366,20 @@ async function loadCommitments({ conn, customerId, now, strict }) {
   }
   // SMS + email rows share one reader; each channel keeps its own gate.
   await read('sms/email commitments', null, async () => {
-    const { smsCommitmentsEnabled, listSmsCommitments } = require('./sms-operational-actions');
+    const { smsCommitmentsEnabled } = require('./sms-operational-actions');
     const smsOn = smsCommitmentsEnabled();
     const emailOn = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
     if (!smsOn && !emailOn) return null;
-    // only the enabled channels, and each rendered lane on its own page, so a limit
-    // never lets one population crowd the other out
+    // only the enabled channels, each lane read to the end of its pages, and each
+    // row classified by the lane query that returned it (never a second read whose
+    // failure could turn a customer's request into a promise of ours)
     const channels = [smsOn && 'sms', emailOn && 'email'].filter(Boolean);
-    const lanes = await Promise.all(['promise', 'request'].map((lane) => listSmsCommitments(conn, { customerId, limit: 50, now, channels, lane })));
-    const listed = lanes.flat();
-    const kept = listed.filter((r) => (r.channel === 'email' ? emailOn : smsOn));
-    // The reader's select omits sms_context (basis: promise vs request, and the
-    // spoken due text); one keyed read supplies it.
-    let contexts = new Map();
-    if (kept.length) {
-      contexts = await read('sms commitment context', new Map(), async () => {
-        const found = await conn('call_commitments').whereIn('id', kept.map((r) => r.id)).select('id', 'sms_context');
-        return new Map((found || []).map((f) => [String(f.id), parseJson(f.sms_context) || {}]));
-      });
+    for (const lane of ['promise', 'request']) {
+      const listed = await allSmsLane(conn, { customerId, now, channels, lane });
+      for (const r of listed.filter((x) => (x.channel === 'email' ? emailOn : smsOn))) {
+        rows.push({ ...r, __lane: lane, __source: r.channel === 'email' ? 'email' : 'sms' });
+      }
     }
-    for (const r of kept) rows.push({ ...r, sms_context: contexts.get(String(r.id)) || null, __source: r.channel === 'email' ? 'email' : 'sms' });
     return null;
   });
 
@@ -353,8 +395,8 @@ async function loadCommitments({ conn, customerId, now, strict }) {
   // customerWaiting: a text/email the customer sent that asks us for something
   // (basis 'request'). A customer-party CALL row is something the customer
   // promised us, so it appears in neither list.
-  const isWaiting = (r) => r.__source !== 'call' && r.sms_context?.basis === 'request';
-  const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.party === 'waves' && r.sms_context?.basis !== 'request');
+  const isWaiting = (r) => r.__source !== 'call' && r.__lane === 'request';
+  const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.__lane === 'promise');
 
   // No deadline is restated: due_at can be an internal default (a 48h reminder for
   // an untimed "I'll call you back"), an earliest-action floor ("after 3 PM") or
@@ -399,8 +441,7 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const ctx = { conn, now, deriveWindow, customerId, strict };
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
 
-  const todayRows = await read('today visits', [], () => loadTodayRows(customerId, ctx));
-  const pastWindow = await read('past window', null, () => findPastWindow(todayRows, ctx));
+  const pastWindow = await read('past window', null, () => findPastWindow(ctx));
 
   const [lateAlert, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(ctx)),
@@ -430,9 +471,9 @@ function visitStatusSignature(visitLoops) {
   const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
-    v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}`,
+    v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, commitmentRevision, visitStatusSignature, allOpenCallCommitments };
+module.exports = { loadVisitLoops, emptyVisitLoops, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };

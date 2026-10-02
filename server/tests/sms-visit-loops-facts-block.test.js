@@ -44,7 +44,7 @@ describe('renderVisitLoopsSection', () => {
     expect(out).not.toContain('Tech position');
     // no minutes: the alert's figure is frozen and measured from the internal job block
     expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
-    expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
+    expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
     expect(out).not.toContain('no tech location');
     expect(out).not.toContain('MISSED VISIT'); // split out of #5499 into its own PR
     expect(out).not.toContain('live note');
@@ -274,7 +274,7 @@ describe('visitLoopStatus', () => {
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull(); // facts without the section
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
-      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00:' });
+      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00::' });
     // the section was rendered with nothing time-sensitive: a null signature is still
     // persisted, so a delay / passed window / miss that appears while the card waits refuses
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toEqual({ signature: null });

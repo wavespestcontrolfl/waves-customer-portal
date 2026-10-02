@@ -440,13 +440,12 @@ function commitmentDayChanged(snapshot, now) {
 // the revision covers a staff edit to a row that stayed open.
 async function commitmentsChanged(conn, refs, customerId) {
   if (!customerId) return true;
-  const { listSmsCommitments } = require('./sms-operational-actions');
-  const { commitmentRevision, allOpenCallCommitments } = require('./visit-loops-facts');
+  const { commitmentRevision, allOpenCallCommitments, allSmsLane } = require('./visit-loops-facts');
   // each rendered SMS/email lane on its own page, as the facts loader reads them
   const [calls, promises, requests] = await Promise.all([
     allOpenCallCommitments(conn, { customerId }),
-    listSmsCommitments(conn, { customerId, limit: 201, lane: 'promise' }),
-    listSmsCommitments(conn, { customerId, limit: 201, lane: 'request' }),
+    allSmsLane(conn, { customerId, lane: 'promise' }),
+    allSmsLane(conn, { customerId, lane: 'request' }),
   ]);
   const live = new Map([...(calls || []), ...(promises || []), ...(requests || [])].map((r) => [String(r.id), r]));
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));

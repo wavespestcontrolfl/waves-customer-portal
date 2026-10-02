@@ -7,6 +7,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn() }));
 jest.mock('../services/sms-operational-actions', () => ({ smsCommitmentsEnabled: jest.fn(), listSmsCommitments: jest.fn() }));
+// the no-show detector's promise evidence (what the customer was actually sent): none by default
+jest.mock('../services/no-show-detector', () => ({
+  loadPromiseEvents: jest.fn(async () => []),
+  latestPromises: (events) => new Map((events || []).map((e) => [String(e.visit_id), e])),
+}));
+const { loadPromiseEvents } = require('../services/no-show-detector');
 
 const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
@@ -51,6 +57,8 @@ function fakeConn(handlers) {
   return conn;
 }
 const hasOp = (ops, op, pred) => ops.some((o) => o.op === op && (!pred || pred(o.args)));
+// the passed-window candidate read (the customer's not-started rows from yesterday on)
+const isCandidateQuery = (ops) => hasOp(ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=');
 
 const todayEntry = (over = {}) => ({ type: 'Pest Control', date: '2026-10-01', isToday: true, tech: 'Jamie Rivera', scheduledServiceId: 'visit-1', ...over });
 const todayRow = (over = {}) => ({
@@ -233,13 +241,13 @@ describe('lateAlert', () => {
 describe('pastWindow', () => {
   const run = (row, now = NOW) => loadVisitLoops({
     customerId: 'c1', upcomingServices: [todayEntry()], now, deriveWindow,
-    conn: fakeConn({ scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin') ? [todayRow(row)] : (kind === 'first' ? null : [])) }),
+    conn: fakeConn({ scheduled_services: (ops, kind) => (isCandidateQuery(ops) ? [todayRow(row)] : (kind === 'first' ? null : [])) }),
   });
 
   test('a pending visit past its customer-facing window (start + 2h, not the internal block) reads passed', async () => {
     // window_start 09:00, internal window_end 10:00, customer window 9-11; it is 12:00.
     const out = await run({ status: 'pending' });
-    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60 });
+    expect(out.pastWindow).toEqual({ visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM', minutesPast: 60, passedKeys: ['visit-1@2026-10-01T09:00:00'] });
   });
 
   test('inside the customer-facing window (even past the internal window_end) is not passed', async () => {
@@ -262,7 +270,7 @@ describe('pastWindow', () => {
   test('performed but not closed (tracker complete, or a service record) is never "passed"', async () => {
     expect((await run({ status: 'confirmed', track_state: 'complete' })).pastWindow).toBeNull();
     const conn = fakeConn({
-      scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin') ? [todayRow({ status: 'pending' })] : (kind === 'first' ? null : [])),
+      scheduled_services: (ops, kind) => (isCandidateQuery(ops) ? [todayRow({ status: 'pending' })] : (kind === 'first' ? null : [])),
       service_records: () => [{ scheduled_service_id: 'visit-1' }],
     });
     expect((await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow, conn })).pastWindow).toBeNull();
@@ -270,7 +278,7 @@ describe('pastWindow', () => {
 
   test('a lagging row is not "passed" when a sibling at the same stop (tech, day, window) is underway or done', async () => {
     const conn = (advanced) => fakeConn({ scheduled_services: (ops) => {
-      if (hasOp(ops, 'leftJoin')) return [todayRow({ status: 'confirmed' })];
+      if (isCandidateQuery(ops)) return [todayRow({ status: 'confirmed' })];
       if (hasOp(ops, 'where', (a) => a[0] && a[0].customer_id === 'c1') && hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date')) return advanced;
       return [];
     } });
@@ -282,7 +290,7 @@ describe('pastWindow', () => {
 
   test('distinct visit groups, or rows that cannot be shown to share a stop, never collapse into one', async () => {
     const conn = (row, advanced) => fakeConn({ scheduled_services: (ops) => {
-      if (hasOp(ops, 'leftJoin')) return [todayRow(row)];
+      if (isCandidateQuery(ops)) return [todayRow(row)];
       if (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date')) return advanced;
       return [];
     } });
@@ -298,12 +306,32 @@ describe('pastWindow', () => {
 
   test('an uncleared street-level address hold is never "passed" (never dispatched)', async () => {
     const conn = (held) => fakeConn({ scheduled_services: (ops) => {
-      if (hasOp(ops, 'leftJoin')) return [todayRow({ status: 'confirmed' })];
+      if (isCandidateQuery(ops)) return [todayRow({ status: 'confirmed' })];
       if (hasOp(ops, 'whereExists')) return held;
       return [];
     } });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ id: 'visit-1' }]) })).pastWindow).toBeNull();
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+  });
+
+  test('the PROMISED window counts, not the row\'s current schedule (an uncommunicated move)', async () => {
+    // promised 9 AM today; staff moved the row to 3 PM without telling the customer: at noon it is passed
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' }]);
+    expect((await run({ status: 'confirmed', window_start: '15:00:00' })).pastWindow).toMatchObject({ visitId: 'visit-1', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
+    // moved to NEXT week, promise still today: still found and passed
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T13:00:00.000Z', communicated_at: '2026-09-29T12:00:00Z' }]);
+    expect((await run({ status: 'confirmed', scheduled_date: '2026-10-08' })).pastWindow).toMatchObject({ scheduledDate: '2026-10-01' });
+    // the customer was told 3 PM (a communicated move): not passed at noon
+    loadPromiseEvents.mockResolvedValueOnce([{ visit_id: 'visit-1', start_at: '2026-10-01T19:00:00.000Z', communicated_at: '2026-10-01T12:00:00Z' }]);
+    expect((await run({ status: 'confirmed', window_start: '09:00:00' })).pastWindow).toBeNull();
+  });
+
+  test('every passed visit rides in the signature keys; the earliest is rendered', async () => {
+    const conn = fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops)
+      ? [todayRow({ id: 'v-late', window_start: '10:00:00', status: 'confirmed' }), todayRow({ status: 'confirmed' })]
+      : []) });
+    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn }); // 13:00 ET
+    expect(out.pastWindow).toMatchObject({ visitId: 'visit-1', passedKeys: ['visit-1@2026-10-01T09:00:00', 'v-late@2026-10-01T10:00:00'] });
   });
 
   test('a window that crosses midnight (23:00-01:00) is not passed in the evening', async () => {
@@ -353,13 +381,14 @@ describe('weOwe and customerWaiting', () => {
     expect(out.weOwe).toHaveLength(1);
   });
 
-  test('sms gate on: basis request is the customer waiting, basis promise is ours; each carries the day it was asked', async () => {
+  test('sms gate on: the request lane is the customer waiting, the promise lane is ours (classified by the query, no second read); each carries the day it was asked', async () => {
     smsCommitmentsEnabled.mockReturnValue(true);
-    listSmsCommitments.mockResolvedValue([
-      smsRow({ id: 's-1' }),
-      smsRow({ id: 's-2', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-09-30T10:00:00Z' }),
-    ]);
-    const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
+    listSmsCommitments.mockImplementation(async (_c, { lane }) => (lane === 'promise'
+      ? [smsRow({ id: 's-1' })]
+      : [smsRow({ id: 's-2', kind: 'send_report', description: 'Report requested', due_at: null, sms_started_at: '2026-09-30T10:00:00Z' })]));
+    // a failing sms_context read can no longer reclassify anything: it is never read
+    const conn = fakeConn({ call_commitments: () => { throw new Error('context read down'); } });
+    const out = await run(conn);
     expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', since: '2026-10-01', source: 'sms' }]);
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
   });

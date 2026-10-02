@@ -4529,7 +4529,7 @@ function visitLoopPastWindowLine(past) {
   if (!past || typeof past !== 'object') return null;
   const type = visitLoopText(past.type, 60) || 'scheduled';
   const win = visitLoopText(past.windowDisplay, 40);
-  return `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
+  return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
