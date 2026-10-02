@@ -226,6 +226,9 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     const block = source.slice(fenced, fenced + 1500);
     expect(block).toContain('if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {');
     expect(block).toContain("skippedReason: 'first_name_exact_address_hold'");
+    // the two sites gate on the SAME condition: enforceModeActive is exactly that expression
+    expect(source).toContain('const enforceModeActive = CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;');
+    expect(source.match(/const enforceModeActive = /g)).toHaveLength(1);
   });
 
   test('wiring: the booking path marks the call for review while the first-name card is open', () => {
