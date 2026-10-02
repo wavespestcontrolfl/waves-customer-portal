@@ -64,6 +64,9 @@ const REQUIRED_STAMPS = Object.freeze({
   reverted: ['revert_pr_number'],
 });
 
+// Evidence tied to one PR: cleared when that PR is closed or replaced.
+const PR_EVIDENCE = Object.freeze(['pr_url', 'reviewed_commit', 'dev_run_id', 'holdout_run_id']);
+
 // Fields a caller may stamp, with or without a status change.
 const STAMPABLE = Object.freeze(['pr_number', 'pr_url', 'reviewed_commit', 'dev_run_id', 'holdout_run_id', 'shipped_version', 'revert_pr_number']);
 
@@ -83,12 +86,14 @@ function splitDevHoldout(area, incidentKeys) {
   return { dev, holdout };
 }
 
-// One confirmed summary per dev incident key (a carried key's summary is
-// read again from the ledger, not from the proposal it came from).
-async function devSummaries(dbi, area, devKeys) {
+// One confirmed summary per dev incident key, read from the ledger row IN
+// THIS CELL and version (one draft can be confirmed in several cells; a
+// billing summary must never describe a schedule proposal).
+async function devSummaries(dbi, { area, surface, failureMode, promptVersion }, devKeys) {
   if (!devKeys.length) return [];
   const rows = await dbi('ai_incidents')
-    .where({ area, disposition: 'confirmed_mistake' })
+    .where({ area, surface, failure_mode: failureMode, disposition: 'confirmed_mistake' })
+    .modify((q) => (promptVersion == null ? q.whereNull('prompt_version') : q.where('prompt_version', promptVersion)))
     .whereIn('incident_key', devKeys)
     .orderBy('adjudicated_at', 'asc')
     .select('incident_key', 'summary');
@@ -234,7 +239,7 @@ async function proposeFromIncidents({ dbi, area, promptVersion, minEvidence = 5,
             total: all.length,
             carried: carried.length,
             holdoutCount: holdout.length,
-            devIncidents: await devSummaries(trx, area, dev),
+            devIncidents: await devSummaries(trx, { area, surface: cell.surface, failureMode: cell.failure_mode, promptVersion }, dev),
           }),
           supersedes: open ? open.id : null,
           history: JSON.stringify([{ at, by: 'auto:proposer', from: null, to: 'pending', fields: { evidence_count: all.length, fresh: fresh.length } }]),
@@ -269,6 +274,25 @@ class TransitionError extends Error {
 }
 
 /**
+ * Review and replay evidence belongs to ONE PR. Closing the PR (pr_open →
+ * accepted) or naming a different PR clears it, so a later PR can never ship
+ * on an abandoned PR's clean review or replay runs. Returns the columns to
+ * null out.
+ */
+function prEvidenceCleared(row, to, fields) {
+  const closingPr = to === 'accepted' && row.status === 'pr_open';
+  const replacingPr = fields.pr_number != null && row.pr_number != null && Number(fields.pr_number) !== Number(row.pr_number);
+  if (closingPr && Object.keys(fields).some((k) => PR_EVIDENCE.includes(k) || k === 'pr_number')) {
+    throw new TransitionError('illegal_transition', 'closing the PR (back to accepted) takes no PR stamps');
+  }
+  if (!closingPr && !replacingPr) return {};
+  const cleared = {};
+  for (const k of PR_EVIDENCE) if (!(k in fields)) cleared[k] = null;
+  if (closingPr) cleared.pr_number = null;
+  return cleared;
+}
+
+/**
  * Move a proposal and/or stamp it. `to` may be omitted to stamp only (a run
  * id, a PR URL). Refuses an illegal move, a missing required stamp, an
  * unknown field, and a lost race (the status changed since it was read).
@@ -289,18 +313,19 @@ async function transitionProposal({ dbi, id, to, fields = {}, by, now = new Date
     if (to != null && to !== row.status && !(TRANSITIONS[to] || []).includes(row.status)) {
       throw new TransitionError('illegal_transition', `${row.status} → ${to} is not allowed`);
     }
-    const next = { ...row, ...fields };
+    const cleared = prEvidenceCleared(row, to, fields);
+    const next = { ...row, ...cleared, ...fields };
     const target = to ?? row.status;
     const missing = (REQUIRED_STAMPS[target] || []).filter((k) => next[k] == null || next[k] === '');
     if (missing.length) throw new TransitionError('missing_stamp', `${target} needs ${missing.join(', ')}`);
 
-    const patch = { ...fields, updated_at: now };
+    const patch = { ...cleared, ...fields, updated_at: now };
     if (to != null && to !== row.status) {
       patch.status = to;
       if (to === 'shipped') patch.shipped_at = now;
       if (to === 'reverted') patch.reverted_at = now;
     }
-    const entry = { at: now, by, from: row.status, to: target, fields };
+    const entry = { at: now, by, from: row.status, to: target, fields, ...(Object.keys(cleared).length ? { cleared: Object.keys(cleared) } : {}) };
     // Every check above has run; a dry run stops here and reports the change.
     if (dryRun) return { ...row, ...patch, history: [...(row.history || []), entry], dryRun: true };
     patch.history = trx.raw('history || ?::jsonb', [JSON.stringify([entry])]);

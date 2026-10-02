@@ -171,6 +171,39 @@ test('the service and the migration name the same statuses, fix kinds and open s
     await expect(step('shipped')).rejects.toMatchObject({ code: 'illegal_transition' });
   });
 
+  test('a closed or replaced PR takes its review and replay evidence with it', async () => {
+    await seed(5);
+    await propose();
+    const { id } = await database('ai_fix_proposals').first();
+    const step = (to, fields = {}) => transitionProposal({ dbi: database, id, to, fields, by: 'lane:test' });
+    const evidence = { reviewed_commit: 'abc1234', dev_run_id: randomUUID(), holdout_run_id: randomUUID() };
+
+    await step('pr_open', { pr_number: 5601, pr_url: 'https://github.com/example/repo/pull/5601', ...evidence });
+    // Naming a different PR clears the old one's evidence…
+    const replaced = await step(undefined, { pr_number: 5602 });
+    expect(replaced).toMatchObject({ pr_number: 5602, pr_url: null, reviewed_commit: null, dev_run_id: null, holdout_run_id: null });
+    await expect(step('shipped', { shipped_version: 'v13' })).rejects.toMatchObject({ code: 'missing_stamp' });
+
+    // …and closing the PR clears the PR too; the next PR starts from nothing.
+    await step(undefined, evidence);
+    await expect(step('accepted', { reviewed_commit: 'abc1234' })).rejects.toMatchObject({ code: 'illegal_transition' });
+    const closed = await step('accepted');
+    expect(closed).toMatchObject({ status: 'accepted', pr_number: null, reviewed_commit: null, dev_run_id: null, holdout_run_id: null });
+    expect(closed.history.at(-1).cleared).toEqual(expect.arrayContaining(['pr_number', 'reviewed_commit']));
+    await step('pr_open', { pr_number: 5610 });
+    await expect(step('shipped', { shipped_version: 'v13' })).rejects.toMatchObject({ code: 'missing_stamp' });
+  });
+
+  test('dev summaries come from the proposal\'s own cell, never another cell of the same draft', async () => {
+    const rows = await seed(12, { summary: 'schedule claim' });
+    // Every one of those drafts is also confirmed in a billing cell.
+    await database('ai_incidents').insert(rows.map((r) => incident({ incident_key: r.incident_key, failure_mode: 'invented_billing', summary: 'BILLING TEXT', adjudicated_at: new Date('2026-10-01T08:30:00Z') })));
+    await propose({ maxCells: 3 });
+    const schedule = await database('ai_fix_proposals').where({ failure_mode: CELL.failure_mode }).first();
+    expect(schedule.proposal).toContain('schedule claim');
+    expect(schedule.proposal).not.toContain('BILLING TEXT');
+  });
+
   test('the table refuses what the service would: stamps per status, closed lists, two open fixes in one cell', async () => {
     const base = { area: 'sms', ...CELL, fix_kind: 'facts', evidence_count: 5, evidence_cutoff_at: new Date(), proposal: 'p' };
     await expect(database('ai_fix_proposals').insert({ ...base, status: 'pr_open' })).rejects.toMatchObject({ code: '23514' });
