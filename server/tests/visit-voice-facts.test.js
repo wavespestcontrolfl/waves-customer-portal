@@ -569,6 +569,13 @@ describe('validateVoiceFacts', () => {
     expect(read({ method: 'none', quote: 'Did not spray today' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: true });
   });
 
+  test('a spray reading is judged at its own spray word, never another treatment (codex local r26 on #5538)', () => {
+    const note = 'Baited inside for ants and did not spray the perimeter. Sprayed around the house and did not bait the garage.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'perimeter', quote: 'Baited inside for ants and did not spray the perimeter' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'Sprayed around the house and did not bait the garage' })).toMatchObject({ spray: { method: 'perimeter' }, unclearSpray: false });
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;

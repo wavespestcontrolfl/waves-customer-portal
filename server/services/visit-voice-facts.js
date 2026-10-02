@@ -217,8 +217,6 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
   return true;
 }
 
-const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
-
 // A pest named with others shares a treatment its sentence ties to it, at
 // any mention of it the note holds:
 //   - a treatment word nearest before it in its clause ties it ("treated for
@@ -580,6 +578,22 @@ const METHOD_SUPPORTED = {
 // The words a spray quote says how the sprays went down with: an undone word
 // said of them undoes the spray (undoneInQuote).
 const SPRAY_SUBJECT = { perimeter: PERIMETER_WORDS_RE, spot: SPOT_WORDS_RE };
+// What a spray quote asserts: its spray word, the one nearest before the
+// method's words in their clause (else the first in that clause, else the
+// quote's first), never another treatment: in "baited inside for ants and
+// did not spray the perimeter" the perimeter's is the denied "spray"
+// (codex local r26 on #5538).
+function sprayAssertion(method) {
+  return (quote) => {
+    const sprays = [...quote.matchAll(new RegExp(SPRAY_WORD_RE.source, 'g'))];
+    if (!sprays.length) return null;
+    const subject = spanOf(SPRAY_SUBJECT[method].exec(quote));
+    const { from, to } = subject ? clauseBounds(quote, subject.offset) : { from: 0, to: 0 };
+    const inClause = sprays.filter((m) => m.index >= from && m.index < to);
+    const pick = inClause.filter((m) => m.index < subject?.offset).pop() || inClause[0] || sprays[0];
+    return { offset: pick.index, length: pick[0].length };
+  };
+}
 
 // How the sprays went down: only a grounded quote the note does not deny. A
 // perimeter spray decides the trace and the sprays' method, so one the note
@@ -616,7 +630,9 @@ function readSpray(spray, grounding) {
   // Not said, or not a method: a note that says how (around the house) or
   // that it did not spray holds the sheet rather than record a spot spray.
   if (!SPRAY_METHODS.has(spray.method)) return { spray: null, unclearSpray: said.perimeter || said.denied, noSpray: false };
-  const read = readQuote(spray.quote, grounding, { ...TREATMENT_FACT, subject: SPRAY_SUBJECT[spray.method] });
+  const read = readQuote(spray.quote, grounding, {
+    assertion: sprayAssertion(spray.method), denialAfter: TRAILING_DENIAL.treatment, subject: SPRAY_SUBJECT[spray.method],
+  });
   // A spray reading stands only on its own grounded quote that says it
   // sprayed: "placed bait inside for ants" is no spray, and a quote the note
   // does not hold is no evidence (pre-push P1 on #5538).
