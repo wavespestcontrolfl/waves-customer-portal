@@ -334,7 +334,9 @@ async function showRecentPayments(customerId, actions, cards) {
     return {
       shown: false,
       count: 0,
-      instruction: unlabeled
+      // An empty page with history behind it (a bounded scan that ended
+      // before the first visible row) is not "no payments".
+      instruction: unlabeled || page.hasMore || Number(page.total || 0) > 0
         ? 'The recent payments are in a state the card cannot show. Tell the customer the Billing page has the details and offer to pass the question to the team.'
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };

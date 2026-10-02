@@ -71,7 +71,7 @@ beforeEach(() => {
     }
     if (table === 'payments') {
       return thenableBuilder(
-        () => rawPayments.map(({ metadata }) => ({ metadata })),
+        () => rawPayments.map(({ metadata, payer_id }) => ({ metadata, payer_id })),
         () => ({ count: String(rawPayments.length) }),
       );
     }
@@ -117,6 +117,22 @@ test('filters third-party payer rows while keeping visible cursor pagination com
     const second = await fetch(`${baseUrl}/billing?limit=2&cursor=${first.nextCursor}`)
       .then((response) => response.json());
     expect(second.payments[0].id).toBe('payment-4');
+  });
+});
+
+// A row the ledger stamps as the payer's directly (payments.payer_id, or
+// metadata.payer_id on statement refunds/disputes) is excluded whatever it
+// links to — the chat payment card reads this same list.
+test('filters rows stamped payer-owned directly, by column or metadata', async () => {
+  payerInvoiceIds = ['payer-invoice'];
+  rawPayments[1].payer_id = 7;
+  rawPayments[2].metadata = { payer_id: 7, source: 'statement_refund' };
+
+  await withServer(async (baseUrl) => {
+    const first = await fetch(`${baseUrl}/billing?limit=3&cursor=0`).then((response) => response.json());
+    expect(first.payments.map((payment) => payment.id)).toEqual(['payment-1', 'payment-4', 'payment-5']);
+    expect(first.payments.some((payment) => payment.payerLookupFailed !== undefined)).toBe(false);
+    expect(first).toMatchObject({ total: 123 });
   });
 });
 

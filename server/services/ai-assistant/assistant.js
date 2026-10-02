@@ -392,7 +392,11 @@ class WavesAssistant {
 
       // Execute tool calls
       const toolResults = [];
-      for (const toolUse of toolUses) {
+      // Every other tool in this response runs before a hand-off, so a card
+      // or button the model asked for in the same breath is on the hand-off
+      // reply whatever order the blocks came in.
+      const ordered = [...toolUses].sort((a, b) => (a.name === 'escalate') - (b.name === 'escalate'));
+      for (const toolUse of ordered) {
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',

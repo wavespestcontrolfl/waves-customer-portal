@@ -147,7 +147,17 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
   const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
   const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
   const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
-  const isPayerLinked = (p) => {
+  const metadataPayerIdOf = (p) => {
+  try {
+    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+    return m && m.payer_id != null ? String(m.payer_id) : null;
+  } catch { return null; }
+};
+const isPayerLinked = (p) => {
+  // A row the ledger stamps as the payer's directly (payments.payer_id, or
+  // metadata.payer_id on statement refunds and disputes) is the payer's
+  // whatever it links to.
+  if (p.payer_id != null || metadataPayerIdOf(p)) return true;
     const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
     if (invId && payerInvoiceIds.has(invId)) return true;
     if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
@@ -171,7 +181,7 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
       // exclusion for rows payer-linked only through their PaymentIntent or
       // invoice-number description, leaving `total` above the number of
       // rows pagination will ever serve (pre-push P1).
-      .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description');
+      .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
     total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
   }
 

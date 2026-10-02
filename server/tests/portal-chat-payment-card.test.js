@@ -82,8 +82,16 @@ test('an unreadable payer ownership lookup shows no card', async () => {
   expect(result.shown).toBe(false);
 });
 
+test('an empty page with history behind it is not "no payments"', async () => {
+  listPortalPayments.mockResolvedValue({ payments: [], hasMore: true, total: 4 });
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], []);
+  expect(result.shown).toBe(false);
+  expect(result.instruction).not.toMatch(/No payments are on record/);
+  expect(result.instruction).toMatch(/pass the question to the team/);
+});
+
 test('no payments on record says so', async () => {
-  listPortalPayments.mockResolvedValue({ payments: [] });
+  listPortalPayments.mockResolvedValue({ payments: [], hasMore: false, total: 0 });
   const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], []);
   expect(result).toEqual(expect.objectContaining({ shown: false, count: 0 }));
   expect(result.instruction).toMatch(/No payments are on record/);

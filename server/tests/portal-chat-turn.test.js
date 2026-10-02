@@ -121,6 +121,24 @@ test('a card shown before a hand-off in the same turn stays on the hand-off repl
   escalate.mockRestore();
 });
 
+test('a card and a hand-off asked for in one response: the card runs first and rides the hand-off reply', async () => {
+  process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+  mockListPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Pest', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
+  wire('portal_chat', 'cust-1');
+  const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent', escalated: true, teamNotified: true });
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't1', name: 'escalate', input: { reason: 'why did it go up', topic: 'billing' } },
+    { type: 'tool_use', id: 't2', name: 'show_recent_payments', input: {} },
+  ] });
+
+  const result = await assistant.processMessage({ message: 'Why did my charge go up?', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  expect(result.escalated).toBe(true);
+  expect(result.cards).toHaveLength(1);
+  expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+  escalate.mockRestore();
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
