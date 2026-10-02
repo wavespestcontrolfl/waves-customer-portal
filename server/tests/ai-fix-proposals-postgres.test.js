@@ -75,6 +75,38 @@ test('the service and the migration name the same statuses, fix kinds and open s
     expect(p.proposal).not.toMatch(/\$\d/);
   });
 
+  test('the proposal describes dev incidents only; a held-out incident is counted, never summarized', async () => {
+    const rows = await seed(12);
+    rows.forEach((r, i) => { r.summary = `incident number ${i}`; });
+    await database('ai_incidents').del();
+    await database('ai_incidents').insert(rows);
+    await propose();
+    const p = await database('ai_fix_proposals').first();
+    expect(p.holdout_incident_keys.length).toBeGreaterThan(0);
+    const summaryOf = new Map(rows.map((r) => [r.incident_key, r.summary]));
+    for (const key of p.holdout_incident_keys) expect(p.proposal).not.toContain(`${summaryOf.get(key)}\n`);
+    for (const key of p.holdout_incident_keys) expect(p.proposal).not.toContain(String(key).slice(0, 8));
+    for (const key of p.dev_incident_keys.slice(0, 10)) expect(p.proposal).toContain(summaryOf.get(key));
+    expect(p.proposal).toContain(`${p.holdout_incident_keys.length} held out`);
+  });
+
+  test('cells with a fix in progress never take the weekly slots from a ready cell', async () => {
+    const busy = ['invented_billing', 'invented_commitment'];
+    for (const mode of busy) {
+      await seed(5, { failure_mode: mode });
+      await propose({ maxCells: 3 });
+    }
+    for (const p of await database('ai_fix_proposals')) {
+      await transitionProposal({ dbi: database, id: p.id, to: 'pr_open', fields: { pr_number: 1 }, by: 'test' });
+    }
+    // The busy cells have MORE fresh evidence than the ready one.
+    for (const mode of busy) await seed(9, { failure_mode: mode, adjudicated_at: new Date('2026-10-10T08:30:00Z') });
+    await seed(5, { adjudicated_at: new Date('2026-10-10T08:30:00Z') });
+    const out = await propose({ maxCells: 1, now: new Date('2026-10-11T08:45:00Z') });
+    expect(out).toMatchObject({ proposed: 1, skippedOpen: 2 });
+    expect(await database('ai_fix_proposals').where({ status: 'pending' }).select('failure_mode')).toEqual([{ failure_mode: CELL.failure_mode }]);
+  });
+
   test('below the threshold, on another version, or after the watermark nothing is proposed', async () => {
     await seed(4);
     await seed(5, { prompt_version: 'house_voice_v11' });

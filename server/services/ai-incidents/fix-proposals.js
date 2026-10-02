@@ -83,16 +83,34 @@ function splitDevHoldout(area, incidentKeys) {
   return { dev, holdout };
 }
 
-function buildProposalText({ area, surface, failureMode, fixKind, promptVersion, incidents, carried = 0 }) {
-  const total = incidents.length + carried;
+// One confirmed summary per dev incident key (a carried key's summary is
+// read again from the ledger, not from the proposal it came from).
+async function devSummaries(dbi, area, devKeys) {
+  if (!devKeys.length) return [];
+  const rows = await dbi('ai_incidents')
+    .where({ area, disposition: 'confirmed_mistake' })
+    .whereIn('incident_key', devKeys)
+    .orderBy('adjudicated_at', 'asc')
+    .select('incident_key', 'summary');
+  const byKey = new Map();
+  for (const r of rows) if (!byKey.has(r.incident_key)) byKey.set(r.incident_key, r);
+  return devKeys.map((k) => byKey.get(k) || { incident_key: k, summary: null });
+}
+
+/**
+ * The text the fix lane reads. Only DEV incidents are described: a held-out
+ * incident is counted, never summarized, so the fix is built without seeing
+ * the cases that will judge it.
+ */
+function buildProposalText({ area, surface, failureMode, fixKind, promptVersion, total, carried = 0, holdoutCount, devIncidents }) {
   const lines = [
     `${total} confirmed ${area} incidents in ${surface} / ${failureMode} on ${promptVersion || 'an unversioned prompt'}`
-      + (carried ? ` (${carried} carried from the proposal this supersedes, ${incidents.length} new).` : '.'),
-    `Fix kind: ${fixKind}. Confirmed by two models on different providers; summaries below are model-written, no names.`,
-    '',
-    ...incidents.slice(0, 10).map((i) => `- ${String(i.incident_key).slice(0, 8)}: ${String(i.summary || '(no summary)').replace(/\s+/g, ' ').slice(0, 240)}`),
+      + (carried ? ` (${carried} carried from the proposal this supersedes, ${total - carried} new).` : '.'),
+    `Fix kind: ${fixKind}. Confirmed by two models on different providers. ${holdoutCount} held out for proof and not described here.`,
+    'Dev incidents (model-written summaries, no names):',
+    ...devIncidents.slice(0, 10).map((i) => `- ${String(i.incident_key).slice(0, 8)}: ${String(i.summary || '(no summary)').replace(/\s+/g, ' ').slice(0, 240)}`),
   ];
-  if (incidents.length > 10) lines.push(`- … and ${incidents.length - 10} more`);
+  if (devIncidents.length > 10) lines.push(`- … and ${devIncidents.length - 10} more`);
   return lines.join('\n');
 }
 
@@ -141,9 +159,18 @@ async function proposeFromIncidents({ dbi, area, promptVersion, minEvidence = 5,
     .select(dbi.raw('MAX(p.last_cutoff) as last_cutoff'))
     .orderBy('fresh', 'desc');
 
-  const eligible = cells.filter((c) => Number(c.fresh) >= minEvidence).slice(0, maxCells);
+  // Cells whose fix is already accepted or in a PR are dropped BEFORE the
+  // weekly cap, so busy cells never take every slot from the rest.
+  const inProgress = new Set((await dbi('ai_fix_proposals')
+    .where({ area })
+    .whereIn('status', OPEN_STATUSES.filter((st) => st !== 'pending'))
+    .select('surface', 'failure_mode'))
+    .map((r) => `${r.surface}|${r.failure_mode}`));
+  const ready = cells.filter((c) => Number(c.fresh) >= minEvidence);
+  const skippedOpen = ready.filter((c) => inProgress.has(`${c.surface}|${c.failure_mode}`)).length;
+  const eligible = ready.filter((c) => !inProgress.has(`${c.surface}|${c.failure_mode}`)).slice(0, maxCells);
   let proposed = 0;
-  let skippedOpen = 0;
+  let lostRace = 0;
   for (const cell of eligible) {
     try {
       const incidents = await dbi('ai_incidents')
@@ -152,7 +179,7 @@ async function proposeFromIncidents({ dbi, area, promptVersion, minEvidence = 5,
         .where('adjudicated_at', '<=', cutoff)
         .modify((q) => { if (cell.last_cutoff) q.where('adjudicated_at', '>', cell.last_cutoff); })
         .orderBy('adjudicated_at', 'asc')
-        .select('incident_key', 'summary');
+        .select('incident_key');
 
       const inserted = await dbi.transaction(async (trx) => {
         const open = await trx('ai_fix_proposals')
@@ -199,7 +226,15 @@ async function proposeFromIncidents({ dbi, area, promptVersion, minEvidence = 5,
           holdout_incident_keys: JSON.stringify(holdout),
           evidence_cutoff_at: cutoff,
           proposal: buildProposalText({
-            area, surface: cell.surface, failureMode: cell.failure_mode, fixKind, promptVersion, incidents: fresh, carried: carried.length,
+            area,
+            surface: cell.surface,
+            failureMode: cell.failure_mode,
+            fixKind,
+            promptVersion,
+            total: all.length,
+            carried: carried.length,
+            holdoutCount: holdout.length,
+            devIncidents: await devSummaries(trx, area, dev),
           }),
           supersedes: open ? open.id : null,
           history: JSON.stringify([{ at, by: 'auto:proposer', from: null, to: 'pending', fields: { evidence_count: all.length, fresh: fresh.length } }]),
@@ -211,14 +246,17 @@ async function proposeFromIncidents({ dbi, area, promptVersion, minEvidence = 5,
         proposed += 1;
         logger.info(`[fix-proposals] ${area} proposal ${String(inserted).slice(0, 8)} for ${cell.surface}/${cell.failure_mode} (${cell.fresh} fresh)`);
       } else {
-        skippedOpen += 1;
+        // A lane accepted the cell's proposal between the read above and
+        // this transaction.
+        lostRace += 1;
         logger.info(`[fix-proposals] ${area} ${cell.surface}/${cell.failure_mode} has a fix in progress; ${cell.fresh} fresh incidents wait`);
       }
     } catch (err) {
       logger.error(`[fix-proposals] ${area} proposer failed for ${cell.surface}/${cell.failure_mode}: ${err.message}`);
     }
   }
-  const summary = { proposed, skippedOpen, eligibleCells: eligible.length, ms: Date.now() - startedAt };
+  if (skippedOpen) logger.info(`[fix-proposals] ${area}: ${skippedOpen} ready cell(s) have a fix in progress; their fresh incidents wait`);
+  const summary = { proposed, skippedOpen: skippedOpen + lostRace, eligibleCells: eligible.length, ms: Date.now() - startedAt };
   logger.info(`[fix-proposals] ${area} propose run complete: ${JSON.stringify(summary)}`);
   return summary;
 }
