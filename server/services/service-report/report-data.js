@@ -3821,62 +3821,6 @@ function buildWateringBanner(instruction, weekPlan = null) {
 // The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
 
-// The plan cadence in weeks a lawn service type names ("every 6 weeks",
-// "monthly"...), or null: the report's estimated next visit and the v6 copy's
-// gap read the same rule.
-function lawnCadenceWeeks(serviceType) {
-  const t = String(serviceType || '').toLowerCase();
-  const m = t.match(/every\s+(\d+)\s+week/);
-  if (m) return Number(m[1]);
-  if (/bi-?weekly/.test(t)) return 2;
-  if (/bi-?monthly/.test(t)) return 8;
-  if (/monthly/.test(t)) return 4;
-  if (/quarterly/.test(t)) return 13;
-  if (/weekly/.test(t)) return 1;
-  return null;
-}
-
-// The days from this visit to the next one AT THIS PROPERTY, for the v6
-// copy's "by your next visit" sentence (GATE_LAWN_REPORT_COPY_V6). The next
-// lawn booking is found by the shared same-line / same-property scan
-// (same-line-visit.js), so on a multi-property account a booking at another
-// home is skipped, not taken; no booking at this property falls back to this
-// visit's own plan cadence. Any read or property lookup that FAILS is recorded
-// as a degraded read (the copy must not freeze on it); an unresolvable
-// property gives an unknown gap, and no by-next-visit sentence is chosen.
-const LAWN_COPY_NEXT_SCAN = 25;
-async function lawnCopyNextVisitGap(service, timing, knex, readFailures) {
-  if (!timing.visitDate || !timing.afterIso || !service.scheduled_service_id) return null;
-  const rows = await knex('scheduled_services')
-    .where('customer_id', service.customer_id)
-    .andWhere('scheduled_date', '>', timing.afterIso)
-    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-    .orderBy('scheduled_date', 'asc')
-    .limit(LAWN_COPY_NEXT_SCAN)
-    .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS)
-    .catch(failSoft(readFailures, 'next_visit', null));
-  const reportVisit = await knex('scheduled_services')
-    .where({ id: service.scheduled_service_id })
-    .first(...PROPERTY_SCOPE_COLUMNS)
-    .catch(failSoft(readFailures, 'next_visit', null));
-  if (!rows || !reportVisit) return null;
-  const found = await nextSameLineVisitAtProperty({
-    knex, rows, reportVisit, serviceLine: 'lawn', onLookupFailure: () => readFailures.add('next_visit'),
-  });
-  if (found.state === 'scheduled') {
-    const raw = found.row.scheduled_date;
-    const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-    const gap = Math.round((Date.parse(`${iso}T12:00:00Z`) - Date.parse(`${timing.visitDate}T12:00:00Z`)) / 86400000);
-    return Number.isFinite(gap) && gap >= 0 ? gap : null;
-  }
-  // 'none' over a full page could hide this property's booking further out.
-  if (found.state === 'none' && rows.length < LAWN_COPY_NEXT_SCAN) {
-    const weeks = lawnCadenceWeeks(service.service_type);
-    return weeks ? weeks * 7 : null;
-  }
-  return null;
-}
-
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -5620,9 +5564,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // a real upcoming scheduled_services row (same allow-list as context-aggregator);
       // otherwise a clearly-labeled cadence ESTIMATE from the service frequency; else
       // omitted entirely. Never invent a precise date the data can't back.
-      // The visit / next-visit calendar days the v6 copy writer reads (it needs
-      // the gap in days, which the label cannot give it).
-      const lawnCopyTiming = { visitDate: null, afterIso: null };
+      // The visit day the v6 copy reads (the SELECTED assessment's date: an
+      // A→B re-do or a pinned render can differ from the record's service_date,
+      // the same anchor the water snapshot and gap history use).
+      const lawnCopyAnchor = lawnAssessment.assessmentDate || service.service_date || null;
+      const lawnCopyVisitDate = lawnCopyAnchor
+        ? (lawnCopyAnchor instanceof Date ? lawnCopyAnchor.toISOString().slice(0, 10) : String(lawnCopyAnchor).slice(0, 10))
+        : null;
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5653,18 +5601,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .first('scheduled_date')
             .catch(() => null);
           let nextVisit = null;
-          // The SELECTED assessment's date (an A→B re-do or a pinned render can
-          // differ from the record's service_date), the same anchor the water
-          // snapshot and gap history use.
-          const anchorRaw = lawnAssessment.assessmentDate || service.service_date || null;
-          lawnCopyTiming.visitDate = anchorRaw
-            ? (anchorRaw instanceof Date ? anchorRaw.toISOString().slice(0, 10) : String(anchorRaw).slice(0, 10))
-            : null;
-          lawnCopyTiming.afterIso = afterIso;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
           } else if (svcIso) {
-            const weeks = lawnCadenceWeeks(service.service_type);
+            const t = String(service.service_type || '').toLowerCase();
+            const m = t.match(/every\s+(\d+)\s+week/);
+            let weeks = m ? Number(m[1]) : null;
+            if (weeks == null) {
+              if (/bi-?weekly/.test(t)) weeks = 2;
+              else if (/bi-?monthly/.test(t)) weeks = 8;
+              else if (/monthly/.test(t)) weeks = 4;
+              else if (/quarterly/.test(t)) weeks = 13;
+              else if (/weekly/.test(t)) weeks = 1;
+            }
             if (weeks) {
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
@@ -5691,13 +5640,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // through reportV2.lead).
         try {
           const { resolveLawnCopyV6ForRender } = require('./lawn-copy-v6');
-          const gapDays = await lawnCopyNextVisitGap(service, lawnCopyTiming, knex, readFailures);
           const outcome = await resolveLawnCopyV6ForRender({
             structuredNotes: service.structured_notes,
             serviceRecordId: service.id,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
-            ctx: { visitDate: lawnCopyTiming.visitDate, nextVisitGapDays: gapDays },
+            ctx: { visitDate: lawnCopyVisitDate },
             // Never CREATE the first-writer-wins entry from a degraded read
             // (any input read that failed is in readFailures) or from
             // unverifiable treatment data; a stored entry still replays first.
@@ -5709,10 +5657,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // applied empty rather than fall back to the AI treatment narrative
           // that has replaced snapshot.treatmentSummary by now.
           Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy || LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
-          if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
+          if (outcome.unfrozen) {
+            lawnAssessment.weekWeatherUncacheable = true;
+            // DELIVERY: an emailed PDF is permanent, so it must not carry copy a
+            // later render could freeze differently. Held only for what a retry
+            // can fix (a failed read, or a failed freeze write: copy present but
+            // unfrozen); unverifiable treatment data alone never freezes, live
+            // or emailed, so it does not hold the send.
+            if (readFailures.size > 0 || outcome.copy) lawnAssessment.lawnCopyV6Unfrozen = true;
+          }
         } catch {
           Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
           lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.lawnCopyV6Unfrozen = true;
         }
       } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
         // The overlay rewrites customer-facing prose and validates only

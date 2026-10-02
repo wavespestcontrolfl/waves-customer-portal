@@ -2152,10 +2152,12 @@ through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
 (`treatment-summary.js`), never the AI treatment narrative that later overwrites
 `snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
 optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
-42 words: the visible-change and by-next-visit sentences of the first two
-expectation rows the owner has approved for today's products, printed word for
-word, a sentence that would pass the cap left out whole; every row ships
-`approved: false`, so the key is absent until the owner approves one) and
+42 words: the visible-change sentence of the first two expectation rows the owner
+has approved for today's products, printed word for word, a sentence that would
+pass the cap left out whole; no by-next-visit timing yet, since that needs the
+next visit at this property, which the report's own next-visit line does not
+resolve; every row ships `approved: false`, so the key is absent until the owner
+approves one) and
 `watching` ("We are also keeping an eye on <topics>." for the watched issues
 after the one the headline names, at most three). The lead's word budget gives
 these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
@@ -2165,16 +2167,14 @@ assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment,
 migration, written at the first healthy render, which the completion write gate
 performs) and replay byte for byte afterwards, so a later product edit or row
 approval never changes a sent report; a stored entry replays even when a later
-read fails. A degraded read (any input read failed, including the next-visit
-lookup that picks the by-next-visit sentence) or an unverifiable treatment
+read fails. A degraded read (any input read failed) or an unverifiable treatment
 creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
 such a render's lead keeps the snapshot headline and has no applied line (never
-the AI treatment narrative). A failed property or estimate lookup behind the
-next-visit check counts as a degraded read.
-That sentence's gap is the next lawn booking AT THIS PROPERTY (the shared
-same-line / same-property scan in `same-line-visit.js`, so an earlier booking at
-another of the customer's homes is skipped), else this visit's own plan cadence;
-an unresolvable property gives no by-next-visit sentence. The fields reach the lead through a non-enumerable
+the AI treatment narrative). A render whose copy a retry could still freeze
+differently (a failed read, or a failed freeze write) sets
+`lawnAssessment.lawnCopyV6Unfrozen`, and the pinned (emailed) PDF defers with a
+retryable `lawn_copy_v6_unfrozen` error instead of sending it.
+The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
 key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one

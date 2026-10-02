@@ -87,18 +87,6 @@ describe('resolveVisitPropertyScope', () => {
     expect(scope).toEqual({ key: null, hasEvidence: true });
   });
 
-  test('onLookupFailure fires for a FAILED property or estimate read, never for a row that is simply gone; the result is unchanged', async () => {
-    const failing = () => ({ where: () => ({ first: () => ({ catch: (fn) => Promise.resolve(fn(new Error('read failed'))) }) }) });
-    const onLookupFailure = jest.fn();
-    await expect(resolveVisitPropertyScope({ property_id: 'prop-a' }, failing, { onLookupFailure })).resolves.toEqual({ key: null, hasEvidence: true });
-    await expect(resolveVisitPropertyScope({ source_estimate_id: 'est-1' }, failing, { onLookupFailure })).resolves.toEqual({ key: null, hasEvidence: true });
-    expect(onLookupFailure).toHaveBeenCalledTimes(2);
-    const gone = jest.fn();
-    await resolveVisitPropertyScope({ property_id: 'prop-gone' }, fakeDb({ customer_properties: [] }), { onLookupFailure: gone });
-    await resolveVisitPropertyScope({ source_estimate_id: 'est-gone' }, fakeDb({ estimates: [] }), { onLookupFailure: gone });
-    expect(gone).not.toHaveBeenCalled();
-  });
-
   test('nothing at all (no stamp, property_id, or source_estimate_id) → no evidence, caller decides its own fallback', async () => {
     const scope = await resolveVisitPropertyScope({}, fakeDb());
     expect(scope).toEqual({ key: null, hasEvidence: false });

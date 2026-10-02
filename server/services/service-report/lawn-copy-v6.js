@@ -11,7 +11,10 @@
  *   whatWeDid    buildTreatmentSummary over the recorded products (never the
  *                AI treatment narrative that later overwrites the snapshot's copy)
  *   whatToExpect owner-approved expectation rows matched to today's products,
- *                their own sentences printed word for word (at most 2 rows, 42 words)
+ *                each row's visible-change sentence printed word for word (at most
+ *                2 rows, 42 words). No by-next-visit timing: that needs the next
+ *                visit at THIS property, which the report's own next-visit line
+ *                does not resolve yet (Codex #5604 r2-r5), so it waits.
  *   watching     "We are also keeping an eye on <topics>." for the watched issues
  *                the headline does not already name
  *
@@ -38,7 +41,7 @@ const FREEZE_VERSION = 1;
 
 const FIELD_CAPS = { whatToExpect: 42 };
 const MAX_EXPECT_ROWS = 2;
-const EXPECT_SENTENCE_KEYS = ['visibleChange', 'byNextVisit'];
+const EXPECT_SENTENCE_KEY = 'visibleChange';
 const FIELD_NAMES = ['headline', 'whatWeDid', 'whatToExpect', 'watching'];
 const MAX_WATCH_TOPICS = 3;
 
@@ -96,8 +99,8 @@ function buildWatching(reportV2) {
 }
 
 // Approved rows for today's products, in the engine's order; each row's own
-// sentences (the visible-change and by-next-visit ones, else its first),
-// printed word for word. A sentence that would pass the cap is skipped whole.
+// visible-change sentence, printed word for word. A row without one is
+// skipped; a sentence that would pass the cap is skipped whole.
 function buildWhatToExpect(reportV2, ctx, deps) {
   const products = productsOf(reportV2);
   if (!products.length) return { text: null, rows: [] };
@@ -106,7 +109,6 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
     visitDate: ctx.visitDate || null,
-    nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
@@ -119,18 +121,13 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   let words = 0;
   for (const row of rows) {
     if (picked.length >= MAX_EXPECT_ROWS) break;
-    const sentences = row.sentences.filter((s) => s && typeof s.key === 'string' && clean(s.text));
-    let chosen = sentences.filter((s) => EXPECT_SENTENCE_KEYS.includes(s.key));
-    if (!chosen.length) chosen = sentences.slice(0, 1);
-    const keys = [];
-    for (const sentence of chosen) {
-      const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
-      words += w;
-      pieces.push(sentence.text.trim());
-      keys.push(sentence.key);
-    }
-    if (keys.length) picked.push({ id: row.id, keys });
+    const sentence = row.sentences.find((s) => s && s.key === EXPECT_SENTENCE_KEY && clean(s.text));
+    if (!sentence) continue;
+    const w = countWords(sentence.text);
+    if (words + w > FIELD_CAPS.whatToExpect) continue;
+    words += w;
+    pieces.push(sentence.text.trim());
+    picked.push({ id: row.id, keys: [sentence.key] });
   }
   return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
 }
@@ -139,7 +136,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
  * The v6 fields for one visit, from its facts alone.
  *
  * @param {object} reportV2 the deterministic lawn reportV2 (snapshot, treatment, insights)
- * @param {object} ctx { visitDate, nextVisitGapDays }
+ * @param {object} ctx { visitDate }
  * @param {object} deps { buildExpectations? } injectable for tests
  * @returns {{ fields: {headline, whatWeDid, whatToExpect, watching}, expectRows: Array<{id, keys}> }}
  */
