@@ -347,8 +347,23 @@ describe('summary helpers', () => {
       expect(hintSearchPlan({ ...asked, ...flags })).toEqual({ summary: false, from: '2026-08-01', to: '2026-11-01', verdictDate: '2026-08-01', step: 15 });
     }
     expect(hintSearchPlan({ ...asked, hint: true, summary: true, summaryEnabled: true }))
-      .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-13', verdictDate: '2026-09-03', step: 60 });
+      .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-13', verdictDate: '2026-08-31', step: 60 });
+    expect(hintSearchPlan({ ...asked, pickedStart: '09:00', hint: true, summary: true, summaryEnabled: true }).verdictDate).toBe('2026-09-03');
     expect(hintSearchPlan({ ...asked, slotStepMinutes: undefined, hint: true }).step).toBeUndefined();
+  });
+
+  test('the legacy 90-day ceiling caps a plain request but not a long-overdue summary', () => {
+    const overdue = { from: '2026-05-01', to: '2026-09-10', maxTo: '2026-07-30', today: '2026-08-31' };
+    expect(hintSearchPlan({ ...overdue, hint: true }).to).toBe('2026-07-30');
+    expect(hintSearchPlan({ ...overdue, hint: true, summary: true, summaryEnabled: true }))
+      .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-10', verdictDate: '2026-08-31', step: 60 });
+  });
+
+  test('an omitted pickedDate defaults to dateFrom, so a past pick is out of range', () => {
+    const past = { hint: true, summary: true, summaryEnabled: true, from: '2026-08-20', to: '2026-09-10', today: '2026-08-31' };
+    expect(() => hintSearchPlan({ ...past, pickedStart: '09:00' })).toThrow('pickedDate must be inside the searched range');
+    expect(hintSearchPlan({ ...past, pickedStart: '09:00', from: '2026-09-02' }).verdictDate).toBe('2026-09-02');
+    expect(hintSearchPlan({ ...past, pickedStart: '09:00', pickedDate: '2026-09-03' }).verdictDate).toBe('2026-09-03');
   });
 
   test('summaryRangeEnd keeps a short range and caps a long one at 14 days', () => {

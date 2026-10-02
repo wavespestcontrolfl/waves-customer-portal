@@ -297,7 +297,7 @@ router.post('/', async (req, res) => {
     const startedAt = Date.now();
     const plan = hintSearchPlan({
       hint, summary, summaryEnabled: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
-      from, to: to > maxTo ? maxTo : to, today, pickedDate, slotStepMinutes,
+      from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();

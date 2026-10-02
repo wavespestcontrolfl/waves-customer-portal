@@ -327,14 +327,23 @@ function summaryRequestError(message) {
   return err;
 }
 
-function hintSearchPlan({ hint, summary, summaryEnabled, from, to, today, pickedDate, slotStepMinutes }) {
+function hintSearchPlan({ hint, summary, summaryEnabled, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
   const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined;
-  if (!(hint && summary === true && summaryEnabled)) return { summary: false, from, to, verdictDate: from, step };
+  if (!(hint && summary === true && summaryEnabled)) {
+    return { summary: false, from, to: maxTo && to > maxTo ? maxTo : to, verdictDate: from, step };
+  }
+  // The legacy ceiling (maxTo) is measured from the asked `from`; a summary
+  // caps its own length from the today-clamped start instead, so a long-
+  // overdue dateFrom still searches the days ahead.
   const start = from < today ? today : from;
   if (to < start) throw summaryRequestError('a summary search cannot end before today');
   const end = summaryRangeEnd(start, to);
-  // A summary search starts days before the pick, so the pick names its date.
-  const verdictDate = pickedDate !== undefined ? pickedDate : start;
+  // A summary search starts days before the pick, so the pick names its date
+  // (documented default: dateFrom, not the clamped start — a past pick is
+  // out of range, never scored against today's route). With no picked hour
+  // there is no verdict to place.
+  if (!pickedStart) return { summary: true, from: start, to: end, verdictDate: start, step: 60 };
+  const verdictDate = pickedDate !== undefined ? pickedDate : from;
   if (verdictDate < start || verdictDate > end) throw summaryRequestError('pickedDate must be inside the searched range');
   return { summary: true, from: start, to: end, verdictDate, step: 60 };
 }
