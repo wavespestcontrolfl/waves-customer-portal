@@ -307,7 +307,7 @@ export default function TechHomePage({ section = 'today' }) {
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
   const currentTechId = getAdminUser()?.id || null;
-  // TechLayout refreshes this from /admin/auth/me on every load, so the
+  // The admin shell refreshes this from /admin/auth/me on every load, so the
   // stored role tracks the server; hiding is UX only — the estimate APIs
   // enforce owner-only server-side regardless.
   const currentRole = getAdminUser()?.role || null;
@@ -1079,7 +1079,7 @@ export default function TechHomePage({ section = 'today' }) {
         <div
           /* Portaled to document.body at zIndex 50 so the stack lands right
              (Codex P2): the overlay mounts AFTER #root, so it paints above
-             the TechLayout bottom nav (also z-50, inside #root) — and
+             the shell bottom nav (also z-50, inside #root) — and
              ProjectDetail's confirmations use the shared Dialog portal
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */

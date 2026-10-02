@@ -44,11 +44,11 @@ let briefStatus;
 let fetchMock;
 let followThrough;
 
-function mount(path = '/tech', { enabled = true, role = 'technician' } = {}) {
+function mount(path = '/admin/today', { enabled = true, role = 'technician' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -97,7 +97,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('opens a selected stop and sends arrival and photos to that service, even when it is not first', async () => {
-    mount('/tech?visit=row%3Atwo');
+    mount('/admin/today?visit=row%3Atwo');
     expect(await screen.findByText('Property brief for two')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'On site' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/tech/services/two/on-site', expect.objectContaining({ method: 'POST' })));
@@ -129,7 +129,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
       return respond(path, options);
     });
 
-    mount('/tech?visit=row%3Aone');
+    mount('/admin/today?visit=row%3Aone');
     await screen.findByText('Recap clips');
     const file = new File(['fixture'], 'field-recovery.jpg', { type: 'image/jpeg' });
     fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
@@ -177,7 +177,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
       return respond(path, options);
     });
 
-    mount('/tech?visit=row%3Aone');
+    mount('/admin/today?visit=row%3Aone');
     await screen.findByText('Recap clips');
     fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['fixture'], 'success.jpg', { type: 'image/jpeg' })] } });
     fireEvent.click(screen.getByRole('button', { name: 'Spray — perimeter' }));
@@ -206,7 +206,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     ['en_route', 'en_route', 'pending', 'en_route', 'en-route'],
   ])('reconciles mixed stop %s/%s with tracks %s/%s through %s', async (first, second, firstTrack, secondTrack, endpoint) => {
     rows = [row('one', { visit: { id: 'group' }, status: first, trackState: firstTrack }), row('two', { visit: { id: 'group' }, status: second, trackState: secondTrack })];
-    mount('/tech?visit=visit%3Agroup');
+    mount('/admin/today?visit=visit%3Agroup');
     await screen.findByText('Property brief for one');
     expect(screen.queryByRole('button', { name: 'En route', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'On site', exact: true })).not.toBeInTheDocument();
@@ -217,21 +217,21 @@ describe('Tech field workspace uses the existing route workflow', () => {
 
   it('does not offer arrival or moving actions for a terminal visit', async () => {
     rows = [row('one', { status: 'completed' })];
-    mount('/tech?visit=row%3Aone');
+    mount('/admin/today?visit=row%3Aone');
     await screen.findByText('Property brief for one');
     expect(screen.queryByRole('button', { name: 'En route' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Quick Move' })).not.toBeInTheDocument();
   });
 
   it('does not resolve a pasted URL for another technician or fetch its property detail', async () => {
-    mount('/tech?visit=row%3Aother');
+    mount('/admin/today?visit=row%3Aother');
     expect(await screen.findByRole('heading', { name: 'Visit unavailable' })).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([path]) => path.includes('/other/'))).toBe(false);
     expect(screen.queryByText('Fixture other')).not.toBeInTheDocument();
   });
 
   it('removes the selected brief when a live update reassigns the visit', async () => {
-    mount('/tech?visit=row%3Atwo');
+    mount('/admin/today?visit=row%3Atwo');
     await screen.findByText('Property brief for two');
     rows = rows.map((service) => ({ ...service, technicianId: 'other-tech' }));
     await act(async () => { mocks.socketEvent(); });
@@ -241,7 +241,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
 
   it('keeps the group URL selected when its first member becomes terminal', async () => {
     rows = [row('one', { visit: { id: 'group' } }), row('two', { visit: { id: 'group' } })];
-    mount('/tech?visit=visit%3Agroup');
+    mount('/admin/today?visit=visit%3Agroup');
     await screen.findByText('Property brief for one');
     rows = rows.map((service) => service.id === 'one' ? { ...service, status: 'completed' } : service);
     await act(async () => { mocks.socketEvent(); });
@@ -251,7 +251,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('blocks stale actions during route failure and restores them after retry', async () => {
-    mount('/tech?visit=row%3Atwo');
+    mount('/admin/today?visit=row%3Atwo');
     await screen.findByText('Property brief for two');
     scheduleFails = true;
     await act(async () => { mocks.socketEvent(); });
@@ -263,7 +263,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('preserves the contact-action navigation lock', async () => {
-    mount('/tech?visit=row%3Atwo');
+    mount('/admin/today?visit=row%3Atwo');
     await screen.findByText('Property brief for two');
     fireEvent.click(screen.getByRole('button', { name: 'Start contact action' }));
     expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true);
@@ -272,7 +272,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
 
   it('uses the navigation lock while the create report has unpersisted photos', async () => {
     rows = [row('one')];
-    mount('/tech/tools');
+    mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
     await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
@@ -283,7 +283,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
 
   it('retains a partially created report and refreshes the route before it can be reopened', async () => {
     rows = [row('one')];
-    mount('/tech/tools');
+    mount('/admin/today/tools');
     const report = await screen.findByRole('button', { name: /Project Report/ });
     const scheduleReads = () => fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
     const initialReads = scheduleReads();
@@ -302,7 +302,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
 
   it('keeps Project Report disabled when the selected visit is missing despite another live service', async () => {
     rows = [row('one')];
-    await act(async () => { mount('/tech/tools?visit=row%3Amissing'); });
+    await act(async () => { mount('/admin/today/tools?visit=row%3Amissing'); });
     await screen.findByRole('heading', { name: 'Tools' });
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /Project Report/ })).toBeDisabled();
@@ -315,7 +315,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   ])('Tools exposes completed combined closeout only when has_service_record is %s (disabled=%s)', async (hasRecord, disabled) => {
     rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
       visitCloseoutEnabled: true, has_service_record: hasRecord })];
-    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    await act(async () => { mount('/admin/today/tools?visit=visit%3Agroup'); });
     const report = await screen.findByRole('button', { name: /Project Report/ });
     if (disabled) expect(report).toBeDisabled();
     else expect(report).toBeEnabled();
@@ -326,7 +326,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
       visitCloseoutEnabled: true, has_service_record: true,
       visitCloseoutPacket: { id: 'packet-one', status: 'processing' },
       linkedProject: status ? { id: 'existing-report', status } : null })];
-    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    await act(async () => { mount('/admin/today/tools?visit=visit%3Agroup'); });
     expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
   });
 
@@ -334,13 +334,13 @@ describe('Tech field workspace uses the existing route workflow', () => {
     rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
       visitCloseoutEnabled: true, has_service_record: false,
       linkedProject: { id: 'existing-report', status } })];
-    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    await act(async () => { mount('/admin/today/tools?visit=visit%3Agroup'); });
     expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
   });
 
   it.each(['sent', 'closed', 'draft'])('Tools only offers editable linked reports (%s)', async status => {
     rows = [row('one', { linkedProject: { id: 'existing-report', status } })];
-    await act(async () => { mount('/tech/tools'); });
+    await act(async () => { mount('/admin/today/tools'); });
     const report = await screen.findByRole('button', { name: /Project Report/ });
     if (status === 'draft') expect(report).toBeEnabled();
     else expect(report).toBeDisabled();
@@ -350,7 +350,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     rows = [row('one', { linkedProject: { id: 'existing-report', status: 'draft' } })];
     const confirmClose = vi.fn(() => false);
     vi.stubGlobal('confirm', confirmClose);
-    mount('/tech/tools');
+    mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
     const editor = await screen.findByTestId('project-detail');
 
@@ -383,7 +383,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('preserves owner-only estimating and the social feature gate in Tools', async () => {
-    mount('/tech/tools');
+    mount('/admin/today/tools');
     expect(await screen.findByRole('heading', { name: 'Tools' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Protocols & SOPs/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Field Estimator/ })).not.toBeInTheDocument();
@@ -392,7 +392,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('keeps the legacy route when the workspace flag is off', async () => {
-    mount('/tech/tools', { enabled: false });
+    mount('/admin/today/tools', { enabled: false });
     expect(await screen.findByRole('heading', { name: 'Quick Actions' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Tools' })).not.toBeInTheDocument();
   });

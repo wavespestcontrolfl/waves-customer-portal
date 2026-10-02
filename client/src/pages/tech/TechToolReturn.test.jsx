@@ -14,11 +14,11 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it.each([TechProtocolsPage, TechLawnDiagnosticPage, TechSocialPostPage])('embedded %s Back retains the selected visit', async Page => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ photos: [], locations: [], enabled: true }) })));
-  render(<MemoryRouter initialEntries={['/tech/tool?visit=visit%3Agroup']}><Routes>
-    <Route path="/tech/tool" element={<Page />} /><Route path="/tech" element={<Destination />} />
+  render(<MemoryRouter initialEntries={['/admin/today/tool?visit=visit%3Agroup']}><Routes>
+    <Route path="/admin/today/tool" element={<Page />} /><Route path="/admin/today" element={<Destination />} />
   </Routes></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: '← Back', exact: true }));
-  expect(screen.getByRole('status')).toHaveTextContent('/tech?visit=visit%3Agroup');
+  expect(screen.getByRole('status')).toHaveTextContent('/admin/today?visit=visit%3Agroup');
 });
 
 it.each([TechProtocolsPage, TechLawnDiagnosticPage, TechSocialPostPage])('%s Back goes to the workspace base path when mounted at /admin/today', async Page => {

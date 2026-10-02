@@ -18,9 +18,9 @@ function Visit() {
 }
 afterEach(() => { cleanup(); unmounted.mockClear(); window.history.replaceState({}, '', '/'); });
 
-function renderShell(path = '/tech', documentsAvailable = false) {
+function renderShell(path = '/admin/today', documentsAvailable = false) {
   return render(<TechNavigationLock><MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable}><div>Existing route</div></TechFieldShell>}>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable}><div>Existing route</div></TechFieldShell>}>
       <Route index element={<div>Route content</div>} />
       <Route path="tools" element={<div>Tools content</div>} />
       <Route path="more" element={<div>More content</div>} />
@@ -42,7 +42,7 @@ it('uses the existing route when disabled and waits for an unresolved flag', () 
   expect(screen.queryByText('Route content')).not.toBeInTheDocument();
 });
 
-it.each(['/tech/documents', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps documents gated at %s', (path) => {
+it.each(['/admin/today/documents', '/admin/today/documents/', '/ADMIN/TODAY/DOCUMENTS/'])('keeps documents gated at %s', (path) => {
   const mounted = renderShell(path);
   expect(screen.getByText('Staff documents are unavailable.')).toBeInTheDocument();
   expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
@@ -52,30 +52,30 @@ it.each(['/tech/documents', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps docu
 });
 
 it.each([
-  ['/tech/', 'Today', false], ['/TECH/', 'Today', false],
-  ['/tech/tools/', 'Tools', true], ['/TECH/TOOLS/', 'Tools', true],
-  ['/tech/more/', 'More', true], ['/TECH/MORE/', 'More', true],
-  ['/TECH/PROTOCOLS/', 'Tools', true],
+  ['/admin/today/', 'Today', false], ['/ADMIN/TODAY/', 'Today', false],
+  ['/admin/today/tools/', 'Tools', true], ['/ADMIN/TODAY/TOOLS/', 'Tools', true],
+  ['/admin/today/more/', 'More', true], ['/ADMIN/TODAY/MORE/', 'More', true],
+  ['/ADMIN/TODAY/PROTOCOLS/', 'Tools', true],
 ])('retains navigation and visit context at %s', (path, section, returnVisible) => {
   renderShell(`${path}?visit=row%3Atwo`);
   expect(screen.getByRole('link', { name: section, exact: true })).toHaveAttribute('aria-current', 'page');
   expect(Boolean(screen.queryByRole('link', { name: 'Return to visit' }))).toBe(returnVisible);
-  expect(screen.getByRole('link', { name: 'Today', exact: true })).toHaveAttribute('href', '/tech?visit=row%3Atwo');
-  expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/tech/tools?visit=row%3Atwo');
+  expect(screen.getByRole('link', { name: 'Today', exact: true })).toHaveAttribute('href', '/admin/today?visit=row%3Atwo');
+  expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/admin/today/tools?visit=row%3Atwo');
   expect(screen.queryByText('Messages')).not.toBeInTheDocument();
 });
 it('keeps a busy visit mounted on browser Back and permits Back after settlement', async () => {
-  window.history.replaceState({ idx: 0 }, '', '/tech');
-  render(<TechNavigationLock><BrowserRouter future={{ v7_startTransition: true }}><Routes><Route path="/tech" element={<TechFieldShell techName="Fixture Tech" />}>
-    <Route index element={<Link to="/tech/visit">Open visit</Link>} /><Route path="visit" element={<Visit />} />
+  window.history.replaceState({ idx: 0 }, '', '/admin/today');
+  render(<TechNavigationLock><BrowserRouter future={{ v7_startTransition: true }}><Routes><Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" />}>
+    <Route index element={<Link to="/admin/today/visit">Open visit</Link>} /><Route path="visit" element={<Visit />} />
   </Route></Routes></BrowserRouter></TechNavigationLock>);
   fireEvent.click(screen.getByRole('link', { name: 'Open visit' }));
   fireEvent.click(await screen.findByRole('button', { name: 'Start contact' }));
   await act(async () => { window.history.back(); });
-  await waitFor(() => expect(window.location.pathname).toBe('/tech/visit'));
+  await waitFor(() => expect(window.location.pathname).toBe('/admin/today/visit'));
   // Wait for the restored POP entry, not just the initial synchronous URL.
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
-  expect(window.location.pathname).toBe('/tech/visit');
+  expect(window.location.pathname).toBe('/admin/today/visit');
   expect(unmounted).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Settle contact' }));
   await act(async () => { window.history.back(); });
