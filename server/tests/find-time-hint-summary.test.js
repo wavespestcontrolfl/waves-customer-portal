@@ -55,7 +55,9 @@ const express = require('express');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
-const { summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS } = require('../services/scheduling/find-time-hints');
+const {
+  summarizeHintDays, summaryRangeEnd, hintSearchPlan, SUMMARY_MAX_DAYS,
+} = require('../services/scheduling/find-time-hints');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
 let server;
@@ -179,12 +181,8 @@ test('gap mode lists every start in a multi-hour gap, vetoing only the occupied 
   ]);
   // The ranked top-N stays one start per gap, as the plain hint answers.
   expect(body.slots.map((s) => s.start_time)).toEqual(['09:00']);
-  // Both passes read the day's occupancy once.
+  // Both lists come from one guard pass: the day's occupancy is read once.
   expect(loadOccupancy).toHaveBeenCalledTimes(1);
-  // No step sent: a summary is hourly, never the engine's exact-minute default.
-  body = await (await post({ ...BASE, slotStepMinutes: undefined, dateTo: '2026-09-01', summary: true })).json();
-  expect(findAvailableSlots.mock.calls[1][0].slotStepMinutes).toBe(60);
-  expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '11:00', '12:00']);
   // Occupancy snapshot down: fail open, every start in the gap listed.
   loadOccupancy.mockRejectedValue(new Error('snapshot unavailable'));
   body = await (await post({ ...BASE, dateTo: '2026-09-01', summary: true })).json();
@@ -210,11 +208,38 @@ test('the summary search is capped at 14 days however wide the request', async (
   expect(findAvailableSlots.mock.calls[1][0].dateTo).toBe('2026-11-30');
 });
 
-test('a range that starts before today reports no rows for the days already gone', async () => {
+test('a summary never searches before today: the engine, the range and every field start today', async () => {
   process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   findAvailableSlots.mockResolvedValue({ slots: [slot('2026-09-01', '09:00', 3)], evaluated: 1 });
   const body = await (await post({ ...BASE, dateFrom: '2026-08-29', dateTo: '2026-09-01', summary: true })).json();
+  // The gap engine walks whatever range it is given — past dates included —
+  // so the clamp is on the search itself, not on the rows afterwards.
+  expect(findAvailableSlots.mock.calls[0][0].dateFrom).toBe('2026-08-31');
+  expect(body.range).toEqual({ dateFrom: '2026-08-31', dateTo: '2026-09-01' });
   expect(body.summary.days.map((day) => day.date)).toEqual(['2026-08-31', '2026-09-01']);
+  // A picked date already gone is outside the search; a range wholly in the past has nothing to search.
+  expect((await post({ ...BASE, dateFrom: '2026-08-29', dateTo: '2026-09-01', summary: true, pickedDate: '2026-08-30', pickedStart: '09:00' })).status).toBe(400);
+  expect((await post({ ...BASE, dateFrom: '2026-08-20', dateTo: '2026-08-25', summary: true })).status).toBe(400);
+  expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+  // The plain hint keeps the range it asked for.
+  await post({ ...BASE, dateFrom: '2026-08-29', dateTo: '2026-09-01' });
+  expect(findAvailableSlots.mock.calls[1][0].dateFrom).toBe('2026-08-29');
+});
+
+test('a summary is hourly whatever step the caller sends', async () => {
+  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
+  findAvailableSlots.mockResolvedValue({
+    slots: [slot('2026-09-01', '09:00', 4, { latest_start_min: 11 * 60 })], evaluated: 1,
+  });
+  for (const slotStepMinutes of [15, 30, undefined]) {
+    const body = await (await post({ ...BASE, slotStepMinutes, dateTo: '2026-09-01', summary: true })).json();
+    expect(findAvailableSlots.mock.lastCall[0].slotStepMinutes).toBe(60);
+    expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '10:00', '11:00']);
+  }
+  // Gate off: the caller's step is its own again.
+  delete process.env.GATE_RESCHEDULE_AVAILABILITY;
+  await post({ ...BASE, slotStepMinutes: 15, dateTo: '2026-09-01', summary: true });
+  expect(findAvailableSlots.mock.lastCall[0].slotStepMinutes).toBe(15);
 });
 
 test('gap mode: the verdict is scored on pickedDate and names no_gap / occupied', async () => {
@@ -298,16 +323,34 @@ test('arrival mode: the route checker runs on pickedDate and its reason passes t
 
 test('garbage summary / pickedDate 400 before the engine runs; pickedDate must be in range', async () => {
   process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
-  for (const extra of [{ summary: 'yes' }, { summary: 1 }, { pickedDate: '09/03/2026' }, { pickedDate: 20260903 }]) {
+  // 2026-09-31 has the right shape and sorts inside a Sept–Oct range, but names no day.
+  for (const extra of [
+    { summary: 'yes' }, { summary: 1 }, { pickedDate: '09/03/2026' }, { pickedDate: 20260903 },
+    { pickedDate: '2026-09-31', dateTo: '2026-10-05', summary: true }, { pickedDate: '2026-02-30' },
+  ]) {
     expect((await post({ ...BASE, ...extra })).status).toBe(400);
   }
-  for (const pickedDate of ['2026-08-31', '2026-09-06']) {
+  for (const pickedDate of ['2026-08-31', '2026-09-06']) { // BASE searches Sep 1–5
     expect((await post({ ...BASE, summary: true, pickedDate, pickedStart: '09:00' })).status).toBe(400);
   }
   expect(findAvailableSlots).not.toHaveBeenCalled();
 });
 
 describe('summary helpers', () => {
+  test('hintSearchPlan leaves every non-summary request exactly as asked', () => {
+    const asked = { from: '2026-08-01', to: '2026-11-01', today: '2026-08-31', slotStepMinutes: 15, pickedDate: '2026-09-03' };
+    for (const flags of [
+      { hint: false, summary: true, summaryEnabled: true },
+      { hint: true, summary: false, summaryEnabled: true },
+      { hint: true, summary: true, summaryEnabled: false },
+    ]) {
+      expect(hintSearchPlan({ ...asked, ...flags })).toEqual({ summary: false, from: '2026-08-01', to: '2026-11-01', verdictDate: '2026-08-01', step: 15 });
+    }
+    expect(hintSearchPlan({ ...asked, hint: true, summary: true, summaryEnabled: true }))
+      .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-13', verdictDate: '2026-09-03', step: 60 });
+    expect(hintSearchPlan({ ...asked, slotStepMinutes: undefined, hint: true }).step).toBeUndefined();
+  });
+
   test('summaryRangeEnd keeps a short range and caps a long one at 14 days', () => {
     expect(summaryRangeEnd('2026-09-01', '2026-09-01')).toBe('2026-09-01');
     expect(summaryRangeEnd('2026-09-01', '2026-09-11')).toBe('2026-09-11');

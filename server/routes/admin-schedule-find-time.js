@@ -29,7 +29,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
-  validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour, summarizeHintDays, summaryRangeEnd,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, hintSearchPlan, buildHintSummary,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
@@ -287,23 +287,18 @@ router.post('/', async (req, res) => {
     const to = dateTo || etDateString(addETDays(parseETDateTime(`${from}T12:00`), 7));
     if (to < from) throw httpError(400, 'dateTo must be on or after dateFrom');
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
-    // Availability-strip summary (one row per date around the picked day) —
-    // its own call-time gate on top of the hint gate, so turning it off
-    // leaves today's three-line hint exactly as it is: the flag is ignored
-    // and the response carries no `summary`. The strip shows about eleven
-    // days; the search is capped at SUMMARY_MAX_DAYS so a caller cannot turn
-    // a debounced picker hint into a 90-day full enumeration.
-    const summaryMode = !!hint && summary === true && gateEnvValue('GATE_RESCHEDULE_AVAILABILITY');
+    // What this request searches (find-time-hints.js hintSearchPlan). Every
+    // caller but one gets back exactly what it asked for; an availability-
+    // strip summary (hint + summary:true, behind its own call-time gate on
+    // top of the hint gate) is clamped to today, capped in length and forced
+    // hourly. Gate off = the flag is ignored and the plain hint answers. A
+    // summary it cannot answer (range in the past, picked date outside the
+    // range) throws a 400 the handler's catch reports like every other.
     const startedAt = Date.now();
-    const rangeTo = to > maxTo ? maxTo : to;
-    const clampedTo = summaryMode ? summaryRangeEnd(from, rangeTo) : rangeTo;
-    // The picked hour's verdict is scored on ONE date. The plain hint
-    // searches a single day, so that date is dateFrom; a summary search
-    // starts days before the pick and names it.
-    const verdictDate = summaryMode && pickedDate !== undefined ? String(pickedDate) : from;
-    if (summaryMode && (verdictDate < from || verdictDate > clampedTo)) {
-      throw httpError(400, 'pickedDate must be inside the searched range');
-    }
+    const plan = hintSearchPlan({
+      hint, summary, summaryEnabled: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
+      from, to: to > maxTo ? maxTo : to, today, pickedDate, slotStepMinutes,
+    });
 
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
@@ -332,17 +327,13 @@ router.post('/', async (req, res) => {
       : undefined;
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
-    // Appointment windows start on the hour (owner directive), and a
-    // summary lists EVERY start in a gap — so a summary search with no step
-    // of its own is hourly, never the engine's exact-minute default.
-    const stepMinutes = slotStepMinutes !== undefined ? Number(slotStepMinutes) : (summaryMode ? 60 : undefined);
     const result = await findAvailableSlots({
       lat: target.lat,
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
       serviceType: typeof serviceType === 'string' ? serviceType : undefined,
-      dateFrom: from,
-      dateTo: clampedTo,
+      dateFrom: plan.from,
+      dateTo: plan.to,
       technicianId: technicianId || undefined,
       // Hint mode takes the engine's ENTIRE candidate list and slices to
       // the requested count below: the occupancy guard can veto whole gaps
@@ -357,7 +348,7 @@ router.post('/', async (req, res) => {
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
       ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
-      slotStepMinutes: stepMinutes,
+      slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
       includeBlackoutDates: true,
@@ -370,57 +361,35 @@ router.post('/', async (req, res) => {
     // slice, the picked-hour verdict) lives in scheduling/find-time-hints.js;
     // the ungated Find-a-Time search only gets unknown detours marked.
     const excluded = (excludeServiceIds || []).map(String);
-    const step = stepMinutes !== undefined ? stepMinutes : 1;
+    const step = plan.step !== undefined ? plan.step : 1;
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
-    // Summary mode keeps every guarded hour (one per day + start) for the
-    // per-day rows; `slots` is still the ranked top-N the plain hint answers.
-    const occupancyCache = new Map();
-    const guarded = hint
-      ? await guardHintSlots(rawSlots, {
-        today, sameDayFloorMin, step, spanMin, excluded, topN: summaryMode ? Number.POSITIVE_INFINITY : requestedTopN,
-        allStarts: summaryMode, occupancyCache,
+    // One guard pass answers both lists: `ranked` is the plain hint's top-N
+    // (one start per gap); `every` is each start that fits, for the summary.
+    const { ranked: slots, every } = hint
+      ? await guardHintStarts(rawSlots, {
+        today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary,
       })
-      : rawSlots;
-    // `slots` stays the plain hint's answer in both modes: one start per gap,
-    // ranked, sliced — a summary request must not turn the top-N into the
-    // first N hours of the single best gap.
-    const slots = summaryMode
-      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, occupancyCache })
-      : guarded;
+      : { ranked: rawSlots };
     const picked = hint && pickedStart
       ? await scorePickedHour({
-        rawSlots, from: verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
-        withReason: summaryMode,
+        withReason: plan.summary,
       })
       : undefined;
 
     // The engine's per-date refusal counts feed the summary's day status
     // only; they are not part of any response contract.
-    const { rejections_by_date: rejectionsByDate, ...engineResult } = result || {};
-    let summaryBody;
-    if (summaryMode) {
-      const elapsedMs = Date.now() - startedAt;
-      // Budget: 1.5 s for the strip's eleven days (the plain hint's range
-      // search covers four). Logged so the first week of use says whether
-      // the range has to shrink.
-      if (elapsedMs > 1500) {
-        logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${from}..${clampedTo}`);
-      }
-      summaryBody = {
-        // Dates before today are never searched (the engine skips them).
-        days: summarizeHintDays(guarded, { from: from < today ? today : from, to: clampedTo, rejectionsByDate }),
-        elapsed_ms: elapsedMs,
-      };
-    }
+    const { rejections_by_date: rejectionsByDate, ...engineResult } = { ...result };
 
     res.json({
       ...engineResult,
       slots,
       ...(picked ? { picked } : {}),
-      ...(summaryBody ? { summary: summaryBody } : {}),
+      // undefined (dropped from the JSON) for everything but a summary plan.
+      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt }),
       target,
-      range: { dateFrom: from, dateTo: clampedTo },
+      range: { dateFrom: plan.from, dateTo: plan.to },
     });
   } catch (err) {
     logger.error('[find-time] failed:', err);
