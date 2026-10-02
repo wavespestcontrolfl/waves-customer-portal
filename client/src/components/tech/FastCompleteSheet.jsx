@@ -1162,6 +1162,7 @@ function ReportFlowForm({
       request={request}
       photoHold={photoHold}
       onPhotoHold={setPhotoHold}
+      onPhotosUpdate={visitPhotos.update}
       onPhotosChanged={reloadPhotos}
       locked={locked}
       dictationPending={dictationPending}
@@ -1246,7 +1247,7 @@ function ReportStep({
 function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
-  noteBoxPhotos, request, photoHold, onPhotoHold, onPhotosChanged,
+  noteBoxPhotos, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -1285,6 +1286,7 @@ function VisitStep({
                 photos={photos}
                 disabled={locked || dictationPending}
                 onAdd={onPhotos}
+                onUpdate={onPhotosUpdate}
                 onChanged={onPhotosChanged}
                 onHold={onPhotoHold}
               />

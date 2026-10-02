@@ -89,7 +89,10 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 // read counts as no photos, never a hold. A failed later read keeps the
 // photos last read, so a dropped connection never empties the note's box
 // under an open description (codex local r1 on #5624); the sheet mounts once
-// per visit, so they are always this visit's.
+// per visit, so they are always this visit's. `update` applies a change the
+// server already took (a description saved, a photo removed) to the photos
+// at once, so a read that fails after it never leaves the report writing
+// from the old ones (pre-push P1 on #5624).
 export function useVisitPhotos({ serviceId, request, version }) {
   const [state, setState] = useState({ photos: [], loaded: false });
   // Only the latest read may land: a read still in flight when the manager
@@ -108,7 +111,8 @@ export function useVisitPhotos({ serviceId, request, version }) {
       .catch(() => { if (sequence === readSequence.current) setState((prev) => ({ photos: prev.photos, loaded: true })); });
     return () => { readSequence.current += 1; };
   }, [request, serviceId, version]);
-  return state;
+  const update = useCallback((change) => setState((prev) => ({ ...prev, photos: change(prev.photos) })), []);
+  return { ...state, update };
 }
 
 // What the writer is told about the photos, as the full form sends it: the
@@ -166,7 +170,7 @@ const NOTE_PHOTO_ERRORS = {
   photo_not_found: 'That photo is no longer on this visit.',
 };
 
-export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd, onChanged, onHold }) {
+export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd, onUpdate, onChanged, onHold }) {
   const [describing, setDescribing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(null);
@@ -177,14 +181,16 @@ export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd,
     || '';
   useEffect(() => { onHold(hold); }, [hold, onHold]);
   useEffect(() => () => onHold(''), [onHold]);
-  // One change at a time; true once the server took it. Either way the box
-  // reads the visit's photos again, so it shows what the visit holds.
-  const change = async (photo, options) => {
+  // One change at a time; true once the server took it, and then applied
+  // to the photos at once (`applied`, from the server's answer). Either way
+  // the box reads the visit's photos again, so it shows what the visit holds.
+  const change = async (photo, options, applied) => {
     if (!photo?.id) return false;
     setSaving(true);
     setError('');
     try {
-      await request(`/tech/services/${serviceId}/photos/${photo.id}`, options);
+      const answer = await request(`/tech/services/${serviceId}/photos/${photo.id}`, options);
+      onUpdate((list) => applied(list, answer));
       return true;
     } catch (err) {
       setError(NOTE_PHOTO_ERRORS[err?.code] || 'Couldn’t save the photo change. Try again.');
@@ -203,7 +209,14 @@ export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd,
         dictationServiceId={serviceId}
         onAdd={onAdd}
         onEditingChange={setDescribing}
-        onCaption={(index, caption) => change(photos[index], { method: 'PATCH', body: JSON.stringify({ caption }) })}
+        onCaption={(index, caption) => {
+          const photo = photos[index];
+          return change(photo, { method: 'PATCH', body: JSON.stringify({ caption }) }, (list, answer) => list.map((each) => (
+            each.id === photo?.id
+              ? { ...each, caption: answer?.photo && 'caption' in answer.photo ? answer.photo.caption : caption }
+              : each
+          )));
+        }}
         onRemove={(index) => { setError(''); setRemoving(photos[index] || null); }}
       />
       {(removing || error) && (
@@ -216,7 +229,11 @@ export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd,
                   type="button"
                   variant="secondary"
                   className="tech-visit-action"
-                  onClick={() => { const photo = removing; setRemoving(null); change(photo, { method: 'DELETE' }); }}
+                  onClick={() => {
+                    const photo = removing;
+                    setRemoving(null);
+                    change(photo, { method: 'DELETE' }, (list) => list.filter((each) => each.id !== photo.id));
+                  }}
                 >
                   Remove photo
                 </Button>

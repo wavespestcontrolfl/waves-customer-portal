@@ -1107,6 +1107,31 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     expect(staged.stored[1].caption).toBe('Ants along the slider track');
   });
 
+  test('a change the server took holds even when the read after it fails: the report writes from it (pre-push P1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    const offline = () => Object.assign(new Error('Failed to fetch'), { status: 0 });
+    // Only the first read lands; every read after a change fails.
+    const request = makeRequest({
+      photos: () => { reads += 1; if (reads > 1) throw offline(); return staged.photos(); },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo' }));
+    await waitFor(() => expect(screen.queryByText('Counter edge')).toBeNull());
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3));
+    await generate();
+    const [payload] = request.bodies('/generate-report');
+    expect(payload.photoCount).toBe(1);
+    expect(payload.photoCaptions).toEqual(['Ants along the slider track']);
+  });
+
   test('a description the server refuses stays open with its words, and says why', async () => {
     const staged = stagedPhotos();
     const refused = Object.assign(new Error('Photo caption contains wording we can\'t put on a customer report (eliminated).'), {
