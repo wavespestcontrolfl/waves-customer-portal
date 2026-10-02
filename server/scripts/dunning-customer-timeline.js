@@ -197,13 +197,16 @@ function annotateAttempts(rows) {
     touch.at = touch.delivered ? new Date(delivered[0].occurred_at) : null;
     touch.leadRow = touch.delivered ? delivered[0] : null;
   }
+  // Gaps follow DELIVERY order, not attempt order: a touch whose first attempt failed and whose later leg
+  // delivered after a newer touch did is measured from that newer touch (never a negative gap).
+  const gapByTouch = new Map();
   let previousAt = null;
+  for (const touch of touches.filter((t) => t.delivered).sort((a, b) => a.at.getTime() - b.at.getTime() || a.number - b.number)) {
+    gapByTouch.set(touch, previousAt ? (touch.at.getTime() - previousAt.getTime()) / DAY_MS : null);
+    previousAt = touch.at;
+  }
   for (const touch of touches) {
-    let gapDays = null;
-    if (touch.delivered) {
-      if (previousAt) gapDays = (touch.at.getTime() - previousAt.getTime()) / DAY_MS;
-      previousAt = touch.at;
-    }
+    const gapDays = gapByTouch.get(touch) ?? null;
     for (const row of touch.rows) {
       const isLead = touch.leadRow === row;
       annotated.set(row, {

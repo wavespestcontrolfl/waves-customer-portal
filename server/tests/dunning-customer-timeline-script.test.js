@@ -104,6 +104,22 @@ describe('annotateAttempts: the gap since the previous delivered reminder', () =
     expect(out.map((a) => a.state)).toEqual(['delivered', 'delivered', 'failed', 'delivered', 'delivered']);
   });
 
+  // Pre-push audit P1: touch A's first leg fails, touch B delivers, then A's other leg delivers. Gaps follow
+  // delivery order: B is the first delivered, A is measured from B (never a negative gap on B).
+  test('gaps follow delivery order when a failed touch delivers after a newer one', () => {
+    const rows = [
+      ledger({ when: '2026-07-01T14:16:00Z', channel: 'email', meta: { notificationEventKey: 'kA', send_failed: true } }),
+      ledger({ when: '2026-07-05T14:16:00Z', channel: 'email', meta: delivered('kB') }),
+      ledger({ when: '2026-07-10T14:16:00Z', channel: 'sms', meta: delivered('kA') }),
+    ];
+    const out = Timeline.annotateAttempts(rows);
+    // output stays in attempt-time order
+    expect(out.map((a) => a.state)).toEqual(['failed', 'delivered', 'delivered']);
+    expect(out.map((a) => a.gapDays)).toEqual([null, null, 5]);
+    expect(out.map((a) => a.underSpacing)).toEqual([false, false, true]);
+    expect(out.every((a) => a.gapDays == null || a.gapDays >= 0)).toBe(true);
+  });
+
   test('the legs of one touch are one touch: the gap is on the first delivered leg and the other leg says same touch', () => {
     const rows = [
       ledger({ when: '2026-07-08T14:16:01Z', channel: 'sms', meta: delivered('k1') }),
