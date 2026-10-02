@@ -112,6 +112,10 @@ async function findArrivalWindowSlots(opts) {
   const today = etDateString(now);
   const parts = etParts(now);
   const slots = [];
+  // Refusal counts per date (same shape as findCapacitySlots'), so the
+  // availability strip can tell a day whose route could not be verified
+  // from a day that is full.
+  const rejectionsByDate = {};
   let evaluated = 0;
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
@@ -129,6 +133,10 @@ async function findArrivalWindowSlots(opts) {
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
       evaluated += candidates.evaluated;
+      for (const [reason, count] of Object.entries(candidates.rejections || {})) {
+        if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+        rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + count;
+      }
       for (const { windowStart, windowEnd, fit } of candidates.placements) {
         const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
         slots.push({
@@ -146,7 +154,10 @@ async function findArrivalWindowSlots(opts) {
   }
   slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes
     || a.arrival_delay_minutes - b.arrival_delay_minutes || a.start_time.localeCompare(b.start_time));
-  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
+  return {
+    slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length,
+    rejections_by_date: rejectionsByDate,
+  };
 }
 
 async function findCapacitySlots(opts) {

@@ -160,11 +160,6 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
   };
 }
 
-/** The ranked answer alone — the plain hint's contract. */
-async function guardHintSlots(slots, opts) {
-  return (await guardHintStarts(slots, opts)).ranked;
-}
-
 // Hours the engine never enumerates are absent from its list for bounds
 // reasons, not route reasons, so they get no verdict: a same-day hour
 // before its now+30 lead, an hour before its day open, or a window ending
@@ -367,28 +362,11 @@ function emptyDayStatus(reasons) {
 /**
  * The guarded slot list as one row per date in [from, to] — every date is
  * present, including the ones with nothing to offer, so the strip can say
- * "full" rather than leave a hole. `slots` is guardHintSlots' output taken
+ * "full" rather than leave a hole. `slots` is guardHintStarts' `every` list:
  * with no topN cap: already vetted against occupancy and the same-day floor
  * and deduped by day + start (best-ranked technician wins). Hours are in
  * clock order; ranking by added drive is the consumer's call.
  */
-// Budget for the strip's eleven days (the plain hint's range search covers
-// four). Logged so the first week of use says whether the range must shrink.
-const SUMMARY_SLOW_MS = 1500;
-
-/** The response's `summary` for a summary plan; undefined for any other. */
-function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt }) {
-  if (!plan.summary) return undefined;
-  const elapsedMs = Date.now() - startedAt;
-  if (elapsedMs > SUMMARY_SLOW_MS) {
-    logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
-  }
-  return {
-    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate }),
-    elapsed_ms: elapsedMs,
-  };
-}
-
 function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
   const byDate = new Map();
   for (let date = from; date <= to; date = nextYmd(date)) byDate.set(date, []);
@@ -411,7 +389,24 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate }) {
   }));
 }
 
+// Budget for the strip's eleven days (the plain hint's range search covers
+// four). Logged so the first week of use says whether the range must shrink.
+const SUMMARY_SLOW_MS = 1500;
+
+/** The response's `summary` for a summary plan; undefined for any other. */
+function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt }) {
+  if (!plan.summary) return undefined;
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs > SUMMARY_SLOW_MS) {
+    logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
+  }
+  return {
+    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate }),
+    elapsed_ms: elapsedMs,
+  };
+}
+
 module.exports = {
-  validateHintParams, markUnknownDetours, guardHintSlots, guardHintStarts, scorePickedHour,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour,
   hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS,
 };
