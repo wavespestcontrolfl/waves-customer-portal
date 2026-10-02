@@ -262,9 +262,10 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // "14:30", and zero cents or minutes dropped ("$2.00" = "2", "2:00 PM" = "2 PM").
 // Other separated runs (dates like "10/14", "14/10") compare part by part.
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
-const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b)/i;
+// Chinese / Japanese / Korean write the hour with a suffix: 14点, 14時, 14시
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|[時시点點])/iu;
 // a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
-const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b)/i;
+const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b|[時시点點])/iu;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
 const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
@@ -335,7 +336,8 @@ function numberValues(text, { strictTimes = false } = {}) {
     out.push({ value: `date:${d.split(/[/-]/).map(trimZeros).join('/')}`, pm: false, time: false });
     return ' ';
   });
-  const str = withoutDates.replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2');
+  // "14h30" and "14時30分" / "14点30分" / "14시 30분" are 14:30
+  const str = withoutDates.replace(/\b(\d{1,2})h(\d{2})\b/gi, '$1:$2').replace(/(\d{1,2})\s*[時시点點]\s*(\d{1,2})\s*[分분]/gu, (m, h, mm) => `${h}:${mm.padStart(2, '0')}`);
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
@@ -464,16 +466,19 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
   const order = addressOrderFaults(englishReply, asciiDigits(translated));
-  // loose mode (a customer's text): the same hour stated on both sides must keep its half of the day ("2 AM" is not "2 PM")
+  // loose mode (a customer's text): a time's half of the day survives either way round - not flipped ("2 AM" is
+  // not "2 PM") and not dropped or added ("2 de la tarde" is not a bare "2"). A 24-hour time stands in for it:
+  // "2 PM" = "14:00", "2 AM" = "2 h", "12 PM" = "12:00", "12 AM" = "0:00".
   if (!strictTimes) {
-    const halves = (list) => list.filter((n) => n.half).map((n) => `${n.value.split(':')[0]}|${n.half}`);
-    const a = halves(en.numbers);
-    const b = halves(tr.numbers);
-    for (const key of a) {
-      const [hour, half] = key.split('|');
-      const flipped = `${hour}|${half === 'pm' ? 'am' : 'pm'}`;
-      if (b.includes(flipped) && !b.includes(key)) order.push(`${hour} ${half}`);
-    }
+    const keepsHalf = (n, other) => {
+      const [h, mm] = n.value.split(':');
+      const hour = Number(h);
+      const pmHour = hour >= 1 && hour <= 11 ? hour + 12 : hour;
+      const as24 = `${n.half === 'pm' ? pmHour : (hour === 12 ? 0 : hour)}${mm ? `:${mm}` : ''}`;
+      return other.some((o) => (o.value === n.value && o.half === n.half) || (o.time && !o.half && o.value === as24));
+    };
+    for (const n of en.numbers) if (n.half && !keepsHalf(n, tr.numbers)) order.push(`${n.value} ${n.half}`);
+    for (const n of tr.numbers) if (n.half && !keepsHalf(n, en.numbers)) order.push(`${n.value} ${n.half}`);
   }
   return { ok: missing.length === 0 && added.length === 0 && order.length === 0, missing, added, ...(order.length ? { order } : {}) };
 }

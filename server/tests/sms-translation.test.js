@@ -175,6 +175,21 @@ describe('tokenParity', () => {
     expect(tokenParity('Can you come at 2 PM?', '下午2点可以来吗？', { strictTimes: false })).toMatchObject({ ok: true });
   });
 
+  test('a half of the day the customer named cannot be dropped or added in the English', () => {
+    expect(tokenParity('Can you come at 2?', '¿Pueden venir a las 2 de la tarde?', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2?', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 de la tarde?', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Can you come at 2 PM?', 'Pouvez-vous venir à 14 h ?', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('CJK clock suffixes are clock times: 14時 / 14시 / 14点 = 2 PM, 14時30分 = 2:30 PM', () => {
+    expect(tokenParity('We can come at 2 PM.', '14時に伺えます。')).toMatchObject({ ok: true });
+    expect(tokenParity('We can come at 2 PM.', '14시에 갈 수 있습니다.')).toMatchObject({ ok: true });
+    expect(tokenParity('We can come at 2 PM.', '我们可以14点来。')).toMatchObject({ ok: true });
+    expect(tokenParity('We can come at 2:30 PM.', '14時30分に伺えます。')).toMatchObject({ ok: true });
+    expect(tokenParity('We can come at 2 PM.', '15時に伺えます。')).toMatchObject({ ok: false });
+  });
+
   test('native sentence punctuation after a link is not part of it', () => {
     expect(tokenParity('Pay at https://portal.wavespestcontrol.com/pay.', '请在 https://portal.wavespestcontrol.com/pay。付款')).toMatchObject({ ok: true });
   });
