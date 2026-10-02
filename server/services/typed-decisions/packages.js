@@ -106,15 +106,15 @@ const CALL_GATE_CHECKS = {
       true: 'They describe a problem or ask for help but the service cannot be named from the call (e.g. "something is eating my plants", "bugs, not sure what kind").',
       false: 'The service is clear from the call, or no service was requested (billing, scheduling an existing visit, spam, voicemail with no request).',
     }),
-    // GATE_CALL_RESCHEDULE_APPLY: the extraction's committed reschedule (status reschedule_requested + agent_committed_booking + confirmed_start_at).
+    // GATE_CALL_RESCHEDULE_APPLY: the extraction's committed reschedule the caller accepted (reschedule_requested + agent_committed_booking + caller_accepted_slot + confirmed_start_at).
     reschedule_committed: noul('Did Waves staff and the caller agree to move an existing, already booked visit to a specific new day and time?', {
-      true: 'An existing visit is moved and both sides settle on the new day and time on the call.',
+      true: 'An existing visit is moved and both sides settle on the new day and time on the call: staff commit to it and the caller accepts it.',
       false: 'No existing visit is moved, the new time is only proposed or left open, it is a cancellation, or it is a first booking.',
     }),
-    // GATE_PROMISE_CHASER_BELL: the extracted Waves commitments (call_commitments, party waves, not stale).
-    promise_open: noul('Did Waves staff promise the caller something to do AFTER this call (call back, send a quote or estimate, text or email information, come out at a time)?', {
-      true: 'Staff commit to a follow-up action that the call itself does not complete.',
-      false: 'Nothing is promised for after the call, or the promise was carried out during the call.',
+    // GATE_PROMISE_CHASER_BELL: the extracted Waves commitments of the kinds the chaser acts on (followup-sla-watcher SLA_KINDS), party waves, not stale.
+    promise_open: noul('Did Waves staff promise the caller, for AFTER this call, to call back, to send a quote or estimate, or to set a time to come out?', {
+      true: 'Staff commit to one of those three follow-ups and the call itself does not complete it.',
+      false: 'None of those three is promised for after the call (other promises, such as sending a report, paperwork or a confirmation, do not count), or it was done during the call.',
     }),
   },
 };

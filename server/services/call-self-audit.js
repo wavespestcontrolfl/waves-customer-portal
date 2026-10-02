@@ -18,6 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled, typedDecisionsLive, typedDecisionsClefLive } = require('../config/feature-gates');
+const { CALL_TRANSCRIPT_CHARS } = require('./typed-decisions/packages');
 const { createDeepMessage } = require('./llm/deep');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -83,7 +84,12 @@ async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v2', baselines: judgeBaselines }, clef));
   // The dark call gates' own decisions beside the same providers' answers
   // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
-  tally.gateChecks = tally.gateChecks || { asked: 0, recorded: 0, failed: 0 };
+  // Asked only when the WHOLE transcript fits the span the models and the
+  // reviewer are shown (94% of calls, measured 10-02): the baselines come from
+  // extractions over the full call, so a cut-off call would show a gate's
+  // reason to neither (Codex #5645 r1). Long calls are counted, not asked.
+  tally.gateChecks = tally.gateChecks || { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
+  if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.gateChecks.skippedLong++; return; }
   count(tally.gateChecks, clef, await askAndRecord(call, { packageId: 'call_gate_checks.v1', baselines: gateBaselines }, clef));
 }
 
@@ -102,10 +108,13 @@ function count(tally, clef, outcome) {
 // `production` baselines. Each is the exact signal the gate acts on:
 //   service_unclear      the v2 extraction's ambiguous_pest_or_service flag
 //                        (call-triage-flags serviceMayForceAssessment)
-//   reschedule_committed the v2 extraction's committed reschedule, the core
-//                        of call-reschedule-apply planRescheduleFromCall
-//   promise_open         an AI-extracted Waves commitment on the call that a
-//                        later pass did not drop (call_commitments)
+//   reschedule_committed the v2 extraction's committed reschedule that the
+//                        caller accepted (call-reschedule-apply
+//                        planRescheduleFromCall + groundRescheduleAgreement's
+//                        caller_accepted_slot check)
+//   promise_open         an AI-extracted Waves commitment of a kind the
+//                        chaser acts on (SLA_KINDS: callback, send_estimate,
+//                        schedule_visit) that a later pass did not drop
 // A gate with no reading for the call (no valid v2 extraction; commitments
 // off) gets no baseline, never a false one.
 function gateCheckBaselines(call, wavesPromiseCallIds) {
@@ -114,7 +123,10 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
   if (v2 && Object.keys(v2).length) {
     out.service_unclear = { production: Array.isArray(v2.triage_flags) && v2.triage_flags.includes('ambiguous_pest_or_service') };
     const sched = v2.scheduling || {};
-    out.reschedule_committed = { production: sched.status === 'reschedule_requested' && sched.agent_committed_booking === true && Boolean(sched.confirmed_start_at) };
+    out.reschedule_committed = {
+      production: sched.status === 'reschedule_requested' && sched.agent_committed_booking === true
+        && sched.caller_accepted_slot === true && Boolean(sched.confirmed_start_at),
+    };
   }
   if (wavesPromiseCallIds) out.promise_open = { production: wavesPromiseCallIds.has(String(call.id)) };
   return out;
@@ -126,9 +138,13 @@ async function loadWavesPromiseCallIds(calls) {
   if (!typedDecisionsLive() || !isEnabled('callCommitments') || !calls.length) return null;
   try {
     const { staleAiRowSql } = require('./call-commitments');
+    // The kinds the promise chaser acts on (Codex #5645 r1): a promise to
+    // send a report or paperwork is real but no gate decision.
+    const { SLA_KINDS } = require('./followup-sla-watcher');
     const rows = await db('call_commitments as cc')
       .whereIn('cc.call_log_id', calls.map((c) => c.id))
       .where({ 'cc.party': 'waves', 'cc.source': 'ai' })
+      .whereIn('cc.kind', SLA_KINDS)
       .whereRaw(`NOT ${staleAiRowSql('cc')}`)
       .distinct('cc.call_log_id');
     return new Set(rows.map((r) => String(r.call_log_id)));

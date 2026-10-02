@@ -29,13 +29,13 @@ const SAMPLE = (over = {}) => ({
   ai_extraction: JSON.stringify({ is_lead: true }), disposition: null, ...over,
 });
 
-function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [] }) {
+function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [], whereInCalls = [] }) {
   db.raw = (sql) => sql;
   db.mockImplementation((table) => {
     const raws = [];
     const isOutbound = (c) => String(c.direction || '').startsWith('outbound');
     const b = {
-      where(...args) { whereCalls.push(args); return b; }, whereIn() { return b; }, whereRaw(sql) { raws.push(sql); return b; }, modify(fn) { fn(b); return b; },
+      where(...args) { whereCalls.push(args); return b; }, whereIn(...args) { whereInCalls.push([table, ...args]); return b; }, whereRaw(sql) { raws.push(sql); return b; }, modify(fn) { fn(b); return b; },
       orderBy() { return b; }, limit() { return b; },
       // call_commitments: the sampled calls carrying a live Waves promise.
       distinct: async () => (table === 'call_commitments as cc' ? promiseCallIds.map((id) => ({ call_log_id: id })) : []),
@@ -317,7 +317,7 @@ describe('Clef shadow leg (second provider)', () => {
 
 describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision beside the models)', () => {
   const { isEnabled } = require('../config/feature-gates');
-  const V2 = (over = {}) => JSON.stringify({ triage_flags: ['ambiguous_pest_or_service'], scheduling: { status: 'reschedule_requested', agent_committed_booking: true, confirmed_start_at: '2026-10-09T14:00:00Z' }, ...over });
+  const V2 = (over = {}) => JSON.stringify({ triage_flags: ['ambiguous_pest_or_service'], scheduling: { status: 'reschedule_requested', agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: '2026-10-09T14:00:00Z' }, ...over });
   const JEV = { ok: true, answers: { service_unclear: { p: 0.8, yes: true, confident: false } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
 
   beforeEach(() => {
@@ -343,6 +343,29 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     });
   });
 
+  test('a reschedule the caller did not accept is not committed, as the apply path rejects it', () => {
+    const call = { id: 'c3', v2_extraction_status: 'valid', ai_extraction_enriched: V2({ scheduling: { status: 'reschedule_requested', agent_committed_booking: true, caller_accepted_slot: null, confirmed_start_at: '2026-10-09T14:00:00Z' } }) };
+    expect(gateCheckBaselines(call, null).reschedule_committed).toEqual({ production: false });
+  });
+
+  test('the promise read counts only the kinds the chaser acts on', async () => {
+    const whereInCalls = [];
+    mockDb({ calls: [SAMPLE()], whereInCalls });
+    await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    const kinds = whereInCalls.find(([table, col]) => table === 'call_commitments as cc' && col === 'cc.kind');
+    expect(kinds[2]).toEqual(['callback', 'send_estimate', 'schedule_visit']);
+  });
+
+  test('a call longer than the span the models and reviewer see is counted, never asked the gate checks', async () => {
+    const long = SAMPLE({ transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(120) });
+    expect(long.transcription.length).toBeGreaterThan(5000);
+    mockDb({ calls: [long] });
+    const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
+    expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
+    expect(asksFor('call_judge.v2')).toHaveLength(1); // call_judge unchanged
+    expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
+  });
+
   test('no reading means no baseline, never a false one: invalid v2 extraction, commitments off', () => {
     expect(gateCheckBaselines({ id: 'c1', v2_extraction_status: 'failed', ai_extraction_enriched: V2() }, null)).toEqual({});
     expect(gateCheckBaselines({ id: 'c1', v2_extraction_status: 'valid', ai_extraction_enriched: null }, null)).toEqual({});
@@ -360,7 +383,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     expect(args).toMatchObject({ capability: 'call_gate_checks', provider: 'typesafe', subjectType: 'call_log', subjectId: 'call-7', result: JEV });
     expect(args.baselines).toEqual({ service_unclear: { production: true }, reschedule_committed: { production: true }, promise_open: { production: true } });
     // tallied apart: call_judge's counts keep their meaning
-    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0 });
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, skippedLong: 0 });
     expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
   });
 
@@ -381,7 +404,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     const byProvider = Object.fromEntries(recordsFor('call_gate_checks.v1').map(([a]) => [a.provider, a]));
     expect(byProvider.typesafe.siblingAnswers).toEqual({ service_unclear: [CLEF.answers.service_unclear] });
     expect(byProvider.cloudflare.siblingAnswers).toEqual({ service_unclear: [JEV.answers.service_unclear] });
-    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, clef: { asked: 1, recorded: 1, failed: 0 } });
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, skippedLong: 0, clef: { asked: 1, recorded: 1, failed: 0 } });
   });
 
   test('the gate-check ask failing never touches call_judge or the audit', async () => {
@@ -389,7 +412,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [SAMPLE()] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
     expect(judgeTally(res.jev)).toEqual({ asked: 1, recorded: 1, failed: 0 });
-    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 0, failed: 1 });
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 0, failed: 1, skippedLong: 0 });
     expect(res.audited).toBe(1);
   });
 });
