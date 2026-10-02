@@ -1120,16 +1120,16 @@ function loadCandidateItems(conn, itemIds = null) {
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
     // The customers a missing_first_name card is owed on (payload.customer_ids, or the scalar
-    // customer_id of a pre-list card), each read directly: how many, and how many are live
-    // with a nonblank first name. A listed id whose row is gone counts as owed, not named.
+    // customer_id of a pre-list card), each read directly: how many, and how many are
+    // fulfilled (live with a nonblank first name, following an active merge to its survivor —
+    // the shared owedCustomerNamedSql). A listed id whose row is gone counts as owed, not named.
     .joinRaw(`left join lateral (
       select count(*) as owed_total,
-        count(c2.id) filter (where c2.deleted_at is null and btrim(coalesce(c2.first_name, '')) <> '') as owed_named
+        count(*) filter (where ${require('../utils/missing-first-name-card').owedCustomerNamedSql('ids.id')}) as owed_named
       from jsonb_array_elements_text(
         case when jsonb_typeof(t.payload->'customer_ids') = 'array' then t.payload->'customer_ids'
              when t.payload->>'customer_id' is not null then jsonb_build_array(t.payload->>'customer_id')
              else '[]'::jsonb end) as ids(id)
-      left join customers c2 on c2.id::text = ids.id
       where t.reason_code = 'missing_first_name'
     ) fnc on true`)
     .where('t.status', 'open')

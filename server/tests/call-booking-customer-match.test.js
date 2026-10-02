@@ -396,4 +396,31 @@ const SKIP = !process.env.DATABASE_URL;
     // a different call gets its own card
     expect(await fileMissingFirstNameCard(trx, { ...args, callLogId: randomUUID() })).toBe(true);
   });
+
+  test('a merged-away customer is judged on the record it was merged into; an undone merge is not followed (codex #5559 r17)', async () => {
+    const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
+    await trx.raw('CREATE TEMP TABLE customers (id uuid PRIMARY KEY, first_name text, deleted_at timestamptz) ON COMMIT DROP');
+    await trx.raw('CREATE TEMP TABLE customer_merge_journal (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), winner_customer_id uuid, loser_customer_id uuid, created_at timestamptz DEFAULT clock_timestamp(), undone_at timestamptz) ON COMMIT DROP');
+    const [loser, mid, winner, live] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    await trx('customers').insert([
+      { id: loser, first_name: '', deleted_at: new Date() },
+      { id: mid, first_name: '', deleted_at: new Date() },
+      { id: winner, first_name: 'Sample' },
+      { id: live, first_name: '' },
+    ]);
+    const owed = (ids) => everyOwedCustomerNamed(trx, { customer_ids: ids });
+    expect(await owed([loser])).toBe(false); // gone, no merge: owed
+    await trx('customer_merge_journal').insert({ winner_customer_id: mid, loser_customer_id: loser });
+    await trx('customer_merge_journal').insert({ winner_customer_id: winner, loser_customer_id: mid });
+    expect(await owed([loser])).toBe(true); // loser → mid → named winner
+    expect(await owed([loser, live])).toBe(false); // every listed customer must be fulfilled
+    await trx('customers').where({ id: live }).update({ first_name: 'Example' });
+    expect(await owed([loser, live])).toBe(true);
+    await trx('customer_merge_journal').where({ loser_customer_id: mid }).update({ undone_at: new Date() });
+    expect(await owed([loser])).toBe(false); // the undone hop is not followed
+    await trx('customer_merge_journal').where({ loser_customer_id: mid }).update({ undone_at: null });
+    await trx('customers').where({ id: winner }).update({ first_name: ' ' });
+    expect(await owed([loser])).toBe(false); // the survivor is still blank
+    expect(await owed([])).toBe(false);
+  });
 });
