@@ -54,6 +54,15 @@ const MAX_LIMIT = 50;
 const SUMMARY_PAGE = 100;
 const SUMMARY_MAX_PAGES = 10;
 const TIMELINE_ROW_CAP = 50;
+const PAYMENT_ROW_CAP = 500;
+
+// Newest rows first, one past the cap, so a truncated read is detected rather
+// than guessed and the most recent evidence (the unresolved attempt) is never
+// the part that is dropped. Returned oldest first.
+async function newestRows(query) {
+  const rows = await query.orderBy('created_at', 'desc').limit(TIMELINE_ROW_CAP + 1);
+  return { rows: rows.slice(0, TIMELINE_ROW_CAP).reverse(), truncated: rows.length > TIMELINE_ROW_CAP };
+}
 const NOT_YET_SENT_STATUSES = ['draft', 'scheduled', 'sending'];
 
 const LIST_STATUS_FILTERS = ['all', 'unpaid', 'overdue', 'paid', 'prepaid', 'processing', 'draft', 'sent', 'viewed', 'void', 'refunded'];
@@ -213,7 +222,7 @@ async function resolveBillingCustomer(input, actionContext) {
 // caller decides what is received.
 async function loadLinkedPayments(customerId, invoices) {
   const linked = new Map(invoices.map((invoice) => [String(invoice.id), []]));
-  if (!invoices.length) return linked;
+  if (!invoices.length) return { linked, truncated: false };
   const ids = invoices.map((invoice) => String(invoice.id));
   const intents = [...new Set(invoices.map((invoice) => invoice.stripe_payment_intent_id).filter(Boolean))];
   const charges = [...new Set(invoices.map((invoice) => invoice.stripe_charge_id).filter(Boolean))];
@@ -227,12 +236,13 @@ async function loadLinkedPayments(customerId, invoices) {
       if (charges.length) this.orWhereRaw('payments.stripe_charge_id = ANY(?)', [charges]);
       if (patterns.length) this.orWhereRaw('payments.description LIKE ANY(?)', [patterns]);
     })
-    .orderBy('created_at', 'asc')
-    .limit(500)
+    .orderBy('created_at', 'desc')
+    .limit(PAYMENT_ROW_CAP + 1)
     .select('id', 'customer_id', 'payment_date', 'amount', 'status', 'description', 'metadata', 'created_at', 'processor',
       'stripe_payment_intent_id', 'stripe_charge_id', 'refund_amount', 'refund_status', 'refunded_at', 'failure_reason',
       'card_brand', 'payment_method_type', 'payer_id', 'retry_count', 'next_retry_at');
-  for (const row of rows) {
+  const truncated = rows.length > PAYMENT_ROW_CAP;
+  for (const row of rows.slice(0, PAYMENT_ROW_CAP).reverse()) {
     const metadata = parseJson(row.metadata) || {};
     for (const invoice of invoices) {
       let by = null;
@@ -249,7 +259,7 @@ async function loadLinkedPayments(customerId, invoices) {
       if (by) linked.get(String(invoice.id)).push({ ...row, linked_by: by });
     }
   }
-  return linked;
+  return { linked, truncated };
 }
 
 // Payment status -> received. Only a recorded successful payment counts; a
@@ -444,7 +454,7 @@ function paymentPlanFromList(row) {
   };
 }
 
-function invoiceItem(row, today, ledger, heldIds) {
+function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false) {
   const payments = ledger.get(String(row.id)) || [];
   const netPaid = fromCents(payments.reduce((total, payment) => total + cents(netReceived(payment)), 0));
   const recorded = payments.some((payment) => payment.status === 'paid' || payment.status === 'refunded');
@@ -464,6 +474,11 @@ function invoiceItem(row, today, ledger, heldIds) {
       amountPaid = 0;
       basis = 'no recorded payment';
     }
+  }
+  if (paymentsTruncated) {
+    amountPaid = null;
+    basis = 'unknown: this customer has more payment rows than were read';
+    unknown.push('Payment history exceeded the read bound: amount paid and whether a payment was recorded are unknown.');
   }
   if (payments.some((payment) => payment.linked_by === 'payment_intent')) {
     unknown.push('A payment linked only by Stripe PaymentIntent may cover more than this invoice (combined payment): amount_paid is not apportioned.');
@@ -518,7 +533,7 @@ async function getCustomerInvoices(input, actionContext) {
     customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest',
   });
   const summary = await accountSummary(InvoiceService, customer, today);
-  const ledger = await loadLinkedPayments(customer.id, page.invoices);
+  const { linked: ledger, truncated: paymentsTruncated } = await loadLinkedPayments(customer.id, page.invoices);
   let heldIds = new Set();
   const unknowns = ['The live Stripe PaymentIntent state is not stored in the portal and is not read here.'];
   try {
@@ -533,7 +548,7 @@ async function getCustomerInvoices(input, actionContext) {
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds)),
+    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated)),
     returned_count: returned,
     total_matching: page.total,
     has_more: hasMore,
@@ -605,7 +620,7 @@ function orphanEntry(row) {
   };
 }
 
-function summarizePayments(entries, invoice) {
+function summarizePayments(entries, invoice, evidenceComplete = true) {
   const recorded = entries.filter((entry) => entry.type === 'recorded_payment' && entry.received);
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
   const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received);
@@ -632,8 +647,9 @@ function summarizePayments(entries, invoice) {
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (creditSettled.length) parts.push('settled by account credit with no card charge (a credit settlement is not a payment received)');
   let statement;
-  if (receivedAny) statement = `Payment was received: ${parts.join('; ')}.`;
+  if (receivedAny) statement = `Payment was received: ${parts.join('; ')}.${evidenceComplete ? '' : ' More records exist than were read.'}`;
   else if (invoiceStatusKey(invoice.status) === 'prepaid') statement = 'Settled as prepaid (account credit or an annual prepay): no payment row; nothing is owed.';
+  else if (!evidenceComplete) statement = `Payment evidence is incomplete: the portal holds more records than were read${parts.length ? ` (found: ${parts.join('; ')})` : ''}. Do not say whether it was received or attempted.`;
   else if (creditSettled.length) statement = `Settled by account credit, not by a payment: ${parts.join('; ')}.`;
   else if (unknownOutcome.length) statement = `Payment receipt is not confirmed: ${parts.join('; ')}. Stripe may have charged the customer, so do not say it was not paid, and do not retry the charge.`;
   else if (invoiceStatusKey(invoice.status) === 'paid') statement = `The invoice is marked paid but no received payment is linked to it in the portal's records${parts.length ? `; ${parts.join('; ')}` : ''}. Say the payment evidence is unknown.`;
@@ -650,6 +666,7 @@ function summarizePayments(entries, invoice) {
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
     settled_by_account_credit: creditSettled.length,
+    evidence_complete: evidenceComplete,
     statement,
   };
 }
@@ -674,16 +691,15 @@ async function getInvoiceDetail(input, actionContext) {
   if (!customer || customer.deleted_at) return unavailable;
 
   const today = etDateString();
-  const linked = (await loadLinkedPayments(customer.id, [invoice])).get(String(invoice.id)) || [];
-  const attempts = await db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
-    .orderBy('created_at', 'asc').limit(TIMELINE_ROW_CAP)
-    .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at');
-  const orphans = await db('stripe_orphan_charges').where({ invoice_id: invoice.id, resolved: false })
-    .orderBy('created_at', 'asc').limit(TIMELINE_ROW_CAP)
-    .select('id', 'stripe_payment_intent_id', 'amount', 'source', 'created_at');
-  const credits = await db('customer_credit_ledger').where({ invoice_id: invoice.id })
-    .orderBy('created_at', 'asc').limit(TIMELINE_ROW_CAP)
-    .select('id', 'delta', 'balance_after', 'source', 'note', 'created_by', 'created_at');
+  const loadedPayments = await loadLinkedPayments(customer.id, [invoice]);
+  const linked = loadedPayments.linked.get(String(invoice.id)) || [];
+  const { rows: attempts, truncated: attemptsTruncated } = await newestRows(db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
+    .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at'));
+  const { rows: orphans, truncated: orphansTruncated } = await newestRows(db('stripe_orphan_charges').where({ invoice_id: invoice.id, resolved: false })
+    .select('id', 'stripe_payment_intent_id', 'amount', 'source', 'created_at'));
+  const { rows: credits, truncated: creditsTruncated } = await newestRows(db('customer_credit_ledger').where({ invoice_id: invoice.id })
+    .select('id', 'delta', 'balance_after', 'source', 'note', 'created_by', 'created_at'));
+  const evidenceComplete = !(loadedPayments.truncated || attemptsTruncated || orphansTruncated || creditsTruncated);
   const plans = await db('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(5)
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
   const hold = await readDisputeHold(customer.id);
@@ -728,8 +744,8 @@ async function getInvoiceDetail(input, actionContext) {
   if (invoice.stripe_payment_intent_id && status !== 'paid') {
     unknowns.push('A Stripe PaymentIntent is attached to this invoice but its live state is unknown here; do not call it paid.');
   }
-  if (linked.length >= 500 || attempts.length >= TIMELINE_ROW_CAP || credits.length >= TIMELINE_ROW_CAP) {
-    unknowns.push('A timeline source hit its row cap: older rows may be missing.');
+  if (!evidenceComplete) {
+    unknowns.push('A timeline source has more rows than were read (the newest are shown, older ones are omitted): do not say a payment was not received or not attempted.');
   }
   if (hold.unknown) unknowns.push(hold.unknown);
 
@@ -766,7 +782,7 @@ async function getInvoiceDetail(input, actionContext) {
       discount_lines: lines.filter((line) => line.is_discount),
       account_credit_applied: money(invoice.credit_applied) || 0,
     },
-    payment_summary: summarizePayments(entries, invoice),
+    payment_summary: summarizePayments(entries, invoice, evidenceComplete),
     payments_timeline: entries,
     payment_plan: paymentPlanDetail(plans),
     dispute_hold: hold,

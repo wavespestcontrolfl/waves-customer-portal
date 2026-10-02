@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C; let D; let E;
+  let A; let B; let H; let C; let D; let E; let F;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -48,12 +48,12 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const json = (value) => JSON.stringify(value);
 
   async function snapshot() {
-    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C, D, E]).count('* as n').first();
+    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C, D, E, F]).count('* as n').first();
     return {
-      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C, D, E]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
+      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C, D, E, F]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
       payments: await q('payments'), attempts: await db('stripe_invoice_charge_attempts').count('* as n').first(),
       ledger: await q('customer_credit_ledger'), notifications: await db('notifications').count('* as n').first(),
-      credits: await db('customers').whereIn('id', [A, B, H, C, D, E]).select('id', 'account_credits').orderBy('id'),
+      credits: await db('customers').whereIn('id', [A, B, H, C, D, E, F]).select('id', 'account_credits').orderBy('id'),
     };
   }
 
@@ -146,6 +146,16 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const creditPaid = await invoice('e_credit', E, { total: 80, status: 'paid', paid_at: new Date(), credit_applied: 80 });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: creditPaid.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-credit-${run}`,
       status: 'succeeded', amount: 0, credit_applied_delta: 80, credit_applied_total: 80, resolved_at: new Date(), submitted_at: new Date() });
+    // More attempts than the timeline reads: the newest (an unresolved charge) must survive and the summary must not claim "none".
+    F = await customer(`Bounded${run}`, `History${run}`);
+    const busy = await invoice('f_busy', F, { total: 70 });
+    const attemptRows = [];
+    for (let n = 0; n < 51; n += 1) {
+      attemptRows.push({ invoice_id: busy.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-busy-${run}-${n}`, status: 'failed', amount: 70,
+        error_message: 'declined', resolved_at: new Date(), created_at: new Date(Date.now() - (100 - n) * 3600e3) });
+    }
+    attemptRows.push({ invoice_id: busy.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-busy-${run}-claimed`, status: 'claimed', amount: 70, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert(attemptRows);
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -341,6 +351,19 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.payment_summary).toMatchObject({ received: false, stripe_succeeded_not_in_ledger: 0, settled_by_account_credit: 1, attempts_in_flight_or_unknown: 0 });
     expect(detail.payment_summary.statement).toMatch(/^Settled by account credit, not by a payment/);
     expect(detail.invoice).toMatchObject({ status: 'paid', credit_applied: 80, balance_due: 0 });
+  });
+
+  test('truncated evidence never becomes a definitive "no payment": the newest rows are kept and the summary says it is incomplete', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.f_busy.id });
+    const attempts = detail.payments_timeline.filter((e) => e.type === 'stripe_charge_attempt');
+    expect(attempts).toHaveLength(50);
+    expect(attempts.some((e) => e.state === 'claimed')).toBe(true);
+    expect(detail.payment_summary.evidence_complete).toBe(false);
+    expect(detail.payment_summary.statement).toMatch(/^Payment evidence is incomplete/);
+    expect(detail.payment_summary.statement).not.toMatch(/^No payment has been received/);
+    expect(detail.unknowns.join(' ')).toMatch(/more rows than were read/);
+    const complete = await read('get_invoice_detail', { invoice_id: inv.open.id });
+    expect(complete.payment_summary.evidence_complete).toBe(true);
   });
 
   test('applied credit: lines, discounts and the credit movement stay separate from payments', async () => {
