@@ -317,6 +317,7 @@ function sameStreetLine(a, b) {
 // A new code that differs from the one on file flags both and rings ONE
 // Customers bell per neighborhood.
 const SOURCE = 'profile';
+const UNCONFIRMED_MARK = 'is unconfirmed: confirm on site';
 const FINAL_OUTCOMES = new Set(['filed', 'duplicate', 'filed_conflict']);
 // The one hash expression, used by the candidate query and the ledger write
 // alike, so the two can never disagree on what "this value" is.
@@ -362,16 +363,19 @@ async function fileOneSavedCode(customerId, lookup) {
       .select('id', 'neighborhood_id');
     if (active.length !== 1 || active[0].id !== snapshot.id) return { status: 'property_changed' };
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
-      .first('neighborhood_gate_code');
+      .first('neighborhood_gate_code', 'access_notes');
     const value = String(prefs?.neighborhood_gate_code || '').trim();
     if (!value) return { status: 'no_code' };
+    // A code the 10-01 message harvest marked unconfirmed (same marker the
+    // backfill reads) files needs_confirm, and flags an existing copy.
+    const unconfirmed = String(prefs?.access_notes || '').includes(UNCONFIRMED_MARK);
     let neighborhoodId = active[0].neighborhood_id;
     if (!neighborhoodId && parcel) {
       const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });
       neighborhoodId = linked.neighborhood ? linked.neighborhood.id : null;
     }
     if (!neighborhoodId) return { status: 'no_neighborhood' };
-    const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId });
+    const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId, unconfirmed });
     if (FINAL_OUTCOMES.has(filed.status)) {
       // Ledger the value filed, in the same transaction as the filing.
       // The hash is taken from the locked preferences row itself.

@@ -31,7 +31,7 @@ postgres('neighborhood gate-code filing sweep', () => {
       .returning('id');
     return row.id;
   };
-  const customerWithCode = async (code, { neighborhoodId = null, properties = 1, street = '100 Synthetic Way' } = {}) => {
+  const customerWithCode = async (code, { neighborhoodId = null, properties = 1, street = '100 Synthetic Way', notes = null } = {}) => {
     const id = randomUUID();
     await trx('customers').insert({ id, first_name: 'Sample', last_name: 'Owner', phone: '+12025550177', email: `${id}@example.invalid` });
     for (let i = 0; i < properties; i += 1) {
@@ -42,7 +42,7 @@ postgres('neighborhood gate-code filing sweep', () => {
         neighborhood_id: neighborhoodId, neighborhood_source: neighborhoodId ? 'county' : null,
       });
     }
-    await trx('property_preferences').insert({ customer_id: id, neighborhood_gate_code: code });
+    await trx('property_preferences').insert({ customer_id: id, neighborhood_gate_code: code, access_notes: notes });
     return id;
   };
   const accessRows = (neighborhoodId) => trx('neighborhood_access').where({ neighborhood_id: neighborhoodId })
@@ -144,6 +144,17 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(why).toBe("Willow Grande now has 2 different gate codes on file after Sample's update.");
     expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers?customerId=${customerId}` });
     expect(why).not.toMatch(/3333|4444/);
+  });
+
+  test.each([
+    ['a new code', false],
+    ['a copy of an active code', true],
+  ])('a profile code marked unconfirmed files needs_confirm (%s)', async (_label, existing) => {
+    const n = await neighborhood('Meadow Run');
+    if (existing) await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1616', status: 'active', source: 'backfill' });
+    await customerWithCode('1616', { neighborhoodId: n, notes: '[10-01 from messages] Gate code 1616 is unconfirmed: confirm on site.' });
+    await sweepSavedGateCodes();
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['1616', 'needs_confirm']]);
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
