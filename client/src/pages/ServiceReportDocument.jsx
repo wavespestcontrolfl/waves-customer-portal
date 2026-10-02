@@ -1161,6 +1161,14 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
+            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+                lead prints. Its headline is the same statusHeadline above, and its
+                watching line names insights this list already prints in full. */}
+            {v2Lead?.whatToExpect ? (
+              <Bullet>
+                <strong>What to expect:</strong> {v2Lead.whatToExpect}
+              </Bullet>
+            ) : null}
             {v2Diagnosis.map((row) => (
               <Bullet key={row.key || row.label}>
                 <strong>{row.label}{row.score != null ? ` (${row.score})` : ''}:</strong> {row.customerExplanation}

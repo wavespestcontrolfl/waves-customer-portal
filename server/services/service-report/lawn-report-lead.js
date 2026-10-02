@@ -26,9 +26,10 @@
  * without it is byte-identical to the lead before the field existed.
  *
  * `whatToExpect` and `watching` (GATE_LAWN_REPORT_COPY_V6) are not read off the
- * payload either: the v6 copy writer (lawn-copy-v6.js) selects / guards them in
- * report-data.js and hands them in. Its `headline` and `whatWeDid` take the
- * place of the headline / applied sources when each passed every guard. The two
+ * payload either: the v6 copy (lawn-copy-v6.js) builds them as fixed sentences in
+ * report-data.js and hands them in. Its `headline`
+ * takes the headline's place when present; its `whatWeDid` is the ONLY applied
+ * source while the writer is live. The two
  * keys exist only when there is text, so a lead without the writer is
  * byte-identical to the lead before it.
  */
@@ -185,8 +186,8 @@ function v6CopyOf(copyV6) {
  * @param {{priorDate:string, lines:string[]}|null} [extras.sinceLast] the
  *   "Since your last visit" block (lawn-since-last-copy.js), when its gate is live
  * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
- *   v6 copy writer's guarded fields (lawn-copy-v6.js), when its gate is live;
- *   each is a string or null (null falls to the source the lead always used)
+ *   v6 copy's fixed-sentence fields (lawn-copy-v6.js), when its gate is live;
+ *   each is a string or null (a null headline falls to the snapshot's)
  * @returns {{ headline: string|null, why: string|null,
  *   applied: string|null, yourPart: string[], next: string|null,
  *   sinceLast?: { priorDate: string, lines: string[] },
@@ -204,7 +205,10 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
     // What Waves applied is a statement of record, not watering advice: a
     // product summary that says "watered in" keeps its place in the lead.
-    applied: clean(v6 && v6.whatWeDid) || clean(snapshot.treatmentSummary),
+    // With the v6 copy the applied line is ONLY its fixed sentence: the
+    // snapshot's treatmentSummary may by now be the AI treatment narrative
+    // (report-data overwrites it), which the v6 contract keeps out of the lead.
+    applied: v6 ? clean(v6.whatWeDid) : clean(snapshot.treatmentSummary),
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
     next: deriveNext(reportV2, topIssue, bannerPresent),
   };
@@ -214,7 +218,7 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
   lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
   const since = deriveSinceLast(sinceLast);
   if (since) lead.sinceLast = since;
-  // Approved expectation sentences and the guarded watching line: under a
+  // Approved expectation sentences and the fixed watching line: under a
   // banner the same wording test that guards every lead field applies, and a
   // field over its cap is left out whole.
   if (v6) {

@@ -3221,10 +3221,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
     .limit(5)
-    // Recorded: these photos set the progress block's confidence, which the
-    // v6 copy writer (GATE_LAWN_REPORT_COPY_V6) reads before its permanent
-    // freeze. Empty on failure, as before.
-    .catch(failSoft(readFailures, 'assessment_photos', []));
+    // read-failure-exempt: gallery photos only; no insight or memory entry reads them
+    .catch(() => []);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
@@ -5496,9 +5494,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .orderBy('quality_score', 'desc')
               .orderBy('photo_order', 'asc')
               .limit(5)
-              // Recorded, not only defaulted: the v6 copy writer must not
-              // freeze copy built on an UNKNOWN prior confidence.
-              .catch(failSoft(readFailures, 'prior_photos', null));
+              .catch(() => null);
             priorForProgress = {
               ...prior,
               confidence: Array.isArray(priorPhotos)
@@ -5509,7 +5505,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
         } catch {
           lawnProgress = null;
-          readFailures.add('progress');
         }
       }
       // AI "What we applied today" narrative — same contract as the T&S path
@@ -5584,8 +5579,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
             .orderBy('scheduled_date', 'asc')
             .first('scheduled_date')
-            // Recorded: the v6 copy writer reads the visit gap from this row
-            // and must not freeze copy on a gap a failed read invented.
+            // Recorded: the v6 copy picks its "by your next visit" sentence from
+            // this gap and must not freeze one a failed read invented.
             .catch(failSoft(readFailures, 'next_visit', null));
           let nextVisit = null;
           lawnCopyTiming.visitDate = svcIso || null;
@@ -5622,11 +5617,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       if (reportV2 && featureGates.lawnReportCopyV6Live()) {
         // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
         // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
-        // read while this is live). Frozen copy replays; a degraded read, an
-        // unverifiable treatment or an unavailable model ships the deterministic
-        // lead copy. The fields ride the in-process report as `copyV6` for the
-        // lead derivation (a non-enumerable hand-off, like reportV2.progress, so
-        // the payload gains a key only through reportV2.lead).
+        // read while this is live). Fixed sentences from this visit's facts, no
+        // model (owner 2026-10-02); frozen copy replays; a degraded read or an
+        // unverifiable treatment ships the lead's own copy. The fields ride the
+        // in-process report as `copyV6` for the lead derivation (a non-enumerable
+        // hand-off, like reportV2.progress, so the payload gains a key only
+        // through reportV2.lead).
         if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
           console.warn('[report-data] lawn v6 copy skipped — treatment data unverifiable');
           // Not reproducible: a later healthy render would write the copy this
@@ -5638,40 +5634,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             const gapDays = lawnCopyTiming.visitDate && lawnCopyTiming.nextVisitIso
               ? Math.round((Date.parse(`${lawnCopyTiming.nextVisitIso}T12:00:00Z`) - Date.parse(`${lawnCopyTiming.visitDate}T12:00:00Z`)) / 86400000)
               : null;
-            const guard = lawnTreatmentGuard?.guardProducts?.length
-              ? (text) => lawnTreatmentGuard.treatmentGuard.contradictsAppliedProducts(text, lawnTreatmentGuard.guardProducts)
-              : null;
-            // The since-last lines the lead may print (GATE_LAWN_SINCE_LAST),
-            // built the same way as below but for any render mode: the copy
-            // freezes at its first healthy render, and the model must not
-            // restate lines a live view will show.
-            let sinceLastLines = [];
-            if (visitMemorySinceLast && featureGates.lawnSinceLastLive()) {
-              try {
-                const block = buildSinceLastCopy({
-                  sinceLast: visitMemorySinceLast,
-                  progress: lawnProgress,
-                  insights: reportV2.insights,
-                  bannerPresent: Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0,
-                });
-                sinceLastLines = block && Array.isArray(block.lines) ? block.lines : [];
-              } catch { sinceLastLines = []; }
-            }
             const outcome = await resolveLawnCopyV6ForRender({
               structuredNotes: service.structured_notes,
               serviceRecordId: service.id,
               assessmentId: lawnAssessment.assessmentId,
               reportV2,
               ctx: {
-                grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
                 visitDate: lawnCopyTiming.visitDate,
                 nextVisitGapDays: Number.isFinite(gapDays) && gapDays >= 0 ? gapDays : null,
-                progress: lawnProgress,
-                sinceLastLines,
-                extraGuard: guard,
               },
-              // Never CREATE the first-writer-wins entry (or call the model)
-              // from a degraded read: any input read that failed is in readFailures.
+              // Never CREATE the first-writer-wins entry from a degraded read:
+              // any input read that failed is in readFailures.
               degraded: readFailures.size > 0,
               knex,
             });

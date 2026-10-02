@@ -1,6 +1,6 @@
 // The v6 copy writer's fields (P14, GATE_LAWN_REPORT_COPY_V6) on the lawn LEAD:
-// headline and whatWeDid replace the lead's headline / applied sources when
-// present, whatToExpect and watching are new lead fields, every field keeps
+// headline replaces the lead's headline when present and whatWeDid is the ONLY
+// applied source, whatToExpect and watching are new lead fields, every field keeps
 // the lead's own caps and watering-wording rule, the word budget has a drop
 // order for them, and the carrier (reportV2.copyV6) never reaches the payload.
 // Gate off (no copyV6) is byte-identical to the lead before this PR.
@@ -82,10 +82,10 @@ describe('deriveLawnLead with the v6 writer fields', () => {
     });
   });
 
-  test('a writer field that fell back (null) leaves the deterministic sentence the lead always used', () => {
+  test('a null headline falls to the snapshot; a null whatWeDid leaves applied EMPTY (never the AI narrative in treatmentSummary)', () => {
     const lead = deriveLawnLead(reportOf(), { copyV6: { headline: null, whatWeDid: null, whatToExpect: null, watching: null } });
     expect(lead.headline).toBe('Stable — watching weeds');
-    expect(lead.applied).toBe('Today we applied a broadleaf herbicide to the edge weeds.');
+    expect(lead.applied).toBeNull();
     // The two optional keys are absent, not null, when they have nothing to say.
     expect(Object.keys(lead).sort()).toEqual(['applied', 'headline', 'next', 'why', 'yourPart']);
   });

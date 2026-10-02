@@ -1,12 +1,11 @@
 /**
  * Lawn copy guards (lawn report rebuild P11).
  *
- * Pure checks for MODEL-written lawn report copy. P14's v6 writer
- * (lawn-copy-v6.js, GATE_LAWN_REPORT_COPY_V6) runs checkLawnModelCopy on every
- * model free-text field and on the printed expectation sentences, and falls
- * back to the deterministic string on any failure. The old narrative overlay
- * (lawn-report-narrative.js safeText / the rain-window regexes) still serves
- * the gate-off path.
+ * Pure checks for MODEL-written lawn report copy. P14's v6 writer runs
+ * checkLawnModelCopy on every model field and falls back to the deterministic
+ * string on any failure. This PR wires nothing: the live narrative overlay
+ * (lawn-report-narrative.js safeText / the rain-window regexes) keeps running
+ * untouched until P14 replaces it behind GATE_LAWN_REPORT_COPY_V6.
  *
  * The model owns prose only, and the timing rule is a CLOSED WORLD: model copy
  * contains no time language and no numbers of its own. Day and week windows

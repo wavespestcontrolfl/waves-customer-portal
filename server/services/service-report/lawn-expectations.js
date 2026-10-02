@@ -1,8 +1,8 @@
 /**
  * Lawn expectations engine (lawn report rebuild, P10). Pure: no I/O, no DB,
- * no fetch, no gate. Ships DARK: the only customer-facing reader is P14's copy
- * writer (lawn-copy-v6.js, GATE_LAWN_REPORT_COPY_V6), which SELECTS approved
- * rows' keyed `sentences` by id; P16 will route the deterministic copy.
+ * no fetch, no gate. Ships DARK: the only customer-facing reader is P14's v6
+ * copy (lawn-copy-v6.js, GATE_LAWN_REPORT_COPY_V6), which prints approved rows'
+ * keyed `sentences` word for word; P16 will route the deterministic copy.
  *
  * Given today's applications, named issues, the visit date and the next-visit
  * date, it returns the approved expectation sentences and a byNextVisit view

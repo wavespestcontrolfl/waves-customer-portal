@@ -2121,45 +2121,38 @@ thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
 `GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
 also live, so gate off, or lead off, leaves the lawn payload, render and PDF
-unchanged, key for key, and makes no model call, read or write) swaps the old
-`LAWN_REPORT_V2_NARRATIVE` overlay for the structural lawn copy writer
+unchanged, key for key, and makes no read or write) swaps the old
+`LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
 (`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
-shrub; no new route, token, privacy or rate-limit surface). It adds NO top-level
-payload key and carries nothing of its own: its fields reach the customer only
-through `reportV2.lead`. `lead.headline` and `lead.applied` take the writer's
-`headline` and "what we did" line when each passed every guard (otherwise the
-deterministic sources they always had), and `lead` gains two optional keys,
-`whatToExpect` (at most 42 words) and `watching` (at most 20 words), that are
-absent (never `null`) unless the writer is live and has text for them. `whatToExpect` is
-SELECTED, never written: the model returns up to two expectation-row ids (and
-optional sentence keys within a row) from a closed list of rows the owner has
-approved (`approved: true` in `server/config/lawn-expectations.js`; every row ships
-`approved: false`, so the key is absent until the owner approves one), and the
-server prints the row's own sentences word for word, skipping any sentence that
-would pass the word cap or trips a copy rule, never cutting one. The model never
-writes a number, window, date, watering, rain, sprinkler, mowing or clock wording,
-a brand, rate or cause name; `headline`, "what we did" (at most 8 and 32 words) and
-`watching` (only when an issue exists) are plain text that must pass the banned
-copy list, the lawn copy guards (`lawn-copy-guards.js`), a word cap (a field over
-it is dropped whole, never truncated), a no-digit rule and the lead's watering
-wording test, and any failure leaves the deterministic sentence the lead used
-before (`watching` and `whatToExpect` then absent). The lead's word budget gives
+shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
+sentence built from the visit's facts; no model writes any of it (owner ruling
+2026-10-02). It adds NO top-level payload key: its fields reach the customer only
+through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
+`lead.applied` is the deterministic treatment summary of the recorded products
+(`treatment-summary.js`), never the AI treatment narrative that later overwrites
+`snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
+optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
+42 words: the visible-change and by-next-visit sentences of the first two
+expectation rows the owner has approved for today's products, printed word for
+word, a sentence that would pass the cap left out whole; every row ships
+`approved: false`, so the key is absent until the owner approves one) and
+`watching` ("We are also keeping an eye on <topics>." for the watched issues
+after the one the headline names, at most three). The lead's word budget gives
 these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
-`whatToExpect`, then `sinceLast`. The model is also shown the "Since your last
-visit" lines (built for any render mode while `GATE_LAWN_SINCE_LAST` is live) only
-so it does not repeat them; it never writes them. The fields freeze into
-`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, promptVersion,
+`whatToExpect`, then `sinceLast`. The fields freeze into
+`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, copyVersion,
 assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
 migration, written at the first healthy render, which the completion write gate
-performs) and replay byte for byte afterwards without a model call. A degraded
-read creates no freeze and asks no model, and an unavailable model creates none
-either (the render is marked uncacheable, `weekWeatherUncacheable`, and the next
-render retries). The writer's fields reach the lead through a non-enumerable
+performs) and replay byte for byte afterwards, so a later product edit or row
+approval never changes a sent report. A degraded read (any input read failed,
+including the next-visit lookup that picks the by-next-visit sentence) or an
+unverifiable treatment creates no freeze and the render is marked uncacheable
+(`weekWeatherUncacheable`). The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
-key, and the lawn PDF cache signature carries a
-`:copyv6=1` stamp while the gate is live. The progress block (P13) stays
-non-enumerable: P14 reads it to check progress words and exposes no `progress` key.
+key. The lawn PDF prints `whatToExpect` as a "What to expect" line (its headline
+is the same `statusHeadline`, and the insights it already lists cover `watching`),
+and its cache signature carries a `:copyv6=1` stamp while the gate is live.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`

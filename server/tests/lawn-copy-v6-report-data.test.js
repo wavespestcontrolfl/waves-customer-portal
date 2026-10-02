@@ -1,13 +1,13 @@
 // GATE_LAWN_REPORT_COPY_V6 (lawn report rebuild P14) through the real report
-// builder (buildReportV1Data) and the reconcile pass. The model is mocked at
-// the shared dispatcher: no production LLM API is called. Synthetic data only.
+// builder (buildReportV1Data) and the reconcile pass. Fixed sentences, no
+// model (owner 2026-10-02); the shared dispatcher is mocked so no production
+// LLM API is called by the report's other lanes. Synthetic data only.
 //
-// Pins: gate off (or lead gate off) = no model call, no write, no key, the same
-// payload and PDF signature as before; gate on = the writer's fields freeze at
-// the first render (first writer wins per assessment) and reach the customer
-// only through reportV2.lead (the carrier never leaves the process); a later
-// render replays byte for byte and never calls the model; a degraded read or an
-// unavailable model creates no freeze and ships the deterministic lead copy.
+// Pins: gate off (or lead gate off) = no write, no key, the same payload and
+// PDF signature as before; gate on = the fields freeze at the first render
+// (first writer wins per assessment) and reach the customer only through
+// reportV2.lead (the carrier never leaves the process); a later render replays
+// byte for byte whatever the facts now say; a degraded read creates no freeze.
 
 jest.mock('../services/lawn-assessment-history', () => ({
   installedForVisit: jest.fn(),
@@ -24,7 +24,8 @@ const history = require('../services/lawn-assessment-history');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { buildReportV1Data, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-const { storedLawnCopyV6For, _test: v6Test } = require('../services/service-report/lawn-copy-v6');
+const { storedLawnCopyV6For } = require('../services/service-report/lawn-copy-v6');
+const { buildTreatmentSummary } = require('../services/service-report/treatment-summary');
 
 const FAIL = Symbol('table read fails');
 function makeKnex(fixtures) {
@@ -162,14 +163,9 @@ const service = (notes = {}) => ({
   structured_notes: JSON.stringify(notes), service_data: JSON.stringify({}),
 });
 
-const MODEL_OUT = {
-  headline: 'Healthy overall, with a few spots to watch',
-  whatWeDid: 'We applied a selective weed control to the weeds we found.',
-  watching: 'Thin areas along the driveway edge, which may be signs of heat stress.',
-};
 const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1, et0Inches: 1, dailyRain: [], rainConfidence: 'high' };
-const V6_LANE = 'lawn_visit_narratives';
-const v6Calls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === V6_LANE);
+const NARRATIVE_LANE = 'lawn_visit_narratives';
+const narrativeCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === NARRATIVE_LANE);
 
 describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD', 'LAWN_REPORT_V2_NARRATIVE'];
@@ -177,13 +173,10 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
     jest.clearAllMocks();
-    v6Test._cache.clear();
     history.installedForVisit.mockResolvedValue(CUR);
     history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
     history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
-    dispatchWithFallback.mockImplementation(async (_policy, payload) => (
-      payload && payload.laneId === V6_LANE ? { ok: true, json: MODEL_OUT } : { ok: false, reason: 'no_key' }
-    ));
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
   });
   afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
 
@@ -196,108 +189,85 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   // The hand-off is non-enumerable (a clone would drop it): reconcile a shallow copy, as the route does.
   const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
 
-  test('gate off: no model call, no write, no key, and the payload is what it was', async () => {
+  test('gate off: no write, no key, and the payload is what it was', async () => {
     const recs = records();
     const { data, log } = await render(recs);
-    expect(v6Calls()).toHaveLength(0);
     expect(log.updates).toHaveLength(0);
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
     expect(data.reportV2.copyV6).toBeUndefined();
     expect(JSON.stringify(reconciled(data))).not.toMatch(/copyV6|lawnCopyV6/);
   });
 
-  test('the v6 gate alone (lead gate off) is inert: byte-identical payload, no call, no write', async () => {
+  test('the v6 gate alone (lead gate off) is inert: byte-identical payload, no write', async () => {
     const base = (await render(records())).data;
     process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
     const recs = records();
     const { data, log } = await render(recs);
-    expect(v6Calls()).toHaveLength(0);
     expect(log.updates).toHaveLength(0);
     expect(JSON.parse(JSON.stringify(data))).toEqual(JSON.parse(JSON.stringify(base)));
   });
 
-  test('while v6 is live the old narrative overlay does not run, even with LAWN_REPORT_V2_NARRATIVE set (v6 prompt and version ride the one call)', async () => {
+  test('while v6 is live the old narrative overlay does not run, even with LAWN_REPORT_V2_NARRATIVE set, and no model is asked for lead copy', async () => {
     process.env.LAWN_REPORT_V2_NARRATIVE = 'true';
     live();
     await render(records());
-    expect(dispatchWithFallback.mock.calls.filter(([, p]) => p && p.laneId === 'lawn_visit_narratives')).toHaveLength(1);
-    // The old path's prompt carries the old structured facts; v6's carries the v6 contract.
-    const [, payload] = v6Calls()[0];
-    expect(payload.system).toContain('OUTPUT CONTRACT');
-    expect(payload.promptVersion).toBe('lawn_report_v6_structural_1');
+    expect(narrativeCalls()).toHaveLength(0);
   });
 
-  test('gate on: the first render freezes the fields once and the lead carries them; the carrier never leaves the payload', async () => {
+  test('gate on: the first render freezes the fixed sentences once and the lead carries them; the carrier never leaves the payload', async () => {
     live();
     const recs = records();
     const { data, log } = await render(recs);
-    expect(v6Calls()).toHaveLength(1);
     expect(log.updates).toHaveLength(1);
     const frozen = storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur');
-    // Today's expectation table has no approved row, so whatToExpect is null.
-    expect(frozen.fields).toEqual({
-      headline: MODEL_OUT.headline, whatWeDid: MODEL_OUT.whatWeDid, whatToExpect: null, watching: MODEL_OUT.watching,
-    });
+    // Fixed sentences from this visit's facts; today's expectation table has no
+    // approved row, so whatToExpect is null.
+    expect(frozen.fields.headline).toBe(data.reportV2.snapshot.statusHeadline);
+    expect(frozen.fields.whatWeDid).toBe(buildTreatmentSummary(data.reportV2.treatment));
+    expect(frozen.fields.whatWeDid).toBeTruthy();
+    expect(frozen.fields.whatToExpect).toBeNull();
+    expect(frozen.copyVersion).toBe('lawn_report_v6_fixed_1');
     expect(data.reportV2.copyV6).toEqual(frozen.fields);
     const out = reconciled(data);
-    expect(out.reportV2.lead.headline).toBe(MODEL_OUT.headline);
-    expect(out.reportV2.lead.applied).toBe(MODEL_OUT.whatWeDid);
-    // Today's table has no approved row: the optional key is absent, not null.
+    expect(out.reportV2.lead.headline).toBe(frozen.fields.headline);
+    expect(out.reportV2.lead.applied).toBe(frozen.fields.whatWeDid);
     expect(Object.keys(out.reportV2.lead)).not.toContain('whatToExpect');
-    expect(out.reportV2.lead.watching).toBe(MODEL_OUT.watching);
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'copyV6')).toBe(false);
     expect(JSON.stringify(out)).not.toContain('copyV6');
-    // Even before reconciliation the carrier is not an enumerable payload key.
     expect(Object.keys(data.reportV2)).not.toContain('copyV6');
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
   });
 
-  test('a later render replays byte for byte and never calls the model, whatever the model would now say', async () => {
+  test('a later render replays byte for byte, whatever the visit facts now say', async () => {
     live();
     const recs = records();
     const first = (await render(recs)).data;
-    jest.clearAllMocks();
-    v6Test._cache.clear();
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { headline: 'Something else entirely', whatWeDid: 'We applied a feed.', watching: 'Thin areas.' } });
-    const again = (await render(recs, {}, service(recs['svc-cur'].structured_notes))).data;
-    expect(v6Calls()).toHaveLength(0);
+    const edited = { service_products: [{ id: 'sp-2', service_record_id: 'svc-cur', product_name: 'Test Fertilizer C', product_category: 'fertilizer', created_at: '2026-09-30T19:00:00Z' }] };
+    const again = (await render(recs, edited, service(recs['svc-cur'].structured_notes))).data;
     expect(JSON.stringify(again.reportV2.copyV6)).toBe(JSON.stringify(first.reportV2.copyV6));
   });
 
   test('a failed freeze serves the copy and marks the render uncacheable', async () => {
     live();
     const { data } = await render(records(), {}, undefined, { failUpdate: true });
-    expect(data.reportV2.copyV6.headline).toBe(MODEL_OUT.headline);
+    expect(data.reportV2.copyV6.headline).toBe(data.reportV2.snapshot.statusHeadline);
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
   });
 
-  test('a degraded read (a failed service_products read) calls no model, creates no freeze, and ships the deterministic copy', async () => {
+  test('a degraded read (a failed service_products read) creates no freeze and ships the lead\'s own copy; recovery freezes', async () => {
     live();
     const recs = records();
     const { data, log } = await render(recs, { service_products: FAIL });
-    expect(v6Calls()).toHaveLength(0);
     expect(log.updates).toHaveLength(0);
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
     expect(data.reportV2.copyV6).toBeUndefined();
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
-    // The next healthy render freezes.
     const next = await render(recs);
     expect(storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur')).toBeTruthy();
     expect(next.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
   });
 
-  test("a failed read of this visit's photos (progress confidence) is a degraded read: no model, no freeze; recovery freezes", async () => {
-    live();
-    const recs = records();
-    const { data } = await render(recs, { lawn_assessment_photos: FAIL });
-    expect(v6Calls()).toHaveLength(0);
-    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
-    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
-    await render(recs);
-    expect(storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur')).toBeTruthy();
-  });
-
-  test('a failed next-visit read (the visit gap the writer reads) is a degraded read: no model, no freeze', async () => {
+  test('a failed next-visit read (the gap that picks the by-next-visit sentence) is a degraded read: no freeze', async () => {
     live();
     const recs = records();
     // Only the next-visit lookup fails; every other scheduled_services read answers.
@@ -311,37 +281,8 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     };
     knex.raw = base.raw;
     const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, {});
-    expect(v6Calls()).toHaveLength(0);
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
-  });
-
-  test('an unavailable model: deterministic lead, no freeze, uncacheable; the retry freezes', async () => {
-    live();
-    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
-    const recs = records();
-    const { data, log } = await render(recs);
-    expect(log.updates).toHaveLength(0);
-    expect(data.reportV2.copyV6).toBeUndefined();
-    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
-    const out = reconciled(data);
-    expect(out.reportV2.lead.headline).toBe(data.reportV2.snapshot.statusHeadline);
-    expect(Object.keys(out.reportV2.lead).sort()).toEqual(['applied', 'headline', 'next', 'why', 'yourPart']);
-    dispatchWithFallback.mockImplementation(async (_p, payload) => (payload && payload.laneId === V6_LANE ? { ok: true, json: MODEL_OUT } : { ok: false }));
-    v6Test._cache.clear();
-    await render(recs);
-    expect(storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur')).toBeTruthy();
-  });
-
-  test('a model answer that breaks every guard falls back field by field: the lead keeps its deterministic sentences', async () => {
-    live();
-    dispatchWithFallback.mockImplementation(async (_p, payload) => (payload && payload.laneId === V6_LANE
-      ? { ok: true, json: { headline: 'Up 5 points since August', whatWeDid: 'Today we applied Test Herbicide B within a week.', watching: 'Chinch bugs.' } }
-      : { ok: false }));
-    const { data } = await render(records());
-    const out = reconciled(data);
-    expect(out.reportV2.lead.headline).toBe(data.reportV2.snapshot.statusHeadline);
-    expect(out.reportV2.lead.applied).toBe(data.reportV2.snapshot.treatmentSummary);
   });
 
   test('the PDF cache signature moves with the gate only while it is live (gate off is the signature it was)', async () => {
