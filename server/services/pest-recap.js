@@ -302,6 +302,22 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
  * most-used list; only that sheet asks for it, so the recap modal (and the
  * sheet's stock re-read) never pay for the aggregate.
  */
+// Whether a trace saved on a lane visit would show on its report: the
+// report's own render verdict (trace-eligibility.js resolveTraceRenderVerdict:
+// bed bug's indoor work and bee, wasp and mud dauber nest work never carry
+// a map), and with the eligibility gate off the report's legacy indoor-only
+// rule for bed bug. A verdict that cannot be read counts as shown, so the
+// sheet's trace holds stand.
+async function laneTraceOnReport(svc, lane, knex) {
+  const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./service-report/trace-eligibility');
+  if (!traceEligibilityGateOn() && lane === 'bed_bug_treatment') return false;
+  const verdict = await resolveTraceRenderVerdict(
+    { scheduled_service_id: svc.id, service_type: svc.service_type, service_data: null },
+    knex,
+  ).catch(() => null);
+  return !verdict?.suppressed;
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -372,10 +388,14 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   const lane = profile && require('../config/feature-gates').laneVoiceFillLive() && !profile.projectBacked && !profile.requiresProject
     ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type })
     : null;
+  const traceOnReport = lane ? await laneTraceOnReport(svc, lane, knex) : undefined;
 
   return {
     ok: true,
     eligible,
+    // Whether a saved trace would show on a lane visit's report, so the
+    // sheet holds only on a map the customer would see.
+    ...(lane ? { traceOnReport } : {}),
     lane,
     existingRecordLoadFailed,
     service: recapServiceIdentity(svc, profile),

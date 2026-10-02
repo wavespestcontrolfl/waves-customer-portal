@@ -118,6 +118,37 @@ describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => 
     expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
   });
 
+  describe('whether a saved trace would show on the lane visit\'s report (codex local r5 on #5629)', () => {
+    const savedTraceGate = process.env.GATE_TRACE_ELIGIBILITY;
+    afterEach(() => {
+      if (savedTraceGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY; else process.env.GATE_TRACE_ELIGIBILITY = savedTraceGate;
+    });
+    const fireAnt = { ...visit, service_type: 'Fire Ant Treatment' };
+
+    test('the report\'s own verdict: bed bug\'s indoor work carries no map, fire ant\'s lawn outline does', async () => {
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+      process.env.GATE_TRACE_ELIGIBILITY = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });
+      expect(await buildRecapContext(bedBug.id, contextDb(bedBug))).toMatchObject({ lane: 'bed_bug_treatment', traceOnReport: false });
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'fire_ant' });
+      expect(await buildRecapContext(fireAnt.id, contextDb(fireAnt))).toMatchObject({ lane: 'fire_ant', traceOnReport: true });
+    });
+
+    test('gate off: the report\'s legacy indoor-only rule still hides bed bug\'s map', async () => {
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+      delete process.env.GATE_TRACE_ELIGIBILITY;
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });
+      expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).traceOnReport).toBe(false);
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'fire_ant' });
+      expect((await buildRecapContext(fireAnt.id, contextDb(fireAnt))).traceOnReport).toBe(true);
+    });
+
+    test('a pest visit carries no such field', async () => {
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+      expect(await buildRecapContext(visit.id, contextDb(visit))).not.toHaveProperty('traceOnReport');
+    });
+  });
+
   test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no lane', async (value) => {
     if (value === undefined) delete process.env.GATE_LANE_VOICE_FILL; else process.env.GATE_LANE_VOICE_FILL = value;
     resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });

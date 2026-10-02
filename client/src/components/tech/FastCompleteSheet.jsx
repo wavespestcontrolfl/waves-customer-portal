@@ -415,6 +415,9 @@ function useFastCompleteContext({
             ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
           visitIdentity: sheetVisitIdentity(visit, reportFlow),
+          // A lane visit: whether its saved trace would show on the report
+          // (an older server says nothing, so the trace holds stand).
+          traceOnReport: data?.traceOnReport !== false,
           rating: {
             allowed: ratingContract?.allowed === true,
             scaleLabels: ratingContract?.scaleLabels || null,
@@ -936,8 +939,9 @@ const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv'
 // confirm. A product picked as a perimeter spray needs a traced length, and
 // a saved trace shows on the customer's report only with such a spray to
 // back it (as on a pest visit).
-function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneAreas = [] }) {
+function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneRecord, traceOnReport = true }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
+  const laneAreas = laneRecord.areas;
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
   // A saved trace claims what it shows: a perimeter a spray around the
@@ -947,11 +951,15 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneA
   const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
   const areaTrace = AREA_CAPTURES.has(traceMode);
   const areaRow = active.find((row) => AREA_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
-  const unusedTrace = draft && traceRead.zone && (areaTrace ? !areaRow : !perimeterRow);
+  // A trace the report never shows (bed bug's indoor work, nest work)
+  // claims nothing, so only one it shows can hold the send (codex local r5
+  // on #5629).
+  const shownTrace = traceOnReport && traceRead.zone;
+  const unusedTrace = draft && shownTrace && (areaTrace ? !areaRow : !perimeterRow);
   // An "Interior spray too" trace claims indoor treatment on the customer's
   // map, so the record must list a place inside (the pest sheet asks the
   // note for Inside; codex local r4 on #5629).
-  const interiorUnbacked = draft && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
+  const interiorUnbacked = draft && shownTrace && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
   return [
     ...ready.report,
     // The record's places are the visit's treated side on the report: with
@@ -1200,7 +1208,7 @@ function ReportFlowForm({
   };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
-    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, laneAreas: record?.areas,
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, laneRecord: record, traceOnReport: ctx.traceOnReport,
   });
 
   // "Update inventory or remove it": once the stock is updated, the tech
@@ -1310,7 +1318,7 @@ function ReportFlowForm({
         // (nor has a lane visit: the schedule routes it untraced, and a trace
         // saved on the full form goes on its report as it is).
         trace={stepTrace}
-        traced={!!(lane ? trace.zone : stepTrace?.zone)}
+        traced={!!(lane ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
         pestHeard={!lane}
         laneCard={laneState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}

@@ -56,11 +56,14 @@ const REPORT = 'WHAT WE FOUND\nLive bed bugs on the couch seams.\n\nWHAT WE DID 
 
 function makeRequest({
   visit = VISIT, lane = 'bed_bug_treatment', laneFacts = READ, trace = { enabled: true, treatmentZone: null }, complete = { success: true },
+  traceOnReport,
 } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: false, lane, service: visit, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) {
+      return { ok: true, eligible: false, lane, service: visit, products: CATALOG, ...(traceOnReport === undefined ? {} : { traceOnReport }) };
+    }
     if (path.endsWith('/tech-rating-allowed')) return { allowed: false };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };
@@ -353,6 +356,31 @@ describe('an "Interior spray too" trace on a lane visit (codex local r4 on #5629
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     expect(request.bodies('/complete')[0].products[0]).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150, areaUnit: 'linear_ft' });
+  });
+});
+
+describe('a saved trace the report never shows (codex local r5 on #5629)', () => {
+  test('holds nothing and is not announced: a bed bug visit\'s legacy perimeter trace never reaches the customer', async () => {
+    const request = makeRequest({
+      traceOnReport: false,
+      trace: { enabled: true, treatmentZone: { capture_mode: 'perimeter', linear_ft: 140, updated_at: '2026-10-02T14:00:00Z' } },
+    });
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    await generate();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    expect(screen.queryByText(/Your saved trace would show/)).toBeNull();
+    expect(screen.queryByText('With the trace.')).toBeNull();
+  });
+
+  test('an older server that says nothing keeps the holds', async () => {
+    const request = makeRequest({
+      trace: { enabled: true, treatmentZone: { capture_mode: 'perimeter', linear_ft: 140, updated_at: '2026-10-02T14:00:00Z' } },
+    });
+    await openSheet(request);
+    addProduct('Temprid FX', '1');
+    await generate();
+    expect(await screen.findByText('Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.')).toBeTruthy();
   });
 });
 
