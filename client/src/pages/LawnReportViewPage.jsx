@@ -257,11 +257,22 @@ export default function LawnReportViewPage() {
       {findings.length ? (
         <SectionCard>
           <SectionTitle>What we found</SectionTitle>
+          {/* How many photos the read used (server sentence; absent unless the evidence gate is live). */}
+          {report.basis ? <p style={{ margin: '-4px 0 12px', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{report.basis}</p> : null}
           <div style={{ display: 'grid', gap: 10 }}>
             {findings.map((f, i) => (
               <div key={`${f.name}-${i}`} style={estimateInnerBox({ borderLeft: `4px solid ${SEVERITY_DOT[f.severity] || COLORS.teal}`, padding: '12px 14px' })}>
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT, marginBottom: f.customer_note ? 4 : 0 }}>{f.name}</div>
                 {f.customer_note ? <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>{f.customer_note}</div> : null}
+                {/* Why we think so: fixed server copy for this finding (what it looks like, how sure, what would settle it). */}
+                {f.evidence?.why ? (
+                  <div data-testid="finding-evidence" style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${BORDER}` }}>
+                    <div data-gt="eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 4 }}>Why we think so</div>
+                    <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>{f.evidence.why}</div>
+                    {f.evidence.certainty ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginTop: 4 }}>{f.evidence.certainty}</div> : null}
+                    {f.evidence.confirm ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginTop: 2 }}>{f.evidence.confirm}</div> : null}
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>

@@ -23,6 +23,8 @@ const {
   sanitizePricingSnapshot,
 } = require('../utils/public-report-egress');
 const { etParts } = require('../utils/datetime-et');
+const { publicFindingEvidence, publicBasis } = require('../services/lawn-diagnostic-evidence');
+const featureGates = require('../config/feature-gates');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
 
@@ -107,7 +109,11 @@ function serverSeasonalNote(createdAt) {
  * Whitelist a stored diagnostic into the customer-facing report payload.
  * Pure + exhaustive allowlist: only the fields named here ever leave the server.
  */
-function buildPublicLawnReport(diagnostic = {}) {
+function buildPublicLawnReport(diagnostic = {}, { photoCount = null } = {}) {
+  // GATE_LAWN_DIAGNOSTIC_EVIDENCE: the evidence behind each finding, as fixed
+  // copy keyed by the allowlisted label and clamped confidence built below.
+  // Gate off, no key is added anywhere in the payload.
+  const evidenceLive = featureGates.lawnDiagnosticEvidenceLive();
   const contract = parseJson(diagnostic.report_contract, {});
   const address = parseJson(diagnostic.address_snapshot, {});
   const contact = parseJson(diagnostic.contact_snapshot, {});
@@ -126,12 +132,16 @@ function buildPublicLawnReport(diagnostic = {}) {
       // named cause for a low/unknown finding.
       const name = safeConditionLabel(finding.name, finding.confidence);
       const confidence = clampEnum(finding.confidence, CONFIDENCE_VALUES);
+      const evidence = evidenceLive ? publicFindingEvidence(name, confidence) : null;
       return {
         name,
         confidence,
         severity: clampEnum(finding.severity, SEVERITY_VALUES),
         // Server-generated from the allowlisted label — never the raw client wording.
         customer_note: safeFindingNote(name, confidence),
+        // Fixed copy selected by the two values above — never the stored
+        // observed_evidence / inferred_context / confirmation_step free text.
+        ...(evidence ? { evidence } : {}),
       };
     }).filter((f) => f.name)
     : [];
@@ -171,6 +181,9 @@ function buildPublicLawnReport(diagnostic = {}) {
     // The conservative hero confidence, so the badge can't contradict a downgraded label.
     confidence: clampEnum(heroConfidence, CONFIDENCE_VALUES),
     findings,
+    // How many photos the read used and whether their quality held it back —
+    // a fixed sentence, never the stored photo limitations (free text).
+    ...(evidenceLive ? { basis: publicBasis({ photoCount, photoQuality: (contract.input_assessment || {}).photo_quality }) } : {}),
     watering: {
       customer_sequence: scrubCustomerText(watering.customer_sequence) || null,
       restriction_summary: scrubCustomerText(ongoing.restriction_summary_customer) || null,
@@ -257,11 +270,23 @@ router.get('/:token', readLimiter, async (req, res, next) => {
         .update({ report_first_viewed_at: db.fn.now() })
         .catch((err) => logger.warn(`[public-lawn-diagnostic] view stamp failed: ${err.message}`));
     }
+    // The photo count behind the report's basis line. Read only while the
+    // evidence gate is live; a failed count just leaves the number out.
+    let photoCount = null;
+    if (featureGates.lawnDiagnosticEvidenceLive()) {
+      try {
+        const counted = await db('lawn_diagnostic_photos').where({ diagnostic_id: row.id }).count('id as count').first();
+        const n = Number(counted && counted.count);
+        photoCount = Number.isInteger(n) && n > 0 ? n : null;
+      } catch (err) {
+        logger.warn(`[public-lawn-diagnostic] photo count failed: ${err.message}`);
+      }
+    }
     // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
     // This route only serves the live customer view, which always renders glass.
     return res.json({
       success: true,
-      report: buildPublicLawnReport(row),
+      report: buildPublicLawnReport(row, { photoCount }),
       glassDefault: true,
     });
   } catch (err) {
