@@ -175,7 +175,8 @@ function numberValues(text) {
     else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
     else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
     else values = raw.split(/[.,:]/);
-    for (const v of values) out.push({ value: v.split(/[.:]/).map(trimZeros).join(raw.includes(':') ? ':' : '.'), ...flags });
+    // only the whole part loses leading zeros: cents and minutes keep theirs ($45.05 is not $45.50 or $45.5)
+    for (const v of values) out.push({ value: v.replace(/^\d+/, trimZeros), ...flags });
   }
   return out;
 }

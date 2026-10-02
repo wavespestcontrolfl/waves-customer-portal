@@ -78,6 +78,10 @@ describe('tokenParity', () => {
     expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45,50 $.')).toMatchObject({ ok: true });
     expect(tokenParity('The plan is $2,500 a year.', 'El plan cuesta 2.500 $ al año.')).toMatchObject({ ok: true });
     expect(tokenParity('See you at 10:30 AM.', 'Nos vemos a las 30:10.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your balance is $45.05.', 'Su saldo es de $45.50.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your balance is $45.05.', 'Su saldo es de 45,05 $.')).toMatchObject({ ok: true });
+    expect(tokenParity('See you at 2:05 PM.', 'Nos vemos a las 14:50.')).toMatchObject({ ok: false });
+    expect(tokenParity('See you at 2:05 PM.', 'Nos vemos a las 14:05.')).toMatchObject({ ok: true });
     expect(tokenParity('See you at 2:00 PM.', 'On se voit à 14h.')).toMatchObject({ ok: true });
     expect(tokenParity('See you at 2:30 PM.', 'On se voit à 14h30.')).toMatchObject({ ok: true });
     expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:45.')).toMatchObject({ ok: false });
