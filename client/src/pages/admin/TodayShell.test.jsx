@@ -3,6 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router-dom';
+import TechNavigationLock from '../../components/tech/TechNavigationLock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const flags = vi.hoisted(() => ({ shellEnabled: false, shellReads: [] }));
@@ -35,7 +36,8 @@ function Where() { const { pathname, search } = useLocation(); return <output da
 function mount(path = '/admin/today') {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify(TECH));
-  return render(<MemoryRouter initialEntries={[path]}><Where /><Routes>
+  // App.jsx mounts the one navigation lock OUTSIDE the router; the shell reads it.
+  return render(<TechNavigationLock><MemoryRouter initialEntries={[path]}><Where /><Routes>
     <Route path="/admin" element={<Outlet context={{ user: TECH }} />}>
       <Route path="today" element={<TodayShell />}>
         <Route index element={<TechHomePage />} />
@@ -46,7 +48,7 @@ function mount(path = '/admin/today') {
       <Route path="more" element={<div>Admin menu page</div>} />
     </Route>
     <Route path="/tech/*" element={<div>Legacy tech shell</div>} />
-  </Routes></MemoryRouter>);
+  </Routes></MemoryRouter></TechNavigationLock>);
 }
 
 beforeEach(() => {
