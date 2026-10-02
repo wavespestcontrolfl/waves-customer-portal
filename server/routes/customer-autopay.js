@@ -34,8 +34,9 @@ function getStripe() {
 // rate change shows on the billing card as the upcoming rate and the next
 // charge at it. The charge comes from the one surcharge authority for the
 // method Auto Pay will charge, over the account's whole debit — never
-// base-rate arithmetic; no Auto Pay method, or a lane with no automatic
-// charge (prepaid renewal), = nothing to announce (nextCharge null). Gate off or
+// base-rate arithmetic; only the monthly dues have an exact next charge
+// (amount + date); no Auto Pay method, a pause covering that date, or any
+// other lane = nothing to announce (nextCharge null). Gate off or
 // nothing pending = no field (byte-identical payload); a read failure omits
 // the field, never the card.
 async function rateChangesField(customerId, { autopayEnabled, method, funding, customer }) {
@@ -43,12 +44,12 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
     return {
-      rate_changes: changes.map(({ chargeCents, ...change }) => {
+      rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
         // A pause covering the effective date skips that charge (billing
         // cron isPaused) — nothing to announce for it.
-        const pausedThen = isPaused(customer, new Date(`${change.effectiveDate}T16:00:00Z`));
+        const pausedThen = !!chargeDate && isPaused(customer, new Date(`${chargeDate}T16:00:00Z`));
         const charge = autopayEnabled && method && chargeCents > 0 && !pausedThen ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
-        return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge } : null };
+        return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
       }),
     };
   } catch (err) {

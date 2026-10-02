@@ -148,6 +148,13 @@ describe('sendPreview', () => {
     expect(await previewDigest()).not.toBe(b);
   });
 
+  test('a draft whose earlier send failed is NOT exempt from the 30-day rule', async () => {
+    const n = draft(1, { effective_date: '2026-11-20', status: 'draft' });
+    n.metadata = { ...n.metadata, pending_letter: { key: 'x', payload: {}, letter: {} } };
+    mockDb.reset(book({ notices: [n] }));
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('too_late');
+  });
+
   test('the digest moves with the cost block, not only the list', async () => {
     mockDb.reset(book());
     const a = await previewDigest();
@@ -218,16 +225,14 @@ describe('sendBatch', () => {
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, failed: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
-    // the attempted send keeps its frozen words: an edited cost block does
-    // not change what the preview shows or what a retry sends
+    // a reported failure drops the frozen words: the retry is a fresh send
+    // of the current letter, which is what the preview shows
     mockDb.store.rate_review_config[0].cost_block = 'An EDITED cost block.';
     const letter = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
-    expect(letter.html).toContain(COST_BLOCK);
-    expect(letter.html).not.toContain('An EDITED cost block.');
+    expect(letter.html).toContain('An EDITED cost block.');
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'unreachable', sent_at: null });
-    // definitively unsent: the frozen words are dropped
     const meta = notices()[0].metadata;
     expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeUndefined();
     expect(snapshots()[0].status).toBe('approved');
@@ -256,9 +261,9 @@ describe('sendBatch', () => {
     expect(parsed.pending_letter).toBeUndefined();
   });
 
-  test('a frozen earlier attempt is reconciled even past the 30-day cutoff (the apply holds a late stamp)', async () => {
+  test('a crashed attempt (stale claim with frozen words) is reconciled even past the 30-day cutoff (the apply holds a late stamp)', async () => {
     const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const n = draft(1, { effective_date: '2026-11-20', status: 'draft' });
+    const n = draft(1, { effective_date: '2026-11-20', status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) });
     n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'November 20, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { first_name: 'Testcust1', cost_block: COST_BLOCK, lines: [] } } };
     mockDb.reset(book({ notices: [n] }));
     const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
@@ -384,7 +389,7 @@ describe('customer surfaces', () => {
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([
-      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: 12100, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
+      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: null, chargeDate: null, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
     ]);
     notices()[0].applied_at = new Date();
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
@@ -395,8 +400,8 @@ describe('customer surfaces', () => {
       billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
       current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
     });
-    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [monthly] }));
-    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400 });
+    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [monthly] }));
+    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01' });
   });
 
   test('portal: two monthly increases on one account project the cumulative dues', async () => {

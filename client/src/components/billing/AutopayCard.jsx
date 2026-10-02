@@ -162,12 +162,7 @@ function UpcomingRateChanges({ changes, formatDate }) {
           </div>
           <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
             Now {change.current} per {change.unit}.{' '}
-            {/* nextCharge comes from the server's surcharge authority for
-                the Auto Pay method over the account's whole debit; an
-                application is charged after it is done, so per
-                application the date is the rule ("on or after"), never a
-                debit appointment. No nextCharge = nothing charges
-                automatically, so only the start date is stated. */}
+            {/* exact next charge for monthly dues only; else the start date */}
             {rateChangeChargeLine(change, formatDate)}{' '}
             <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
           </div>
@@ -178,15 +173,21 @@ function UpcomingRateChanges({ changes, formatDate }) {
 }
 
 // The "next charge" sentence of the upcoming-rate line (annual rate review).
+// Only the monthly dues carry an exact next charge (amount and date, from
+// the server's surcharge authority); an application is charged after it
+// is done and may bill with other services, and a prepaid renewal is
+// recorded by the office — those state when the new rate starts.
+const RATE_STARTS = {
+  application: (when) => `The new rate applies from your first application on or after ${when}.`,
+  year: (when) => `The new rate starts when your prepaid plan renews on ${when}.`,
+  month: (when) => `The new rate starts ${when}.`,
+};
+
 function rateChangeChargeLine(change, formatDate) {
-  const when = formatDate(change.effectiveDate);
   const charge = change.nextCharge;
-  if (!charge) return `The new rate starts ${when}.`;
-  const amount = `$${Number(charge.total).toFixed(2)}`;
+  if (!charge) return (RATE_STARTS[change.unit] || RATE_STARTS.month)(formatDate(change.effectiveDate));
   const split = charge.surcharge > 0 ? ` ($${Number(charge.base).toFixed(2)} + $${Number(charge.surcharge).toFixed(2)} credit card surcharge)` : '';
-  return change.unit === 'application'
-    ? `Next charge at the new rate: ${amount}${split}, after your first application on or after ${when}.`
-    : `Next charge at the new rate: ${amount}${split} on ${when}.`;
+  return `Next charge at the new rate: $${Number(charge.total).toFixed(2)}${split} on ${formatDate(charge.date)}.`;
 }
 
 export default function AutopayCard({

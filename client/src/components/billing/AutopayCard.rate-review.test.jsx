@@ -24,13 +24,17 @@ describe('AutopayCard upcoming rate line', () => {
   it('renders the upcoming rate, the next charge at it, and the notice link', async () => {
     mockGetAutopay.mockResolvedValue({
       ...base,
-      rate_changes: [{ service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/abc', nextCharge: { total: 124.5, base: 121, surcharge: 3.5 } }],
+      rate_changes: [
+        { service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/abc', nextCharge: null },
+        { service: 'Lawn care', unit: 'month', current: '$40', next: '$44', effectiveDate: '2026-12-15', noticePath: '/price-change/def', nextCharge: { total: 107.01, base: 104, surcharge: 3.01, date: '2027-01-01' } },
+      ],
     });
     render(<AutopayCard customer={{}} />);
     const box = await screen.findByTestId('rate-review-upcoming');
     expect(box).toHaveTextContent('Pest control: $121 per application from Dec 10, 2026');
-    expect(box).toHaveTextContent('Now $117 per application. Next charge at the new rate: $124.50 ($121.00 + $3.50 credit card surcharge), after your first application on or after Dec 10, 2026.');
-    expect(screen.getByRole('link', { name: 'View notice' })).toHaveAttribute('href', '/price-change/abc');
+    expect(box).toHaveTextContent('Now $117 per application. The new rate applies from your first application on or after Dec 10, 2026.');
+    expect(box).toHaveTextContent('Next charge at the new rate: $107.01 ($104.00 + $3.01 credit card surcharge) on Jan 1, 2027.');
+    expect(screen.getAllByRole('link', { name: 'View notice' })[0]).toHaveAttribute('href', '/price-change/abc');
     expect(box).not.toHaveTextContent(/per visit|monthly/i);
   });
 
@@ -41,7 +45,7 @@ describe('AutopayCard upcoming rate line', () => {
     });
     render(<AutopayCard customer={{}} />);
     const box = await screen.findByTestId('rate-review-upcoming');
-    expect(box).toHaveTextContent('The new rate starts Dec 10, 2026.');
+    expect(box).toHaveTextContent('The new rate applies from your first application on or after Dec 10, 2026.');
     expect(box).not.toHaveTextContent('Next charge');
   });
 

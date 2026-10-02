@@ -153,7 +153,7 @@ test('a cancelled (C4) session gets status scalars only — no saved-method deta
 });
 
 describe('annual rate review upcoming rate (rate_changes)', () => {
-  const change = { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: 12100, effectiveDate: '2026-12-10', noticePath: '/price-change/x' };
+  const change = { service: 'Lawn care', unit: 'month', current: '$40', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01', effectiveDate: '2026-12-15', noticePath: '/price-change/x' };
 
   test('nothing pending: no rate_changes field (byte-identical payload)', async () => {
     const { body } = await getAutopay();
@@ -163,23 +163,23 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
   test('the next charge at the new rate comes from computeChargeAmount for the Auto Pay method', async () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([change]);
     const { computeChargeAmount } = require('../services/stripe-pricing');
-    const expected = computeChargeAmount(121, 'card', { funding: 'credit' });
+    const expected = computeChargeAmount(104, 'card', { funding: 'credit' });
     const { body } = await getAutopay();
     expect(body.rate_changes).toEqual([{
-      service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/x',
-      nextCharge: { total: expected.total, base: expected.base, surcharge: expected.surcharge },
+      service: 'Lawn care', unit: 'month', current: '$40', next: '$44', effectiveDate: '2026-12-15', noticePath: '/price-change/x',
+      nextCharge: { total: expected.total, base: expected.base, surcharge: expected.surcharge, date: '2027-01-01' },
     }]);
   });
 
   test('a lane with no automatic charge (prepaid renewal) announces none', async () => {
-    mockUpcomingRateChanges.mockResolvedValueOnce([{ ...change, unit: 'year', chargeCents: null }]);
+    mockUpcomingRateChanges.mockResolvedValueOnce([{ ...change, unit: 'year', chargeCents: null, chargeDate: null }]);
     const { body } = await getAutopay();
     expect(body.rate_changes[0].nextCharge).toBeNull();
   });
 
   test('a pause covering the effective date announces no charge (the cron skips it)', async () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([change]);
-    state.customers[0].autopay_paused_until = '2026-12-31';
+    state.customers[0].autopay_paused_until = '2027-01-05';
     const { body } = await getAutopay();
     expect(body.rate_changes[0].nextCharge).toBeNull();
   });
