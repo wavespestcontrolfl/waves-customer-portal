@@ -88,3 +88,24 @@ it('turns a mounted gate off when a later flag read fails closed', async () => {
 
   expect(await screen.findByText('Recap hidden')).toBeInTheDocument();
 });
+
+it('keeps a default-on flag the server switched off OFF when a reload fails', async () => {
+  let online = true;
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    if (!online) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({ flags: { ff_invoice_send_receipt: false } }) };
+  }));
+  localStorage.setItem('waves_admin_token', 'login-a');
+  const { useFeatureFlag, refetchFlags } = await import('./useFeatureFlag');
+  function Gate() {
+    return useFeatureFlag('ff_invoice_send_receipt', true) ? <p>Receipt on</p> : <p>Receipt off</p>;
+  }
+
+  render(<Gate />);
+  expect(await screen.findByText('Receipt off')).toBeInTheDocument();
+
+  online = false;
+  await act(async () => { await refetchFlags(); });
+
+  expect(screen.getByText('Receipt off')).toBeInTheDocument();
+});

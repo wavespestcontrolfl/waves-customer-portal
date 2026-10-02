@@ -20,9 +20,12 @@ function subscribe(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
-function publish(flags) {
+// `failed` marks a read that failed closed: a mounted screen turns the
+// flag OFF, never back to its default (a default-on flag the server had
+// switched off must not come back on because a reload failed).
+function publish(flags, failed = false) {
   listeners.forEach((listener) => {
-    try { listener(flags); } catch { /* one screen never breaks another */ }
+    try { listener(flags, failed); } catch { /* one screen never breaks another */ }
   });
 }
 if (typeof window !== 'undefined') {
@@ -50,7 +53,7 @@ async function loadFlags() {
       const token = localStorage.getItem('waves_admin_token');
       if (!token) {
         cache = {};
-        publish(cache);
+        publish(cache, true); // signed out: mounted screens fail closed
         return cache;
       }
       const res = await fetch(`${API_BASE}/admin/feature-flags`, {
@@ -70,7 +73,7 @@ async function loadFlags() {
       cache = {}; // fail closed — everyone gets stable UI
       lastLoadFailed = true;
       // Screens already showing a flag fail closed too, not only new ones.
-      publish(cache);
+      publish(cache, true);
       return cache;
     } finally {
       if (timer) clearTimeout(timer);
@@ -92,8 +95,8 @@ export function useFeatureFlag(key, defaultValue = false) {
   const [enabled, setEnabled] = useState(defaultValue);
   useEffect(() => {
     let mounted = true;
-    const apply = (flags) => {
-      if (mounted) setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
+    const apply = (flags, failed = false) => {
+      if (mounted) setEnabled(!failed && (Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue));
     };
     const unsubscribe = subscribe(apply);
     loadFlags().then(apply);
@@ -118,10 +121,10 @@ export function useFeatureFlagReady(key, defaultValue = false) {
   }));
   useEffect(() => {
     let mounted = true;
-    const apply = (flags) => {
+    const apply = (flags, failed = false) => {
       if (!mounted) return;
       setState({
-        enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue,
+        enabled: !failed && (Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue),
         ready: true,
       });
     };
@@ -160,8 +163,12 @@ export function usePairedFeatureFlag(keyA, keyB, defaultValue = false) {
   }));
   useEffect(() => {
     let mounted = true;
-    const apply = (flags) => {
+    const apply = (flags, failed = false) => {
       if (!mounted) return;
+      if (failed) {
+        setState({ enabled: false, ready: true, mismatched: false });
+        return;
+      }
       const a = Object.prototype.hasOwnProperty.call(flags, keyA) ? !!flags[keyA] : defaultValue;
       const b = Object.prototype.hasOwnProperty.call(flags, keyB) ? !!flags[keyB] : defaultValue;
       const mismatched = a !== b;
