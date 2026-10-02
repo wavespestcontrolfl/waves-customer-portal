@@ -1409,3 +1409,31 @@ describe('Codex #5580 round 11', () => {
     expect(out.unclear).toContainEqual({ heard: 'four ounces of Taurus', reason: 'amount_said_not_filled' });
   });
 });
+
+describe('Codex #5580 round 12', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('"no, it was five ounces" corrects the four', () => {
+    const t = 'Taurus four ounces, no, it was five ounces.';
+    expect(validateFill(answer({ products: [row(5, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"three through four ounces" is a range', () => {
+    const t = 'Used Taurus, three through four ounces.';
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"two tablespoons" left blank by the model is an unclear_unit Check', () => {
+    const t = 'Used Taurus, two tablespoons.';
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'Used Taurus, two tablespoons')] }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Used Taurus, two tablespoons', reason: 'unclear_unit' });
+  });
+
+  test('a PIN spoken as words never reaches the customer note', () => {
+    const t = 'Treated the garage. PIN is four four one two.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.officeNote).toBe('PIN is four four one two.');
+  });
+});

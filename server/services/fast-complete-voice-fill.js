@@ -46,7 +46,10 @@ const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = req
 const VOICE_FILL_TIER = 'FAST';
 const LANE_ID = 'fast_complete_voice_fill';
 const PROMPT_VERSION = 'v1';
-const MAX_OUTPUT_TOKENS = 2000;
+// Thinking (the FAST tier thinks by default) spends from the same budget as the
+// JSON, so the cap is the shared thinking floor (anthropic-wire.js); billing is
+// per generated token, so the headroom costs nothing unless used.
+const MAX_OUTPUT_TOKENS = 8192;
 const MODEL_TIMEOUT_MS = 30000;
 
 const MAX_TRANSCRIPT_CHARS = 4000;
@@ -527,7 +530,14 @@ const CORRECTION_AFTER = 3;
 const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
 // A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
 // first and is not a negation of the second.
-const isCorrectingNo = (tokens, j) => tokens[j] === 'no' && Boolean(readSpokenNumber(tokens, j + 1));
+// ("no, it was five", "no, make it five", "no, actually five": a short filler may sit between)
+const CORRECTION_FILLERS = new Set(['it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
+function isCorrectingNo(tokens, j) {
+  if (tokens[j] !== 'no') return false;
+  let k = j + 1;
+  while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
+  return Boolean(readSpokenNumber(tokens, k));
+}
 function isRetracted(tokens, breaks, start, end) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
     if (isNegationAt(tokens, j) && !isCorrectingNo(tokens, j)) return true;
@@ -561,7 +571,7 @@ function quantitiesIn(text) {
     const nameAt = tokens[end] === 'of' ? end + (tokens[end + 1] === 'the' ? 2 : 1) : null;
     // "three or four", "three to four", "between three and four": a range, so
     // neither number is the one that was meant.
-    const joiner = tokens[end] === 'or' || tokens[end] === 'to' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
+    const joiner = tokens[end] === 'or' || tokens[end] === 'to' || tokens[end] === 'through' || tokens[end] === 'thru' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
     found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit, stops), retracted: isRetracted(tokens, breaks, i, end) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
@@ -937,6 +947,11 @@ function productAmount(raw, product, heard, unclear, world) {
     const said = productMentions(product, heard, world).flatMap((m) => mentionQuantities(m, world))
       .some((q) => !q.ambiguous && !q.retracted && !q.carrier && offered(q));
     if (said && !parsed.reason && !raw.sameAsLast) pushUnclear(unclear, heard, 'amount_said_not_filled');
+    // a dose said in a unit the sheet does not offer ("two tablespoons") is the
+    // same unclear_unit Check a filled row would get
+    const odd = productMentions(product, heard, world).flatMap((m) => mentionQuantities(m, world))
+      .some((q) => q.unit === 'unsupported' && !q.retracted && !q.carrier);
+    if (odd && !parsed.reason) pushUnclear(unclear, heard, 'unclear_unit');
     return none;
   }
   const unit = sheetUnit(raw.unit, product.measure);
@@ -1251,7 +1266,12 @@ const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\
 // dogs and locks) are office-only even when the tech did not label them.
 const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|access|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
-const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence) || accessCodeRe.test(sentence);
+// "PIN is four four one two", "combination is one two three four": a code spoken
+// as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
+const SPOKEN_DIGIT = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|\\d)';
+const SPOKEN_CODE_RE = new RegExp(`\\b(?:pin|code|combo|combination|passcode)\\b[^.!?\\n]{0,15}?(?:${SPOKEN_DIGIT}[\\s,-]+){2,}${SPOKEN_DIGIT}\\b`, 'i');
+const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence)
+  || accessCodeRe.test(sentence) || SPOKEN_CODE_RE.test(sentence);
 
 // Where the note sentence was said, as 'customer' | 'office' | 'unclear' (only
 // after an office label, so possibly still the aside), or null when it is not a
