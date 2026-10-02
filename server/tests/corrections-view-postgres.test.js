@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 + 20261002110000 + 20261002120000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002130000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -29,10 +29,10 @@ jest.setTimeout(60000);
 
   test('one row per correction across the five sources, with the AI text and the human text side by side; non-corrections stay out', async () => {
     const ids = {
-      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(),
+      corrected: randomUUID(), ignored: randomUUID(), dismissed: randomUUID(), accepted: randomUUID(), linkedCorrected: randomUUID(), linkedCorrectedNoSend: randomUUID(), settlingSend: randomUUID(),
       labelWrong: randomUUID(), labelRight: randomUUID(),
-      revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(),
-      humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(),
+      revised: randomUUID(), rejectedByPerson: randomUUID(), rejectedBySystem: randomUUID(), rejectedByGuard: randomUUID(), revisedArray: randomUUID(), rejectedArrayNoTag: randomUUID(), approved: randomUUID(), shadowDraft: randomUUID(), shadowDraft2: randomUUID(), shadowDraft3: randomUUID(), shadowDraft4: randomUUID(),
+      humanBetter: randomUUID(), equivalent: randomUUID(), humanBetterAlreadyCorrected: randomUUID(), humanBetterNoSend: randomUUID(),
       profileRejected: randomUUID(), profilePending: randomUUID(),
     };
     const reviewer = randomUUID();
@@ -67,7 +67,7 @@ jest.setTimeout(60000);
       id, status: 'shadow', drafter: 'house_voice', intent: 'general', draft_response: `Draft ${id.slice(0, 4)}`,
       prompt_version: 'house_voice_v12_real_answers3_cfl', model: 'gpt-5.6-terra',
     });
-    await trx('message_drafts').insert([ids.revised, ids.rejectedByPerson, ids.rejectedBySystem, ids.rejectedByGuard, ids.revisedArray, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3].map(draft));
+    await trx('message_drafts').insert([ids.revised, ids.rejectedByPerson, ids.rejectedBySystem, ids.rejectedByGuard, ids.revisedArray, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4].map(draft));
     // The review endpoints stamp flags.review_verdict with the status they set (migration 20261002110000 requires it).
     await trx('message_drafts').where({ id: ids.revised }).update({ status: 'revised', revised_response: 'We can come Tuesday at 2 PM.', approved_by: reviewer, approved_at: at(8), flags: JSON.stringify({ review_verdict: 'revised' }) });
     await trx('message_drafts').where({ id: ids.rejectedByPerson }).update({ status: 'rejected', approved_by: reviewer, approved_at: at(7), flags: JSON.stringify({ review_verdict: 'rejected' }) });
@@ -88,9 +88,19 @@ jest.setTimeout(60000);
       judgment(ids.humanBetter, 'human_better', ids.shadowDraft),
       judgment(ids.equivalent, 'equivalent', ids.shadowDraft2),
       judgment(ids.humanBetterAlreadyCorrected, 'human_better', ids.shadowDraft3),
+      judgment(ids.humanBetterNoSend, 'human_better', ids.shadowDraft4),
     ]);
     // The judged draft's Agent Review decision was corrected by a person: one correction, shown as the decision.
-    await trx('agent_decisions').insert(decision(ids.linkedCorrected, 'corrected', { entity_type: 'message_draft', entity_id: ids.shadowDraft3, correction_note: 'Agent Review draft edited and sent from SMS inbox.', reviewed_at: at(4.5) }));
+    await trx('agent_decisions').insert([
+      decision(ids.linkedCorrected, 'corrected', { entity_type: 'message_draft', entity_id: ids.shadowDraft3, correction_note: 'Agent Review draft edited and sent from SMS inbox.', reviewed_at: at(4.5) }),
+      // corrected, judged, but its settling send is not on record: the judgment's human text stands in
+      decision(ids.linkedCorrectedNoSend, 'corrected', { entity_type: 'message_draft', entity_id: ids.shadowDraft4, correction_note: 'Agent Review draft edited and sent from SMS inbox.', reviewed_at: at(4.4) }),
+    ]);
+    // What the person actually sent: the outbound text stamped with the decision id (the send that settled it).
+    await trx('sms_log').insert({
+      id: ids.settlingSend, direction: 'outbound', from_phone: '+19415550190', to_phone: '+19415550100', message_type: 'manual', status: 'delivered',
+      message_body: 'Tuesday at 2 is fine. See you then.', metadata: JSON.stringify({ agent_decision_id: ids.linkedCorrected }), created_at: at(4.6),
+    });
 
     const profile = (id, status, version) => ({
       id, version, profile_text: `Profile ${id.slice(0, 4)}`, status, model: 'claude-opus-5-5', schema_version: 'v2',
@@ -103,10 +113,13 @@ jest.setTimeout(60000);
 
     expect(rows.map((r) => `${r.source}:${r.kind}`)).toEqual([
       'agent_decision:dismissed', 'agent_decision:corrected', 'agent_decision:ignored', 'typed_review:label_wrong',
-      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'voice_profile:profile_rejected',
+      'message_draft:revised', 'message_draft:revised', 'message_draft:rejected', 'shadow_judgment:human_better', 'agent_decision:corrected', 'agent_decision:corrected', 'voice_profile:profile_rejected',
     ]);
-    expect(byId[ids.linkedCorrected]).toMatchObject({ source: 'agent_decision', kind: 'corrected' });
-    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.profilePending]) {
+    // the person's own text, not the canned note: the settling send first, the judgment's human text when no send is on record, the note last
+    expect(byId[ids.linkedCorrected]).toMatchObject({ source: 'agent_decision', kind: 'corrected', human_text: 'Tuesday at 2 is fine. See you then.' });
+    expect(byId[ids.linkedCorrected].detail.correction_note).toBe('Agent Review draft edited and sent from SMS inbox.');
+    expect(byId[ids.linkedCorrectedNoSend]).toMatchObject({ kind: 'corrected', human_text: 'Yes, Tuesday works. See you then.' });
+    for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending]) {
       expect(byId[absent]).toBeUndefined();
     }
     expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
