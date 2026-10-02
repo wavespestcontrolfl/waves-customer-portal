@@ -525,6 +525,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
+      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
+      // Resolve / Dismiss must not settle a customer the operator never saw.
+      || item.reason_code === 'missing_first_name'
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -535,6 +538,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
       }
+    }
+    // Resolve on an owed-first-name card means the names were ENTERED: every listed customer
+    // must be live with a nonblank first name, judged on the LIVE payload under the per-call
+    // lock the append writer also takes (Dismiss is the explicit waiver).
+    if (nextStatus === 'resolved' && item.reason_code === 'missing_first_name') {
+      const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
+      if (!(await everyOwedCustomerNamed(trx, live?.payload))) return { outcome: 'first_name_missing' };
     }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // Judge the LIVE payload, not the route's pre-lock snapshot — a
@@ -720,6 +730,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    case 'first_name_missing': return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
     case 'email_disagreement_unconfirmed': return res.status(409).json({
       error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',
       code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
@@ -747,18 +758,6 @@ async function transition(req, res, nextStatus) {
     // Resolve is admin-only (Dismiss stays open to the office).
     if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
-    }
-  }
-  // Resolve on a missing_first_name card means the name was ENTERED: refuse unless every
-  // customer the card lists is live with a nonblank first name (Dismiss is the explicit
-  // waiver). Judged on the card's current payload.
-  if (nextStatus === 'resolved') {
-    const owed = await db('triage_items').where({ id }).first('reason_code', 'payload');
-    if (owed && owed.reason_code === 'missing_first_name') {
-      const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
-      if (!(await everyOwedCustomerNamed(db, owed.payload))) {
-        return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
-      }
     }
   }
   const result = await transitionCore({

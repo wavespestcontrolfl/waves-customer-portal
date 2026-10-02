@@ -343,6 +343,27 @@ describe('PUT /admin/triage/:id/resolve on a missing_first_name card', () => {
     });
     expect(f.tables.triage_items[0].status).toBe('resolved');
   });
+  test('a list that grew after the operator loaded the card (version moved) refuses BOTH Resolve and Dismiss; the check runs on the live payload', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '22222222-2222-4222-8222-222222222222';
+    const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: null }, { id: B, first_name: '', deleted_at: null }] });
+    f.tables.triage_items[0].reason_code = 'missing_first_name';
+    f.tables.triage_items[0].payload = { customer_ids: [A] };
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      // reprocess appends B (bumping updated_at) after the operator loaded the card showing only A
+      f.tables.triage_items[0].payload = { customer_ids: [A, B] };
+      f.tables.triage_items[0].updated_at = '2030-01-07T12:05:00.000Z';
+      for (const action of ['resolve', 'dismiss']) {
+        const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('STALE_CARD_VERSION');
+      }
+      // a request without any version is refused too
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, {})).status).toBe(409);
+    });
+    expect(f.tables.triage_items[0].status).toBe('open');
+  });
   test('a deleted or missing listed customer blocks Resolve; Dismiss still works', async () => {
     const A = '11111111-1111-4111-8111-111111111111';
     const f = fixture({ customers: [{ id: A, first_name: 'Sam', deleted_at: '2026-10-01T00:00:00Z' }] });

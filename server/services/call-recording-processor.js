@@ -3783,6 +3783,9 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
   if (live) {
     // Append under a row lock so two passes listing different customers both land.
     return conn.transaction(async (trx) => {
+      // The per-call triage lock FIRST (the global lock order): a Resolve / Dismiss / sweep
+      // judging this card's list holds it, so the append and the settlement serialize.
+      await lockTriageCall(trx, callLogId);
       const fresh = await trx('triage_items').where({ id: live.id }).whereIn('status', ['open', 'in_progress']).forUpdate().first('payload');
       if (!fresh) return false;
       const ids = owedCustomerIds(fresh.payload);
