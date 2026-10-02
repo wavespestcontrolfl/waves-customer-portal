@@ -1448,7 +1448,7 @@ class ContextAggregator {
   // sentinelOnError: return null instead of [] on a lookup failure so the
   // caller can tell an outage from a quiet phone (the pre-visit brief
   // must not hash "no calls" over a cached brief during an outage).
-  async getRecentCalls(customerId, { sentinelOnError = false, before = null } = {}) {
+  async getRecentCalls(customerId, { sentinelOnError = false, before = null, phone = null } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -1461,6 +1461,17 @@ class ContextAggregator {
         // Optional upper bound (the review-ask writer scopes calls to a visit)
         // applied before the limit below, so later calls can't crowd it out.
         .modify((qb) => { if (before) qb.where('created_at', '<', before); })
+        // Optional caller identity (the review-ask writer: the recipient's own
+        // number only), applied before the limit and the transcript pick, so
+        // another household contact's calls can't crowd theirs out.
+        .modify((qb) => {
+          const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+          if (!phone) return;
+          if (digits.length !== 10) { qb.whereRaw('1 = 0'); return; }
+          qb.where((w) => w
+            .where((x) => x.whereRaw("direction ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]))
+            .orWhere((x) => x.whereRaw("coalesce(direction, '') NOT ILIKE 'inbound%'").whereRaw("right(regexp_replace(coalesce(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])));
+        })
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is

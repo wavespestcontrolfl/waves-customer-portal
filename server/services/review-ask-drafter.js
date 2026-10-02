@@ -565,7 +565,8 @@ async function gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, s
   const [report, sms, calls, emails, priorTouches] = await Promise.all([
     serviceReportFacts(serviceRecordId),
     recentSmsThread(customer.id, TECH_VOICE_SMS_HISTORY, before),
-    ContextAggregator.getRecentCalls(customer.id, { before }).catch(() => []),
+    // The recipient's own number narrows the calls in the query itself.
+    customer.phone ? ContextAggregator.getRecentCalls(customer.id, { before, phone: customer.phone }).catch(() => []) : [],
     customerOwnEmails(customer.id, before, customer.email),
     priorSequenceTouches(sequenceId, sequenceStep),
   ]);

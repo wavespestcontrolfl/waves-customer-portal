@@ -456,7 +456,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
       return q;
     });
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
-    await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-15' });
+    await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-15', customer: { ...INPUT.customer, phone: '+19415550100' } });
     const bound = whereCalls.find(([t, col, op]) => t === 'sms_log' && col === 'created_at' && op === '<');
     expect(bound).toBeDefined();
     expect(bound[3].toISOString()).toBe('2026-09-16T04:00:00.000Z'); // midnight ET starting the next day
@@ -704,6 +704,8 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const text = mockDispatch.mock.calls[0][1].text;
     expect(text).toContain('own call');
     expect(text).not.toContain('tenant call');
+    // r24: the recipient's number is passed into the call query (before its limit and transcript pick).
+    expect(mockGetRecentCalls.mock.calls[0][1]).toMatchObject({ phone: '(941) 555-0100' });
   });
 
   test('a bare link after a question stays with its sentence', () => {
