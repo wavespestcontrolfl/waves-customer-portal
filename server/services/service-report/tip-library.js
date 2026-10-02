@@ -383,7 +383,10 @@ const TIPS = Object.freeze([
   {
     id: 'pal_dry_drains', group: 'moisture', label: "Run water in unused drains",
     keywords: ["drain", "guest bath", "tub", "laundry sink", "palmetto"], lines: ["pest"], season: 'all',
-    services: ["pest_initial_palmetto_knockdown", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_onetime"],
+    // Every general-pest identity: prod's one-time visit is the admin-created
+    // one_time_pest_control row, migration-built databases its twin
+    // pest_initial_cleanout (sms-book-funnel-map.js).
+    services: ["pest_initial_palmetto_knockdown", "pest_control", "pest_recurring", "pest_general_quarterly", "pest_general_bimonthly", "pest_general_monthly", "pest_general_semiannual", "pest_onetime", "one_time_pest_control", "pest_initial_cleanout"],
     copy: "A drain nobody uses (a guest tub, a laundry sink, a floor drain in the garage) dries out its trap, and palmetto bugs come up through it from the line. Run water in each one once a week so the trap stays full.",
   },
 

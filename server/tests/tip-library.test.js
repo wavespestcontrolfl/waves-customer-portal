@@ -249,6 +249,11 @@ describe('tipsForVisit', () => {
     expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
     const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
     expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    // The one-time pest identity is one_time_pest_control in prod and
+    // pest_initial_cleanout in migration-built databases (Codex #5582).
+    for (const serviceKey of ['one_time_pest_control', 'pest_initial_cleanout']) {
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    }
     for (const serviceKey of [null, 'lawn_care', 'not_a_service']) {
       const visit = tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' });
       expect(visit.groups.map((group) => group.id)).not.toContain('for_service');
