@@ -1143,6 +1143,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
   completionSmsRecapMode: 'Completion-text claim marker (Fast Complete fixed re-service text, frozen at record insert): the one-text dedupe that pest-recap.js and recap-delivery.js honor; not a customer report fact.',
+  traceJudged: 'Fast Complete report-flow bookkeeping (GATE_FAST_COMPLETE_REPORT): the saved trace the record was judged against (its updated_at, or null for none), frozen at completion so report-data shows that trace only (treatment-zone-maps.js traceJudgedAllows) — it can only withhold the separately stored treatment_zone_maps trace, never adds a claim.',
   backfill: 'Backfill-completion audit marker (quiet/backdated closeout posture).',
   backfillMintRequired: 'Backfill invoice-mint bookkeeping (required-mint posture frozen at commit).',
   backfillMintAmountCents: 'Backfill invoice-mint bookkeeping (frozen amount).',

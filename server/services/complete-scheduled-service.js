@@ -6069,14 +6069,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
-            // The trace the report flow judged this record against (its
-            // updated_at, or null for none): the report shows only that one
-            // (treatment-zone-maps.js traceJudgedAllows).
-            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
             // Frozen with the record itself, so no reader (recap-delivery's
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // The trace the report flow judged this record against (its
+            // updated_at, or null for none): the report shows only that one
+            // (treatment-zone-maps.js traceJudgedAllows).
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
