@@ -2105,7 +2105,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits. The web report mounts the lead card right under the watering
+until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2181,6 +2181,51 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that). The block itself never reaches the payload; the only
 thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
+`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
+also live, so gate off, or lead off, leaves the lawn payload, render and PDF
+unchanged, key for key, and makes no read or write) swaps the old
+`LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
+(`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
+shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
+sentence built from the visit's facts; no model writes any of it (owner ruling
+2026-10-02). It adds NO top-level payload key: its fields reach the customer only
+through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
+`lead.applied` is the deterministic treatment summary of the recorded products
+(`treatment-summary.js`), never the AI treatment narrative that later overwrites
+`snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
+optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
+42 words: the visible-change sentence of the first two expectation rows the owner
+has approved for today's products, printed word for word, a sentence that would
+pass the cap left out whole; no by-next-visit timing yet, since that needs the
+next visit at this property, which the report's own next-visit line does not
+resolve; every row ships `approved: false`, so the key is absent until the owner
+approves one) and
+`watching` ("We are also keeping an eye on <topics>." for the watched issues
+after the one the headline names, at most three). The lead's word budget gives
+these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
+`whatToExpect`, then `sinceLast`. The fields freeze into
+`service_records.structured_notes.lawnCopyV6[<assessment id>]` (`{ v, copyVersion,
+assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
+migration, written at the first healthy render, which the completion write gate
+performs) and replay byte for byte afterwards, so a later product edit or row
+approval never changes a sent report; a stored entry replays even when a later
+read fails, and its headline also replaces `snapshot.statusHeadline` on that
+render, so the lead's banner fallback and the PDF's Overall line replay it too. A degraded read (any input read failed) or an unverifiable treatment
+creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`);
+such a render's lead keeps the snapshot headline and has no applied line (never
+the AI treatment narrative). A render whose copy a retry could still freeze
+differently (a failed read, an unverifiable treatment, or a failed freeze write)
+sets
+`lawnAssessment.lawnCopyV6Unfrozen`, and the pinned (emailed) PDF defers with a
+retryable `lawn_copy_v6_unfrozen` error instead of sending it.
+The fields reach the lead through a non-enumerable
+in-process hand-off (`reportV2.copyV6`, read first by
+`applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
+under this gate, so a later assessment correction cannot make the PDF and the
+live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
+as a "What to expect" line (the insights it already lists cover `watching`),
+and its cache signature carries a `:copyv6=1` stamp while the gate is live.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`

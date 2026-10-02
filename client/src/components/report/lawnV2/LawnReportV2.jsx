@@ -387,6 +387,22 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           </div>
         ) : null}
 
+        {/* GATE_LAWN_REPORT_COPY_V6: approved expectation sentences (selected, never
+            model-written) and the short guarded "watching" line. Absent keys render nothing. */}
+        {lead.whatToExpect ? (
+          <div data-testid="lawn-lead-expect" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What to expect</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.whatToExpect}</div>
+          </div>
+        ) : null}
+
+        {lead.watching ? (
+          <div data-testid="lawn-lead-watching" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Watching</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.watching}</div>
+          </div>
+        ) : null}
+
         {yourPart.length || nextVisit ? (
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
             {yourPart.length ? (
