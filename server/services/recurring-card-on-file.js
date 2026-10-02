@@ -1779,6 +1779,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       if (job.authentication_required === true) {
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }
+      // A deferred job whose bank debit was RETURNED (paf-prepay-release.js
+      // rearmReturnedDebits): no automatic re-debit (owner R2) — straight to
+      // the pay link, and the office alert follows.
+      if (job.charge_returned === true) {
+        throw new Error('charge_returned — the bank returned the debit; delivering pay link');
+      }
       if (pmRow && Number.isInteger(job.authorized_total_cents) && job.authorized_total_cents >= 0) {
         const fencedCharge = await withJobFence(async () => StripeService.chargeInvoiceWithSavedCard(invoice.id, pmRow.id, {
           // Deferred to the first visit (owner R1): account credit that

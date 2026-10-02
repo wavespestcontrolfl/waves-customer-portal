@@ -45,7 +45,6 @@ const AWAITING = 'awaiting_first_visit';
 const STALE_DAYS = 14;
 const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
 const DEAD_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
-const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid', 'processing'];
 const JOB = "estimate_data -> 'prepayAutoChargeJob'";
 
 const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
@@ -61,9 +60,9 @@ function parseData(raw) {
 
 // Merge `patch` into the job; `guard` adds the compare-and-swap conditions.
 // Returns true when this caller's write landed.
-async function patchJob(estimateId, patch, guard = (q) => q) {
-  const rows = await guard(db('estimates').where({ id: estimateId })).update({
-    estimate_data: db.raw(
+async function patchJob(estimateId, patch, guard = (q) => q, conn = db) {
+  const rows = await guard(conn('estimates').where({ id: estimateId })).update({
+    estimate_data: conn.raw(
       "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
       [JSON.stringify(patch)],
     ),
@@ -121,17 +120,26 @@ async function releaseOne(row, now) {
     // declined charge's pay link and follow-ups then age from after the
     // visit, never from the accept. A failure throws and leaves the job
     // awaiting for the next pass.
-    if (!settled) {
-      await db('invoices').where({ id: invoice.id }).where('status', 'draft').update({ due_date: etDateString(now) });
-    }
-    const released = await patchJob(row.id, {
-      // created_at stays the accept time, so the sweep's 15-minute age
-      // filter takes the job on this same pass.
-      status: 'pending',
-      released_at: now.toISOString(),
-      released_for_visit_id: visit?.id || null,
-    }, whileAwaiting);
-    return released ? 'released' : null;
+    // Under the invoice's row lock, re-read: a year voided or cancelled since
+    // the reads above must take the cancel branch on the next pass (so held
+    // work reaches the office), never be released into a charge that skips.
+    return db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status');
+      const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status');
+      if (!locked || DEAD_INVOICE_STATUSES.includes(String(locked.status || '').toLowerCase())
+        || String(lockedTerm?.status || '') === 'cancelled') return null;
+      if (!settled && String(locked.status || '').toLowerCase() === 'draft') {
+        await trx('invoices').where({ id: invoice.id }).update({ due_date: etDateString(now) });
+      }
+      const released = await patchJob(row.id, {
+        // created_at stays the accept time, so the sweep's 15-minute age
+        // filter takes the job on this same pass.
+        status: 'pending',
+        released_at: now.toISOString(),
+        released_for_visit_id: visit?.id || null,
+      }, whileAwaiting, trx);
+      return released ? 'released' : null;
+    });
   }
   const since = new Date(job.authorized_at || job.created_at || 0);
   if (!job.stale_alert_reserved_at && now - since >= STALE_DAYS * 24 * 60 * 60 * 1000) {
@@ -187,9 +195,14 @@ async function reconcileJobAlerts(estimateId) {
 
   // R2: the charge after the first visit failed and the pay link went out.
   if (job.status === 'delivered_fallback' && !job.charge_alert_closed_at) {
-    const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
+    const invoice = await db('invoices').where({ id: job.invoice_id }).first('status', 'payment_method');
     const invStatus = String(invoice?.status || '').toLowerCase();
-    const stillOwed = !!invoice && !SETTLED_INVOICE_STATUSES.includes(invStatus) && !DEAD_INVOICE_STATUSES.includes(invStatus);
+    // Tender-aware (the sweep's own classifier): only paid / prepaid or an
+    // initiated BANK debit is settled. A card intent parked 'processing' is
+    // unfinished — leave the alert as it is until reconciliation decides.
+    const outcome = invoice ? require('./recurring-card-on-file').classifySavedMethodChargeInvoice(invoice) : 'unexpected';
+    if (outcome === 'card_incomplete') return;
+    const stillOwed = !!invoice && outcome === 'unexpected' && !DEAD_INVOICE_STATUSES.includes(invStatus);
     if (stillOwed && !job.charge_alert_raised_at) {
       await raise({
         action: 'Collect an annual prepay that failed after visit 1',
@@ -257,6 +270,48 @@ async function reconcileAlerts({ pageSize = 200 } = {}) {
   }
 }
 
+// A deferred job resolved 'processing' is an initiated bank debit. When the
+// bank returns it, the payment-failed webhook reopens the invoice but nothing
+// touches the job, which would otherwise keep the plan's visits held forever.
+// Re-arm it to 'pending' with charge_returned: the sweep then skips any
+// re-debit (no automatic retry, owner R2) and goes straight to the pay link,
+// and the R2 alert follows from 'delivered_fallback'.
+async function rearmReturnedDebits({ pageSize = 200 } = {}) {
+  let afterId = null;
+  let rearmed = 0;
+  for (;;) {
+    let rows = [];
+    try {
+      rows = await db('estimates')
+        .whereRaw(`(${JOB} ->> 'deferred_to_first_visit') = 'true'`)
+        .whereRaw(`(${JOB} ->> 'status') = 'processing'`)
+        .modify((q) => { if (afterId) q.where('id', '>', afterId); })
+        .orderBy('id', 'asc')
+        .limit(pageSize)
+        .select('id', 'estimate_data');
+    } catch (err) {
+      logger.warn(`[paf-prepay] processing-job scan failed: ${err.message}`);
+      return rearmed;
+    }
+    for (const row of rows) {
+      try {
+        const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
+        const invoice = job?.invoice_id ? await db('invoices').where({ id: job.invoice_id }).first('status', 'payment_method') : null;
+        const invStatus = String(invoice?.status || '').toLowerCase();
+        // Still processing, settled, or dead: nothing to re-arm.
+        if (!invoice || ['processing', 'paid', 'prepaid'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) continue;
+        const moved = await patchJob(row.id, { status: 'pending', charge_returned: true, claim_token: null, claimed_at: null },
+          (q) => q.whereRaw(`${JOB} ->> 'status' = 'processing'`));
+        if (moved) rearmed += 1;
+      } catch (err) {
+        logger.warn(`[paf-prepay] returned-debit check failed for estimate ${row.id} (retried next pass): ${err.message}`);
+      }
+    }
+    if (rows.length < pageSize) return rearmed;
+    afterId = rows[rows.length - 1].id;
+  }
+}
+
 // Every awaiting job is visited on each pass, page by page (keyset on id):
 // jobs that stay waiting (no visit yet) never crowd a newer performed one out.
 async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() } = {}) {
@@ -290,6 +345,7 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
     if (rows.length < pageSize) break;
     afterId = rows[rows.length - 1].id;
   }
+  summary.rearmed = await rearmReturnedDebits();
   summary.alertsChecked = await reconcileAlerts();
   return summary;
 }

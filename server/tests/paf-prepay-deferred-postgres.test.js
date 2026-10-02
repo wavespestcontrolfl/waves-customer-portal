@@ -428,6 +428,30 @@ postgres('annual prepay charged after the first visit', () => {
       closeSpy.mockRestore();
     });
 
+    it('a card intent parked processing neither closes nor raises the R2 alert', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', charge_alert_raised_at: new Date().toISOString() } });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'processing', payment_method: 'card' });
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      await release();
+      expect(closeSpy).not.toHaveBeenCalledWith(expect.anything(), [`paf-prepay-charge-failed:${f.estimateId}`], expect.anything(), expect.anything());
+      expect(await jobOf(f)).not.toHaveProperty('charge_alert_closed_at');
+      closeSpy.mockRestore();
+    });
+
+    it('a returned bank debit goes to the pay link and the office alert, never a re-debit', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'processing' } });
+      // The payment-failed webhook reopened the invoice.
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect(await jobOf(f)).toMatchObject({ status: 'delivered_fallback', charge_returned: true });
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'invoice', id: f.invoiceId } }),
+        { dedupeKey: `paf-prepay-charge-failed:${f.estimateId}` });
+    });
+
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {
       const f = await deferredAccept();
       await trx('annual_prepay_terms').where({ id: f.termId }).update({ first_visit_date: day(0) });
