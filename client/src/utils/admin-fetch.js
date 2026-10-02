@@ -59,7 +59,7 @@ export async function adminFetch(path, { redirectOn401 = true, ...options } = {}
       headers: {
         'Content-Type': 'application/json',
         ...authHeader(),
-        ...(options.headers || {}),
+        ...options.headers,
       },
     });
 
@@ -94,9 +94,9 @@ export async function adminFetch(path, { redirectOn401 = true, ...options } = {}
       let serverBody = null;
       try {
         const body = await r.clone().json();
-        serverMsg = body?.error || '';
-        serverCode = body?.code || null;
-        serverBody = body || null;
+        serverMsg = body?.error;
+        serverCode = body?.code;
+        serverBody = body;
       } catch {
         try { serverMsg = await r.text(); } catch { /* ignore */ }
       }

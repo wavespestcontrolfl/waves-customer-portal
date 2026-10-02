@@ -1,6 +1,4 @@
-import { clearStaffDeviceData, getAdminAuthToken, loadStaffOfflinePass, saveStaffOfflinePass } from "../lib/adminAuth";
-import { installStaffSessionGuard } from "../lib/staffSessionGuard";
-import { isFieldPath } from "../lib/adminBookmarkMeta";
+import { clearStaffDeviceData } from "../lib/adminAuth";
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
@@ -32,7 +30,6 @@ import {
 import useIsMobile from "../hooks/useIsMobile";
 import useModalFocus from "../hooks/useModalFocus";
 import { refetchFlags, useFeatureFlag, useFeatureFlagReady } from "../hooks/useFeatureFlag";
-import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -48,10 +45,9 @@ import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 import { useTechNavigationLock } from "./tech/TechNavigationLock";
+import useStaffSession from "../hooks/useStaffSession";
 
-// Bound on the staff check so a dead zone cannot hold the field workspace on
-// "Verifying staff access" forever (field paths only; see the auth effect).
-export const AUTH_CHECK_TIMEOUT_MS = 15000;
+export { AUTH_CHECK_TIMEOUT_MS } from "../hooks/useStaffSession";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -105,6 +101,15 @@ function UnreadSrText({ count }) {
   return <span className="sr-only">, {count} conversation{count === 1 ? "" : "s"} needing a reply</span>;
 }
 
+// Main-area padding by layout (see `layout` in the component): the field
+// workspace supplies its own header and bottom nav, so it is edge to edge.
+const MOBILE_SHELL = 1;
+const MAIN_PADDING = [
+  { top: 24, bottom: 24, x: 28 },
+  { top: "calc(52px + env(safe-area-inset-top) + 16px)", bottom: "calc(56px + env(safe-area-inset-bottom) + 16px)", x: 16 },
+  { top: 0, bottom: 0, x: 0 },
+];
+
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -134,13 +139,9 @@ export default function AdminLayoutV2() {
     window.addEventListener("keydown", swallowPaletteShortcut, true);
     return () => window.removeEventListener("keydown", swallowPaletteShortcut, true);
   }, [fieldBusy]);
-  const [user, setUser] = useState(null);
-  // True while the shell stands on the offline pass alone (no server answer):
-  // that readiness is the field workspace's only. Leaving /admin/today
-  // re-runs the online check before any other admin page mounts (Codex #5573
-  // r8).
-  const [offlineReady, setOfflineReady] = useState(false);
-  const [authStatus, setAuthStatus] = useState("checking");
+  // Staff-session state machine (verify, offline pass, cross-tab sign-in,
+  // 401 handling): see useStaffSession.
+  const { user, userId, authStatus, sessionReady, onField } = useStaffSession();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuTriggerRef = useRef(null);
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
@@ -148,13 +149,12 @@ export default function AdminLayoutV2() {
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
   // Per verified account, like the field-workspace read below: an account
   // switch in another tab refetches flags (Codex #5573 r8).
-  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, user?.id ?? null);
-  const navigationEnabled = useFeatureFlag("admin-navigation", false, user?.id ?? null);
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, userId);
+  const navigationEnabled = useFeatureFlag("admin-navigation", false, userId);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
   // destination is the inbox, never a particular customer.
-  const sessionReady = authStatus === "ready" && !(offlineReady && !isFieldPath(location.pathname));
   const unreadConversations = useUnreadConversations(sessionReady && ["admin", "owner"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
@@ -169,173 +169,6 @@ export default function AdminLayoutV2() {
     // the errors-only lint config — a disable directive for it is itself an
     // unknown-rule error).
   }, []);
-
-  // Bumped when the staff check answers for a token that is no longer the
-  // stored one (another tab signed in): the check reruns for the new login
-  // instead of applying the old login's answer.
-  const [verifyRun, setVerifyRun] = useState(0);
-  const locationRef = useRef(location);
-  locationRef.current = location;
-
-  useEffect(() => {
-    const token = localStorage.getItem("waves_admin_token");
-    if (!token) {
-      navigate(adminLoginUrl(location), { replace: true });
-      return undefined;
-    }
-    // The field workspace (/admin/today) must open with no signal, so only
-    // there is the check bounded and allowed to fall back to the offline pass
-    // a previous successful check left for THIS token. Every other admin
-    // page keeps the plain check and its error state.
-    const field = isFieldPath(location.pathname);
-    let cancelled = false;
-    const abort = field && typeof AbortController === "function" ? new AbortController() : null;
-    const timer = abort ? setTimeout(() => abort.abort(), AUTH_CHECK_TIMEOUT_MS) : null;
-    // Only a failure to REACH the server (or to read a 2xx body) may open from
-    // the offline pass: adminFetch throws those with no HTTP status. A server
-    // answer of any kind carries a status (or is a profile we reject below).
-    // On the field path the 401 is handled below, after the token check, so
-    // an old login's late 401 never sends a newer login (another tab) to the
-    // sign-in page (pre-push P1).
-    const verify = adminFetch("/admin/auth/me", abort ? { signal: abort.signal, redirectOn401: false } : {});
-    verify
-      .then((profile) => {
-        if (cancelled) return;
-        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
-        if (!profile) {
-          setAuthStatus("error");
-          return;
-        }
-        // The field workspace keeps the retired /tech shell's flow: the
-        // verified session goes to the signed-in change-password page, which
-        // adminAuthenticate permits for a rotation (Codex #5573 r11).
-        if (profile.mustChangePassword && isFieldPath(locationRef.current.pathname)) {
-          navigate("/admin/change-password", { replace: true });
-          return;
-        }
-        if (profile.mustChangePassword) {
-          localStorage.removeItem("waves_admin_token");
-          localStorage.removeItem("waves_admin_user");
-          clearStaffDeviceData();
-          refetchFlags().catch(() => {});
-          navigate("/admin/forgot-password", {
-            replace: true,
-            state: { email: profile.email, resetRequired: true },
-          });
-          return;
-        }
-        setUser(profile);
-        setOfflineReady(false);
-        setAuthStatus("ready");
-        // A failed cache write must not leave a stale copy behind.
-        try {
-          localStorage.setItem("waves_admin_user", JSON.stringify(profile));
-        } catch {
-          try { localStorage.removeItem("waves_admin_user"); } catch { /* storage unavailable */ }
-        }
-        // Every verified check refreshes the pass, so a later offline reopen
-        // of the field workspace has one.
-        saveStaffOfflinePass(token, profile);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
-        if (err?.status === 401) {
-          localStorage.removeItem("waves_admin_token");
-          localStorage.removeItem("waves_admin_user");
-          clearStaffDeviceData();
-          refetchFlags().catch(() => {});
-          navigate(adminLoginUrl(location), { replace: true });
-          return;
-        }
-        // Judged on the path NOW: navigating off Today while the check was
-        // pending must not open another admin page from the pass.
-        const onField = field && isFieldPath(locationRef.current.pathname);
-        const stored = onField && err?.status === undefined ? loadStaffOfflinePass(token) : null;
-        if (stored) {
-          setUser(stored);
-          setOfflineReady(true);
-          setAuthStatus("ready");
-          return;
-        }
-        setAuthStatus("error");
-      })
-      .finally(() => { if (timer) clearTimeout(timer); });
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      // A superseded field check must not linger in a dead zone.
-      abort?.abort();
-    };
-  }, [navigate, verifyRun]);
-
-  // The whole shell (it stays mounted across admin pages, so a switch made
-  // while on another page must not reach Today later; pre-push P1): another
-  // tab signing in or out changes the stored token under this shell. Drop the identity verified for the old token at
-  // once (the outlet unmounts while "checking") and verify the new one.
-  useEffect(() => {
-    const onStorage = (event) => {
-      if (event.key !== null && event.key !== "waves_admin_token") return;
-      setUser(null);
-      setAuthStatus(getAdminAuthToken() ? "checking" : "error");
-      setVerifyRun((n) => n + 1);
-      refetchFlags().catch(() => {});
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  // Entering Today after a failed or still-pending check elsewhere (no
-  // signal on another page) re-runs it as the bounded field check, so the
-  // workspace can still open from its pass (Codex #5573 r9).
-  const onFieldNow = isFieldPath(location.pathname);
-  const wasOnField = useRef(onFieldNow);
-  useEffect(() => {
-    // Only a real move INTO Today restarts the check (a direct /admin/today
-    // load already started the bounded one; Codex #5573 r10). A still-pending
-    // non-field check has no time bound: restart it as the field check too.
-    const entered = onFieldNow && !wasOnField.current;
-    const left = !onFieldNow && wasOnField.current;
-    wasOnField.current = onFieldNow;
-    // Leaving Today while its bounded check is still pending restarts it as
-    // the unbounded non-field check (Codex #5573 r12).
-    if (left && authStatus === "checking") {
-      setVerifyRun((n) => n + 1);
-      return;
-    }
-    if (!entered || authStatus === "ready") return;
-    setAuthStatus("checking");
-    setVerifyRun((n) => n + 1);
-  }, [onFieldNow]);
-
-  useEffect(() => {
-    if (!offlineReady || isFieldPath(location.pathname)) return;
-    setOfflineReady(false);
-    setUser(null);
-    setAuthStatus("checking");
-    setVerifyRun((n) => n + 1);
-  }, [offlineReady, location.pathname]);
-
-  // Field workspace only: a 401 from ANY staff API call for the current token
-  // ends the session here (token, stored profile and saved route go), so an
-  // offline reopen cannot unlock from a session the server already refused.
-  const onFieldPath = isFieldPath(location.pathname);
-  useEffect(() => {
-    if (!onFieldPath) return undefined;
-    return installStaffSessionGuard({
-      getToken: getAdminAuthToken,
-      onRejected: () => {
-        localStorage.removeItem("waves_admin_token");
-        localStorage.removeItem("adminToken");
-        localStorage.removeItem("waves_admin_user");
-        clearStaffDeviceData();
-        setUser(null);
-        setAuthStatus("checking");
-        refetchFlags().catch(() => {});
-        navigate(adminLoginUrl(locationRef.current), { replace: true });
-      },
-    });
-  }, [navigate, onFieldPath]);
 
   // Role scoping on deep links: the sidebar/More page hide adminOnly
   // destinations from non-admin roles, but a typed URL bypasses nav.
@@ -411,8 +244,12 @@ export default function AdminLayoutV2() {
   // which has no navigation of its own, so the admin chrome must stay.
   // Re-read per verified account: an account switch in another tab refetches
   // flags, and the chrome must follow the new login's value (pre-push P1).
-  const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false, user?.id ?? null);
-  const fieldChrome = isMobile && fieldWorkspaceFlag.enabled && isFieldPath(location.pathname);
+  const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false, userId);
+  // 0 desktop, 1 phone, 2 phone on the field workspace; indexes the padding
+  // table and the phone-only chrome.
+  const layout = Number(isMobile) * (1 + Number(fieldWorkspaceFlag.enabled && onField));
+  const mainPadding = MAIN_PADDING[layout];
+  const fieldHold = { onClickCapture: holdWhileFieldBusy, "aria-busy": fieldBusy || undefined };
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
   // An offline-pass session is ready for the field workspace only: off Today
@@ -438,7 +275,7 @@ export default function AdminLayoutV2() {
     >
       <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
-      {isMobile && !fieldChrome && (
+      {layout === MOBILE_SHELL && (
         <div
           style={{
             position: "fixed",
@@ -524,8 +361,7 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
-        onClickCapture={holdWhileFieldBusy}
-        aria-busy={fieldBusy || undefined}
+        {...fieldHold}
         ref={drawerRef}
         role={isMobile && sidebarOpen ? "dialog" : undefined}
         aria-modal={isMobile && sidebarOpen ? true : undefined}
@@ -852,14 +688,10 @@ export default function AdminLayoutV2() {
           minWidth: 0,
           maxWidth: "100%",
           marginLeft: isMobile ? 0 : navigationEnabled ? 240 : 220,
-          paddingTop: fieldChrome ? 0 : isMobile
-            ? "calc(52px + env(safe-area-inset-top) + 16px)"
-            : 24,
-          paddingBottom: fieldChrome ? 0 : isMobile
-            ? "calc(56px + env(safe-area-inset-bottom) + 16px)"
-            : 24,
-          paddingLeft: fieldChrome ? 0 : isMobile ? 16 : 28,
-          paddingRight: fieldChrome ? 0 : isMobile ? 16 : 28,
+          paddingTop: mainPadding.top,
+          paddingBottom: mainPadding.bottom,
+          paddingLeft: mainPadding.x,
+          paddingRight: mainPadding.x,
           height: "var(--admin-vh, 100vh)",
           minHeight: "var(--admin-vh, 100vh)",
           boxSizing: "border-box",
@@ -882,12 +714,11 @@ export default function AdminLayoutV2() {
       </main>
 
       {/* Mobile bottom tab bar */}
-      {isMobile && !fieldChrome && (
+      {layout === MOBILE_SHELL && (
         <nav
           aria-label="Primary"
           className="admin-mobile-tabbar"
-          onClickCapture={holdWhileFieldBusy}
-          aria-busy={fieldBusy || undefined}
+          {...fieldHold}
           style={{
             position: "fixed",
             bottom: "var(--keyboard-inset, 0px)",
