@@ -8,11 +8,14 @@
  * response shape, and the v1-column mapping). PR-2b wires this into
  * `server/routes/photo-id.js` behind `GATE_PHOTO_ID_V2`.
  *
- * Model calls (steps 1–3): Gemini candidates → Gemini verify (only when ≥1
- * catalog candidate) → OpenAI escalation (only when a trigger fires),
+ * Model calls: by default (owner 2026-10-01) Gemini candidates alone, with
+ * OpenAI only when Gemini returns nothing (see `geminiOnly`). With
+ * PHOTO_ID_V2_LADDER=full (steps 1–3): Gemini candidates → Gemini verify
+ * (only when ≥1 catalog candidate) → OpenAI escalation (only when a trigger
+ * fires),
  * SEQUENTIAL, never parallel, no Claude leg — the same deliberate departure
  * from the Claude-fallback rule as `lawn-visit-assessment.js`
- * (`MODELS.TEXT_POLICIES.photoIdVision`, added by PR #4865 — this module
+ * (`MODELS.TEXT_POLICIES.photoIdPestV2`, else `photoIdVision` — this module
  * reads it at call time so it builds and tests independently of whichever
  * lane lands first; an absent policy degrades every leg to `no_route`,
  * exactly like `dispatch()` already handles a missing route).
@@ -275,6 +278,22 @@ function derivedNodeCompatibility(nodeId) {
   };
 }
 
+// Owner 2026-10-01 ("lets just use Gemini for this"): Photo ID answers from
+// Gemini's one read. No verify leg, no OpenAI second opinion; OpenAI stands
+// in only when Gemini returns nothing usable (outage, cut-off reply), so a
+// customer never gets an error for a Gemini miss. Without a trait check the
+// answer tops out at "Likely". PHOTO_ID_V2_LADDER=full restores the
+// 2026-09-26 Gemini → verify → OpenAI ladder without a deploy.
+// The app engine's own policy; photoIdVision (v1 surfaces) is the fallback
+// only when photoIdPestV2 is not registered.
+function photoIdPolicy() {
+  return MODELS.TEXT_POLICIES?.photoIdPestV2 || MODELS.TEXT_POLICIES?.photoIdVision;
+}
+
+function geminiOnly() {
+  return process.env.PHOTO_ID_V2_LADDER !== 'full';
+}
+
 function escalateBelow() {
   const raw = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
   return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.80;
@@ -512,7 +531,7 @@ function totalBudgetMs() {
 const MIN_LEG_TIMEOUT_MS = 1000;
 
 async function callCandidatesModel(images, catalogEntries, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
+  const route = photoIdPolicy()?.primary;
   return callWithProvider(route, {
     system: buildCandidatesSystemPrompt(buildCatalogIndexText(catalogEntries)),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it.`,
@@ -528,7 +547,7 @@ async function callCandidatesModel(images, catalogEntries, timeoutMs) {
 }
 
 async function callVerifyModel(images, candidateContext, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
+  const route = photoIdPolicy()?.primary;
   return callWithProvider(route, {
     system: buildVerifySystemPrompt(candidateContext),
     text: 'Check each candidate above against these same photos.',
@@ -544,7 +563,7 @@ async function callVerifyModel(images, candidateContext, timeoutMs) {
 }
 
 async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.fallback;
+  const route = photoIdPolicy()?.fallback;
   return callWithProvider(route, {
     system: buildEscalationSystemPrompt(buildCatalogIndexText(catalogEntries), candidateContext),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it and check any candidates already raised.`,
@@ -1551,9 +1570,10 @@ async function identifyPestV2(photos = []) {
   const candidatesFromCall1 = candidatesJson ? dedupeCandidates(sanitizedCandidatesOf(candidatesJson).map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
+  const singleRead = geminiOnly();
   let verifyResult = null;
   let verifiedCandidates = candidatesFromCall1;
-  if (catalogCandidates1.length) {
+  if (catalogCandidates1.length && !singleRead) {
     verifyResult = await callVerifyModel(images, candidateContextFor(catalogCandidates1), legTimeoutMs(2));
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
@@ -1579,12 +1599,12 @@ async function identifyPestV2(photos = []) {
   const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
-  const escalationReasons = [
+  const escalationReasons = (singleRead ? [[!candidatesJson, 'gemini_missed']] : [
     [geminiMissed, 'gemini_missed'],
     [contradicted, 'self_contradiction'],
     [lookAlikeClose, 'consequential_lookalike_close'],
     [topConfidenceForTrigger < escalateBelow(), 'low_confidence'],
-  ].filter(([applies]) => applies).map(([, reason]) => reason);
+  ]).filter(([applies]) => applies).map(([, reason]) => reason);
   const escalationTriggered = escalationReasons.length > 0;
 
   let finalCandidates = dedupeCandidates(verifiedCandidates);
@@ -1678,6 +1698,7 @@ async function identifyPestV2(photos = []) {
       verify: legInfo(verifyResult),
       escalation: legInfo(escalationResult),
     },
+    ladder: singleRead ? 'gemini_only' : 'full',
     escalation_triggered: escalationTriggered,
     escalation_reasons: escalationReasons,
     disagreed,
