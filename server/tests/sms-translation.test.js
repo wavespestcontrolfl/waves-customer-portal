@@ -142,6 +142,11 @@ describe('tokenParity', () => {
     expect(tokenParity('Your balance is $1,234.56.', 'Su saldo es de $1,234.65.')).toMatchObject({ ok: false });
   });
 
+  test('a rate keeps its percent sign', () => {
+    expect(tokenParity('A card fee of up to 2.9% applies.', 'Se aplica una tarifa de hasta 2.9.')).toMatchObject({ ok: false });
+    expect(tokenParity('A card fee of up to 2.9% applies.', 'Se aplica una tarifa de hasta 2,9 %.')).toMatchObject({ ok: true });
+  });
+
   test('an email\'s local part keeps its case; only the domain may differ in case', () => {
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a casesensitive@custom.example.')).toMatchObject({ ok: false });
     expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a CaseSensitive@Custom.Example.')).toMatchObject({ ok: true });
@@ -231,7 +236,7 @@ describe('runTranslationTrial', () => {
   test('trial drafting is metered on the translation lane', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
-    expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ laneId: 'sms_translation', metricsLane: 'translation_trial' }));
+    expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ laneId: 'sms_translation', verifierLaneId: 'sms_translation', metricsLane: 'translation_trial' }));
   });
 
   test('the shadow drafter\'s post-draft guards hold a converged draft: placeholder, ungrounded amount', async () => {
@@ -255,7 +260,7 @@ describe('runTranslationTrial', () => {
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     const meaningCall = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'));
     expect(meaningCall[1].text).toContain(longBack.trim());
-    scriptModels({ inbound: SPANISH_INBOUND, back: 'x '.repeat(1700) });
+    scriptModels({ inbound: SPANISH_INBOUND, back: 'Thanks for your patience. '.repeat(130) });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_too_long' });
   });
 
@@ -346,6 +351,11 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: { ...SPANISH_INBOUND, english: SPANISH } });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:translation_not_english' });
     expect(mockDraft).not.toHaveBeenCalled();
+  });
+
+  test('a back-translation that is not English (an echoed translation) is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, back: REPLY_ES });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'back_translation_failed:back_translation_not_english' });
   });
 
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {

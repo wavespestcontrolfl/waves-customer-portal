@@ -43,6 +43,20 @@ function needsTranslation(inbound) {
   return !labelFacts.isEnglishInbound(inbound) || labelFacts.isUnknownSingleWord(inbound);
 }
 
+// A model's English output, checked with the same language guard. That guard
+// treats an inbound over its 1,000-character cap as unverified, so a longer
+// text is read in sentence-aligned chunks under the cap.
+function isEnglishText(text) {
+  const chunks = [];
+  let current = '';
+  for (const sentence of String(text || '').split(/(?<=[.!?])\s+/)) {
+    if (current && (current.length + sentence.length + 1) > 900) { chunks.push(current); current = ''; }
+    current = current ? `${current} ${sentence}` : sentence;
+  }
+  if (current) chunks.push(current);
+  return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && !needsTranslation(c));
+}
+
 const INBOUND_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -112,7 +126,7 @@ async function translateInbound(inbound) {
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
   // the "translation" must itself be English, or no English check would read it (an echoed original)
-  if (needsTranslation(english)) return { ok: false, reason: 'translation_not_english' };
+  if (!isEnglishText(english)) return { ok: false, reason: 'translation_not_english' };
   const code = languageCodeOf(languageCode);
   const name = code && !/^en(?:-|$)/.test(code) ? languageNameOf(code) : null;
   if (!name) return { ok: false, reason: 'language_not_supported' };
@@ -144,7 +158,10 @@ async function backTranslate({ translated }) {
   if (!out.ok) return out;
   const text = typeof out.json.text === 'string' ? out.json.text.trim() : '';
   const languageCode = languageCodeOf(out.json.language_code);
-  return text ? { ok: true, text, languageCode, model: out.model } : { ok: false, reason: 'back_translation_empty' };
+  if (!text) return { ok: false, reason: 'back_translation_empty' };
+  // the read-back must itself be English (an echoed translation would compare a foreign text to the reply)
+  if (!isEnglishText(text)) return { ok: false, reason: 'back_translation_not_english' };
+  return { ok: true, text, languageCode, model: out.model };
 }
 
 // The language named in every prompt is the server's own English name for a
@@ -298,6 +315,8 @@ function numberValues(text, { strictTimes = false } = {}) {
     }
     let values;
     const money = raw.includes(':') ? '' : moneyPrefix(str.slice(0, m.index), after);
+    // a rate keeps its percent sign ("2.9%" is not a bare "2.9"); "por ciento" / "pour cent" read as %
+    const percent = !raw.includes(':') && /^\s*(?:%|por\s?ciento\b|pour\s?cent\b|percent\b|per\s?cent\b|prozent\b)/i.test(after);
     const grouped = /^(\d{1,3}(?:([.,])\d{3})+)([.,])(\d{1,2})$/.exec(raw);
     // "1,234.56" and "1.234,56" are one amount: thousands groups plus cents, the two separators different
     if (grouped && grouped[2] !== grouped[3]) values = [`${grouped[1].replace(/[.,]/g, '')}.${grouped[4]}`.replace(/\.0+$/, '')];
@@ -305,8 +324,8 @@ function numberValues(text, { strictTimes = false } = {}) {
     else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
     else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
     else values = raw.split(/[.,:]/);
-    if (money && values.length === 1) {
-      out.push({ value: `${money}${values[0].replace(/^\d+/, trimZeros)}`, ...flags });
+    if ((money || percent) && values.length === 1) {
+      out.push({ value: `${money}${values[0].replace(/^\d+/, trimZeros)}${percent ? '%' : ''}`, ...flags });
       continue;
     }
     // only the whole part loses leading zeros: cents and minutes keep theirs ($45.05 is not $45.50 or $45.5)
@@ -511,7 +530,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
     client, context: thread.context, inboundMessage: inbound.english, inboundPhone: fromPhone, intent, schedulingIntent,
     city: customer.city || null, liveOpenTimes: true,
     // trial traffic is metered on its own lane, never as live drafting
-    laneId: 'sms_translation', metricsLane: 'translation_trial',
+    laneId: 'sms_translation', verifierLaneId: 'sms_translation', metricsLane: 'translation_trial',
   });
   const englishReply = typeof draft?.parsed?.reply === 'string' ? draft.parsed.reply.trim() : '';
   Object.assign(fields, {

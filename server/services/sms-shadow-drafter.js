@@ -5135,7 +5135,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, verifierLaneId = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -5412,7 +5412,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     } else {
       try {
         const vResp = await createDeepMessage(client, {
-          laneId: 'sms_verifier',
+          // a caller metering its own traffic (the any-language trial) passes its lane; live keeps sms_verifier
+          ...(verifierLaneId ? { laneId: verifierLaneId } : { laneId: 'sms_verifier' }),
           model: verifier.VERIFIER_MODEL,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
