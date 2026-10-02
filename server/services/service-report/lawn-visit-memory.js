@@ -243,12 +243,16 @@ async function freezeLawnVisitMemory(serviceRecordId, entry, knex) {
  * drifted reading permanently into this visit's entry. No block beats a
  * block that disagrees with what the prior report actually said.
  *
+ * `degraded` (the caller's product load, catalog enrichment or other inputs
+ * this visit's entry is built from were not read cleanly): replay still works,
+ * but nothing is written and the render is unfrozen.
+ *
  * Returns { sinceLast, unfrozen }. `unfrozen` means this render is not
  * reproducible (the prior read blipped, or the freeze failed): the caller
  * must not durably cache it.
  */
 async function resolveVisitMemoryForRender({
-  structuredNotes, serviceRecordId, customerId, reportV2, assessmentId, serviceDate, priorVisit, knex,
+  structuredNotes, serviceRecordId, customerId, reportV2, assessmentId, serviceDate, priorVisit, knex, degraded = false,
 } = {}) {
   const stored = storedVisitMemoryFor(structuredNotes, assessmentId);
   if (stored) return { sinceLast: canonical(stored.sinceLast || null), unfrozen: false };
@@ -270,6 +274,10 @@ async function resolveVisitMemoryForRender({
     }
   }
   const sinceLast = buildSinceLast({ priorVisit, priorMemory });
+  // A freeze may only be CREATED from a complete, healthy read (first writer
+  // wins: a degraded entry could never be repaired). The prior's frozen block
+  // does not depend on this visit's inputs, so it is still served, read-only.
+  if (degraded) return { sinceLast: canonical(sinceLast), unfrozen: true };
   const frozen = await freezeLawnVisitMemory(serviceRecordId, { ...memory, sinceLast }, knex);
   if (!frozen) return { sinceLast: canonical(sinceLast), unfrozen: true };
   return { sinceLast: canonical(frozen.sinceLast || null), unfrozen: false };

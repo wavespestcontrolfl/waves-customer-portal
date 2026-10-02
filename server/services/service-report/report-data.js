@@ -5377,6 +5377,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             assessmentId: lawnAssessment.assessmentId,
             serviceDate: visitMemoryOut.serviceDate,
             priorVisit: visitMemoryOut.priorVisit || null,
+            // Never CREATE the first-writer-wins entry from a degraded read: a
+            // failed service_products load (applications [] would freeze as
+            // "applied nothing"), a failed or partial catalog enrichment (the
+            // watering freeze's own guard) or a failed prefs / week-weather
+            // freeze (the water insights the checks come from). A frozen
+            // entry still replays.
+            degraded: !!(productsLoadFailed || products.catalogEnrichmentFailed
+              || lawnAssessment.portalPrefsReadFailed || lawnAssessment.weekWeatherUnfrozen),
             knex,
           });
           visitMemorySinceLast = outcome.sinceLast;

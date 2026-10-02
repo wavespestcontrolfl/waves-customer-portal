@@ -407,6 +407,30 @@ describe('resolveVisitMemoryForRender', () => {
     expect(JSON.stringify(again.sinceLast)).toBe(JSON.stringify(first.sinceLast));
   });
 
+  test('degraded inputs: nothing is written, the prior\'s block is still served read-only, the render is unfrozen', async () => {
+    const records = world();
+    const { knex, log } = makeStore(records);
+    const out = await resolveVisitMemoryForRender({ ...base(records), knex, degraded: true });
+    expect(out.unfrozen).toBe(true);
+    expect(out.sinceLast).toMatchObject({ priorAssessmentId: 'as-P' });
+    expect(log.updates).toHaveLength(0);
+    expect(records['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    // No prior read failure hides behind it either.
+    const f = makeStore(world());
+    f.state.failRead = true;
+    expect(await resolveVisitMemoryForRender({ ...base(records), knex: f.knex, degraded: true })).toEqual({ sinceLast: null, unfrozen: true });
+  });
+
+  test('degraded inputs never block a replay of an existing entry', async () => {
+    const records = world();
+    const { knex } = makeStore(records);
+    const first = await resolveVisitMemoryForRender({ ...base(records), knex });
+    const s2 = makeStore(records);
+    const again = await resolveVisitMemoryForRender({ ...base(records), knex: s2.knex, degraded: true });
+    expect(again).toEqual({ sinceLast: first.sinceLast, unfrozen: false });
+    expect(s2.log.tables).toHaveLength(0);
+  });
+
   test('no prior: freezes the entry with sinceLast null, and returns none', async () => {
     const records = world();
     const { knex, log } = makeStore(records);

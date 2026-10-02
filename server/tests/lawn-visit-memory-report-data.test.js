@@ -295,6 +295,66 @@ describe('GATE_LAWN_VISIT_MEMORY on the report payload', () => {
     expect(data.lawnAssessment.weekWeatherUnfrozen).toBe(false); // delivery is not held, only caching
   });
 
+  // The first-writer-wins entry may only be CREATED from a complete read.
+  const withFixtures = (recs, patch, svc = service(recs['svc-cur'].structured_notes)) => {
+    const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs);
+    return buildReportV1Data(svc, 'token-p12', knex, {}).then((data) => ({ data, log }));
+  };
+  const applied = (recs) => storedVisitMemoryFor(recs['svc-cur'].structured_notes, 'la-cur')?.applied.map((p) => p.name);
+
+  test('a failed service_products read writes nothing; the next render freezes the real applied list', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    const failed = await withFixtures(recs, { service_products: FAIL });
+    expect(failed.log.updates).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    expect(failed.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    // The prior's frozen block is independent of this visit's products: still served.
+    expect(failed.data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+
+    const next = await withFixtures(recs, {});
+    expect(applied(recs)).toEqual(['Test Herbicide B']);
+    expect(next.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+  });
+
+  test('a failed catalog enrichment writes nothing (the watering freeze\'s own guard), and recovery freezes', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    const catalogRow = (over) => ({ id: '11111111-2222-4333-8444-555555555555', ...over });
+    const products = [{ id: 'sp-1', service_record_id: 'svc-cur', product_id: '11111111-2222-4333-8444-555555555555', product_name: 'Test Herbicide B', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' }];
+    const failed = await withFixtures(recs, { service_products: products, products_catalog: FAIL });
+    expect(failed.log.updates).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnVisitMemory).toBeUndefined();
+    expect(failed.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+
+    await withFixtures(recs, { service_products: products, products_catalog: [catalogRow({ name: 'Test Herbicide B', category: 'herbicide' })] });
+    expect(applied(recs)).toEqual(['Test Herbicide B']);
+  });
+
+  test('a failed property_preferences read (the water insights\' input) writes nothing; recovery freezes', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    const failed = await withFixtures(recs, { property_preferences: FAIL });
+    expect(failed.log.updates).toHaveLength(0);
+    expect(failed.data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    await withFixtures(recs, {});
+    expect(applied(recs)).toEqual(['Test Herbicide B']);
+  });
+
+  test('replay is unaffected by a later failed read: the frozen entry and block are served as frozen', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const recs = records();
+    const first = (await withFixtures(recs, {})).data;
+    const later = await withFixtures(recs, { service_products: FAIL, property_preferences: FAIL });
+    expect(later.log.updates).toHaveLength(0);
+    expect(JSON.stringify(later.data.reportV2.sinceLast)).toBe(JSON.stringify(first.reportV2.sinceLast));
+    expect(applied(recs)).toEqual(['Test Herbicide B']);
+  });
+
   test('a frozen render is cacheable and never re-reads the prior record', async () => {
     live();
     setHistory([PRIOR, CUR]);
