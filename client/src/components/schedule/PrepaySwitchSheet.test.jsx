@@ -61,7 +61,7 @@ let calls;
 // switch committed?", "was the old invoice restored?") instead of indexes.
 function stubFetch({
   preview = PREVIEW, switchFails = false, switchNetworkFails = false,
-  undoFails = false, freshStatus = 'paid', statusActivated = true,
+  undoFails = false, freshStatus = 'paid', statusActivated = true, noticedAmount = false, switchGate = null,
 } = {}) {
   calls = [];
   global.fetch = vi.fn(async (url, options = {}) => {
@@ -83,6 +83,10 @@ function stubFetch({
       // the outcome is ambiguous, unlike a 409.
       if (switchNetworkFails) throw new TypeError('Failed to fetch');
       if (switchFails) return { ok: false, status: 409, json: async () => ({ error: 'Customer already has an annual prepay term through 2027-08-11' }) };
+      if (switchGate) await switchGate;
+      if (noticedAmount && !JSON.parse(options.body || '{}').acknowledgeNoticedAmount) {
+        return { ok: false, status: 409, json: async () => ({ error: 'noticed', code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 540, chargedAmount: 512, termId: 't1' }) };
+      }
       return ok({
         invoice: { id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 },
         voided: [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }],
@@ -185,6 +189,43 @@ describe('PrepaySwitchSheet', () => {
     await screen.findByText('$512.00');
     expect(screen.queryByRole('button', { name: /Send the invoice/ })).not.toBeInTheDocument();
     expect(screen.getByText(/Customer 360/)).toBeInTheDocument();
+  });
+
+  it('a noticed renewal amount 409 asks once; confirm resends the switch with acknowledgeNoticedAmount', async () => {
+    stubFetch({ noticedAmount: true });
+    const confirmMock = vi.spyOn(window, 'confirm').mockImplementation(() => true);
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await screen.findByText('tender 512');
+    expect(confirmMock).toHaveBeenCalledWith('The customer was told $540.00. Charge $512.00 instead?');
+    const switches = calls.filter((c) => c.path.endsWith('/prepay-switch') && c.method === 'POST').map((c) => c.body);
+    expect(switches).toEqual([{}, { acknowledgeNoticedAmount: true }]);
+  });
+
+  it('a noticed renewal amount 409 cancelled sends nothing more and says why; nothing to compensate', async () => {
+    stubFetch({ noticedAmount: true });
+    vi.spyOn(window, 'confirm').mockImplementation(() => false);
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    expect(await screen.findByText('Not saved. The customer was told $540.00 for this renewal.')).toBeInTheDocument();
+    expect(calls.filter((c) => c.path.endsWith('/prepay-switch') && c.method === 'POST')).toHaveLength(1);
+    expect(screen.queryByText(/Connection dropped/)).not.toBeInTheDocument();
+    expect(didUndo()).toBe(false);
+    expect(voidedPrepay()).toBe(false);
+  });
+
+  it('a noticed renewal amount 409 landing after the sheet closed neither asks nor resends', async () => {
+    let release;
+    stubFetch({ noticedAmount: true, switchGate: new Promise((r) => { release = r; }) });
+    const confirmMock = vi.spyOn(window, 'confirm').mockImplementation(() => true);
+    const view = render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await waitFor(() => expect(calls.filter((c) => c.path.endsWith('/prepay-switch') && c.method === 'POST')).toHaveLength(1));
+    view.unmount();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.path.endsWith('/prepay-switch') && c.method === 'POST')).toHaveLength(1);
   });
 
   it('a server-refused switch surfaces the reason; nothing to compensate', async () => {

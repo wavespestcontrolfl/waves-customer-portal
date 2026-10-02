@@ -55,20 +55,6 @@ const PAGE_REFRESH = 25;
 // between them.
 const RECEIPT_SOURCE_TYPE = 'email';
 
-const EMAIL_ASK_LABEL = 'An email from a customer needs follow-up';
-const EMAIL_PROMISE_LABEL = 'A promise emailed to a customer needs follow-up';
-function overdueBody(kind, whenAt) {
-  const when = new Date(whenAt).toLocaleString('en-US', {
-    timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-  });
-  const BODY = {
-    uncertain: `The ${when} ET email needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
-    open: `Requested or promised in the ${when} ET email. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
-    late: `Promised in the ${when} ET email. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
-  };
-  return BODY[kind] || BODY.open;
-}
-
 // The email's grounded source is its subject AND its body: a request or
 // promise may sit only in the subject ("Please reschedule Friday"), so an
 // empty body with a subject is still eligible, and the receipt hash covers
@@ -411,12 +397,12 @@ async function refreshEmailCommitment(conn, row, now, verify) {
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     const dedupeKey = `email-commitment:${row.id}`;
-    const title = live.sms_context?.basis === 'promise' ? EMAIL_PROMISE_LABEL : EMAIL_ASK_LABEL;
     if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')) {
+      // The bell names the customer and quotes the email (ringOverdueBell words it for an email
+      // from sourceIdField), so no title or body is passed.
       const bell = await ringOverdueBell(trx, { row: live, message, verdict: { ...verdict, late: true }, dedupeKey,
-        title: EMAIL_PROMISE_LABEL, sourceIdField: 'email_id', triggerKey: 'email_operational_followup',
-        body: overdueBody('late', message.created_at) });
+        sourceIdField: 'email_id', triggerKey: 'email_operational_followup' });
       if (!bell.suppressed) return;
     }
     if (verdict.verdict === 'fulfilled') {
@@ -426,9 +412,8 @@ async function refreshEmailCommitment(conn, row, now, verify) {
       return;
     }
     if (deadlinePassed) {
-      await ringOverdueBell(trx, { row: live, message, verdict, dedupeKey, title,
-        sourceIdField: 'email_id', triggerKey: 'email_operational_followup',
-        body: overdueBody(verdict.verdict, message.created_at) });
+      await ringOverdueBell(trx, { row: live, message, verdict, dedupeKey,
+        sourceIdField: 'email_id', triggerKey: 'email_operational_followup' });
     }
   });
   return { outcome: 'checked', verdict, closed };

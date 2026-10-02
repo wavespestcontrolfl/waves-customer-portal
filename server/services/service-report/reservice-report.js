@@ -35,6 +35,7 @@
 
 const crypto = require('crypto');
 const { detectServiceLine } = require('./service-line-configs');
+const { reserviceReportCardGateOn } = require('./reservice-report-card');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
 // report gates (cockroach-report-v2.js / termite-report-v2.js) and the
@@ -250,7 +251,16 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
   };
 }
 
-function signatureFor(block) {
+// `cardIncluded` (GATE_RESERVICE_REPORT_CARD, reservice-report-card.js): the
+// PDF carries the "You told us" / "What we did" card, so documents cached
+// before the flip re-render once under '-rcd1'. False (gate dark) appends
+// nothing — every existing key stays byte-identical.
+// The card's "Activity seen" word needs no key part (Codex r12): it is the
+// label PERSISTED on the record's score row, shown only when the report's
+// own gauge is (report-data.js), and every score write clears the cached
+// PDF (pest-pressure/store.js) while the Pest Pressure visibility settings
+// already ride the key's visibility signature.
+function signatureFor(block, cardIncluded = false) {
   if (!block) return '';
   const outcomeKey = block.outcome === 'inspection_only' ? 'i'
     : block.outcome === 'customer_declined' ? 'd'
@@ -260,7 +270,7 @@ function signatureFor(block) {
   // PDFs cached under '-rs1…' would keep serving the schematic on
   // permanent links. Bump this version whenever the CALLBACK report
   // composition changes — each callback PDF re-renders once on next view.
-  return `${block.includedWithWaveGuard ? '-rs2m' : '-rs2n'}${outcomeKey}`;
+  return `${block.includedWithWaveGuard ? '-rs2m' : '-rs2n'}${outcomeKey}${cardIncluded ? '-rcd1' : ''}`;
 }
 
 /**
@@ -270,7 +280,8 @@ function signatureFor(block) {
  * byte-identical (same contract as the V2 dashboard signatures).
  */
 async function reserviceReportPdfSignature(service = {}, { serviceLine = null, knex = null } = {}) {
-  return signatureFor(await buildReserviceReport(service, { serviceLine, knex }));
+  const block = await buildReserviceReport(service, { serviceLine, knex });
+  return signatureFor(block, Boolean(block) && reserviceReportCardGateOn());
 }
 
 /**
@@ -284,7 +295,11 @@ function reserviceReportRenderedSignature(data, service = {}) {
   if (!gateOn()) return '';
   if (!isCallbackRecord(service)) return '';
   const block = data?.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
-  return signatureFor(block);
+  // The card the render ACTUALLY carried (never re-resolved from the gate
+  // alone), same contract as the block above.
+  const cardIncluded = Boolean(block) && reserviceReportCardGateOn()
+    && Boolean(data?.reserviceReportCard) && typeof data.reserviceReportCard === 'object';
+  return signatureFor(block, cardIncluded);
 }
 
 // Payload marker: TRUE means the server ran the gated composer, so a null

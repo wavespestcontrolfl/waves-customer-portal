@@ -11,7 +11,8 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, executeToolCall } = require('./tools');
+const { TOOLS, portalToolsFor, executeToolCall } = require('./tools');
+const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
@@ -100,10 +101,18 @@ function laneExtras(lane) {
 
 function portalLane(channel) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null };
-  if (require('../../config/feature-gates').portalChatFactsLive()) {
-    return { prompt: PORTAL_FACTS_PROMPT, tools: PORTAL_FACTS_TOOLS, actions: [], cards: [] };
-  }
-  return { prompt: PORTAL_SYSTEM_PROMPT, tools: PORTAL_TOOLS, actions: [], cards: null };
+  const gates = require('../../config/feature-gates');
+  // Two independent gates: the payment card and the past-visit facts.
+  const payments = gates.portalChatFactsLive();
+  const visits = gates.portalChatVisitFactsLive();
+  return {
+    prompt: PORTAL_PROMPTS[`${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}`],
+    tools: portalToolsFor({ payments, visits }),
+    actions: [],
+    cards: payments || visits ? [] : null,
+    // Whether the payment card tool is in this lane (its own gate).
+    payments,
+  };
 }
 
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
@@ -234,6 +243,29 @@ Call open_portal_section for the matching page and say in one sentence what the 
 
 `);
 
+// GATE_PORTAL_CHAT_VISIT_FACTS on top of either portal prompt: the past-visit
+// tool, and the owner-approved company facts (services/sms-company-facts.js,
+// the texting AI's own block, unedited).
+function withVisitFacts(prompt) {
+  return prompt
+    .replace('- Hand the conversation to the Waves team (escalate)', '- Look up the customer\'s recent completed visits (get_recent_visits)\n- Hand the conversation to the Waves team (escalate)')
+    .replace('plan details, past visits, or documents', 'plan details, or documents')
+    .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PAST VISITS:
+For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits. Answer from what it returns (the date, the service, the technician's first name, the kinds of product applied) and point the customer to the card it shows for the reviewed summary and the report link. You are not given the summary text. Do not add a finding, product or date it did not return, and never name a product brand. If the customer reports a problem since the visit or says something was missed, escalate.
+
+${renderCompanyFactsSection()}
+WHAT YOU MUST ESCALATE (use the escalate tool):`);
+}
+
+// Every portal prompt, built once: the text sent to the model for a gate
+// combination never varies between requests (it carries the cache breakpoint).
+const PORTAL_PROMPTS = {
+  base: PORTAL_SYSTEM_PROMPT,
+  payments: PORTAL_FACTS_PROMPT,
+  'base+visits': withVisitFacts(PORTAL_SYSTEM_PROMPT),
+  'payments+visits': withVisitFacts(PORTAL_FACTS_PROMPT),
+};
+
 const TOPIC_WORDING = {
   cancellation: 'a cancellation',
   schedule_change: 'a schedule change',
@@ -302,7 +334,7 @@ class WavesAssistant {
       // A billing keyword ("refund", "dispute") hands off, but under the facts
       // lane the customer still gets the payment card and Open Billing
       // button under the hand-off reply, as a model-led hand-off would give.
-      if (topic === 'billing' && lane.cards) {
+      if (topic === 'billing' && lane.payments) {
         await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
       }
       const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
