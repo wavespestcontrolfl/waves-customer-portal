@@ -205,7 +205,7 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     expect(notice.sent_at == null && notice.applied_at == null && notice.email_sent === false && notice.sms_sent === false).toBe(true);
     expect(notice.notice_token).toMatch(/^[0-9a-f]{32}$/);
     const meta = JSON.parse(notice.metadata);
-    expect(meta).toMatchObject({ source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, anniversary_occurrence: '2026-12-05', first_visit_id: VISIT(101), visits_per_year: 4, current_rate_source: 'visit_median' });
+    expect(meta).toMatchObject({ source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, anniversary_occurrence: '2026-12-05', first_visit_id: VISIT(101), series_root_id: VISIT(100), visits_per_year: 4, current_rate_source: 'visit_median' });
     expect(snapshots()[0]).toMatchObject({ status: 'approved', notice_id: notice.id });
     expect(mockDb.store.activity_log.map((a) => a.action)).toEqual(['rate_review_notices_scheduled']);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
@@ -818,6 +818,26 @@ describe('applyDueRateChanges — per_application', () => {
     expect(notices()[0].applied_at == null).toBe(true);
     expect(visits()[1].estimated_price).toBe('117.00');
   });
+  test('the noticed series was replaced (cancelled, a new series of the same line accepted) → hold, the old notice never reprices the new plan', async () => {
+    const book = sentBook();
+    const replacement = fixture.pestSeries(1, ['2026-12-12', '2027-03-12']);
+    replacement.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+    book.scheduled_services = book.scheduled_services.map((v) => (v.status === 'pending' ? { ...v, status: 'cancelled' } : v));
+    book.scheduled_services.push(...replacement.all);
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    expect(notices()[0].applied_at == null).toBe(true);
+    expect(mockDb.store.scheduled_services.filter((v) => v.recurring_parent_id === VISIT(900)).map((v) => v.estimated_price)).toEqual(['117.00', '117.00']);
+  });
+  test('a notice that never recorded its series → hold (fail closed), nothing repriced', async () => {
+    const book = sentBook();
+    const meta = { ...book.price_change_notices[0].metadata };
+    delete meta.series_root_id;
+    book.price_change_notices[0] = { ...book.price_change_notices[0], metadata: meta };
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['notice_series_unrecorded']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
   test('a line running as two series → hold for a hand reprice', async () => {
     const book = sentBook();
     const second = fixture.pestSeries(1, ['2026-12-12']);
@@ -1293,6 +1313,13 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(route.slice(Math.max(0, call - 900), call)).toMatch(/rateReviewLive\(\)/);
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
+  });
+  test('a $0 renewal is a different amount, not an absent one: it needs the acknowledgement too', async () => {
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    expect(await renew(0)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 0 });
+    expect(await renew(null)).toBeNull();
+    expect(await renew('')).toBeNull();
+    expect(await renew(-5)).toBeNull();
   });
   test('noticedRenewalAmountError carries the 409 body both route modules return', () => {
     const err = apply.noticedRenewalAmountError({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });

@@ -140,6 +140,8 @@ const HOLD_COPY = Object.freeze({
   visit_in_reschedule: 'An upcoming visit is parked in a reschedule request, so the series was not repriced.',
   visit_status_missing: 'An upcoming visit of this plan has no status on file, so the series was not repriced.',
   multiple_series: 'The plan line runs as more than one series, so it needs a hand reprice.',
+  plan_replaced: 'The plan the customer was told about was replaced by a new one, so the noticed rate was not applied.',
+  notice_series_unrecorded: 'The notice does not record which plan series it named, so the rate was not applied.',
   series_template_complex: 'The series template carries add-ons or discounts, so later visits would not spawn at the new price.',
   template_overlay_gate_off: 'Series price overrides are switched off, so later visits would spawn at the old price.',
   series_guard_refused: 'A visit in the series already holds money or is being changed, so the series was not repriced.',
@@ -483,6 +485,10 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
   let term = null;
   if (lane === LANE_PER_APPLICATION) {
     visits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
+    // The series this notice names: the apply reprices only that series,
+    // never a replacement accepted after it (see lockPerApplicationTargets).
+    const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
+    if (roots.length === 1) metadata.series_root_id = roots[0];
   } else if (lane === LANE_PREPAY) {
     const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
     if (!found.term) throw hold(found.reason);
@@ -788,6 +794,12 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
   if (roots.length > 1) throw hold('multiple_series', { roots });
   const parentId = roots[0];
+  // A series cancelled and replaced since the notice (same line, cadence
+  // and price) is a new plan: the old notice never reprices it. A notice
+  // that did not record its series fails closed.
+  const noticedRoot = parseMetadata(notice.metadata).series_root_id;
+  if (!noticedRoot) throw hold('notice_series_unrecorded');
+  if (String(noticedRoot) !== String(parentId)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: parentId });
   let locked;
   try {
     await schedule.acquireRecurringSeriesMaintenanceLock(trx, parentId, false);
@@ -1203,7 +1215,9 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
 async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today, lock = false }) {
-  if (!customerId || !(Number(amount) > 0)) return null;
+  // $0 is a price (a different amount than the one noticed), never an
+  // absent one: only a missing or invalid amount skips the check.
+  if (!customerId || amount == null || amount === '' || !Number.isFinite(Number(amount)) || Number(amount) < 0) return null;
   const start = ymd(termStart) || today;
   const family = familyOfCoverage(coverageServiceType);
   // The predecessor's row is locked WHATEVER its noticed amount is right
