@@ -119,6 +119,8 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(lookupStep).toContain('!v2ThirdPartyCallNature');
     const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
     expect(lookupStep).toContain('addressValidation: effectiveAddressValidation');
+    expect(lookupStep).toContain('service_address?.street_line_2');
+    expect(lookupStep).toContain('effectiveAddressValidation?.normalized?.street_line_1');
     expect(branch).not.toContain('backfillLinkedCustomerFromExtraction');
     const completion = source.slice(source.indexOf('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
     expect(completion).toContain('persistCallSecondaryContact(customerId, householdContact');
@@ -321,6 +323,22 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').update({ zip: null });
     await trx('customer_properties').insert({ customer_id: noZip.id, address_line1: '1083 Example Shell Loop', zip: '34240', active: true, address_key: 'k2' });
     expect((await lookup()).customer?.id).toBe(noZip.id);
+  });
+
+  test('V2-primary OFF: a unit that only the V2 service_address carries still refuses a unit-less account; disagreeing renderings refuse', async () => {
+    const row = member();
+    await trx('customers').insert(row);
+    const v2Unit4 = { address_line1: '1083 Example Shell Loop', address_line2: 'Unit 4', zip: '34240' };
+    // the legacy extraction has no unit; V2 heard Unit 4 -> a different door than the unit-less account
+    expect((await lookup({ address_line2: null }, { alternateAddresses: [v2Unit4] })).reason).toBe('unit_differs');
+    // a unit-bearing account matches only the same unit, whichever rendering carries it
+    await trx('customers').update({ address_line2: 'Unit 4' });
+    expect((await lookup({ address_line2: null }, { alternateAddresses: [v2Unit4] })).customer?.id).toBe(row.id);
+    expect((await lookup({ address_line2: 'Unit 5' }, { alternateAddresses: [v2Unit4] })).reason).toBe('unit_conflict');
+    // V2 or Address Validation names a different street / ZIP than the legacy extraction
+    expect((await lookup({}, { alternateAddresses: [{ address_line1: '1085 Example Shell Loop', zip: '34240' }] })).reason).toBe('address_disagrees');
+    expect((await lookup({}, { alternateAddresses: [{ address_line1: '1083 Example Shell Loop', zip: '34241' }] })).reason).toBe('address_disagrees');
+    expect((await lookup({ address_line2: 'Unit 4' }, { alternateAddresses: [null, { address_line1: '1083 Example Shell Loop', zip: '34240' }, { address_line1: '' }] })).customer?.id).toBe(row.id);
   });
 
   test('more than one customer at the address -> refused', async () => {

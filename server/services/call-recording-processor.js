@@ -3761,7 +3761,7 @@ function householdLinkFromCall(call, customerId) {
 // a different account). Commercial accounts are refused. Anything weaker
 // returns { customer: null, reason } and the caller falls back to today's
 // behaviour. Never throws.
-async function findHouseholdCustomerByAddress({ phone, address = {}, commercialCall = false, addressValidation = null, conn = db } = {}) {
+async function findHouseholdCustomerByAddress({ phone, address = {}, alternateAddresses = [], commercialCall = false, addressValidation = null, conn = db } = {}) {
   const refuse = (reason) => ({ customer: null, reason });
   try {
     if (commercialCall) return refuse('commercial_call');
@@ -3819,7 +3819,22 @@ async function findHouseholdCustomerByAddress({ phone, address = {}, commercialC
     const want = peel(street, address.address_line2);
     const wantStreet = want.key;
     if (!wantStreet) return refuse('no_phone_or_address');
-    const wantUnit = want.unit;
+    // ONE coherent address (codex pre-push P1): every other rendering of the
+    // call's address — the V2 service_address (its unit is NOT copied into the
+    // legacy extraction when V2-primary adoption is off) and Address
+    // Validation's normalized street — must agree with it on street and ZIP,
+    // and every unit any of them carries must be the same one. Any
+    // disagreement refuses the match.
+    const units = new Set(want.unit ? [want.unit] : []);
+    for (const alt of alternateAddresses) {
+      if (!alt) continue;
+      if (String(alt.address_line1 || '').trim() && peel(alt.address_line1, null).key !== wantStreet) return refuse('address_disagrees');
+      if (normalizeZip(alt.zip) && normalizeZip(alt.zip) !== zip5) return refuse('address_disagrees');
+      const altUnit = peel(alt.address_line1 || '', alt.address_line2).unit;
+      if (altUnit) units.add(altUnit);
+    }
+    if (units.size > 1) return refuse('unit_conflict');
+    const wantUnit = units.size ? [...units][0] : '';
     const zipFits = (z) => { const z5 = normalizeZip(z); return !z5 || z5 === zip5; };
     const sourcesById = new Map(); // customer id -> [{ line1, line2, zipExact }]
     // An unknown / malformed stored ZIP keeps its row a candidate (an ambiguity
@@ -12150,6 +12165,14 @@ const CallRecordingProcessor = {
             address_line2: extracted.address_line2 || null,
             zip: extracted.zip,
           },
+          alternateAddresses: [
+            {
+              address_line1: v2CanonicalExtraction?.property?.service_address?.street_line_1,
+              address_line2: v2CanonicalExtraction?.property?.service_address?.street_line_2,
+              zip: v2CanonicalExtraction?.property?.service_address?.postal_code,
+            },
+            { address_line1: effectiveAddressValidation?.normalized?.street_line_1, zip: effectiveAddressValidation?.normalized?.postal_code },
+          ],
           addressValidation: effectiveAddressValidation,
           commercialCall: v2CanonicalExtraction?.property?.property_type === 'commercial'
             || v2CanonicalExtraction?.property?.hoa_common_area_service === true,
