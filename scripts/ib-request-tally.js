@@ -6,7 +6,8 @@
  * so the ten workflows can be ranked by observed use without reading any
  * request text. It prints:
  *   - tool calls grouped by tool and by day, per operator id
- *   - failure counts per tool from tool_health_events
+ *   - proposal-phase and read failure counts per tool from tool_health_events
+ *   - confirmed-write outcomes per tool from ib_pending_actions
  *
  * It never selects, prints or exports the prompt or response columns of
  * intelligence_bar_queries, nor error_message from tool_health_events.
@@ -27,6 +28,12 @@
  *     so expect a single "(none)" operator unless that changes
  *   - public estimate Q&A rows share the table and appear as the tool
  *     public_estimate_ask; ignore them for workflow ranking
+ *   - tool_health_events records a carded write when it is PROPOSED (and a
+ *     read when it runs); the write that runs after Confirm records no health
+ *     event. Confirmed-write failures (a rejected text, a stale write, a
+ *     database error) come from ib_pending_actions instead, classified with the
+ *     same executionOutcome the bar uses. A consumed row with no stored result
+ *     counts as outcome_unknown.
  */
 require('dotenv').config();
 
@@ -87,6 +94,56 @@ const FAILURES_SQL = `
   order by failures desc, events desc, 1
 `;
 
+// Confirmed carded writes. Only the outcome flags of `result` leave the
+// database (never its text), so executionOutcome can classify each row the
+// way the bar's recovery path does.
+const CONFIRMED_SQL = `
+  select
+    a.tool_name as tool,
+    case when a.result is null or jsonb_typeof(a.result) <> 'object' then null
+    else jsonb_strip_nulls(jsonb_build_object(
+      'outcome_unknown', a.result -> 'outcome_unknown',
+      'pending_confirmation', a.result -> 'pending_confirmation',
+      'preview', a.result -> 'preview',
+      'proposal', a.result -> 'proposal',
+      'dry_run', a.result -> 'dry_run',
+      'blocked', a.result -> 'blocked',
+      'failed', a.result -> 'failed',
+      'success', a.result -> 'success',
+      'partial', a.result -> 'partial',
+      'state', a.result -> 'state',
+      'error', case when coalesce(a.result ->> 'error', '') not in ('', 'false', 'null') then true end,
+      'warning', case when coalesce(a.result ->> 'warning', '') not in ('', 'false', 'null') then true end,
+      'keys', case when a.result = '{}'::jsonb then null else true end
+    )) end as flags
+  from ib_pending_actions a
+  where a.status = 'confirmed'
+    and coalesce(a.consumed_at, a.updated_at) >= now() - make_interval(days => ?)
+`;
+
+// Outcomes that count as a failed confirmed write. awaiting_approval cannot
+// follow a confirm, so it is reported with the unknowns.
+const CONFIRMED_FAILED = new Set(['failed', 'blocked']);
+const CONFIRMED_OK = new Set(['completed', 'partially_completed', 'provider_accepted']);
+
+function classifyConfirmed(rows, outcomeOf = require('../server/services/intelligence-bar/outcomes').executionOutcome) {
+  const byTool = {};
+  for (const r of rows) {
+    // `keys` only marks a non-empty result; it is not an outcome flag. A
+    // non-empty result with no flags stays non-empty so it classifies as
+    // outcome_unknown, exactly as the full result would.
+    const { keys, ...flags } = r.flags && typeof r.flags === 'object' ? r.flags : {};
+    const result = keys ? (Object.keys(flags).length ? flags : { other: true }) : null;
+    const outcome = outcomeOf(result);
+    const t = byTool[r.tool] = byTool[r.tool] || { tool: r.tool, confirmed: 0, succeeded: 0, failed: 0, unknown: 0 };
+    t.confirmed += 1;
+    if (CONFIRMED_OK.has(outcome)) t.succeeded += 1;
+    else if (CONFIRMED_FAILED.has(outcome)) t.failed += 1;
+    else t.unknown += 1;
+  }
+  return Object.values(byTool).sort((a, b) => b.failed - a.failed || b.confirmed - a.confirmed || a.tool.localeCompare(b.tool));
+}
+
 function parseArgs(argv) {
   const out = { days: DEFAULT_DAYS, json: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
@@ -103,7 +160,7 @@ function parseArgs(argv) {
   return out;
 }
 
-function summarize(calls, turns, failures) {
+function summarize(calls, turns, failures, confirmed = []) {
   const byTool = {};
   const byOperator = {};
   for (const r of calls) {
@@ -120,7 +177,7 @@ function summarize(calls, turns, failures) {
     byOperator[t.operator_id].turns += t.turns;
   }
   const toolRank = Object.entries(byTool).map(([tool, count]) => ({ tool, calls: count })).sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool));
-  return { tool_rank: toolRank, operators: byOperator, failures };
+  return { tool_rank: toolRank, operators: byOperator, failures, confirmed };
 }
 
 function formatText(report) {
@@ -141,9 +198,14 @@ function formatText(report) {
     }
   }
   lines.push('');
-  lines.push('Failures per tool (tool_health_events)');
+  lines.push('Read and proposal-phase failures per tool (tool_health_events; a carded write is counted when proposed, not when confirmed)');
   if (!report.summary.failures.length) lines.push('  (no health events in the window)');
   for (const f of report.summary.failures) lines.push(`  ${String(f.failures).padStart(5)} failed / ${String(f.events).padStart(6)} events  ${f.tool}${f.circuit_open ? `  (circuit open on ${f.circuit_open})` : ''}`);
+  lines.push('');
+  lines.push('Confirmed-write outcomes per tool (ib_pending_actions, after the operator pressed Confirm)');
+  const confirmed = report.summary.confirmed || [];
+  if (!confirmed.length) lines.push('  (no confirmed writes in the window)');
+  for (const c of confirmed) lines.push(`  ${String(c.failed).padStart(5)} failed / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} confirmed  ${c.tool}`);
   return lines.join('\n');
 }
 
@@ -153,7 +215,8 @@ async function collect(db, days) {
     const calls = (await trx.raw(CALLS_SQL, [days])).rows;
     const turns = (await trx.raw(TURNS_SQL, [days])).rows;
     const failures = (await trx.raw(FAILURES_SQL, [days, HEALTH_SOURCES])).rows;
-    return { calls, turns, failures };
+    const confirmedRows = (await trx.raw(CONFIRMED_SQL, [days])).rows;
+    return { calls, turns, failures, confirmed: classifyConfirmed(confirmedRows) };
   });
 }
 
@@ -172,15 +235,15 @@ async function main() {
   }
   const db = require('../server/models/db');
   try {
-    const { calls, turns, failures } = await collect(db, args.days);
-    const report = { days: args.days, generated_at: new Date().toISOString(), calls, turns, summary: summarize(calls, turns, failures) };
+    const { calls, turns, failures, confirmed } = await collect(db, args.days);
+    const report = { days: args.days, generated_at: new Date().toISOString(), calls, turns, summary: summarize(calls, turns, failures, confirmed) };
     console.log(args.json ? JSON.stringify(report, null, 2) : formatText(report));
   } finally {
     await db.destroy();
   }
 }
 
-module.exports = { parseArgs, summarize, formatText, CALLS_SQL, TURNS_SQL, FAILURES_SQL, HEALTH_SOURCES, DEFAULT_DAYS };
+module.exports = { parseArgs, summarize, formatText, classifyConfirmed, CALLS_SQL, TURNS_SQL, FAILURES_SQL, CONFIRMED_SQL, HEALTH_SOURCES, DEFAULT_DAYS };
 
 if (require.main === module) {
   main().catch((err) => {

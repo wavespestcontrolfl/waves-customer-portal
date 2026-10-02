@@ -861,8 +861,7 @@
       ],
       "corrections": [],
       "tags": [
-        "plan_drift",
-        "pre_exec_change"
+        "plan_drift"
       ],
       "covers": [
         "W8-C3"

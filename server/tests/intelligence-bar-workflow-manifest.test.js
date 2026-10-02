@@ -50,6 +50,10 @@ const finalOutcome = (c) => (c.corrections.length ? c.corrections[c.corrections.
 // A write step whose answer must show a confirmation card is marked card:true (a card is presented; it is confirmed only when the outcome is completed or submitted). Reads never show one, even when the answer is about payment cards.
 const mentionsCard = (say) => /\bcard(?:ed)?\b/i.test(say || '') && !/\b(no|without|uncarded)\b[^.]{0,12}\bcard(?:ed)?\b/i.test(say || '');
 const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+// The same request with another customer, product, day or number is the same
+// scenario: mask every capitalized word after the first, and every number,
+// before comparing dev and held-out wording.
+const scenarioKey = (s) => norm(String(s).replace(/(?<=\S\s+)[A-Z][\w'’-]*/g, '<name>').replace(/\d+/g, '<n>').replace(/[?.!,]/g, ''));
 
 describe('manifest files', () => {
   test('exactly W1.json to W10.json exist', () => {
@@ -114,15 +118,26 @@ describe('case shape', () => {
       if (c.kind === 'read') expect(step.card).toBe(false); // a read never shows a confirmation card
       else if (mentionsCard(step.say)) expect(step.card).toBe(true);
     }
+    // a fault injected after the card is shown means the initial step did show one
+    if (c.kind === 'write' && mentionsCard(c.inject)) expect(c.expected.card).toBe(true);
     // with the owner-direct gate off, an owner write that completes went through a card
     if (c.kind === 'write' && c.actor === 'owner' && c.mode === 'owner_direct_off' && SCORED_OUTCOMES.includes(c.expected.outcome)) {
       expect(c.expected.card).toBe(true);
     }
-    // a change of mind before execution: the initial step only proposes, so nothing is sent or committed yet
-    if (c.tags.includes('pre_exec_change') && c.corrections.length) {
+    // a change of mind before execution: the initial step only proposes, so
+    // nothing is sent or committed yet, and the change arrives as a follow-up step
+    if (c.tags.includes('pre_exec_change')) {
+      expect(c.corrections.length).toBeGreaterThan(0);
       expect(c.expected.outcome).toBe('awaiting_operator');
       expect(c.expected.sends).toBe(0);
       expect(c.expected.changes).toEqual([]);
+    }
+
+    // the stored appointment block is duration based (flat 60 minutes for a
+    // new booking); the two-hour arrival range is confirmation-text copy, so no
+    // change row may assert it as the persisted window
+    for (const step of [c.expected, ...c.corrections.map((x) => x.expected)]) {
+      for (const ch of step.changes) expect(ch).not.toMatch(/\.(date_)?window = [^;(]*\d\d:\d\d-\d\d:\d\d/);
     }
 
     // forbidden: every write case has a list, and so does every read case here
@@ -205,12 +220,11 @@ describe.each(manifests)('$id coverage', ({ id, doc }) => {
       seen[c.origin] = seen[c.origin] || c.partition;
       expect(seen[c.origin]).toBe(c.partition);
     }
-    // a held-out request (or correction) is never word-for-word a dev one
-    const devTexts = new Set(dev.flatMap((c) => [c.request, ...c.corrections.map((x) => x.request)]).map(norm));
-    for (const c of held) {
-      expect(devTexts.has(norm(c.request))).toBe(false);
-      for (const x of c.corrections) expect(devTexts.has(norm(x.request))).toBe(false);
-    }
+    // a held-out request (or correction) is never a dev one, word for word or
+    // with only the names and numbers swapped
+    const devTexts = new Set(dev.flatMap((c) => [c.request, ...c.corrections.map((x) => x.request)]).map(scenarioKey));
+    const leaks = held.flatMap((c) => [c.request, ...c.corrections.map((x) => x.request)].filter((t) => devTexts.has(scenarioKey(t))).map((t) => `${c.id}: ${t}`));
+    expect(leaks).toEqual([]);
   });
 
   test('negative cases are present in both partitions and supported cases remain the majority', () => {
@@ -353,7 +367,7 @@ describe('request tally script', () => {
   const tally = require('../../scripts/ib-request-tally');
 
   test('its SQL never names the prompt, response or error text columns', () => {
-    for (const sql of [tally.CALLS_SQL, tally.TURNS_SQL, tally.FAILURES_SQL]) {
+    for (const sql of [tally.CALLS_SQL, tally.TURNS_SQL, tally.FAILURES_SQL, tally.CONFIRMED_SQL]) {
       expect(sql).not.toMatch(/\bprompt\b|\bresponse\b|\berror_message\b/i);
       expect(sql.trim().toLowerCase().startsWith('select')).toBe(true);
       expect(sql).not.toMatch(/\b(insert|update|delete|alter|drop|truncate)\b/i);
@@ -381,5 +395,28 @@ describe('request tally script', () => {
     expect(s.operators['(none)'].days['2026-10-01']).toEqual({ needs_me: 2 });
     expect(s.operators['(none)'].turns).toBe(4);
     expect(s.failures).toEqual(failures);
+  });
+
+  test('confirmed writes are counted from ib_pending_actions using only outcome flags, never result text', () => {
+    // the result column is only ever read through a named key
+    expect(tally.CONFIRMED_SQL).not.toMatch(/a\.result\s*(,|\bas\b|$)/im);
+    expect(tally.CONFIRMED_SQL).toMatch(/status = 'confirmed'/);
+  });
+
+  test('confirmed-write outcomes classify like the bar: failures, unknowns and successes per tool', () => {
+    const rows = [
+      { tool: 'send_sms', flags: { keys: true, success: true } },
+      { tool: 'send_sms', flags: { keys: true, error: true } },
+      { tool: 'send_sms', flags: { keys: true, state: 'provider_accepted' } },
+      { tool: 'send_sms', flags: null }, // consumed, no stored result
+      { tool: 'adjust_stock', flags: { keys: true, blocked: true } },
+      { tool: 'adjust_stock', flags: { keys: true } }, // a result with no outcome flag
+    ];
+    expect(tally.classifyConfirmed(rows)).toEqual([
+      { tool: 'send_sms', confirmed: 4, succeeded: 2, failed: 1, unknown: 1 },
+      { tool: 'adjust_stock', confirmed: 2, succeeded: 0, failed: 1, unknown: 1 },
+    ]);
+    const s = tally.summarize([], [], [], tally.classifyConfirmed(rows));
+    expect(tally.formatText({ days: 14, generated_at: 'now', summary: s })).toMatch(/Confirmed-write outcomes[\s\S]*1 failed \/\s+1 unknown \/\s+4 confirmed  send_sms/);
   });
 });

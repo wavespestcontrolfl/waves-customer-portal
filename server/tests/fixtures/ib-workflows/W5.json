@@ -46,7 +46,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
+          "scheduled_services[new].window_start = Wednesday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = 149",
           "scheduled_services[new].property = cust-pellham primary"
         ],
@@ -95,7 +95,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Thursday 16:00-18:00 Eastern",
+          "scheduled_services[new].window_start = Thursday 16:00 Eastern; window_end = 17:00 (stored flat 60-minute block; the 16:00-18:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = catalog one-time pest price"
         ],
         "unchanged": [
@@ -345,7 +345,7 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
+              "scheduled_services[new].window_start = Wednesday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
               "scheduled_services[new].price = 149"
             ],
             "unchanged": [
@@ -384,7 +384,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Thursday 10:00-12:00 Eastern",
+          "scheduled_services[new].window_start = Thursday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = the new catalog price"
         ],
         "unchanged": [
@@ -440,7 +440,7 @@
           "scheduled_services row count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "The scheduler re-checks at confirm, tells the truth that the slot was taken, offers the next open hours; no row is written."
       },
       "forbidden": [
@@ -486,7 +486,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Tuesday 11:00-13:00 Eastern",
+          "scheduled_services[new].window_start = Tuesday 11:00 Eastern; window_end = 12:00 (stored flat 60-minute block; the 11:00-13:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = 149"
         ],
         "unchanged": [
@@ -568,7 +568,7 @@
             "changes": [
               "scheduled_services[new].customer = cust-larkspur",
               "scheduled_services[new].service = one-time pest treatment",
-              "scheduled_services[new].window = Wednesday 13:00-15:00 Eastern",
+              "scheduled_services[new].window_start = Wednesday 13:00 Eastern; window_end = 14:00 (stored flat 60-minute block; the 13:00-15:00 arrival range is confirmation-text copy only)",
               "scheduled_services[new].price = catalog one-time pest price",
               "scheduled_services[new].property = cust-larkspur rental 27 Sample Court"
             ],
@@ -598,7 +598,7 @@
       "origin": "W5-h02",
       "partition": "held",
       "kind": "write",
-      "request": "Book the Ostranders for a one-time pest treatment Monday at 8.",
+      "request": "Get the Ostranders on the schedule Monday 8 AM for a one-off pest visit.",
       "fixture": "book-set",
       "page_context": "customer:cust-ostrander",
       "actor": "owner",
@@ -608,7 +608,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-ostrander",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Monday 08:00-10:00 Eastern",
+          "scheduled_services[new].window_start = Monday 08:00 Eastern; window_end = 09:00 (stored flat 60-minute block; the 08:00-10:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = catalog price less 15% WaveGuard discount via the discount engine"
         ],
         "unchanged": [
@@ -833,7 +833,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Monday 13:00-15:00 Eastern",
+          "scheduled_services[new].window_start = Monday 13:00 Eastern; window_end = 14:00 (stored flat 60-minute block; the 13:00-15:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = 149"
         ],
         "unchanged": [
@@ -927,7 +927,7 @@
           "scheduled_services row count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Confirm is refused under the current rules and reported; no gate is enabled to finish it."
       },
       "forbidden": [
@@ -970,7 +970,7 @@
         "changes": [
           "scheduled_services[new].customer = cust-pellham",
           "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Friday 15:00-17:00 Eastern",
+          "scheduled_services[new].window_start = Friday 15:00 Eastern; window_end = 16:00 (stored flat 60-minute block; the 15:00-17:00 arrival range is confirmation-text copy only)",
           "scheduled_services[new].price = catalog one-time pest price stated in the answer"
         ],
         "unchanged": [

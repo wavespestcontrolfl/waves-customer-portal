@@ -915,23 +915,21 @@
       "origin": "W10-h10",
       "partition": "held",
       "kind": "write",
-      "request": "Received 2 jugs of Talak, no wait, it was 3.",
+      "request": "Received 2 jugs of Talak.",
       "fixture": "stock-set",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_off",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "stock_movements[new].product = Talak",
-          "stock_movements[new].quantity = 3 jugs"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "stock_movements[2 jugs]"
+          "stock_movements rows",
+          "products on-hand"
         ],
         "sends": 0,
         "card": true,
-        "say": "The 2 jug proposal is discarded; only 3 jugs can commit."
+        "say": "Proposes a 2 jug receipt on a confirmation card; nothing commits yet."
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -951,7 +949,28 @@
           "page": "/admin/inventory (restock queue) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "No wait, it was 3.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "stock_movements[new].product = Talak",
+              "stock_movements[new].quantity = 3 jugs"
+            ],
+            "unchanged": [
+              "stock_movements[2 jugs]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "The 2 jug proposal is discarded; a fresh 3 jug card is the only one that can commit."
+          },
+          "forbidden": [
+            "a 2 jug movement",
+            "two movements for the one receipt"
+          ]
+        }
+      ],
       "tags": [
         "pre_exec_change"
       ],

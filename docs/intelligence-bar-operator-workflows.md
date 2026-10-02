@@ -54,7 +54,11 @@ Supported-request completion is scored over cases whose final outcome is `comple
 
 ### Partitions
 
-Ten development and ten held-out cases per workflow. They are split by originating example: no origin appears in both partitions, and the test also rejects a held-out request or correction that is word for word a development one. A held-out case may resemble a development case in family, never in scenario.
+Ten development and ten held-out cases per workflow. They are split by originating example: no origin appears in both partitions, and the test also rejects a held-out request or correction that matches a development one word for word or with only the names and numbers swapped. A held-out case may resemble a development case in family, never in scenario.
+
+Booking and move rows record the stored block, not the arrival range: a new booking stores a flat 60-minute `window_end`, and a move keeps the visit's stored block length. The two-hour range a customer sees ("10 AM to 12 PM") is confirmation-text copy, and the test rejects a change row that asserts it as the persisted window.
+
+A recovery tag describes a step that happens: `pre_exec_change` needs a follow-up correction after the initial proposal, and a fault injected "after the card is shown" means the initial step expects a card.
 
 | Workflow | Dev scored / negative | Held scored / negative | Cases needing a missing reader |
 | --- | --- | --- | --- |
@@ -256,7 +260,7 @@ All ten: the platform evidence ledger (`docs/intelligence-bar-platform-implement
 
 ## Request tally (decision D4)
 
-`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY` transaction) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, per-operator turn counts, and failure counts per tool from `tool_health_events`.
+`scripts/ib-request-tally.js` ranks request families by observed tool use without reading any prompt text. It is read only (one `READ ONLY` transaction) and never selects the `prompt` or `response` columns of `intelligence_bar_queries` or `error_message` of `tool_health_events`. It prints tool-call counts by tool and by day for each operator id, per-operator turn counts, read and proposal-phase failure counts per tool from `tool_health_events`, and confirmed-write outcomes per tool from `ib_pending_actions`. The two failure lists are separate because a carded write records its health event when it is proposed; the write that runs after Confirm records none, so its failures (a rejected text, a stale write, a database error) are read from the pending-action row, classified with the bar's own `executionOutcome` from the row's outcome flags only.
 
 The owner runs it through Railway; it needs the production `DATABASE_URL`, so it is never run from CI or from a session:
 

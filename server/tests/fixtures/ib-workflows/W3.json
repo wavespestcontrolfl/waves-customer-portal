@@ -768,8 +768,8 @@
           "customers[cust-murphy-a].email"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Only the two named fields change; notes were named so clearing it is intended."
+        "card": true,
+        "say": "Notes and source are outside the owner-direct field list (name, phone, address), so this goes through a confirmation card; after confirm only the two named fields change, and notes were named so clearing it is intended."
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",

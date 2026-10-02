@@ -1063,7 +1063,7 @@
           "sms_log rows"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Confirm is refused under the current rules and reported; nothing sent."
       },
       "forbidden": [

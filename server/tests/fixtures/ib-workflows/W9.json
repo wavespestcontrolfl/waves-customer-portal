@@ -729,7 +729,7 @@
       "origin": "W9-h06",
       "partition": "held",
       "kind": "read",
-      "request": "And the August one?",
+      "request": "Show me the Ostranders' September invoice.",
       "fixture": "pay-set",
       "requires": "PR 3a invoice and payment reader",
       "page_context": "customer:cust-ostrander",
@@ -747,7 +747,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Resolves August from the prior Ostrander context and reports that invoice only."
+        "say": "Reports the September invoice only: amount, due date, what was paid and what is still owed."
       },
       "forbidden": [
         "any charge, refund, credit, invoice edit, receipt send or reminder",
@@ -765,7 +765,29 @@
           "page": "/admin/invoices/:id (invoice detail)"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "And the August one?",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "payments rows",
+              "invoices rows",
+              "credits rows",
+              "sms_log rows",
+              "emails rows"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Resolves August from the September turn above and reports that invoice only."
+          },
+          "forbidden": [
+            "reporting the September invoice again as if it were August",
+            "asking which customer when the thread already names the Ostranders"
+          ]
+        }
+      ],
       "tags": [],
       "covers": [
         "W9-C1"
@@ -777,7 +799,7 @@
       "origin": "W9-h07",
       "partition": "held",
       "kind": "read",
-      "request": "What do the Thistledowns owe?",
+      "request": "Is anything outstanding on the Thistledown account, or are they square?",
       "fixture": "pay-set",
       "page_context": "none",
       "actor": "owner",
