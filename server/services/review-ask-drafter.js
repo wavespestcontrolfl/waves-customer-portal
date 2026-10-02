@@ -190,6 +190,8 @@ function verifyDraftBody(body, { firstName } = {}) {
   const rendered = text.replace(/\{review_url\}/g, SAMPLE_RENDERED_LINK);
   const segments = countSegments(rendered);
   if (segments.segmentCount > MAX_RENDERED_SEGMENTS) return "too_many_segments";
+  // Every review ask names a Google review (owner ruling 2026-10-01).
+  if (!/google review/i.test(text)) return "missing_google_review";
   return null;
 }
 
@@ -603,11 +605,21 @@ function buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo,
 
 // Text written by the customer, or about this visit by the tech: the only
 // places a proper noun in the draft may come from.
+function callerTurns(transcript) {
+  return String(transcript || "").split(/\n+/)
+    .filter((line) => /^\s*(?:caller|customer)\s*:/i.test(line))
+    .map((line) => line.replace(/^\s*(?:caller|customer)\s*:\s*/i, ""))
+    .join("\n");
+}
+
 function customerOwnWords(ctx) {
   return [
     ...ctx.report.map((f) => f.text),
     ...ctx.sms.filter((m) => m.direction === "customer").map((m) => m.body),
-    ...ctx.calls.map((c) => `${c.call_summary || ""} ${c.transcript || ""}`),
+    // From calls, only what the CALLER said in a labeled transcript: the
+    // summary is AI-written and mixes both voices, and unlabeled transcripts
+    // can't be attributed, so neither counts as the customer's own words.
+    ...ctx.calls.map((c) => callerTurns(c.transcript)),
     ...ctx.emails.map((e) => `${e.subject} ${e.text}`),
   ].join("\n");
 }
@@ -947,7 +959,15 @@ function quoteSharesContent(sentence, quote, names) {
   // A clause of only greeting / request words and names claims nothing.
   if (!words.length) return true;
   const quoteWords = stemSet(quote);
-  return words.some((w) => quoteWords.has(w));
+  // Coverage, not a single shared word: every pest / property / problem word
+  // in the clause is in the quotes, and so are at least half of its content
+  // words — "I saw ants in your new baby's nursery" does not ride on a quote
+  // about ants. (Full coverage would refuse honest paraphrase: "I flagged
+  // moisture" against the report's "moisture under the sink"; the checker
+  // judges meaning, this is the floor under it.)
+  if (words.some((w) => GROUNDED_TERMS.has(w) && !quoteWords.has(w))) return false;
+  const shared = words.filter((w) => quoteWords.has(w)).length;
+  return shared >= 1 && shared * 2 >= words.length;
 }
 
 // One checker verdict against the sentence it names. Returns a reject reason
@@ -1232,7 +1252,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;

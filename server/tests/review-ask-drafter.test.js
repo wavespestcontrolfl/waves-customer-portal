@@ -47,6 +47,8 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(verify("Aaron, a Google review helps: {review_url} Reply if anything's off.")).toBe('office_phrase');
     expect(verify('Aaron, text me instead of posting if something is wrong: {review_url}')).toBe('steers_from_review');
     expect(Drafter.verifyEmailIntro('Aaron, if you were happy with the visit, a review would help.', { firstName: 'Aaron' })).toBe('satisfaction_condition');
+    // #5524 r4: the older writer's SMS must name a Google review too.
+    expect(verify('Aaron, would you leave us a review? {review_url}')).toBe('missing_google_review');
     // #5511 GitHub r2: the condition and the ask split across sentences.
     expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us. If anything still looks off, just reply. Otherwise leave a Google review.', { firstName: 'Aaron' })).toBe('steers_from_review');
     expect(verify("Aaron, text me if something's not right. Google review: {review_url}")).toBe('steers_from_review');
@@ -114,7 +116,7 @@ describe('verifyDraftBody — the auto-send safety net', () => {
   });
 
   test('"feel free to reply" is NOT an incentive', () => {
-    expect(verify('Hi Aaron, feel free to reply here - {review_url}')).toBeNull();
+    expect(verify('Hi Aaron, Google review here, feel free to reply too - {review_url}')).toBeNull();
   });
 
   test('rejects unrendered placeholders other than the link', () => {
@@ -200,9 +202,9 @@ describe('draftAskBody — gating + fallback contract', () => {
   });
 
   test('smart punctuation is normalized to GSM before verification', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron — hope the ants are gone… If so: {review_url}. Anything off, just reply here.' });
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron — hope the ants are gone… Google review: {review_url}.' });
     const body = await Drafter.draftAskBody({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
-    expect(body).toBe('Hi Aaron - hope the ants are gone... If so: {review_url}. Anything off, just reply here.');
+    expect(body).toBe('Hi Aaron - hope the ants are gone... Google review: {review_url}.');
   });
 
   test('a draft that fails verification falls back to null (template sends instead)', async () => {
@@ -316,7 +318,7 @@ describe('name matching is word-bounded (codex #3235 r7)', () => {
   });
 
   test('the name as its own word passes', () => {
-    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick review: {review_url} Reply if off.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick Google review: {review_url}', { firstName: 'Al' })).toBeNull();
     expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out.', { firstName: 'Al' })).toBeNull();
   });
 });

@@ -4663,6 +4663,13 @@ const ReviewService = {
           // type included (it decides the termite rule), never the sequence.
           .then((sr) => (sr ? { serviceRecordId: sr.id, serviceDate: sr.service_date, technicianId: sr.technician_id, serviceType: sr.service_type } : null))
           .catch(() => null);
+    // Anchor a recovered visit to the cadence the first time, so later
+    // touches draft about the SAME visit even if a newer one completes.
+    if (techVoice && voiceVisit?.serviceRecordId && !serviceRecordId && !scheduledServiceId && sequenceId != null) {
+      await db("review_sequences").where({ id: sequenceId }).whereNull("service_record_id")
+        .update({ service_record_id: voiceVisit.serviceRecordId })
+        .catch((err) => logger.warn(`[review] tech voice: visit anchor failed (sequenceId=${sequenceId}): ${err.message}`));
+    }
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)

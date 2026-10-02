@@ -502,6 +502,22 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isAskOnlySentence('Thanks, a Google review would help: {review_url}', new Set())).toBe(true);
   });
 
+  test('#5524 r4 P1: a quote must cover the facts inside a clause, not just one word', () => {
+    const { quoteSharesContent } = Drafter.__private;
+    expect(quoteSharesContent("I saw ants in your new baby's nursery", 'ants outside the kitchen', new Set())).toBe(false);
+    // Honest paraphrase of a report line still passes.
+    expect(quoteSharesContent('I flagged moisture under the kitchen sink for your property group',
+      'Moisture under the kitchen sink that may lead to mildew; suggested raising it with the property group', new Set())).toBe(true);
+    // A pest / property word missing from the quotes always fails.
+    expect(quoteSharesContent('moisture under the kitchen sink and the attic', 'Moisture under the kitchen sink', new Set())).toBe(false);
+  });
+
+  test('#5524 r4 P1: from calls, only the caller\'s labeled turns count as the customer\'s words', () => {
+    const { callerTurns } = Drafter.__private;
+    expect(callerTurns('Agent: we just had a new baby at the office\nCaller: the ants are back by the lanai')).toBe('the ants are back by the lanai');
+    expect(callerTurns('no labels at all here')).toBe('');
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
