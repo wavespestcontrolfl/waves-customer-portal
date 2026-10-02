@@ -35,6 +35,7 @@ const KEYS = Array.from({ length: 12 }, (_, i) => `${String(i + 1).padStart(8, '
 test('the service and the migration name the same closed lists', () => {
   expect(migration.SPLITS).toEqual([...replay.SPLITS]);
   expect(migration.METHODS).toEqual([...replay.METHODS]);
+  expect(migration.PURPOSES).toEqual([...replay.PURPOSES]);
   expect(migration.RUN_STATUSES).toEqual([...replay.RUN_STATUSES]);
   expect(migration.VERDICTS).toEqual([...replay.VERDICTS]);
 });
@@ -147,9 +148,15 @@ test('export refuses a directory inside the repository, however it is spelled', 
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).holdout_run_id).toBe(run.id);
   });
 
-  test('a version bump carries the proposal only when the holdout replay on the new version still reproduces', async () => {
-    await record({ promptVersion: V13 });
-    const repro = await record({ split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys, 'reproduces') });
+  test('a version bump carries the proposal only when a recurrence check on the new version still reproduces', async () => {
+    // The mistake still reproduces in dev too: a recurrence check needs no dev pass.
+    await record({ promptVersion: V13, results: results(proposal.dev_incident_keys, 'reproduces') });
+    const fixRun = (await database('ai_fix_proposals').where({ id: proposal.id }).first()).dev_run_id;
+    await expect(record({ purpose: 'recurrence', split: 'dev', promptVersion: V13 })).rejects.toMatchObject({ code: 'needs_holdout' });
+    const repro = await record({ purpose: 'recurrence', split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys, 'reproduces') });
+    expect(repro.run).toMatchObject({ purpose: 'recurrence', status: 'failed' });
+    // A recurrence check is not the proposal's proof.
+    expect(await database('ai_fix_proposals').where({ id: proposal.id }).first()).toMatchObject({ dev_run_id: fixRun, holdout_run_id: null });
     await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: repro.run.id, promptVersion: 'house_voice_v14', by: 'lane:test' }))
       .rejects.toMatchObject({ code: 'wrong_version' });
     const { superseded, carried } = await replay.carryForward({ dbi: database, proposalId: proposal.id, runId: repro.run.id, promptVersion: V13, by: 'lane:test' });
@@ -158,16 +165,19 @@ test('export refuses a directory inside the repository, however it is spelled', 
     expect(carried.holdout_incident_keys).toEqual(proposal.holdout_incident_keys);
   });
 
-  test('a replay that no longer reproduces is never carried', async () => {
+  test('a replay that no longer reproduces, or a fix run, is never carried', async () => {
     await record({ promptVersion: V13 });
-    const clean = await record({ split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys) });
+    const fixHoldout = await record({ split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys, 'reproduces') });
+    await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: fixHoldout.run.id, promptVersion: V13, by: 'lane:test' }))
+      .rejects.toMatchObject({ code: 'needs_recurrence_run' });
+    const clean = await record({ purpose: 'recurrence', split: 'holdout', promptVersion: V13, results: results(proposal.holdout_incident_keys) });
     await expect(replay.carryForward({ dbi: database, proposalId: proposal.id, runId: clean.run.id, promptVersion: V13, by: 'lane:test' }))
       .rejects.toMatchObject({ code: 'no_longer_reproduces' });
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).status).toBe('pending');
   });
 
   test('the table keeps counts honest and the split closed', async () => {
-    const base = { area: 'sms', proposal_id: proposal.id, split: 'dev', method: 'subagent', code_ref: SHA, status: 'passed', created_by: 't' };
+    const base = { area: 'sms', proposal_id: proposal.id, split: 'dev', method: 'subagent', purpose: 'fix', code_ref: SHA, status: 'passed', created_by: 't' };
     await expect(database('ai_replay_runs').insert({ ...base, case_count: 3, fixed_count: 1, reproduces_count: 0, inconclusive_count: 0 })).rejects.toMatchObject({ code: '23514' });
     await expect(database('ai_replay_runs').insert({ ...base, split: 'test', case_count: 1, fixed_count: 1, reproduces_count: 0, inconclusive_count: 0 })).rejects.toMatchObject({ code: '23514' });
   });

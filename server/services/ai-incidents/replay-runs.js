@@ -10,9 +10,11 @@
  *   recordReplayRun   — validates the verdicts against the proposal's split,
  *                       computes the run status, stores run + results and
  *                       stamps the proposal's dev_run_id / holdout_run_id.
- *                       A holdout run needs a PASSED dev run on the same code.
- *   carryForward      — after a prompt-version bump, a holdout run on the new
- *                       version that still reproduces the mistake carries the
+ *                       A fix's holdout run needs a PASSED dev run on the
+ *                       same code and version; a recurrence check (holdout
+ *                       only) needs none and never stamps the proposal.
+ *   carryForward      — after a prompt-version bump, a holdout recurrence
+ *                       check on the new version that still reproduces the mistake carries the
  *                       proposal (and its count) to the new version (owner
  *                       ruling Q2: count across bumps only when a replay still
  *                       reproduces).
@@ -22,6 +24,7 @@ const { transitionProposal, TransitionError } = require('./fix-proposals');
 
 const SPLITS = Object.freeze(['dev', 'holdout']);
 const METHODS = Object.freeze(['subagent', 'code']);
+const PURPOSES = Object.freeze(['fix', 'recurrence']);
 const RUN_STATUSES = Object.freeze(['passed', 'failed', 'inconclusive', 'underpowered']);
 const VERDICTS = Object.freeze(['fixed', 'reproduces', 'inconclusive']);
 // A holdout run on fewer cases than this is labelled underpowered, never passed.
@@ -98,8 +101,9 @@ async function exportCases({ dbi, proposalId, split }) {
  * result is stored as inconclusive ('not_run'). Returns { run, results }.
  */
 async function recordReplayRun({
-  dbi, proposalId, split, method, codeRef, promptVersion = null, drafterModel = null, notes = null, results, by, dryRun = false,
+  dbi, proposalId, split, method, purpose = 'fix', codeRef, promptVersion = null, drafterModel = null, notes = null, results, by, dryRun = false,
 }) {
+  if (!PURPOSES.includes(purpose)) throw new TransitionError('bad_purpose', `purpose must be ${PURPOSES.join(' or ')}`);
   if (!SPLITS.includes(split)) throw new TransitionError('bad_split', `split must be ${SPLITS.join(' or ')}`);
   if (!METHODS.includes(method)) throw new TransitionError('bad_method', `method must be ${METHODS.join(' or ')}`);
   if (!codeRef || !/^[0-9a-f]{7,64}$/i.test(codeRef)) throw new TransitionError('bad_code_ref', 'code_ref must be the git sha the replay ran');
@@ -120,7 +124,10 @@ async function recordReplayRun({
     }
     if (!keys.length) throw new TransitionError('empty_split', `the proposal has no ${split} incidents`);
 
-    if (split === 'holdout') {
+    if (purpose === 'recurrence' && split !== 'holdout') {
+      throw new TransitionError('needs_holdout', 'a recurrence check replays the holdout cases');
+    }
+    if (purpose === 'fix' && split === 'holdout') {
       // The candidate must clear its dev cases first, on the same code AND
       // the same prompt version (gates change the prompt without a commit).
       const dev = await trx('ai_replay_runs')
@@ -143,6 +150,7 @@ async function recordReplayRun({
       proposal_id: proposalId,
       split,
       method,
+      purpose,
       prompt_version: promptVersion,
       code_ref: codeRef,
       drafter_model: drafterModel,
@@ -160,9 +168,13 @@ async function recordReplayRun({
 
     const [stored] = await trx('ai_replay_runs').insert(run).returning('*');
     await trx('ai_replay_results').insert(rows.map((r) => ({ ...r, run_id: stored.id })));
-    await transitionProposal({
-      dbi: trx, id: proposalId, fields: { [split === 'dev' ? 'dev_run_id' : 'holdout_run_id']: stored.id }, by,
-    });
+    // Only a fix run is the proposal's proof; a recurrence check is evidence
+    // for carryForward and never replaces it.
+    if (purpose === 'fix') {
+      await transitionProposal({
+        dbi: trx, id: proposalId, fields: { [split === 'dev' ? 'dev_run_id' : 'holdout_run_id']: stored.id }, by,
+      });
+    }
     return { run: stored, results: rows };
   });
 }
@@ -184,7 +196,9 @@ async function carryForward({ dbi, proposalId, runId, promptVersion, by, now = n
     if ((old.prompt_version ?? null) === promptVersion) throw new TransitionError('same_version', 'the proposal is already on that version');
     const run = await trx('ai_replay_runs').where({ id: runId, proposal_id: proposalId }).first();
     if (!run) throw new TransitionError('not_found', `run ${runId} is not a run of this proposal`);
-    if (run.split !== 'holdout') throw new TransitionError('needs_holdout', 'carrying forward needs a holdout run');
+    if (run.purpose !== 'recurrence' || run.split !== 'holdout') {
+      throw new TransitionError('needs_recurrence_run', 'carrying forward needs a holdout recurrence check on the new version');
+    }
     if (run.prompt_version !== promptVersion) throw new TransitionError('wrong_version', `the run replayed ${run.prompt_version || 'no version'}, not ${promptVersion}`);
     if (run.reproduces_count === 0) {
       throw new TransitionError('no_longer_reproduces', 'the mistake no longer reproduces on this version: close the proposal as shipped with the PR that fixed it');
@@ -217,6 +231,7 @@ async function carryForward({ dbi, proposalId, runId, promptVersion, by, now = n
 module.exports = {
   SPLITS,
   METHODS,
+  PURPOSES,
   RUN_STATUSES,
   VERDICTS,
   MIN_HOLDOUT_CASES,

@@ -10,6 +10,10 @@
  * `exact_production_model` is false on every such run and the report says
  * so. `method` 'code' is for a deterministic check that needs no model.
  *
+ * `purpose` 'fix' validates a candidate fix (dev must pass before holdout);
+ * 'recurrence' re-checks an open proposal on a newer prompt version and is
+ * the only evidence a carry-forward accepts.
+ *
  * Results-only tables, like the sealed exam's: nothing here ever writes
  * message_drafts, and `reason` is a short code or sentence, never customer
  * text. Status is computed by services/ai-incidents/replay-runs.js
@@ -19,11 +23,16 @@
 
 const SPLITS = ['dev', 'holdout'];
 const METHODS = ['subagent', 'code'];
+// fix: validates a candidate fix (dev first, then holdout).
+// recurrence: re-checks an open proposal on a newer prompt version; the
+// evidence a carry-forward needs, never proof that anything was fixed.
+const PURPOSES = ['fix', 'recurrence'];
 const RUN_STATUSES = ['passed', 'failed', 'inconclusive', 'underpowered'];
 const VERDICTS = ['fixed', 'reproduces', 'inconclusive'];
 
 exports.SPLITS = SPLITS;
 exports.METHODS = METHODS;
+exports.PURPOSES = PURPOSES;
 exports.RUN_STATUSES = RUN_STATUSES;
 exports.VERDICTS = VERDICTS;
 
@@ -37,6 +46,7 @@ exports.up = async function up(knex) {
       t.uuid('proposal_id').references('id').inTable('ai_fix_proposals').onDelete('SET NULL');
       t.string('split', 10).notNullable();
       t.string('method', 20).notNullable();
+      t.string('purpose', 20).notNullable();
       // The prompt version the replayed code renders, and the commit it ran.
       t.string('prompt_version', 60);
       t.string('code_ref', 64).notNullable();
@@ -54,6 +64,7 @@ exports.up = async function up(knex) {
     });
     await knex.raw(`ALTER TABLE ai_replay_runs ADD CONSTRAINT ai_replay_runs_split_check CHECK (split IN (${list(SPLITS)}))`);
     await knex.raw(`ALTER TABLE ai_replay_runs ADD CONSTRAINT ai_replay_runs_method_check CHECK (method IN (${list(METHODS)}))`);
+    await knex.raw(`ALTER TABLE ai_replay_runs ADD CONSTRAINT ai_replay_runs_purpose_check CHECK (purpose IN (${list(PURPOSES)}))`);
     await knex.raw(`ALTER TABLE ai_replay_runs ADD CONSTRAINT ai_replay_runs_status_check CHECK (status IN (${list(RUN_STATUSES)}))`);
     await knex.raw(`
       ALTER TABLE ai_replay_runs ADD CONSTRAINT ai_replay_runs_counts_check CHECK (

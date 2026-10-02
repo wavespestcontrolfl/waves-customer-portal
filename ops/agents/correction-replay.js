@@ -15,13 +15,15 @@
 //       (fixed | reproduces | inconclusive). Customer text: the dir must be
 //       outside the repository (the session scratchpad).
 //   record --file=<results.json> [--execute]
-//       Validates and stores a run: { proposal_id, split, method, code_ref,
+//       Validates and stores a run: { proposal_id, split, method, purpose
+//       (fix | recurrence), code_ref,
 //       prompt_version, drafter_model, notes, results: [{ incident_key,
-//       verdict, reason }] }. A holdout run needs a passed dev run on the same
-//       code_ref. Stamps the proposal's dev_run_id / holdout_run_id.
+//       verdict, reason }] }. A fix's holdout run needs a passed dev run on
+//       the same code_ref and version, and stamps the proposal; a recurrence
+//       check (holdout, a newer version) needs neither and is what carry reads.
 //   carry --proposal=<id|8-char> --run=<holdout run uuid> --version=<live prompt version> [--execute]
-//       Carries a proposal to the live version when that holdout run still
-//       reproduces the mistake (owner ruling Q2).
+//       Carries a proposal to the live version when that holdout recurrence
+//       check still reproduces the mistake (owner ruling Q2).
 //
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/correction-replay.js export --proposal=1a2b3c4d --split=dev --out=$SCRATCH/replay-1a2b3c4d
@@ -116,6 +118,7 @@ async function runExport({ dbi, args, log, drafter }) {
     proposal_id: proposal.id,
     split: args.split,
     method: 'subagent',
+    purpose: 'fix',
     code_ref: '<git sha of the checkout that rendered system-prompt.txt>',
     prompt_version: d.currentPromptVersion(),
     drafter_model: '<subagent model>',
@@ -141,6 +144,7 @@ async function runRecord({ dbi, args, log }) {
     proposalId: body.proposal_id,
     split: body.split,
     method: body.method,
+    purpose: body.purpose || 'fix',
     codeRef: body.code_ref,
     promptVersion: body.prompt_version || null,
     drafterModel: body.drafter_model || null,
@@ -149,7 +153,7 @@ async function runRecord({ dbi, args, log }) {
     by: args.by || 'lane:correction-loop',
     dryRun: !args.execute,
   });
-  log(`${args.execute ? 'RECORDED' : 'DRY RUN (add --execute to write)'}: ${run.split} run ${run.id ? String(run.id).slice(0, 8) : '(new)'} ${run.status} — ${run.fixed_count} fixed, ${run.reproduces_count} reproduce, ${run.inconclusive_count} inconclusive of ${run.case_count}; exact production model: no`);
+  log(`${args.execute ? 'RECORDED' : 'DRY RUN (add --execute to write)'}: ${run.purpose} ${run.split} run ${run.id ? String(run.id).slice(0, 8) : '(new)'} ${run.status} — ${run.fixed_count} fixed, ${run.reproduces_count} reproduce, ${run.inconclusive_count} inconclusive of ${run.case_count}; exact production model: no`);
   return { recorded: Boolean(args.execute), run };
 }
 
