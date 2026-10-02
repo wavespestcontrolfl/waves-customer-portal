@@ -777,7 +777,7 @@ describe('applyDueRateChanges — per_application', () => {
     ['an add-on line', (b) => { b.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(102), estimated_price: '20.00' }]; }, 'visit_has_addons'],
     ['an appointment discount', (b) => { b.scheduled_services[2].discount_type = 'percent'; b.scheduled_services[2].discount_amount = 10; b.scheduled_services[2].discount_dollars = '11.70'; }, 'visit_has_discount'],
     ['a structured price that disagrees with the stamp', (b) => { b.scheduled_services[2].primary_line_price = '130.00'; }, 'visit_price_structure'],
-    ['a prepaid visit', (b) => { b.scheduled_services[2].annual_prepay_term_id = TERM(1); }, 'visit_prepaid'],
+    ['a prepaid visit', (b) => { b.scheduled_services[2].prepaid_amount = '117.00'; }, 'visit_prepaid'],
     ['a parked reschedule request in the window', (b) => { b.scheduled_services[2].status = 'rescheduled'; }, 'visit_in_reschedule'],
   ])('%s on a target visit → hold %s, nothing written', async (_label, mutate, reason) => {
     const book = sentBook();
@@ -787,6 +787,14 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.holds.map((h) => h.reason)).toEqual([reason]);
     expect(JSON.stringify({ v: visits(), c: mockDb.store.customers })).toBe(before);
     expect(mockDb.store.audit_log).toHaveLength(0);
+  });
+  test('a visit keeping only the audit LINK of a voided/refunded prepay (no live coverage, no prepaid money) is not prepaid — the reprice applies', async () => {
+    const book = sentBook();
+    book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'refunded', prepay_amount: '400.00', coverage_visit_count: 4, coverage_service_type: 'Lawn Care Program', term_start: '2026-06-01', term_end: '2027-05-31' }];
+    book.scheduled_services[2].annual_prepay_term_id = TERM(1);
+    const out = await runApply(book);
+    expect(out.holds).toEqual([]);
+    expect(out.applied).toBe(1);
   });
   test('a series template that would not spawn later visits at the noticed amount (parent discount) → hold', async () => {
     const book = sentBook();
@@ -1322,7 +1330,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
-    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true })');
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null })');
     expect(call).toBeGreaterThan(0);
     // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
     // preserves them when no start is sent), so the guard judges the preserved start, never today
@@ -1347,6 +1355,13 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // never delivered → the customer was told nothing yet
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false })] });
     expect(await renew(468)).toBeNull();
+  });
+  test('editing the successor term itself (the invoice route on its own term) is still guarded: that term is not a successor that settles the guard', async () => {
+    const successor = { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) };
+    mockDb.reset({ annual_prepay_terms: [term({ status: 'renewed', renewal_decision: 'renew' }), successor] });
+    expect(await renew(500)).toBeNull(); // another writer: the successor exists, the guard has done its job
+    expect(await renew(500, { editingTermId: TERM(2) })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 500 });
+    expect(await renew(484, { editingTermId: TERM(2) })).toBeNull();
   });
   test('a $0 renewal is a different amount, not an absent one: it needs the acknowledgement too', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
