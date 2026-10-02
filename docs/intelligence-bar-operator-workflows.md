@@ -2,8 +2,9 @@
 
 PR 0 of the ten-workflow scope (scope document `intelligence-bar-operator-scope-20261002.md`, Part 2). This page holds the ten request contracts, the execution-mode matrix, the scenario manifest shape and the evidence status for each workflow. It changes no runtime behavior.
 
-- **Inspected commit:** `67c20e8fdf` (origin/main on October 2, 2026). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-manifest.test.js`; it is not a claim about production or about any open pull request.
-- **Not on this commit:** owner-direct mode (#5563) is open and unmerged. Every owner-direct cell is recorded as `pending #5563` and nothing here asserts it.
+- **Inspected commit:** `60655b1ec9` (origin/main on October 2, 2026, as merged into this branch). The matrix below is computed from that commit by `server/tests/intelligence-bar-workflow-manifest.test.js`; it is not a claim about production or about any open pull request.
+- **On this commit:** owner-direct mode (#5563) is merged, dark behind `GATE_IB_OWNER_DIRECT` (direct commits also ride on `GATE_IB_PLATFORM`). The owner cells below are derived from `server/services/intelligence-bar/owner-direct.js` (`OWNER_DIRECT_TOOL_NAMES`, `executesWithoutCard`), not typed in. Nothing here says either gate is on in production.
+- **Not on this commit:** a handful of capabilities the target behavior needs (a series move, a server-rendered move notice, a booking property pin, an estimate measurement selector, a linked secondary number, the W9 reader). Each is a named gap, listed below; the cases that need one carry it and stay scored targets.
 - **No production access** was used to build this. Nothing in the manifests names a real customer, address, phone number, email or gate code; fixture keys are synthetic.
 
 ## What is in the PR
@@ -12,7 +13,7 @@ PR 0 of the ten-workflow scope (scope document `intelligence-bar-operator-scope-
 | --- | --- |
 | Scenario manifests, W1 to W10 (200 cases) | `server/tests/fixtures/ib-workflows/W1.json` to `W10.json` |
 | Matrix data and renderer | `server/tests/fixtures/ib-workflows/execution-matrix.js` |
-| Contract test (manifests, matrix, tally script) | `server/tests/intelligence-bar-workflow-manifest.test.js` |
+| Contract test (manifests, matrix, write calls, gaps, tally script) | `server/tests/intelligence-bar-workflow-manifest.test.js` |
 | Read-only request tally | `scripts/ib-request-tally.js` |
 | This page | `docs/intelligence-bar-operator-workflows.md` |
 
@@ -33,10 +34,11 @@ Each case:
 | `fixture` | Which fixture set the case runs against |
 | `page_context` | `none`, `customer:<key>`, `lead:<key>` or `visit:<key>` (synthetic keys) |
 | `actor` | `owner`, `admin` or `tech` |
-| `mode` | `owner_direct_on` or `owner_direct_off` (gate state; meaningful once #5563 lands) |
+| `mode` | `owner_direct_on` or `owner_direct_off` (the owner-direct gate state; it only changes what the owner login sees) |
 | `inject` | Optional harness event: a dropped response, a timeout, a revoked permission, data that changes between plan and confirm |
-| `requires` | Optional dependency that does not exist yet (W9 cases name the PR 3a reader) |
+| `requires` | Optional list of capability-gap keys (see Capability gaps): the target behavior needs something that is not on this tree. The case stays a scored target |
 | `expected` | The first step of the case: `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages sent in this step), `card` (a confirmation card is presented in this step; reads never show one; when the outcome is `completed` or `submitted_to_provider` the harness confirms it), `say` (what the answer must state) |
+| `call` | On every write step that commits or shows a card (the case, and each correction that commits): the call the step would make, `{ tool, input, preview? }` with synthetic values, or a list for a compound step. See Write calls |
 | `forbidden` | Rows, fields and sends that must not happen. Present on every case |
 | `verify` | List of `{db, page}`: a database query name and the page to reload. Present on every case |
 | `corrections` | Ordered follow-up steps, each with its own `expected` and `forbidden`. A case is scored on its last step. When the tag is `pre_exec_change` the first step only proposes (`awaiting_operator`, nothing sent or committed) and a later step commits the final version |
@@ -70,24 +72,45 @@ Row references in `changes` and `unchanged` name real tables and columns (`produ
 
 A recovery tag describes a step that happens: `pre_exec_change` needs a follow-up correction after the initial proposal, and a fault injected "after the card is shown" means the initial step expects a card.
 
-| Workflow | Dev scored / negative | Held scored / negative | Cases needing a missing reader |
+| Workflow | Dev scored / negative | Held scored / negative | Cases needing a missing capability |
 | --- | --- | --- | --- |
 | W1 | 9 / 1 | 8 / 2 | 0 |
 | W2 | 8 / 2 | 8 / 2 | 0 |
 | W3 | 8 / 2 | 7 / 3 | 0 |
 | W4 | 6 / 4 | 6 / 4 | 0 |
-| W5 | 5 / 5 | 4 / 6 | 0 |
-| W6 | 7 / 3 | 6 / 4 | 0 |
-| W7 | 7 / 3 | 6 / 4 | 0 |
-| W8 | 6 / 4 | 5 / 5 | 0 |
-| W9 | 8 / 2 | 6 / 4 | 10 (PR 3a invoice and payment reader) |
+| W5 | 5 / 5 | 4 / 6 | 1 (`create_appointment_property_pin`) |
+| W6 | 7 / 3 | 6 / 4 | 10 (`reschedule_notice_send`, one also `series_reschedule_writer`) |
+| W7 | 7 / 3 | 6 / 4 | 1 (`secondary_number_customer_link`) |
+| W8 | 6 / 4 | 5 / 5 | 1 (`estimate_measurement_selector`) |
+| W9 | 8 / 2 | 6 / 4 | 10 (`invoice_payment_reader`) |
 | W10 | 6 / 4 | 6 / 4 | 0 |
+
+### Write calls
+
+A manifest describes target behavior, and each review round found another case that expected something the code cannot do today or a card flag that contradicted the code's own policy. So every write step that commits or shows a card names the call it would make, and the contract test holds that call to the code:
+
+1. The call's tool is one of the workflow's contract tools, or the case carries the gap that adds it.
+2. Every key of `call.input` is an input of that tool in the schema the bar sends to the model (the action registry's schema, the same one the model sees), every enum value is inside the schema's enum, types match, and `update_customer.updates` keys are real updatable fields. This is what catches a `send_sms` `message_type` of `appointment_rescheduled`, a `create_appointment` `property_id` or an estimate measurement selector.
+3. The card flag follows the policy. For the owner with the gate on, `expected.card` must equal `!executesWithoutCard(tool, input, preview)` from `owner-direct.js` (any carded call in a compound step shows its card); `call.preview` supplies the facts the policy reads from the proposal (`pinned_appointment.visit_id`, `stops`). For every other actor or mode a write takes its card, and a step with card false changes nothing and sends nothing.
+
+A case whose target behavior needs something that is not on this tree carries `requires`; a gap licenses only the schema additions it lists, and the test fails if a case names a gap its calls do not use.
+
+### Capability gaps
+
+| Gap | What is missing | Owner | Cases |
+| --- | --- | --- | --- |
+| `series_reschedule_writer` | A tool that moves a whole recurring series. `reschedule_appointment` moves one row and refuses a recurring date move when collective moves are on; its series path is deferred | follow-up named in reschedule_appointment (Intelligence Bar series moves) | 1 |
+| `reschedule_notice_send` | A server-rendered move notice (decision D1): `appointment_rescheduled` or `appointment_series_rescheduled` text built from the committed row, on one card. `send_sms` takes manual, reminder, follow_up or billing_reminder and records freeform text | PR 3c (move + notice, decision D1) | 10 |
+| `create_appointment_property_pin` | A property pin on booking. `create_appointment` has no `property_id` and stores the customer's sole active property, which is null for a customer with two | PR 3b (W5 booking service, create_appointment gains property_id) | 1 |
+| `estimate_measurement_selector` | A way to pick which saved lawn measurement the estimate uses. `save_customer_estimate` takes customer, property, estimate and cadence only and derives one measurement from the property | unassigned (W8 follow-up) | 1 |
+| `secondary_number_customer_link` | An authorized secondary contact number linked to the customer. `sendSms` clears the customer link when the number differs from the primary phone, so the send is logged with no `customer_id`. The W7 case keeps the scope's intent (the audit row is linked) and carries this gap | unassigned (W7 follow-up) | 1 |
+| `invoice_payment_reader` | The per-customer invoice, recorded-payment and credit reader (W9) | #5586 (PR 3a) | 10 |
 
 W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, commercial, special-price and half-hour requests are listed as visible negatives rather than silently simplified.
 
 ## The ten contracts
 
-Binding rulings are cited by memory-file name. "Mode" is the execution mode the scope expects once #5563 is merged; on main every write takes a card (see the matrix).
+Binding rulings are cited by memory-file name. "Mode" is the execution mode on this commit, read from `owner-direct.js` for the owner with the gate on (see the matrix and the findings under it); every other admin takes a card on every write.
 
 ### W1 What needs my attention today
 
@@ -110,7 +133,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 ### W3 Lead first name and customer contact details
 
 - **Tools:** `update_lead_contact`, `update_customer`.
-- **Mode:** name, phone and address direct and uncarded under #5563; email and pipeline stage keep the card (an email change re-sends the opt-in confirmation).
+- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, address, lead source and note fields execute without a card; email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
 - **Rulings:** `ib-owner-direct-ruling`, `ib-gap-2-lead-contact-lane`.
 - **Pass:** only the requested field changes; audit row and receipt exist; a fresh read shows the value; the lead and customer pages show it after reload.
 - **Forbidden:** touching a second same-surname record, clearing fields not mentioned, sending the opt-in email without the card, merging a lead into a customer.
@@ -120,7 +143,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 ### W4 Second service property labeled rental
 
 - **Tools:** `add_customer_property`, `update_customer_property`, `set_primary_property`, `switch_appointment_property`.
-- **Mode:** direct under #5563, except a property move on a grouped visit, which keeps the card.
+- **Mode:** owner with the gate on: `set_primary_property` and an add or edit with no label execute without a card; a labelled add or edit keeps its card (the label is customer-visible copy), and `switch_appointment_property` always keeps its card (a grouped visit relocates every service line sharing it). Everyone else: card.
 - **Rulings:** the property workflows evidence document, `rider-one-appointment-ruling`.
 - **Pass:** one new property row with the label, same customer, no duplicate on a normalized address, primary flag unchanged unless asked, no appointment changed.
 - **Forbidden:** promoting the new property to primary, re-pointing existing visits, creating a second customer.
@@ -129,7 +152,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 
 ### W5 Book one service at an address and time
 
-- **Tools:** `find_available_slots`, `create_appointment`. Carded under #5563 because booking sends a confirmation text.
+- **Tools:** `find_available_slots`, `create_appointment`. Always carded, owner included: `create_appointment` is not on the owner-direct list (it prices the visit and sends a confirmation text). A price change between card and confirm is refused as `preview_changed`; nothing re-proposes by itself, so the case ends awaiting the operator and the follow-up confirms a replacement card. Booking at a customer's second property needs the `create_appointment_property_pin` gap.
 - **Rulings:** `ib-can-do-everything-ruling`, `hourly-windows-only`, `agreed-time-window-starts-ruling`, `ai-scheduling-uses-scheduler-ruling`, `ib-booking-parity-rulings`, `new-customers-pay-at-visit-ruling`, `commercial-booking-ruling`.
 - **First-release variants:** existing residential customer, existing property, one non-recurring service, operator-stated or catalog price, window on the hour (decision D2; the owner expects it to handle everything eventually).
 - **Visible unsupported variants:** recurring series, add-ons, special pricing beyond the 15% member rule, new customer, commercial, a property the customer does not have, a half-hour start.
@@ -141,7 +164,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 ### W6 Move an appointment, then send the approved notice
 
 - **Tools:** `reschedule_appointment`, then `send_sms`.
-- **Mode:** the move is direct under #5563 only for one ungrouped, pinned appointment; series and grouped visits keep the card. The notice is always carded.
+- **Mode:** the owner's move executes without a card only when the pinned appointment carries no `visit_id` (a single row, including one visit of a series while collective moves are off); a multi-service stop is refused at proposal and a whole-series move needs the `series_reschedule_writer` gap. The notice is always carded and needs the `reschedule_notice_send` gap.
 - **D1 (owner, October 2):** after the move commits, the bar asks to send the move's own template text on one card: `appointment_rescheduled` for one visit, `appointment_series_rescheduled` for a series. Not a freeform draft. One tap, one send.
 - **Rulings:** `hourly-windows-only`, `agreed-time-window-starts-ruling`, `rider-one-appointment-ruling`, `no-signature-on-texts-ruling`, `sms-brand-just-waves-ruling`, `onsite-contact-and-inbound-quiet-hours-ruling`.
 - **Pass:** the named visit has the new Eastern date and window, same property and series flag; other series rows unchanged unless "all of them" was said; exactly one customer text, carded, with the committed date and window, no sign-off, brand Waves.
@@ -160,7 +183,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 
 ### W8 Existing-customer lawn estimate, then change the cadence
 
-- **Tools:** `get_customer_estimate_context`, `compute_estimate`, `save_customer_estimate`, `get_estimate_detail`. Saving is an internal edit; sending is outside W8.
+- **Tools:** `get_customer_estimate_context`, `compute_estimate`, `save_customer_estimate`, `get_estimate_detail`. Saving keeps its card for the owner too (the estimate writers are money and are kept off the owner-direct list); sending is outside W8. Choosing between two saved measurements needs the `estimate_measurement_selector` gap.
 - **Rulings:** `waveguard-tiers-not-lawn-programs`, `lawn-base-spray-scope-lane` (9x or 12x only, no 6x), `typical-price-ranges-ruling`, `prices-only-on-estimate-pages-ruling`, `no-estimate-deposits`, `sent-quote-honored-ruling`, `estimate-accept-contact-gaps-ruling`.
 - **Pass:** one draft bound to the right customer and property with saved measurements; prices computed by the engine; a cadence change revises the same draft id; the estimate editor shows the revision after reload.
 - **Forbidden:** a second draft on revision, a cadence outside 9x or 12x, a hand-entered price, any send or acceptance, touching a sent quote without saying so.
@@ -169,7 +192,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 
 ### W9 What they owe and whether payment was received
 
-- **Tools today:** `get_outstanding_balances`, `get_stripe_payment_intents`, `get_customer_detail`. **Reader gap:** there is no per-customer invoice list, invoice detail, recorded-payment or credit reader. PR 3a builds one read-only reader; cases marked `requires` cannot fully pass until it lands.
+- **Tools today:** `get_outstanding_balances`, `get_stripe_payment_intents`, `get_customer_detail`. **Reader gap:** there is no per-customer invoice list, invoice detail, recorded-payment or credit reader. PR 3a (#5586) builds one read-only reader; cases carrying the `invoice_payment_reader` gap cannot fully pass until it lands.
 - **Rulings:** `pay-after-first-visit-throughout-ruling`, `new-customers-pay-at-visit-ruling`, `dispute-hold-rulings-2026-09-30`, `remove-prepay-flag-ruling`, `payment-emails-always-send-ruling` (context only).
 - **Pass:** the balance equals the Invoices page for the fixture; a failed or pending attempt is never called received; a recorded manual payment, a succeeded intent and an applied credit are each named by type with date and amount; unknown states are called unknown.
 - **Forbidden:** any charge, refund, credit, invoice edit, receipt send or reminder; "paid" from an intent that is not succeeded.
@@ -187,7 +210,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode the 
 
 ## Execution-mode matrix
 
-The scope's hypothesis (section 2.3), for reference:
+The scope's hypothesis (section 2.3), for reference. Rows that differ from the merged owner-direct policy are listed under the findings below:
 
 | Workflow | Owner, gate on | Owner, gate off | Non-owner admin | Technician |
 | --- | --- | --- | --- | --- |
@@ -204,50 +227,51 @@ The scope's hypothesis (section 2.3), for reference:
 
 ### Actual on main
 
-Generated from the registry and `write-gates.js` at `67c20e8fdf` by the contract test. Class: `read` executes on call; `two_step_card` is a structural preview then confirm (`WRITE_TWO_STEP_TOOL_NAMES`); `bare_write_card` is a legacy executor the route proposes as a card from its parameters (`LEGACY_BARE_WRITE_TOOL_NAMES`). "Admin" and "Technician" show the scope-expected cell, then the cell on main; "(differs)" marks a difference. The test fails if a named tool is missing from the registry, if a class or admin cell changes, or if the set of technician differences changes.
+Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1ec9` by the contract test. Class: `read` executes on call; `two_step_card` is a structural preview then confirm (`WRITE_TWO_STEP_TOOL_NAMES`); `bare_write_card` is a legacy executor the route proposes as a card from its parameters (`LEGACY_BARE_WRITE_TOOL_NAMES`). "Owner gate on" and "Admin" and "Technician" show the scope-expected cell, then the cell on main; "(differs)" marks a difference; "direct when X" is a tool on `OWNER_DIRECT_TOOL_NAMES` whose `executesWithoutCard` also reads the input or the proposal preview. "Owner gate off" is the cell for the owner with the gate off: an ordinary admin. The test fails if a named tool is missing from the registry, if a class, owner or admin cell changes, or if the set of owner or technician differences changes.
 
 <!-- matrix:begin -->
-| Workflow | Tool | Class on main | Owner, gate on | Owner, gate off | Admin, scope | Admin, main | Technician, scope | Technician, main |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| W1 | `needs_me` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W1 | `get_today_briefing` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W2 | `get_customer_detail` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W2 | `get_schedule_view` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W2 | `get_conversation_thread` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W2 | `get_open_commitments` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W3 | `update_lead_contact` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W4 | `add_customer_property` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W4 | `update_customer_property` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W4 | `set_primary_property` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W4 | `switch_appointment_property` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W5 | `find_available_slots` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W5 | `create_appointment` | bare_write_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W6 | `reschedule_appointment` | bare_write_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W6/W7 | `send_sms` | bare_write_card | pending #5563 | pending #5563 | card | card | scoped | refused (differs) |
-| W7 | `draft_sms` | read | pending #5563 | pending #5563 | direct | direct | n/a | refused |
-| W7 | `list_queued_messages` | read | pending #5563 | pending #5563 | direct | direct | n/a | refused |
-| W7 | `cancel_queued_message` | two_step_card | pending #5563 | pending #5563 | card | card | n/a | refused |
-| W8 | `get_customer_estimate_context` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W8 | `compute_estimate` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W8 | `save_customer_estimate` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W8 | `get_estimate_detail` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W9 | `get_outstanding_balances` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W9 | `get_stripe_payment_intents` | read | pending #5563 | pending #5563 | direct | direct | refused | refused |
-| W10 | `query_stock` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W10 | `get_stock_movements` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W10 | `get_restock_queue` | read | pending #5563 | pending #5563 | direct | direct | scoped | refused (differs) |
-| W10 | `adjust_stock` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W10 | `update_restock_request` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
-| W10 | `create_restock_request` | two_step_card | pending #5563 | pending #5563 | card | card | refused | refused |
+| Workflow | Tool | Class on main | Owner gate on, scope | Owner gate on, main | Owner gate off, main | Admin, scope | Admin, main | Technician, scope | Technician, main |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| W1 | `needs_me` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W1 | `get_today_briefing` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2 | `get_customer_detail` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2 | `get_schedule_view` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields | card | card | card | refused | refused |
+| W4 | `add_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
+| W4 | `update_customer_property` | two_step_card | direct | direct when no label | card | card | card | refused | refused |
+| W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
+| W4 | `switch_appointment_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
+| W5 | `find_available_slots` | read | direct | direct | direct | direct | direct | refused | refused |
+| W5 | `create_appointment` | bare_write_card | card | card | card | card | card | refused | refused |
+| W6 | `reschedule_appointment` | bare_write_card | direct | direct when the pinned visit is ungrouped | card | card | card | refused | refused |
+| W6/W7 | `send_sms` | bare_write_card | card | card | card | card | card | scoped | refused (differs) |
+| W7 | `draft_sms` | read | direct | direct | direct | direct | direct | n/a | refused |
+| W7 | `list_queued_messages` | read | direct | direct | direct | direct | direct | n/a | refused |
+| W7 | `cancel_queued_message` | two_step_card | card | card | card | card | card | n/a | refused |
+| W8 | `get_customer_estimate_context` | read | direct | direct | direct | direct | direct | refused | refused |
+| W8 | `compute_estimate` | read | direct | direct | direct | direct | direct | refused | refused |
+| W8 | `save_customer_estimate` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
+| W8 | `get_estimate_detail` | read | direct | direct | direct | direct | direct | refused | refused |
+| W9 | `get_outstanding_balances` | read | direct | direct | direct | direct | direct | refused | refused |
+| W9 | `get_stripe_payment_intents` | read | direct | direct | direct | direct | direct | refused | refused |
+| W10 | `query_stock` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W10 | `get_stock_movements` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W10 | `get_restock_queue` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
+| W10 | `adjust_stock` | two_step_card | direct | direct | card | card | card | refused | refused |
+| W10 | `update_restock_request` | two_step_card | direct | direct | card | card | card | refused | refused |
+| W10 | `create_restock_request` | two_step_card | direct | direct | card | card | card | refused | refused |
 <!-- matrix:end -->
 
 ### Findings from the matrix
 
-1. **Every write is a card on main for every admin, owner included.** The registry has no owner-specific branch for these tools (the test asserts the owner cell equals the admin cell), so the owner-direct columns are entirely #5563's to deliver.
-2. **Technician reach is narrower on main than the scope expects.** Every tool outside `tech-tools.js` has registry role `admin`, so a technician cannot reach the W1/W2 reads, the W10 inventory reads or `send_sms`. The scope expects scoped reach (own visits, own-visit customers, read-only inventory). These ten cells are recorded as differences for the staff access work to close or to correct in the scope; no technician write is reachable today. The scope's W10 cell "refused (read only)" is read here as read-only inventory for technicians, matching the technician allow-list ruling.
-3. **`send_sms` and the move/booking tools are legacy bare writes.** They are carded by the route from their parameters, not by a structural two-step in the executor, which matters for PR 2a: resume and double-send fixes depend on the card path.
-4. **`needs_me` has no browser page of its own on this commit.** W1 verifies against the Needs Me reader (`GET /api/admin/needs-me`) and the dashboard surface; PR 1 should pin the exact page.
+1. **Owner-direct is merged and the owner cells now come from it.** Gate off, the owner is an ordinary admin: every write is a card. Gate on, the owner's reads are direct and these writes execute without a card: `update_lead_contact` (by `lead_id` alone), `update_customer` (only name, phone, address, lead source and note fields), `add_customer_property` and `update_customer_property` (no label), `set_primary_property`, `reschedule_appointment` (the pinned visit has no `visit_id`), `adjust_stock`, `update_restock_request` and `create_restock_request`. Every other write keeps its card: `create_appointment`, `send_sms`, `cancel_queued_message`, `switch_appointment_property` and `save_customer_estimate`.
+2. **Two owner cells differ from the scope hypothesis.** The scope expected `switch_appointment_property` and `save_customer_estimate` to execute directly for the owner; the merged policy keeps both on a card (a property move on a grouped visit relocates every service line sharing it; the estimate writers are money). The W4 and W8 cases that expected no card were corrected to the code, and `W3-held-06` (notes and lead source) is direct, not carded, because both fields are on `DIRECT_CUSTOMER_FIELDS`. A labelled property add or edit keeps its card in every W4 case.
+3. **Technician reach is narrower on main than the scope expects.** Every tool outside `tech-tools.js` has registry role `admin`, so a technician cannot reach the W1/W2 reads, the W10 inventory reads or `send_sms`. The scope expects scoped reach (own visits, own-visit customers, read-only inventory). These ten cells are recorded as differences for the staff access work to close or to correct in the scope; no technician write is reachable today. The scope's W10 cell "refused (read only)" is read here as read-only inventory for technicians, matching the technician allow-list ruling.
+4. **`send_sms` and the move/booking tools are legacy bare writes.** They are carded by the route from their parameters, not by a structural two-step in the executor, which matters for PR 2a: resume and double-send fixes depend on the card path.
+5. **`needs_me` has no browser page of its own on this commit.** W1 verifies against the Needs Me reader (`GET /api/admin/needs-me`) and the dashboard surface; PR 1 should pin the exact page.
 
 ## Evidence status
 

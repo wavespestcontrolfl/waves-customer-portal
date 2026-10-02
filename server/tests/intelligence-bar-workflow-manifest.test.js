@@ -5,10 +5,15 @@
  * Part 1 validates the manifests under fixtures/ib-workflows/W1.json to W10.json
  * against the shape in scope section 2.4. Part 2 checks the execution-mode
  * matrix against what THIS branch implements (action registry, write-gates.js,
- * technician rules). Owner-direct (#5563) is not merged: its columns are
- * recorded as "pending #5563" and never asserted.
+ * technician rules, and owner-direct.js, #5563, which is merged: the owner
+ * cells are derived from it). Part 3 is the write-call chokepoint: every write
+ * step that commits names the call it would make, and the test checks that call
+ * against the tool schemas the bar sends to the model and against the card
+ * policy, so a case that expects something the code cannot do, or a card flag
+ * that contradicts the policy, fails here and not in review.
  *
- * No runtime behavior is exercised; nothing here talks to a database.
+ * No runtime behavior is exercised; nothing here talks to a database
+ * (except the one tally predicate check, which needs DATABASE_URL).
  * Set UPDATE_IB_MATRIX_DOC=1 to rewrite the matrix table in the doc.
  */
 
@@ -38,6 +43,8 @@ const WORKFLOW_IDS = Array.from({ length: 10 }, (_, i) => `W${i + 1}`);
 
 const registry = require('../services/intelligence-bar/action-registry');
 const gates = require('../services/intelligence-bar/write-gates');
+const ownerDirect = require('../services/intelligence-bar/owner-direct');
+const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
 const matrix = require('./fixtures/ib-workflows/execution-matrix');
 
 const manifests = WORKFLOW_IDS.map((id) => ({ id, file: `${id}.json`, doc: JSON.parse(fs.readFileSync(path.join(DIR, `${id}.json`), 'utf8')) }));
@@ -100,7 +107,11 @@ describe('case shape', () => {
     expect(MODES).toContain(c.mode);
     expect(Object.keys(doc.fixtures)).toContain(c.fixture);
     if (c.inject !== undefined) expect(isNonEmptyString(c.inject)).toBe(true);
-    if (c.requires !== undefined) expect(isNonEmptyString(c.requires)).toBe(true);
+    // a dependency that does not exist on this tree is a key of CAPABILITY_GAPS, never free text
+    if (c.requires !== undefined) {
+      expect(Array.isArray(c.requires) && c.requires.length > 0).toBe(true);
+      for (const key of c.requires) expect(Object.keys(matrix.CAPABILITY_GAPS)).toContain(key);
+    }
 
     // expected: outcome enum plus the exact rows, fields and values
     expect(OUTCOMES).toContain(c.expected.outcome);
@@ -348,7 +359,7 @@ describe('doc partition table', () => {
 });
 
 describe('execution-mode matrix on main', () => {
-  const rows = matrix.computeActual(registry, gates);
+  const rows = matrix.computeActual(registry, gates, ownerDirect);
 
   test('the registry has no policy errors', () => {
     expect(registry.policyErrors).toEqual([]);
@@ -390,9 +401,50 @@ describe('execution-mode matrix on main', () => {
     for (const r of rows) expect(r.actual.admin).toBe(r.admin);
   });
 
-  test('main has no owner-specific branch for these tools (owner-direct is #5563, not merged)', () => {
-    for (const r of rows) expect(r.actual.owner).toBe(r.actual.admin);
-    expect(matrix.OWNER_DIRECT_PENDING).toBe('pending #5563');
+  // Owner cells come from owner-direct.js (#5563): OWNER_DIRECT_TOOL_NAMES and
+  // executesWithoutCard(), probed with inputs and previews. They are never
+  // typed into the matrix.
+  test('gate off, the owner is an ordinary admin on every tool', () => {
+    for (const r of rows) expect(r.actual.ownerOff).toBe(r.actual.admin);
+  });
+
+  test('gate on, an owner read is direct and an owner write follows owner-direct.js', () => {
+    for (const r of rows) {
+      if (r.cls === 'read') { expect(r.actual.ownerOn).toBe('direct'); continue; }
+      if (!ownerDirect.OWNER_DIRECT_TOOL_NAMES.has(r.tool)) { expect(r.actual.ownerOn).toBe('card'); continue; }
+      const probe = matrix.ownerPolicyProbe(ownerDirect, r.tool);
+      expect(probe.canBeDirect).toBe(true);
+      expect(r.actual.ownerOn).toBe(probe.canBeCard ? `direct when ${matrix.OWNER_DIRECT_CONDITIONS[r.tool]}` : 'direct');
+    }
+  });
+
+  test('every conditional owner-direct tool has its condition written down, and no unconditional one does', () => {
+    const ownerTools = rows.filter((r) => r.cls !== 'read' && ownerDirect.OWNER_DIRECT_TOOL_NAMES.has(r.tool));
+    const conditional = ownerTools.filter((r) => matrix.ownerPolicyProbe(ownerDirect, r.tool).canBeCard).map((r) => r.tool).sort();
+    expect(conditional).toEqual(Object.keys(matrix.OWNER_DIRECT_CONDITIONS).sort());
+    for (const r of rows) expect(r.actual.ownerOn).not.toMatch(/UNDOCUMENTED/);
+  });
+
+  test('the conditions say what the policy does', () => {
+    const exec = (tool, input, preview) => ownerDirect.executesWithoutCard(tool, input, preview || null);
+    expect(exec('update_lead_contact', { lead_id: 'lead-x', first_name: 'A' })).toBe(true);
+    expect(exec('update_lead_contact', { lead_name: 'A', first_name: 'A' })).toBe(false);
+    expect(exec('update_lead_contact', { lead_id: 'lead-x', lead_name: 'A', first_name: 'A' })).toBe(false);
+    for (const field of ownerDirect.DIRECT_CUSTOMER_FIELDS) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(true);
+    for (const field of ['email', 'waveguard_tier', 'monthly_rate', 'active', 'pipeline_stage']) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(false);
+    expect(exec('update_customer', { updates: { phone: 'x', email: 'y' } })).toBe(false);
+    for (const tool of ['add_customer_property', 'update_customer_property']) {
+      expect(exec(tool, { label: null })).toBe(true);
+      expect(exec(tool, { label: 'rental' })).toBe(false);
+    }
+    expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a' } })).toBe(true);
+    expect(exec('reschedule_appointment', { appointment_id: 'a' }, { pinned_appointment: { id: 'a', visit_id: 'v' } })).toBe(false);
+    expect(exec('reschedule_appointment', { appointment_id: 'a' }, null)).toBe(false);
+  });
+
+  test('the owner cells that differ from the scope are exactly the recorded findings', () => {
+    const differing = rows.filter((r) => matrix.differs(r.owner, matrix.baseCell(r.actual.ownerOn))).map((r) => `${r.tool}:owner`).sort();
+    expect(differing).toEqual([...matrix.OWNER_KNOWN_DIFFERENCES].sort());
   });
 
   test('the technician cells that differ from the scope are exactly the recorded findings', () => {
@@ -423,6 +475,187 @@ describe('execution-mode matrix on main', () => {
   });
 });
 
+// The write-call chokepoint. A manifest describes target behavior; each write
+// step that commits therefore names the call it would make ({ tool, input,
+// preview? }, synthetic values, a list for a compound step), and the call is
+// held to what the code can do: the tool is one the contract declares, every
+// input key and enum value exists in the schema the bar sends to the model, and
+// the card flag follows owner-direct.js. Anything the target needs that is not
+// on this tree is a declared capability gap (CAPABILITY_GAPS) carried as
+// `requires`; a gap licenses only what it `adds`.
+describe('write calls', () => {
+  const writeCases = manifests.flatMap(({ id, doc }) => doc.cases.filter((c) => c.kind === 'write').map((c) => ({ wf: id, doc, c })));
+  const stepsOf = (c) => [{ label: 'first step', step: c.expected, holder: c }, ...c.corrections.map((x, i) => ({ label: `correction ${i + 1}`, step: x.expected, holder: x }))];
+  const gapKeys = (c) => c.requires || [];
+  const callsOf = (c) => stepsOf(c).flatMap(({ holder }) => matrix.callList(holder));
+
+  test('reads carry no call', () => {
+    const offenders = manifests.flatMap(({ doc }) => doc.cases.filter((c) => c.kind === 'read').flatMap((c) => stepsOf(c).filter(({ holder }) => holder.call !== undefined).map(() => c.id)));
+    expect(offenders).toEqual([]);
+  });
+
+  test('every write step that commits or shows a card names its call, and no call hangs on a step that does not', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      for (const { label, step, holder } of stepsOf(c)) {
+        const calls = matrix.callList(holder);
+        if (matrix.stepCommits(step) && calls.length === 0) problems.push(`${c.id} ${label}: commits or shows a card but names no call`);
+        if (!matrix.stepCommits(step) && calls.length > 0) problems.push(`${c.id} ${label}: names a call but changes nothing, sends nothing and shows no card`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('every scored write case names at least one call, unless it truthfully commits nothing', () => {
+    // a completed no-op (a duplicate add reported, a request already received) changes nothing and shows no card
+    const bare = writeCases.filter(({ c }) => !c.negative && callsOf(c).length === 0 && stepsOf(c).some(({ step }) => matrix.stepCommits(step))).map(({ c }) => c.id);
+    expect(bare).toEqual([]);
+  });
+
+  test('a call has a tool and an input object, and is a write', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      for (const k of callsOf(c)) {
+        if (!isNonEmptyString(k.tool) || !k.input || typeof k.input !== 'object' || Array.isArray(k.input)) { problems.push(`${c.id}: malformed call`); continue; }
+        const action = registry.actions.get(k.tool);
+        if (action && !['internal_write', 'external_action'].includes(action.kind)) problems.push(`${c.id}: ${k.tool} is a read, not a write`);
+        if (k.preview !== undefined && (!k.preview || typeof k.preview !== 'object')) problems.push(`${c.id}: preview must be an object`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('the call tool is one of the contract tools, or the case declares the gap that adds it', () => {
+    const problems = [];
+    for (const { doc, c } of writeCases) {
+      for (const k of callsOf(c)) {
+        if (doc.contract.tools.includes(k.tool)) continue;
+        const added = gapKeys(c).some((key) => matrix.CAPABILITY_GAPS[key] && matrix.CAPABILITY_GAPS[key].adds && matrix.CAPABILITY_GAPS[key].adds.tools && matrix.CAPABILITY_GAPS[key].adds.tools[k.tool]);
+        if (!added) problems.push(`${c.id}: ${k.tool} is not in the ${doc.workflow} contract tools and no declared gap adds it`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('every input key and enum value exists in the schema the bar sends to the model (declared gaps apply on top)', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      for (const k of callsOf(c)) problems.push(...matrix.schemaProblems(k, registry, Object.keys(UPDATABLE_FIELDS), gapKeys(c)).map((p) => `${c.id}: ${p}`));
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('the schema check catches what it exists to catch', () => {
+    const check = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys);
+    // a template message type and a booking property pin: not on main
+    expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } })).toHaveLength(1);
+    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } })).toHaveLength(1);
+    expect(check({ tool: 'save_customer_estimate', input: { customer_id: 'c', property_id: 'p', measurement_key: 'back_lot' } })).toHaveLength(1);
+    expect(check({ tool: 'reschedule_appointment_series', input: { appointment_id: 'a' } })).toHaveLength(1);
+    expect(check({ tool: 'update_customer', input: { customer_id: 'c', updates: { favorite_color: 'x' } } })).toHaveLength(1);
+    expect(check({ tool: 'save_customer_estimate', input: { customer_id: 'c', property_id: 'p', lawn_applications: 6 } })).toHaveLength(1);
+    // the declared gaps license exactly what they add
+    expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } }, ['reschedule_notice_send'])).toEqual([]);
+    expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'billing_notice' } }, ['reschedule_notice_send'])).toHaveLength(1);
+    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } }, ['create_appointment_property_pin'])).toEqual([]);
+    expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } }, ['reschedule_notice_send'])).toHaveLength(1);
+    // and plain main calls are clean
+    expect(check({ tool: 'send_sms', input: { customer_id: 'c', message: 'hi', message_type: 'manual' } })).toEqual([]);
+  });
+
+  test('a declared gap is used by the case that declares it', () => {
+    const stale = [];
+    for (const { c } of writeCases) {
+      for (const key of gapKeys(c)) {
+        const adds = matrix.CAPABILITY_GAPS[key].adds || {};
+        if (!adds.tools && !adds.properties) continue; // behavior-only gap: nothing in a schema to point at
+        const calls = callsOf(c);
+        const uses = calls.some((k) => {
+          if (adds.tools && adds.tools[k.tool]) return true;
+          const props = adds.properties && adds.properties[k.tool];
+          return !!props && Object.entries(props).some(([prop, spec]) => prop in k.input && (!spec.enum || spec.enum.includes(k.input[prop])));
+        });
+        if (!uses) stale.push(`${c.id}: requires ${key} but no call uses what it adds`);
+      }
+    }
+    expect(stale).toEqual([]);
+  });
+
+  test('the card flag of every step with a call follows owner-direct.js for the owner with the gate on, and is true for every other actor or mode', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      for (const { label, step, holder } of stepsOf(c)) {
+        const calls = matrix.callList(holder);
+        if (!calls.length) continue;
+        const want = matrix.expectedCard(c, calls, ownerDirect);
+        if (step.card !== want) problems.push(`${c.id} ${label}: card is ${step.card}, the policy says ${want} for ${c.actor}/${c.mode} (${calls.map((k) => k.tool).join(', ')})`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('outside owner-direct, a write never changes or sends anything without a card', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      if (c.actor === 'owner' && c.mode === 'owner_direct_on') continue;
+      for (const { label, step } of stepsOf(c)) {
+        if (!step.card && (step.changes.length > 0 || step.sends > 0)) problems.push(`${c.id} ${label}: ${c.actor}/${c.mode} changes or sends with card false`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('a card that is not shown is a refusal or a question before any proposal, never a completed write', () => {
+    const problems = [];
+    for (const { c } of writeCases) {
+      for (const { label, step, holder } of stepsOf(c)) {
+        if (step.card || matrix.callList(holder).length) continue;
+        if (step.changes.length > 0 || step.sends > 0) problems.push(`${c.id} ${label}: changes or sends with no card and no call`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('the policy check sees a wrong card flag', () => {
+    const owner = { actor: 'owner', mode: 'owner_direct_on' };
+    expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { phone: 'x' } } }], ownerDirect)).toBe(false);
+    expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { email: 'x' } } }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard(owner, [{ tool: 'add_customer_property', input: { label: 'rental' } }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard(owner, [{ tool: 'reschedule_appointment', input: {}, preview: { pinned_appointment: { id: 'a' } } }, { tool: 'send_sms', input: {} }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard(owner, [{ tool: 'reschedule_appointment', input: {}, preview: { pinned_appointment: { id: 'a', visit_id: 'v' } } }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard({ actor: 'owner', mode: 'owner_direct_off' }, [{ tool: 'adjust_stock', input: {} }], ownerDirect)).toBe(true);
+    expect(matrix.expectedCard({ actor: 'admin', mode: 'owner_direct_on' }, [{ tool: 'adjust_stock', input: {} }], ownerDirect)).toBe(true);
+  });
+});
+
+describe('capability gaps', () => {
+  const docText = fs.readFileSync(DOC, 'utf8');
+  const caseCount = (key) => manifests.reduce((n, { doc }) => n + doc.cases.filter((c) => (c.requires || []).includes(key)).length, 0);
+
+  test('every gap is described, owned, and used by at least one case', () => {
+    for (const [key, gap] of Object.entries(matrix.CAPABILITY_GAPS)) {
+      expect(isNonEmptyString(gap.what)).toBe(true);
+      expect(isNonEmptyString(gap.owner_pr)).toBe(true);
+      expect(caseCount(key)).toBeGreaterThan(0);
+    }
+  });
+
+  test('the doc lists every gap with its owner and the number of cases that carry it', () => {
+    for (const [key, gap] of Object.entries(matrix.CAPABILITY_GAPS)) {
+      const row = docText.split('\n').find((line) => line.startsWith(`| \`${key}\` |`));
+      expect(row).toBeDefined();
+      expect(row).toContain(gap.owner_pr);
+      expect(row.trim().endsWith(`| ${caseCount(key)} |`)).toBe(true);
+    }
+  });
+
+  test('a case that carries a gap is a target, not an unsupported request', () => {
+    // the gap documents what the target needs; it never turns the case into a refusal of the request
+    const refused = manifests.flatMap(({ doc }) => doc.cases.filter((c) => c.requires && finalOutcome(c) === 'unsupported').map((c) => c.id));
+    expect(refused).toEqual([]);
+  });
+});
+
 describe('request tally script', () => {
   const tally = require('../../scripts/ib-request-tally');
 
@@ -437,6 +670,31 @@ describe('request tally script', () => {
   test('public estimate Q&A turns are left out of the call and turn counts', () => {
     for (const sql of [tally.CALLS_SQL, tally.TURNS_SQL]) expect(sql).toContain(tally.NOT_PUBLIC_ESTIMATE);
     expect(tally.NOT_PUBLIC_ESTIMATE).toMatch(/public_estimate_ask/);
+  });
+
+  test('a NULL or non-array tool_calls row is a tool-free turn that stays in the counts', () => {
+    // `not (null and ...)` is NULL, which a WHERE drops: the predicate must be IS DISTINCT FROM TRUE
+    expect(tally.NOT_PUBLIC_ESTIMATE).toMatch(/is distinct from true\s*$/i);
+    expect(tally.NOT_PUBLIC_ESTIMATE).not.toMatch(/^\s*not\b/i);
+    expect(tally.TURNS_SQL).toMatch(/jsonb_typeof\(q\.tool_calls\) is distinct from 'array'/);
+  });
+
+  // The same predicate, evaluated by PostgreSQL over the rows that matter. Runs in the
+  // DB-gated CI step or against a private QA database; skipped when DATABASE_URL is unset.
+  (process.env.DATABASE_URL ? test : test.skip)('the predicate keeps NULL, empty, non-array and ordinary rows and drops only public estimate Q&A (PostgreSQL)', async () => {
+    const { Client } = require('pg');
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      const { rows } = await client.query(`
+        with q(id, tool_calls) as (values
+          (1, null::jsonb), (2, '[]'::jsonb), (3, '{"a": 1}'::jsonb), (4, '[{"name": "needs_me"}]'::jsonb),
+          (5, '[{"name": "public_estimate_ask"}]'::jsonb), (6, '[{"name": "needs_me"}, {"name": "public_estimate_ask"}]'::jsonb), (7, 'null'::jsonb))
+        select q.id from q where ${tally.NOT_PUBLIC_ESTIMATE} order by q.id`);
+      expect(rows.map((r) => r.id)).toEqual([1, 2, 3, 4, 7]);
+    } finally {
+      await client.end();
+    }
   });
 
   test('arguments: default window, --days and --json, bad input refused', () => {

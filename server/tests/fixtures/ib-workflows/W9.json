@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W9",
   "title": "What they owe and whether payment was received",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -37,7 +37,6 @@
       "request": "What do the Ostranders owe?",
       "fixture": "pay-set",
       "inject": "drop the response, reload the thread, ask again",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -76,7 +75,10 @@
         "lost_response"
       ],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-02",
@@ -85,7 +87,6 @@
       "kind": "read",
       "request": "Was the Ostranders' payment received?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -122,7 +123,10 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-03",
@@ -178,7 +182,6 @@
       "kind": "read",
       "request": "Pull up the September invoice for the Pellhams.",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -217,7 +220,10 @@
       "covers": [
         "W9-C1"
       ],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-05",
@@ -226,7 +232,6 @@
       "kind": "read",
       "request": "Are the Larkspurs square?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -263,7 +268,10 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-06",
@@ -272,7 +280,6 @@
       "kind": "read",
       "request": "What is the story on the Fennimore invoice?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -311,7 +318,10 @@
       "covers": [
         "W9-C3"
       ],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-07",
@@ -410,7 +420,6 @@
       "kind": "read",
       "request": "Did the Pellhams pay by credit card?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -447,7 +456,10 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-dev-10",
@@ -549,7 +561,6 @@
       "kind": "read",
       "request": "Has Marlowe paid the July invoice?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "admin",
       "mode": "owner_direct_on",
@@ -586,7 +597,10 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-held-03",
@@ -595,7 +609,6 @@
       "kind": "read",
       "request": "Is anything for Marlowe overdue, and by how long?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -632,7 +645,10 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-held-04",
@@ -731,7 +747,6 @@
       "kind": "read",
       "request": "Show me the Ostranders' September invoice.",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "customer:cust-ostrander",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -792,7 +807,10 @@
       "covers": [
         "W9-C1"
       ],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-held-07",
@@ -892,7 +910,6 @@
       "request": "Did anything change on the Wexcombe balance in the last minute?",
       "fixture": "pay-set",
       "inject": "the pending bank payment settles between the two reads",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -933,7 +950,10 @@
       "covers": [
         "W9-C2"
       ],
-      "negative": false
+      "negative": false,
+      "requires": [
+        "invoice_payment_reader"
+      ]
     },
     {
       "id": "W9-held-10",

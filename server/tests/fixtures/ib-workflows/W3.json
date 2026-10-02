@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W3",
   "title": "Lead first name and customer contact details",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -49,6 +49,13 @@
         "card": false,
         "say": "Picks the one unlinked lead with no first name, or asks one question listing the candidates. Never refuses, never says tools are erroring."
       },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "murphy-lead-3",
+          "first_name": "Jay"
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -95,6 +102,13 @@
         "card": false,
         "say": "First commit lands on the forced lead."
       },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "murphy-lead-4",
+          "first_name": "Jay"
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -126,6 +140,13 @@
             "sends": 0,
             "card": false,
             "say": "A new operation with its own receipt; the first change on murphy-lead-4 is left in place and reported, not claimed undone."
+          },
+          "call": {
+            "tool": "update_lead_contact",
+            "input": {
+              "lead_id": "murphy-lead-3",
+              "first_name": "Jay"
+            }
           },
           "forbidden": []
         }
@@ -163,6 +184,13 @@
         "sends": 0,
         "card": false,
         "say": "Direct edit with a receipt, no card."
+      },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "murphy-lead-3",
+          "first_name": "Jay"
+        }
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -209,6 +237,15 @@
         "card": false,
         "say": "Direct internal edit, receipt shown."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "phone": "555-0173"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -250,6 +287,15 @@
         "card": true,
         "say": "A card appears and its disclosure names the opt-in confirmation email; nothing changes until confirmed."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "email": "murphy.test@example.invalid"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -286,6 +332,15 @@
             "card": true,
             "say": "After confirm: the email changes, the pending opt-in follows it with fresh tokens, and one opt-in confirmation goes to the new address; receipt shown."
           },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "email": "murphy.test@example.invalid"
+              }
+            }
+          },
           "forbidden": [
             "an opt-in email to the old address",
             "an old confirmation or unsubscribe token still resolving",
@@ -319,6 +374,13 @@
         "card": true,
         "say": "Gate off: the edit is carded, nothing changes until confirmed, and the card names the lead."
       },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "murphy-lead-3",
+          "first_name": "Jay"
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -349,6 +411,13 @@
             "sends": 0,
             "card": true,
             "say": "The first card is discarded; a new card shows Jason; only the final value commits."
+          },
+          "call": {
+            "tool": "update_lead_contact",
+            "input": {
+              "lead_id": "murphy-lead-3",
+              "first_name": "Jason"
+            }
           },
           "forbidden": [
             "Jay written to any lead"
@@ -384,6 +453,13 @@
         "sends": 0,
         "card": false,
         "say": "Reload finds the existing receipt; the second submit does not write again and no second receipt exists."
+      },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "lead-ostrander",
+          "first_name": "Pat"
+        }
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -429,6 +505,15 @@
         "card": true,
         "say": "Pipeline stage keeps its card even in owner-direct; nothing changes until confirmed."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "pipeline_stage": "estimate_sent"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -461,6 +546,15 @@
             "sends": 0,
             "card": true,
             "say": "After confirm the stage changes with its lifecycle stamps and a receipt."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "pipeline_stage": "estimate_sent"
+              }
+            }
           },
           "forbidden": [
             "a stage change on the other Murphy customer",
@@ -582,6 +676,26 @@
         "card": true,
         "say": "Split execution: the phone change commits directly with a receipt, and the email change stops at a confirmation card that names the opt-in email. The bar reports both halves; the email is unchanged until confirmed."
       },
+      "call": [
+        {
+          "tool": "update_customer",
+          "input": {
+            "customer_id": "cust-murphy-a",
+            "updates": {
+              "phone": "555-0172"
+            }
+          }
+        },
+        {
+          "tool": "update_customer",
+          "input": {
+            "customer_id": "cust-murphy-a",
+            "updates": {
+              "email": "murphy.rental@example.invalid"
+            }
+          }
+        }
+      ],
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -628,6 +742,13 @@
         "card": false,
         "say": "Only the last name changes, under one receipt."
       },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "lead-ostrander",
+          "last_name": "Ostrander-Reyes"
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -671,6 +792,15 @@
         "card": false,
         "say": "Edits the viewed customer first."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-b",
+          "updates": {
+            "phone": "555-0199"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -702,6 +832,15 @@
             "card": false,
             "say": "New operation and receipt for cust-murphy-a; the first change stays on cust-murphy-b and is reported, not claimed undone."
           },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "phone": "555-0199"
+              }
+            }
+          },
           "forbidden": []
         }
       ],
@@ -730,6 +869,15 @@
         "sends": 0,
         "card": true,
         "say": "Card with the opt-in email disclosure; no change before confirm."
+      },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-b",
+          "updates": {
+            "email": "pat.test@example.invalid"
+          }
+        }
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -765,6 +913,15 @@
             "sends": 1,
             "card": true,
             "say": "After confirm: the email changes, the pending opt-in follows it with fresh tokens, and one opt-in confirmation goes to the new address; receipt shown."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-b",
+              "updates": {
+                "email": "pat.test@example.invalid"
+              }
+            }
           },
           "forbidden": [
             "an opt-in email to the old address",
@@ -841,8 +998,18 @@
           "customers[cust-murphy-a].email"
         ],
         "sends": 0,
-        "card": true,
-        "say": "Notes and source are outside the owner-direct field list (name, phone, address), so this goes through a confirmation card; after confirm only the two named fields change, and notes were named so clearing it is intended."
+        "card": false,
+        "say": "Notes and lead source are on the owner-direct field list, so the edit executes without a card and with a receipt; only the two named fields change, and notes were named so clearing it is intended."
+      },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "notes": "",
+            "lead_source": "referral"
+          }
+        }
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -885,6 +1052,15 @@
         "card": true,
         "say": "Gate off: carded; nothing changes until confirmed."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "phone": "555-0161"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -915,6 +1091,15 @@
             "sends": 0,
             "card": true,
             "say": "Old card discarded, new card shows 555-0162; only that value commits."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "phone": "555-0162"
+              }
+            }
           },
           "forbidden": [
             "555-0161 committed"
@@ -992,6 +1177,15 @@
         "card": false,
         "say": "Reports unknown readback, then finds the receipt on resume; does not write a second time."
       },
+      "call": {
+        "tool": "update_customer",
+        "input": {
+          "customer_id": "cust-murphy-a",
+          "updates": {
+            "phone": "555-0140"
+          }
+        }
+      },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
@@ -1038,6 +1232,13 @@
         "sends": 0,
         "card": false,
         "say": "A new explicit operation with its own receipt; the first receipt stays and is not claimed never to have happened."
+      },
+      "call": {
+        "tool": "update_lead_contact",
+        "input": {
+          "lead_id": "murphy-lead-3",
+          "first_name": "Jason"
+        }
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",

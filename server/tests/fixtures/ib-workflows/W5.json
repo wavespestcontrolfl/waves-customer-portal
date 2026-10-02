@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W5",
   "title": "Book one service at an address and time",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -57,6 +57,16 @@
         "card": true,
         "say": "Card discloses the confirmation text; one row, one text after confirm; receipt shown."
       },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-07",
+          "service_type": "one-time pest treatment",
+          "time_window": "10:00 AM",
+          "price": 149
+        }
+      },
       "forbidden": [
         "two scheduled_services rows",
         "an unpriced row",
@@ -104,6 +114,15 @@
         "sends": 1,
         "card": true,
         "say": "4 PM books 16:00 to 18:00, never 15:00 to 17:00; the price comes from the catalog and the bar says what it is instead of sending the operator to the Schedule screen."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-08",
+          "service_type": "one-time pest treatment",
+          "time_window": "4:00 PM"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -321,6 +340,16 @@
         "card": true,
         "say": "Card shows 9 AM; nothing is booked until it is confirmed."
       },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-07",
+          "service_type": "one-time pest treatment",
+          "time_window": "9:00 AM",
+          "price": 149
+        }
+      },
       "forbidden": [
         "two scheduled_services rows",
         "an unpriced row",
@@ -355,6 +384,16 @@
             "card": true,
             "say": "The 9 AM proposal is discarded and cannot commit; a new card shows 10 AM; only 10 AM commits, with one confirmation text."
           },
+          "call": {
+            "tool": "create_appointment",
+            "input": {
+              "customer_id": "cust-pellham",
+              "scheduled_date": "2026-10-07",
+              "service_type": "one-time pest treatment",
+              "time_window": "10:00 AM",
+              "price": 149
+            }
+          },
           "forbidden": [
             "a 9 AM row"
           ]
@@ -375,24 +414,29 @@
       "kind": "write",
       "request": "Book the Pellhams for a one-time pest treatment Thursday at 10.",
       "fixture": "book-price-drift",
-      "inject": "change the catalog price after the card is shown and before confirm",
+      "inject": "change the catalog price after the card is shown and before the operator confirms",
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "scheduled_services[new].customer_id = cust-pellham",
-          "scheduled_services[new].service_type = one-time pest treatment",
-          "scheduled_services[new].window_start = Thursday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
-          "scheduled_services[new].estimated_price = the new catalog price"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
+          "scheduled_services[new]",
           "scheduled_services[existing rows]"
         ],
-        "sends": 1,
+        "sends": 0,
         "card": true,
-        "say": "The first confirm is refused as drift; the bar recomputes, shows the difference in plain words and a new card; only the new price commits."
+        "say": "The card shows the price at proposal time. The catalog price changes before the operator confirms, so the confirm is refused as preview_changed (409): no row is written and no text is sent, and the bar says the price changed and nothing was booked. Nothing re-proposes or confirms by itself."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-08",
+          "service_type": "one-time pest treatment",
+          "time_window": "10:00 AM"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -413,7 +457,65 @@
           "page": "/admin/dispatch (stop card)"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "try booking it again",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "scheduled_services[new]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "Re-proposes from the fresh catalog price: a replacement card names the new price and the difference in plain words; nothing is booked until that card is confirmed."
+          },
+          "call": {
+            "tool": "create_appointment",
+            "input": {
+              "customer_id": "cust-pellham",
+              "scheduled_date": "2026-10-08",
+              "service_type": "one-time pest treatment",
+              "time_window": "10:00 AM"
+            }
+          },
+          "forbidden": [
+            "a booking from the stale card",
+            "the replacement card confirmed without the operator"
+          ]
+        },
+        {
+          "request": "yes, book it at the new price",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "scheduled_services[new].customer_id = cust-pellham",
+              "scheduled_services[new].service_type = one-time pest treatment",
+              "scheduled_services[new].window_start = Thursday 10:00 Eastern; window_end = 11:00 (stored flat 60-minute block; the 10:00-12:00 arrival range is confirmation-text copy only)",
+              "scheduled_services[new].estimated_price = the new catalog price"
+            ],
+            "unchanged": [
+              "scheduled_services[existing rows]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "The operator confirms the replacement card; one row at the new catalog price and one confirmation text; receipt shown."
+          },
+          "call": {
+            "tool": "create_appointment",
+            "input": {
+              "customer_id": "cust-pellham",
+              "scheduled_date": "2026-10-08",
+              "service_type": "one-time pest treatment",
+              "time_window": "10:00 AM"
+            }
+          },
+          "forbidden": [
+            "a second row for the same booking",
+            "a row stamped with the old price"
+          ]
+        }
+      ],
       "tags": [
         "plan_drift"
       ],
@@ -442,6 +544,15 @@
         "sends": 0,
         "card": true,
         "say": "The scheduler re-checks at confirm, tells the truth that the slot was taken, offers the next open hours; no row is written."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-07",
+          "service_type": "one-time pest treatment",
+          "time_window": "10:00 AM"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -496,6 +607,16 @@
         "card": true,
         "say": "Reload finds the receipt; competing resumes produce one row and one confirmation text."
       },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-06",
+          "service_type": "one-time pest treatment",
+          "time_window": "11:00 AM",
+          "price": 149
+        }
+      },
       "forbidden": [
         "two scheduled_services rows",
         "an unpriced row",
@@ -529,6 +650,9 @@
       "kind": "write",
       "request": "Schedule a one-time pest treatment at the rental on Sample Court for the Larkspurs, Tuesday at 1.",
       "fixture": "book-set",
+      "requires": [
+        "create_appointment_property_pin"
+      ],
       "page_context": "customer:cust-larkspur",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -541,6 +665,16 @@
         "sends": 0,
         "card": true,
         "say": "Card names the rental property and Tuesday 1 PM; nothing is booked until it is confirmed."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "scheduled_date": "2026-10-06",
+          "service_type": "one-time pest treatment",
+          "time_window": "1:00 PM",
+          "property_id": "larkspur-rental"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -580,6 +714,16 @@
             "card": true,
             "say": "Tuesday proposal discarded; Wednesday card; only Wednesday commits, with one confirmation text."
           },
+          "call": {
+            "tool": "create_appointment",
+            "input": {
+              "customer_id": "cust-larkspur",
+              "scheduled_date": "2026-10-07",
+              "service_type": "one-time pest treatment",
+              "time_window": "1:00 PM",
+              "property_id": "larkspur-rental"
+            }
+          },
           "forbidden": [
             "a Tuesday row"
           ]
@@ -617,6 +761,15 @@
         "sends": 1,
         "card": true,
         "say": "Member discount applied through the discount engine, not typed by the model."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-ostrander",
+          "scheduled_date": "2026-10-05",
+          "service_type": "one-time pest treatment",
+          "time_window": "8:00 AM"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -793,6 +946,16 @@
         "card": true,
         "say": "The booking goes through its card; the confirm times out with the outcome unknown, so the bar says unknown and finds the row or receipt on resume before any new attempt; never books twice."
       },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-09",
+          "service_type": "one-time pest treatment",
+          "time_window": "9:00 AM",
+          "price": 149
+        }
+      },
       "forbidden": [
         "two scheduled_services rows",
         "an unpriced row",
@@ -842,6 +1005,16 @@
         "sends": 1,
         "card": true,
         "say": "Non-owner admin: card; one row and one confirmation text after confirm."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-05",
+          "service_type": "one-time pest treatment",
+          "time_window": "1:00 PM",
+          "price": 149
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -930,6 +1103,16 @@
         "card": true,
         "say": "Confirm is refused under the current rules and reported; no gate is enabled to finish it."
       },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-06",
+          "service_type": "one-time pest treatment",
+          "time_window": "8:00 AM",
+          "price": 149
+        }
+      },
       "forbidden": [
         "two scheduled_services rows",
         "an unpriced row",
@@ -979,6 +1162,15 @@
         "sends": 1,
         "card": true,
         "say": "States the price in the bar, then proposes the booking card; books only after confirm."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-pellham",
+          "scheduled_date": "2026-10-09",
+          "service_type": "one-time pest treatment",
+          "time_window": "3:00 PM"
+        }
       },
       "forbidden": [
         "two scheduled_services rows",

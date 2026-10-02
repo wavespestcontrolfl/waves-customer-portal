@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W8",
   "title": "Existing-customer lawn estimate, then change the cadence",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -56,8 +56,16 @@
           "estimates[sent quotes]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Draft saved directly with the engine price; says the draft is unsent."
+        "card": true,
+        "say": "A card shows the engine price (an estimate save is money, so it keeps its card even for the owner); after confirm the draft is saved; says the draft is unsent."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -104,8 +112,16 @@
           "estimates[sent quotes]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Same result: monthly is the 12x program; the answer names it."
+        "card": true,
+        "say": "Same result: card, then draft; monthly is the 12x program; the answer names it."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -152,9 +168,28 @@
           "estimates draft count = 1"
         ],
         "sends": 0,
-        "card": false,
-        "say": "One draft revised under the same id; the editor shows 12x and the new engine price after reload."
+        "card": true,
+        "say": "Two cards: the first draft at 9x, then a revision of the same draft to 12x; the editor shows 12x and the new engine price after reload."
       },
+      "call": [
+        {
+          "tool": "save_customer_estimate",
+          "input": {
+            "customer_id": "cust-thistledown",
+            "property_id": "thistledown-home",
+            "lawn_applications": 9
+          }
+        },
+        {
+          "tool": "save_customer_estimate",
+          "input": {
+            "customer_id": "cust-thistledown",
+            "property_id": "thistledown-home",
+            "lawn_applications": 12,
+            "estimate_id": "thistledown-draft"
+          }
+        }
+      ],
       "forbidden": [
         "a second draft created on revision",
         "a cadence outside 9x or 12x",
@@ -200,8 +235,16 @@
         ],
         "unchanged": [],
         "sends": 0,
-        "card": false,
-        "say": "Draft at 9x."
+        "card": true,
+        "say": "A card, then the draft at 9x."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -252,6 +295,9 @@
       "kind": "write",
       "request": "Make a lawn estimate for the Thistledowns, twelve a year.",
       "fixture": "est-set",
+      "requires": [
+        "estimate_measurement_selector"
+      ],
       "page_context": "customer:cust-thistledown",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -266,8 +312,16 @@
         ],
         "unchanged": [],
         "sends": 0,
-        "card": false,
-        "say": "Saved with the front lawn first."
+        "card": true,
+        "say": "Saved through its card with the front lawn first."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -300,8 +354,18 @@
               "estimates draft count = 1"
             ],
             "sends": 0,
-            "card": false,
-            "say": "Re-saves the same draft with the back lot measurement and the recomputed engine price."
+            "card": true,
+            "say": "Re-saves the same draft through a second card with the back lot measurement and the recomputed engine price."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12,
+              "estimate_id": "thistledown-draft",
+              "measurement_key": "back_lot"
+            }
           },
           "forbidden": [
             "a second draft"
@@ -321,22 +385,27 @@
       "kind": "write",
       "request": "Make a lawn estimate for the Thistledowns, twelve a year.",
       "fixture": "est-drift",
-      "inject": "edit the lawn measurement after compute and before save",
+      "inject": "edit the lawn measurement after the card is shown and before the operator confirms",
       "page_context": "customer:cust-thistledown",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "estimates[new].customer_id = cust-thistledown",
-          "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output"
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "estimates[new]"
         ],
-        "unchanged": [],
         "sends": 0,
-        "card": false,
-        "say": "The save is refused as drift, the bar recomputes and states the price difference in plain words, then saves once with the new engine price."
+        "card": true,
+        "say": "The card shows the price from the measurement at proposal time. The measurement is edited before the operator confirms, so the confirm is refused as preview_changed: no draft is written, and the bar says the price changed and nothing was saved. Nothing re-proposes or confirms by itself."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -357,7 +426,60 @@
           "page": "/admin/pipeline (estimates tab) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "try saving it again",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "estimates[new]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "Re-proposes from the edited measurement: a replacement card states the price difference in plain words; nothing is saved until that card is confirmed."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12
+            }
+          },
+          "forbidden": [
+            "a draft saved at the stale price",
+            "the replacement card confirmed without the operator"
+          ]
+        },
+        {
+          "request": "yes, save it",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "estimates[new].customer_id = cust-thistledown",
+              "estimates[new].status = draft",
+              "estimates[new].lawn_applications = 12",
+              "estimates[new].price = engine output"
+            ],
+            "unchanged": [],
+            "sends": 0,
+            "card": true,
+            "say": "The operator confirms the replacement card; one draft saved once with the new engine price."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12
+            }
+          },
+          "forbidden": [
+            "a second draft created"
+          ]
+        }
+      ],
       "tags": [
         "plan_drift"
       ],
@@ -429,8 +551,16 @@
         ],
         "unchanged": [],
         "sends": 0,
-        "card": false,
-        "say": "Saves at the default 9 applications with the engine price and says it cannot hand-enter a price here; no operator-typed price appears."
+        "card": true,
+        "say": "Shows the card at the default 9 applications with the engine price and says it cannot hand-enter a price here; no operator-typed price appears."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -524,6 +654,14 @@
         "card": true,
         "say": "Gate off: the save is carded; one draft after confirm."
       },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
       "forbidden": [
         "a second draft created on revision",
         "a cadence outside 9x or 12x",
@@ -567,8 +705,17 @@
           "estimates draft count = 1"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Revises the saved draft in place: same id, new engine price; no second draft."
+        "card": true,
+        "say": "Revises the saved draft in place through a card: same id, new engine price; no second draft."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9,
+          "estimate_id": "thistledown-existing-draft"
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -703,8 +850,16 @@
           "emails sent"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Draft saved; sending is a separate capability and is not done; says what remains."
+        "card": true,
+        "say": "Draft saved through its card; sending is a separate capability and is not done; says what remains."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
       },
       "forbidden": [
         "a second draft created on revision",
@@ -879,6 +1034,14 @@
         "card": true,
         "say": "Non-owner admin: carded; one draft after confirm."
       },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-pellham",
+          "property_id": "pellham-home",
+          "lawn_applications": 12
+        }
+      },
       "forbidden": [
         "a second draft created on revision",
         "a cadence outside 9x or 12x",
@@ -966,8 +1129,16 @@
           "estimates draft count = 1"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Reload finds the saved draft; the repeat does not create a second draft."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-pellham",
+          "property_id": "pellham-home",
+          "lawn_applications": 12
+        }
       },
       "forbidden": [
         "a second draft created on revision",

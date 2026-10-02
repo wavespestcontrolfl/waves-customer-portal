@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W10",
   "title": "Record stock that arrived and show on-hand",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -59,6 +59,15 @@
         "card": false,
         "say": "One receipt movement, never a set_total; reports the new on-hand with the converted units."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Taurus SC",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "gal"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -106,6 +115,26 @@
         "card": false,
         "say": "The open Taurus request is marked received with the delivered quantity and the answer says so; no purchase or supplier action."
       },
+      "call": [
+        {
+          "tool": "adjust_stock",
+          "input": {
+            "product_name": "Taurus SC",
+            "movement_type": "restock",
+            "quantity": 2,
+            "unit": "gal"
+          }
+        },
+        {
+          "tool": "update_restock_request",
+          "input": {
+            "request_id": "taurus-open",
+            "action": "receive",
+            "quantity": 2,
+            "unit": "gal"
+          }
+        }
+      ],
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -150,6 +179,15 @@
         "card": false,
         "say": "First movement committed."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Taurus SC",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "qt"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -181,6 +219,15 @@
             "sends": 0,
             "card": false,
             "say": "A correcting movement with its own receipt for the difference; the first movement is not edited and is reported."
+          },
+          "call": {
+            "tool": "adjust_stock",
+            "input": {
+              "product_name": "Taurus SC",
+              "movement_type": "correction",
+              "quantity": 1.5,
+              "unit": "gal"
+            }
           },
           "forbidden": []
         }
@@ -349,6 +396,15 @@
         "card": false,
         "say": "Records the receipt; says it cannot place the supplier order from here; says what remains."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 3,
+          "unit": "jug"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -394,6 +450,15 @@
         "sends": 0,
         "card": true,
         "say": "Gate off: carded; the confirm recomputes on-hand from the live count and states the difference."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Taurus SC",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "gal"
+        }
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -483,6 +548,15 @@
         "sends": 0,
         "card": false,
         "say": "Reload finds the receipt; the repeat does not add a second movement."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Taurus SC",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "gal"
+        }
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -574,6 +648,15 @@
         "sends": 0,
         "card": false,
         "say": "Product identity resolves to Talak 96 oz by ruling; says so; one movement."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak 96 oz",
+          "movement_type": "restock",
+          "quantity": 3,
+          "unit": "jug"
+        }
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -753,6 +836,15 @@
         "card": false,
         "say": "Says the read-back is unknown, finds the receipt on resume, never records a second movement."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 5,
+          "unit": "jug"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -842,6 +934,15 @@
         "card": true,
         "say": "Non-owner admin: carded; one movement after confirm."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "jug"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -884,6 +985,15 @@
         "sends": 0,
         "card": true,
         "say": "Confirm refused under current rules; reported; nothing recorded."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 3,
+          "unit": "jug"
+        }
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -930,6 +1040,15 @@
         "card": true,
         "say": "Proposes a 2 jug receipt on a confirmation card; nothing commits yet."
       },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 2,
+          "unit": "jug"
+        }
+      },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
@@ -963,6 +1082,15 @@
             "sends": 0,
             "card": true,
             "say": "The 2 jug proposal is discarded; a fresh 3 jug card is the only one that can commit."
+          },
+          "call": {
+            "tool": "adjust_stock",
+            "input": {
+              "product_name": "Talak",
+              "movement_type": "restock",
+              "quantity": 3,
+              "unit": "jug"
+            }
           },
           "forbidden": [
             "a 2 jug movement",

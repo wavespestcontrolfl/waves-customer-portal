@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W6",
   "title": "Move an appointment, then send the approved notice",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -36,6 +36,9 @@
       "kind": "write",
       "request": "Move the Pellham visit to Friday at 10 and let them know.",
       "fixture": "move-set",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -53,6 +56,29 @@
         "card": true,
         "say": "Move commits directly; then one card for the move template text with the committed date and window, brand Waves, no sign-off; one send after confirm."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "pellham-monday",
+            "new_date": "2026-10-09",
+            "new_time_window": "10:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "pellham-monday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-pellham",
+            "appointment_id": "pellham-monday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -128,6 +154,9 @@
       "kind": "write",
       "request": "Move the Pellham visit to Friday at 10 and tell them.",
       "fixture": "move-set",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -143,6 +172,29 @@
         "card": true,
         "say": "First move and notice complete."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "pellham-monday",
+            "new_date": "2026-10-09",
+            "new_time_window": "10:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "pellham-monday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-pellham",
+            "appointment_id": "pellham-monday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -174,6 +226,29 @@
             "card": true,
             "say": "A second move with its own receipt; the first receipt stays; the notice text names Thursday with the committed window and goes out once; the Friday notice is not claimed to be unsent."
           },
+          "call": [
+            {
+              "tool": "reschedule_appointment",
+              "input": {
+                "appointment_id": "pellham-monday",
+                "new_date": "2026-10-08",
+                "new_time_window": "10:00 AM"
+              },
+              "preview": {
+                "pinned_appointment": {
+                  "id": "pellham-monday"
+                }
+              }
+            },
+            {
+              "tool": "send_sms",
+              "input": {
+                "customer_id": "cust-pellham",
+                "appointment_id": "pellham-monday",
+                "message_type": "appointment_rescheduled"
+              }
+            }
+          ],
           "forbidden": []
         }
       ],
@@ -193,6 +268,9 @@
       "request": "Move the Pellham visit to Friday at 10 and tell them.",
       "fixture": "move-set",
       "inject": "drop the response after the move commits and before the notice card",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -208,6 +286,29 @@
         "card": true,
         "say": "Resume finds the move receipt, does not move again, and offers only the notice card; one send."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "pellham-monday",
+            "new_date": "2026-10-09",
+            "new_time_window": "10:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "pellham-monday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-pellham",
+            "appointment_id": "pellham-monday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -256,8 +357,21 @@
           "series.recurrence"
         ],
         "sends": 0,
-        "card": true,
-        "say": "Series visit single-move keeps its card; only that visit moves; the series is unchanged."
+        "card": false,
+        "say": "One ungrouped pinned row of a series moves directly with a receipt (collective moves off); only that visit moves; the series is unchanged."
+      },
+      "call": {
+        "tool": "reschedule_appointment",
+        "input": {
+          "appointment_id": "wexcombe-series-2",
+          "new_date": "2026-10-09",
+          "new_time_window": "9:00 AM"
+        },
+        "preview": {
+          "pinned_appointment": {
+            "id": "wexcombe-series-2"
+          }
+        }
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -290,6 +404,10 @@
       "kind": "write",
       "request": "Move all the Wexcombe visits to Fridays at 9 and tell them.",
       "fixture": "move-set",
+      "requires": [
+        "series_reschedule_writer",
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-wexcombe",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -306,6 +424,25 @@
         "card": true,
         "say": "Series scope named by the operator; card; notice uses the series template, one send."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment_series",
+          "input": {
+            "appointment_id": "wexcombe-series-1",
+            "new_date": "2026-10-09",
+            "new_time_window": "9:00 AM",
+            "scope": "series"
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-wexcombe",
+            "appointment_id": "wexcombe-series-1",
+            "message_type": "appointment_series_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -340,15 +477,15 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "awaiting_operator",
+        "outcome": "unsupported",
         "changes": [],
         "unchanged": [
           "scheduled_services[friday-lawn]",
           "scheduled_services[friday-pest]"
         ],
         "sends": 0,
-        "card": true,
-        "say": "The lawn and pest pair are one stop: the card moves both together, or the move is refused with the reason; never moves one alone."
+        "card": false,
+        "say": "The lawn and pest pair are one stop, and the move tool refuses a multi-service stop before proposing anything: says so and points to the Dispatch schedule (move the whole stop) or separating the services; moves nothing and never moves one alone."
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -395,6 +532,19 @@
         "card": true,
         "say": "Gate off: the move is carded; no customer notice is sent unless asked."
       },
+      "call": {
+        "tool": "reschedule_appointment",
+        "input": {
+          "appointment_id": "pellham-monday",
+          "new_date": "2026-10-09",
+          "new_time_window": "10:00 AM"
+        },
+        "preview": {
+          "pinned_appointment": {
+            "id": "pellham-monday"
+          }
+        }
+      },
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -440,6 +590,19 @@
         "card": false,
         "say": "Move commits; the notice is refused because the phone is opted out; reports the move receipt and what remains; suggests a non-text route."
       },
+      "call": {
+        "tool": "reschedule_appointment",
+        "input": {
+          "appointment_id": "ostrander-visit",
+          "new_date": "2026-10-09",
+          "new_time_window": "11:00 AM"
+        },
+        "preview": {
+          "pinned_appointment": {
+            "id": "ostrander-visit"
+          }
+        }
+      },
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -473,6 +636,9 @@
       "request": "Move the Pellham visit to Friday at 10 and tell them.",
       "fixture": "move-set",
       "inject": "clear the bar and refresh while the move is running",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -488,6 +654,29 @@
         "card": true,
         "say": "Clearing the conversation does not cancel the move; it never says an already-started move was canceled; recovery shows the receipt."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "pellham-monday",
+            "new_date": "2026-10-09",
+            "new_time_window": "10:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "pellham-monday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-pellham",
+            "appointment_id": "pellham-monday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -518,24 +707,51 @@
       "origin": "W6-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Reschedule the Fennimore service for next Monday at 2 and text them about the change.",
+      "request": "Push the Fennimore service to later the same day, 2 PM, and text them about the change.",
       "fixture": "move-set",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-fennimore",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[fennimore-wednesday].date_window = next Monday window_start 14:00 Eastern; window_end = window_start + the visit's stored block length (the 14:00-16:00 arrival range is text copy only)",
+          "scheduled_services[fennimore-wednesday].date_window = the same Wednesday, window_start 14:00 Eastern; window_end = window_start + the visit's stored block length (the 14:00-16:00 arrival range is text copy only)",
           "sms_log[new].template = appointment_rescheduled"
         ],
         "unchanged": [
+          "scheduled_services[fennimore-wednesday].scheduled_date",
           "scheduled_services[other rows]"
         ],
         "sends": 1,
         "card": true,
-        "say": "Notice text carries the committed Monday 2 PM window, brand Waves, no signature."
+        "say": "A time-only move keeps the date; the notice card names the same Wednesday with the committed 2 PM window, brand Waves, no signature; one send after confirm."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "fennimore-wednesday",
+            "new_date": "2026-10-07",
+            "new_time_window": "2:00 PM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "fennimore-wednesday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-fennimore",
+            "appointment_id": "fennimore-wednesday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -554,26 +770,9 @@
           "page": "/admin/communications (customer thread)"
         }
       ],
-      "corrections": [
-        {
-          "request": "make that Tuesday instead",
-          "expected": {
-            "outcome": "submitted_to_provider",
-            "changes": [
-              "scheduled_services[fennimore-wednesday].date_window = next Tuesday window_start 14:00 Eastern; window_end = window_start + the visit's stored block length (the 14:00-16:00 arrival range is text copy only)"
-            ],
-            "unchanged": [],
-            "sends": 1,
-            "card": true,
-            "say": "Second move and receipt; new notice with Tuesday; sent once."
-          },
-          "forbidden": []
-        }
-      ],
+      "corrections": [],
       "tags": [],
-      "covers": [
-        "W6-C2"
-      ],
+      "covers": [],
       "negative": false
     },
     {
@@ -597,6 +796,18 @@
         "sends": 0,
         "card": false,
         "say": "No notice requested: none sent; offers the notice as a follow-up."
+      },
+      "call": {
+        "tool": "reschedule_appointment",
+        "input": {
+          "appointment_id": "larkspur-friday",
+          "new_date": "2026-10-12"
+        },
+        "preview": {
+          "pinned_appointment": {
+            "id": "larkspur-friday"
+          }
+        }
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -643,6 +854,19 @@
         "sends": 0,
         "card": false,
         "say": "Move only; no notice is drafted or offered as a send, and the answer says none was sent."
+      },
+      "call": {
+        "tool": "reschedule_appointment",
+        "input": {
+          "appointment_id": "ostrander-visit",
+          "new_date": "2026-10-09",
+          "new_time_window": "11:00 AM"
+        },
+        "preview": {
+          "pinned_appointment": {
+            "id": "ostrander-visit"
+          }
+        }
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -760,6 +984,9 @@
       "kind": "write",
       "request": "Tell the Pellhams about the new time first, then move them to Friday at 10.",
       "fixture": "move-set",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -775,6 +1002,29 @@
         "card": true,
         "say": "Moves first and only then offers the notice drafted from the committed row; never sends before commit."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "pellham-monday",
+            "new_date": "2026-10-09",
+            "new_time_window": "10:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "pellham-monday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-pellham",
+            "appointment_id": "pellham-monday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -807,6 +1057,9 @@
       "request": "Bump the Larkspur appointment to next Wednesday at 3 and send them the update.",
       "fixture": "move-set",
       "inject": "two sessions resume the compound request at the same moment",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-larkspur",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -822,6 +1075,29 @@
         "card": true,
         "say": "Exactly one move and exactly one notice across both resumes."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "larkspur-friday",
+            "new_date": "2026-10-14",
+            "new_time_window": "3:00 PM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "larkspur-friday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "appointment_id": "larkspur-friday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -858,6 +1134,9 @@
       "request": "Reschedule the Larkspurs to next Tuesday at 1 and message them about it.",
       "fixture": "move-set",
       "inject": "time out after the provider accepts the text, before the status returns",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-larkspur",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -873,6 +1152,29 @@
         "card": true,
         "say": "Reports the move done and the notice text's outcome unknown (timed out before a provider result), never submitted or sent; no resend until reconciled."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "larkspur-friday",
+            "new_date": "2026-10-13",
+            "new_time_window": "1:00 PM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "larkspur-friday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "appointment_id": "larkspur-friday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",
@@ -905,6 +1207,9 @@
       "kind": "write",
       "request": "Change the Larkspur visit to next Thursday at 9 and notify them.",
       "fixture": "move-set",
+      "requires": [
+        "reschedule_notice_send"
+      ],
       "page_context": "customer:cust-larkspur",
       "actor": "admin",
       "mode": "owner_direct_on",
@@ -920,6 +1225,29 @@
         "card": true,
         "say": "Non-owner admin: the move is carded and the notice is carded; one of each."
       },
+      "call": [
+        {
+          "tool": "reschedule_appointment",
+          "input": {
+            "appointment_id": "larkspur-friday",
+            "new_date": "2026-10-15",
+            "new_time_window": "9:00 AM"
+          },
+          "preview": {
+            "pinned_appointment": {
+              "id": "larkspur-friday"
+            }
+          }
+        },
+        {
+          "tool": "send_sms",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "appointment_id": "larkspur-friday",
+            "message_type": "appointment_rescheduled"
+          }
+        }
+      ],
       "forbidden": [
         "a different visit of the same customer moved",
         "the series moved on a single-visit request",

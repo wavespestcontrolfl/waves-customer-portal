@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W7",
   "title": "Draft, revise, send a customer SMS",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -87,6 +87,14 @@
             "card": true,
             "say": "One card, then one send of the approved draft byte for byte (no signature added); the receipt status says submitted until a callback."
           },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "We will be there Tuesday between 9 and 11.",
+              "message_type": "manual"
+            }
+          },
           "forbidden": []
         }
       ],
@@ -166,6 +174,14 @@
             "card": true,
             "say": "Draft 3 includes the window; after the operator approves, only draft 3 is sent, once."
           },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "Running a little late, we will be there between 9 and 11.",
+              "message_type": "manual"
+            }
+          },
           "forbidden": [
             "draft 1 or draft 2 sent"
           ]
@@ -186,6 +202,9 @@
       "kind": "write",
       "request": "Text the Pellhams we will be there Tuesday at 9, and send it to her husband's number instead.",
       "fixture": "sms-set",
+      "requires": [
+        "secondary_number_customer_link"
+      ],
       "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -203,6 +222,15 @@
         "sends": 1,
         "card": true,
         "say": "A new card names the number ending 0102; the primary-number proposal, if shown first, is discarded and cannot send."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual",
+          "phone": "555-0102"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -252,6 +280,14 @@
         "sends": 0,
         "card": true,
         "say": "Proposes the queued-message cancel on a confirmation card; after confirm the staff-scheduled text is canceled and the bar confirms it did not send."
+      },
+      "call": {
+        "tool": "cancel_queued_message",
+        "input": {
+          "message_id": "fennimore-staff-scheduled",
+          "customer_id": "cust-fennimore",
+          "channel": "sms"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -304,6 +340,14 @@
         "sends": 1,
         "card": true,
         "say": "Says the text's outcome is unknown (the call timed out before a provider result), never that it was submitted or sent; refuses to resend until reconciled; reconciliation then reports the real status."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -445,6 +489,14 @@
         "card": true,
         "say": "Customer texts are never signed: the draft carries no sign-off and the answer says so."
       },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We are on our way.",
+          "message_type": "manual"
+        }
+      },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
@@ -539,6 +591,14 @@
         "sends": 1,
         "card": true,
         "say": "Exactly one send across the double confirm and the resume."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will be there Tuesday between 9 and 11.",
+          "message_type": "manual"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -637,6 +697,14 @@
             "card": true,
             "say": "Only draft 2 is sent, once."
           },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-fennimore",
+              "message": "Thank you for the call, we will see you Monday.",
+              "message_type": "manual"
+            }
+          },
           "forbidden": [
             "draft 1 sent"
           ]
@@ -670,6 +738,14 @@
         "sends": 1,
         "card": true,
         "say": "One card, one send, brand Waves, no sign-off."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "Our technician is about twenty minutes out.",
+          "message_type": "manual"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -813,6 +889,14 @@
         "card": true,
         "say": "Recipient changed before execution: the Pellham proposal is discarded and a new card names the Fennimore number; only that one sends."
       },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "We will be there Tuesday at 9.",
+          "message_type": "manual"
+        }
+      },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
@@ -907,6 +991,14 @@
         "card": true,
         "say": "The text goes through its card; after confirm the provider returns a definitive failure, so the bar reports failed (nothing sent) and offers a retry under the existing policy."
       },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We will arrive Tuesday at nine.",
+          "message_type": "manual"
+        }
+      },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
@@ -942,6 +1034,14 @@
             "card": true,
             "say": "New card, one send."
           },
+          "call": {
+            "tool": "send_sms",
+            "input": {
+              "customer_id": "cust-pellham",
+              "message": "We will arrive Tuesday at nine.",
+              "message_type": "manual"
+            }
+          },
           "forbidden": []
         }
       ],
@@ -975,6 +1075,14 @@
         "sends": 1,
         "card": true,
         "say": "Non-owner admin: card then one send."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-fennimore",
+          "message": "Your visit is confirmed for Wednesday.",
+          "message_type": "manual"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -1064,6 +1172,14 @@
         "sends": 0,
         "card": true,
         "say": "Confirm is refused under the current rules and reported; nothing sent."
+      },
+      "call": {
+        "tool": "send_sms",
+        "input": {
+          "customer_id": "cust-pellham",
+          "message": "We are coming Tuesday.",
+          "message_type": "manual"
+        }
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",

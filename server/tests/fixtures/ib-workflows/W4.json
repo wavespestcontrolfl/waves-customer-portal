@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inspected_commit": "67c20e8fdf",
+  "inspected_commit": "60655b1ec9",
   "workflow": "W4",
   "title": "Second service property labeled rental",
   "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
@@ -51,8 +51,22 @@
           "customers count"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Direct internal edit with a receipt; states the primary property is unchanged."
+        "card": true,
+        "say": "A label is customer-visible copy, so the add keeps its card; after confirm one row with a receipt, and the primary property is stated unchanged."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -98,8 +112,22 @@
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Same result as the first wording; the label rental is carried from the operator's words."
+        "card": true,
+        "say": "Same result as the first wording: a card, then one row; the label rental is carried from the operator's words."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -144,8 +172,22 @@
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
-        "card": false,
-        "say": "First request adds the row."
+        "card": true,
+        "say": "First request shows the labelled add on a card and adds the row once it is confirmed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -211,8 +253,22 @@
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Rental added not primary."
+        "card": true,
+        "say": "Rental added through its card, not primary."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -246,6 +302,13 @@
             "card": false,
             "say": "Separate direct edit with its own receipt; the first receipt is untouched."
           },
+          "call": {
+            "tool": "set_primary_property",
+            "input": {
+              "customer_id": "cust-larkspur",
+              "property_id": "larkspur-rental"
+            }
+          },
           "forbidden": []
         }
       ],
@@ -275,6 +338,13 @@
         "sends": 0,
         "card": true,
         "say": "Friday is a grouped lawn and pest stop: the card names that both rows move together; nothing is direct and nothing changes until confirmed."
+      },
+      "call": {
+        "tool": "switch_appointment_property",
+        "input": {
+          "appointment_id": "wexcombe-friday-lawn",
+          "property_id": "wexcombe-lake-house"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -318,6 +388,20 @@
         "sends": 0,
         "card": true,
         "say": "Gate off: a card with the property preview; no row until confirmed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -405,8 +489,22 @@
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Adds the property; does not re-point existing visits on a blanket instruction; says what remains and asks which visit."
+        "card": true,
+        "say": "Adds the property through its card; does not re-point existing visits on a blanket instruction; says what remains and asks which visit."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -493,8 +591,22 @@
           "customer_properties count after reload"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Reload finds the existing receipt and does not repeat the write."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-larkspur",
+          "address_line1": "27 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -543,8 +655,22 @@
           "scheduled_services count"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Adds the property labelled rental without scheduling anything or touching existing visits; says no recurring service was set up."
+        "card": true,
+        "say": "Shows the labelled add on a card, then adds the property labelled rental without scheduling anything or touching existing visits; says no recurring service was set up."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "52 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -588,8 +714,16 @@
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Label edit on the existing second property; no new row."
+        "card": true,
+        "say": "A label is customer-visible copy, so the label edit on the existing second property keeps its card; no new row."
+      },
+      "call": {
+        "tool": "update_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "property_id": "wexcombe-lake-house",
+          "label": "rental"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -634,6 +768,13 @@
         "sends": 0,
         "card": false,
         "say": "Primary flip is its own direct edit; no appointment changes."
+      },
+      "call": {
+        "tool": "set_primary_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "property_id": "wexcombe-lake-house"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -761,8 +902,15 @@
           "scheduled_services[friday-pest]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Ungrouped single visit moves directly; Friday rows untouched."
+        "card": true,
+        "say": "A property move is not on the owner-direct list, so even an ungrouped single visit shows a card; after confirm only that visit changes property; Friday rows untouched."
+      },
+      "call": {
+        "tool": "switch_appointment_property",
+        "input": {
+          "appointment_id": "wexcombe-monday-lawn",
+          "property_id": "wexcombe-lake-house"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -847,8 +995,22 @@
           "customer_properties[cust-larkspur]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "The named account wins over the viewed page in owner-direct; says which account was changed."
+        "card": true,
+        "say": "The named account wins over the viewed page in owner-direct; the labelled add shows a card that names the account; says which account was changed."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "33 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",
@@ -893,9 +1055,32 @@
           "customer_properties[3 Fixture Row].is_primary"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Keeps the first step's receipt, says the primary step remains, resumes only that step."
+        "card": true,
+        "say": "The labelled add shows a card; after confirm the first step keeps its receipt; the primary step then fails, so the answer says the primary step remains and resumes only that step."
       },
+      "call": [
+        {
+          "tool": "add_customer_property",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "address_line1": "41 Sample Court",
+            "address_line2": null,
+            "city": "Samplecity",
+            "state": "FL",
+            "zip": "34200",
+            "label": "rental",
+            "occupancy_type": "rental_investment",
+            "relationship": "rental_owned"
+          }
+        },
+        {
+          "tool": "set_primary_property",
+          "input": {
+            "customer_id": "cust-larkspur",
+            "property_id": "larkspur-41-sample-court"
+          }
+        }
+      ],
       "forbidden": [
         "new property promoted to primary",
         "a visit the operator did not name re-pointed to another property",
@@ -939,6 +1124,20 @@
         "sends": 0,
         "card": true,
         "say": "Non-owner admin gets a card; write access is revoked before confirm, so the confirm is refused with the reason and no row exists."
+      },
+      "call": {
+        "tool": "add_customer_property",
+        "input": {
+          "customer_id": "cust-wexcombe",
+          "address_line1": "44 Sample Court",
+          "address_line2": null,
+          "city": "Samplecity",
+          "state": "FL",
+          "zip": "34200",
+          "label": "rental",
+          "occupancy_type": "rental_investment",
+          "relationship": "rental_owned"
+        }
       },
       "forbidden": [
         "new property promoted to primary",

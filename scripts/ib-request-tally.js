@@ -42,7 +42,10 @@ const DEFAULT_DAYS = 14;
 const MAX_DAYS = 365;
 const HEALTH_SOURCES = ['intelligence-bar', 'tech-intelligence-bar'];
 // Customer estimate questions share intelligence_bar_queries; drop those turns.
-const NOT_PUBLIC_ESTIMATE = `not (jsonb_typeof(q.tool_calls) = 'array' and q.tool_calls @> '[{"name": "public_estimate_ask"}]'::jsonb)`;
+// tool_calls is nullable: `not (null and ...)` is NULL and would drop the row, so the
+// public-estimate test is compared with `is distinct from true` and a NULL or
+// non-array value stays in as the tool-free turn it is.
+const NOT_PUBLIC_ESTIMATE = `(jsonb_typeof(q.tool_calls) = 'array' and q.tool_calls @> '[{"name": "public_estimate_ask"}]'::jsonb) is distinct from true`;
 
 // Neither statement names the prompt or response columns.
 const CALLS_SQL = `
