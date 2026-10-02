@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import TechNavigationLock from '../../components/tech/TechNavigationLock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -92,6 +92,21 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
     expect(flags.shellReads).toContain('tech-field-workspace');
     expect(document.querySelector('[data-legacy-field-shell]')).not.toBeNull();
+  });
+
+  it('flag off keeps the retired shell links: Route, Protocols, and Documents/Growth only when available', async () => {
+    flags.shellEnabled = false;
+    mount();
+    const links = await screen.findByRole('navigation', { name: 'Field links' });
+    expect(within(links).getByRole('link', { name: 'Route' })).toHaveAttribute('href', '/admin/today');
+    expect(within(links).getByRole('link', { name: 'Protocols' })).toHaveAttribute('href', '/admin/today/protocols');
+    expect(within(links).getByRole('link', { name: 'Documents' })).toHaveAttribute('href', '/admin/today/documents');
+    expect(within(links).getByRole('link', { name: 'Growth' })).toHaveAttribute('href', '/admin/today/pay-growth');
+    cleanup();
+    docs.available = false;
+    mount();
+    const gated = await screen.findByRole('navigation', { name: 'Field links' });
+    expect(within(gated).queryByRole('link', { name: 'Documents' })).toBeNull();
   });
 
   it('flag off + documents unavailable: /admin/today/documents shows the unavailable notice, not the library', async () => {
