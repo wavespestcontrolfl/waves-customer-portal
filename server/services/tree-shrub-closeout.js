@@ -45,9 +45,9 @@ function parseInjectionDose(value) {
   return amount > 0 && unit ? { amount, unit } : null;
 }
 
-// The label band the tech picked for the injection dose (target pest,
-// season, palm size; client/src/lib/injection-dose.js INJECTION_LABEL_BANDS),
-// kept with the record it was worked out for. Anything else reads null.
+// The label band the tech picked for the injection dose (plant, season;
+// shared/injection-label-bands.json), kept with the record it was worked out
+// for. Anything else reads null.
 function normalizeLabelBand(value) {
   if (!value || typeof value !== 'object') return null;
   const key = text(value.key);
@@ -61,10 +61,6 @@ function normalizeLabelBand(value) {
 // ruling 2026-10-01, #5361) when the product has one for that basis.
 const INJECTION_LABEL_BANDS = require('../../shared/injection-label-bands.json')
   .map((row) => ({ ...row, match: new RegExp(row.match, 'i') }));
-
-// How the closeout names a record field a label's band answers (mirrors
-// BAND_FIELD_NAMES in client/src/lib/injection-dose.js).
-const BAND_FIELD_NAMES = { sizeClassOrDbh: 'Palm size', targetIssue: 'Target issue' };
 
 function injectionLabelOf(catalog = {}) {
   const unit = String(catalog.default_unit ?? catalog.defaultUnit ?? '');
@@ -415,18 +411,33 @@ function pushBlock(blocks, code, message, field = null) {
   blocks.push({ code, message, field, severity: 'block' });
 }
 
-// A label the tech splits by pick needs that band, picked for this product;
-// a band that answers a record field must be that field's answer.
-function pushInjectionBandBlocks(blocks, injection, table) {
+// The band the record holds for the product it names, from the label's
+// table (mirrors bandKeyFor / pickedBand in client/src/lib/injection-dose.js).
+function pickedInjectionBand(injection, table) {
   const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand?.key || '' : '';
-  const band = table.bands.find((option) => option.key === bandKey);
-  if (!band) {
-    pushBlock(blocks, 'tree_shrub_injection_band_required', `Pick the ${table.pick.toLowerCase()} for the injection dose.`, 'injectionRecord.labelBand');
-  } else if (table.recordsAs && text(injection[table.recordsAs]).toLowerCase() !== band.label.toLowerCase()) {
-    // A band that answers a record field (Palm-jet's palm size, IMA-jet's
-    // target pest) is that field's answer; the record never holds two.
-    const field = table.recordsAs;
-    pushBlock(blocks, 'tree_shrub_injection_band_mismatch', `${BAND_FIELD_NAMES[field]} must match the picked band (${band.label}).`, `injectionRecord.${field}`);
+  return table?.bands.find((option) => option.key === bandKey) || null;
+}
+
+// The record against its product's label, when the product is one of this
+// visit's catalog products (by the catalog id the form records, else by
+// name): a band the label leaves to the tech's pick, and the size: the trunk
+// in inches for a per-inch label unless a palm is picked.
+function pushInjectionLabelBlocks(blocks, injection, productRefs) {
+  const labelRef =
+    (injection.productId && productRefs.find((ref) => String(ref.input?.productId) === injection.productId)) ||
+    productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
+  const label = labelRef ? injectionLabelOf(labelRef.catalog) : null;
+  const band = pickedInjectionBand(injection, label?.table);
+  if (label?.table?.pick && !band) {
+    pushBlock(blocks, 'tree_shrub_injection_band_required', `Pick the ${label.table.pick.toLowerCase()} for the injection dose.`, 'injectionRecord.labelBand');
+  }
+  // Per inch or per palm from the label's unit in mL or g (Arbor-OTC in
+  // grams has no liquid rate, but is still dosed per inch); a palm picked on
+  // a per-inch label is sized by canopy, not trunk.
+  const trunkNeeded = Boolean(labelRef) && injectionBasisOf(labelRef.catalog) === 'inch' && !band?.palm;
+  if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
+  else if (trunkNeeded && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
+    pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
   }
 }
 
@@ -435,21 +446,7 @@ function pushInjectionBandBlocks(blocks, injection, table) {
 // dose, the trunk in inches for a per-inch label, and the label band.
 function pushInjectionRecordBlocks(blocks, injection, productRefs) {
   if (!injection.plantSpecies) pushBlock(blocks, 'tree_shrub_injection_species_required', 'Injection record requires plant species.', 'injectionRecord.plantSpecies');
-  // The record's product, when it is one of this visit's catalog products,
-  // brings its injection label: a per-inch label needs the trunk in inches,
-  // and a label the tech splits by pick needs that band.
-  const labelRef =
-    (injection.productId && productRefs.find((ref) => String(ref.input?.productId) === injection.productId)) ||
-    productRefs.find((ref) => [ref.catalog?.name, ref.input?.name].map(text).includes(injection.product));
-  const label = labelRef ? injectionLabelOf(labelRef.catalog) : null;
-  // Per inch or per palm from the label's unit in mL or g (Arbor-OTC in
-  // grams has no liquid rate, but is still dosed per inch).
-  const basis = labelRef ? injectionBasisOf(labelRef.catalog) : null;
-  if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
-  else if (basis === 'inch' && !(trunkInches(injection.sizeClassOrDbh) > 0)) {
-    pushBlock(blocks, 'tree_shrub_injection_dbh_inches', 'Enter the trunk in inches.', 'injectionRecord.sizeClassOrDbh');
-  }
-  if (label?.table?.pick) pushInjectionBandBlocks(blocks, injection, label.table);
+  pushInjectionLabelBlocks(blocks, injection, productRefs);
   if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');
   if (!injection.dose) pushBlock(blocks, 'tree_shrub_injection_dose_required', 'Injection record requires dose.', 'injectionRecord.dose');
   else if (ML_AMOUNT_TEXT.test(injection.dose)) pushBlock(blocks, 'tree_shrub_injection_dose_ml', 'Injection dose must be in tsp or fl oz, not mL.', 'injectionRecord.dose');

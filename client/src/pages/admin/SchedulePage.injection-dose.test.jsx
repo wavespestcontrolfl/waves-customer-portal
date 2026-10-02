@@ -14,7 +14,8 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
 }));
 
-// Two of the catalog's Arborjet labels, as their display fields read.
+// The catalog's Arborjet labels, as their display fields read. Only PHOSPHO-jet
+// and Mn-jet have band tables; IMA-jet and Palm-jet have a label line only.
 const IMA_JET = {
   id: 'ima-jet', name: 'Arborjet Ima-Jet Systemic Insecticide', category: 'insecticide',
   default_rate: '2-8', default_unit: 'ml/inch dbh', application_method: 'trunk_injection',
@@ -27,7 +28,12 @@ const PHOSPHO_JET = {
   id: 'phospho-jet', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', category: 'fungicide',
   default_rate: '3.5-7', default_unit: 'ml/inch dbh', application_method: 'trunk_injection',
 };
+const MN_JET = {
+  id: 'mn-jet', name: 'ArborJet Mn-Jet Fe Micros', category: 'fertilizer',
+  default_rate: '5-15', default_unit: 'ml/inch dbh', application_method: 'trunk_injection',
+};
 const IMA_RATE = injectionLabelRate(IMA_JET);
+const MN_RATE = injectionLabelRate(MN_JET);
 const PHOSPHO_RATE = injectionLabelRate(PHOSPHO_JET);
 const PALM_RATE = injectionLabelRate(PALM_JET);
 const COLORS = { card: '#fff', border: '#ddd', text: '#111', muted: '#666', error: '#c00', warn: '#e60' };
@@ -65,23 +71,24 @@ describe('the injection record', () => {
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
   });
 
-  it('works out the dose for the trunk measured and stores the dose in tsp or fl oz', async () => {
-    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
-    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+  it('works out the dose for the trunk measured and the plant picked, and stores the dose in tsp or fl oz', async () => {
+    render(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
     expect(record().sizeClassOrDbh).toBe('10 in DBH');
-    // The label splits its rate: no dose until the tech picks the band.
+    // The tech picks the plant first: the trunk alone settles nothing.
     expect(screen.queryByText('Dose for this tree')).toBeNull();
-    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'tree' } });
     expect(screen.getByText('Dose for this tree')).toBeTruthy();
-    expect(screen.getByText(injectionDoseText(IMA_RATE, 10, 'sap_feeders'))).toBeTruthy();
-    // Under 12 in, the label's lower rate for sap feeders: 2 mL per inch.
-    expect(screen.getByText(injectionLabelText(IMA_RATE, injectionBand(IMA_RATE, 10, 'sap_feeders')))).toBeTruthy();
+    expect(screen.getByText(injectionDoseText(PHOSPHO_RATE, 10, 'tree'))).toBeTruthy();
+    expect(screen.getByText('1.18 fl oz')).toBeTruthy();
+    // Under 12 in, the label's 3.5 mL per inch.
+    expect(screen.getByText(injectionLabelText(PHOSPHO_RATE, injectionBand(PHOSPHO_RATE, 10, 'tree')))).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '4' } });
-    expect(record().dose).toBe('4 fl oz');
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '7' } });
+    expect(record().dose).toBe('7 fl oz');
     fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
-    expect(record().dose).toBe('4 tsp');
+    expect(record().dose).toBe('7 tsp');
     expect([...screen.getByLabelText('Dose unit').options].map((option) => option.value)).toEqual(['tsp', 'fl_oz']);
     expect(screen.queryByRole('note')).toBeNull();
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
@@ -90,29 +97,31 @@ describe('the injection record', () => {
   it("notes a dose over the label for that trunk, against the label's exact limit", () => {
     render(
       <Block
-        injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]}
-        initial={{ injectionRecord: { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' } }}
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH' } }}
       />,
     );
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '3' } });
     expect(screen.getByRole('note').textContent).toMatch(/^3 fl oz is more than the label allows for a 10-inch trunk/);
-    // 2 fl oz is 59 mL, inside the label's top 80 mL for a 10-inch trunk.
+    // 2 fl oz is 59 mL, inside the label's top 70 mL for a 10-inch trunk, until the tree is picked.
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '2' } });
     expect(screen.queryByRole('note')).toBeNull();
-    // For sap feeders the same tree (under 12 in) is allowed 20 mL: 2 fl oz is over it.
-    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
-    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows for a 10-inch trunk \(4 tsp\)/);
+    // A tree under 12 in is allowed 35 mL: 2 fl oz is over it.
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'tree' } });
+    expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows for a 10-inch trunk \(1\.18 fl oz\)/);
   });
 
   it("starts a new product without the old product's dose and band", async () => {
     render(
       <Block
-        injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }, { name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
-        initial={{ injectionRecord: { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH', dose: '1 fl oz', labelBand: { product: IMA_JET.name, key: 'sap_feeders' } } }}
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }, { name: MN_JET.name, rate: MN_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH', dose: '1 fl oz', labelBand: { product: PHOSPHO_JET.name, key: 'tree' } } }}
       />,
     );
-    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: PHOSPHO_JET.name } });
-    expect(record()).toMatchObject({ product: PHOSPHO_JET.name, dose: '', labelBand: null, sizeClassOrDbh: '10 in DBH' });
+    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: MN_JET.name } });
+    expect(record()).toMatchObject({ product: MN_JET.name, dose: '', labelBand: null, sizeClassOrDbh: '10 in DBH' });
+    // Mn-jet asks for its own pick.
+    expect(screen.getByLabelText('Plant and season').value).toBe('');
     expect(screen.getByLabelText('Dose amount').value).toBe('');
   });
 
@@ -133,12 +142,56 @@ describe('the injection record', () => {
     expect(record().sizeClassOrDbh).toBe('8 in DBH');
   });
 
-  it('settles a size-banded label by the trunk, with nothing to pick', async () => {
+  it("needs PHOSPHO-jet's plant picked, then settles the dose size by the trunk", async () => {
     render(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} />);
     await waitFor(() => expect(record().product).toBe(PHOSPHO_JET.name));
-    expect(screen.queryByLabelText('Target pest')).toBeNull();
+    const pick = screen.getByLabelText('Plant');
+    expect([...pick.options].map((option) => option.value)).toEqual(['', 'tree', 'palm']);
+    // The tree option names its rate; the palm option is just its label.
+    expect(screen.getByRole('option', { name: /^Tree \(hardwood or conifer\): / }).textContent).toMatch(/ tsp per inch of trunk$/);
+    expect(screen.getByRole('option', { name: PHOSPHO_RATE.bands[1].label }).textContent).toBe(PHOSPHO_RATE.bands[1].label);
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
-    expect(screen.getByText(injectionDoseText(PHOSPHO_RATE, 10, ''))).toBeTruthy();
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    fireEvent.change(pick, { target: { value: 'tree' } });
+    expect(record().labelBand).toEqual({ product: PHOSPHO_JET.name, key: 'tree' });
+    expect(screen.getByText(injectionDoseText(PHOSPHO_RATE, 10, 'tree'))).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '18' } });
+    expect(screen.getByText('2¼ – 3 fl oz')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '30' } });
+    expect(screen.getByText('5¼ – 7 fl oz')).toBeTruthy();
+  });
+
+  it("settles Mn-jet by the plant and season picked, whatever the trunk", async () => {
+    render(<Block injectionProducts={[{ name: MN_JET.name, rate: MN_RATE }]} initial={{ injectionRecord: { product: MN_JET.name, sizeClassOrDbh: '10 in DBH' } }} />);
+    const pick = screen.getByLabelText('Plant and season');
+    expect([...pick.options].map((option) => option.value)).toEqual(['', 'tree_low', 'tree_late', 'palm']);
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    fireEvent.change(pick, { target: { value: 'tree_low' } });
+    expect(screen.getByText(injectionDoseText(MN_RATE, 10, 'tree_low'))).toBeTruthy();
+    fireEvent.change(pick, { target: { value: 'tree_late' } });
+    expect(screen.getByText(injectionDoseText(MN_RATE, 10, 'tree_late'))).toBeTruthy();
+    expect(record().labelBand).toEqual({ product: MN_JET.name, key: 'tree_late' });
+    // A tree to another tree measures the size the same way: the trunk stays.
+    expect(record().sizeClassOrDbh).toBe('10 in DBH');
+  });
+
+  it('works out no dose and has no picker for IMA-jet or Palm-jet, only the label line', async () => {
+    const { unmount } = render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+    expect(screen.queryByLabelText('Target pest')).toBeNull();
+    expect(screen.queryByLabelText('Plant')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    expect(screen.getByText(/No dose is worked out for this product/)).toBeTruthy();
+    // The target issue stays the tech's own text.
+    expect(record().targetIssue ?? '').toBe('');
+    unmount();
+    render(<Block injectionProducts={[{ name: PALM_JET.name, rate: PALM_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(PALM_JET.name));
+    expect(screen.queryByLabelText('Palm size')).toBeNull();
+    expect(screen.queryByText('Dose per palm')).toBeNull();
+    expect(screen.getByText(/No dose is worked out for this product/)).toBeTruthy();
+    expect(screen.getByText(injectionLabelText(PALM_RATE))).toBeTruthy();
   });
 
   it('works out no dose for an injectable with no band table', async () => {
@@ -185,28 +238,49 @@ describe('the injection record', () => {
   it('saves the picked band with the record, and reads it back', () => {
     const { unmount } = render(
       <Block
-        injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]}
-        initial={{ injectionRecord: { product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' } }}
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH' } }}
       />,
     );
-    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
-    expect(record().labelBand).toEqual({ product: IMA_JET.name, key: 'sap_feeders' });
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'tree' } });
+    expect(record().labelBand).toEqual({ product: PHOSPHO_JET.name, key: 'tree' });
     const saved = record();
     unmount();
-    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} initial={{ injectionRecord: { ...saved, dose: '2 fl oz' } }} />);
-    expect(screen.getByLabelText('Target pest').value).toBe('sap_feeders');
+    render(<Block injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]} initial={{ injectionRecord: { ...saved, dose: '2 fl oz' } }} />);
+    expect(screen.getByLabelText('Plant').value).toBe('tree');
     expect(screen.getByRole('note').textContent).toMatch(/^2 fl oz is more than the label allows/);
   });
 
-  it("records IMA-jet's target group as the target issue, with no second field", async () => {
-    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
-    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
-    expect(screen.queryByPlaceholderText('Injection target issue')).toBeNull();
-    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'borers' } });
-    expect(record().targetIssue).toBe(IMA_RATE.bands.find((band) => band.key === 'borers').label);
+  it("never fills the target issue from a band, and keeps it the tech's own text", () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH', targetIssue: 'Anthracnose' } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'tree' } });
+    expect(record().targetIssue).toBe('Anthracnose');
+    expect(screen.getByPlaceholderText('Injection target issue').value).toBe('Anthracnose');
+    fireEvent.change(screen.getByPlaceholderText('Injection target issue'), { target: { value: 'Leaf spot' } });
+    expect(record().targetIssue).toBe('Leaf spot');
   });
 
   it('notes a dose under the label for that trunk', () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH', labelBand: { product: PHOSPHO_JET.name, key: 'tree' } } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
+    expect(screen.getByRole('note').textContent).toMatch(/^1 tsp is less than the label's dose for a 10-inch trunk/);
+    fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'fl_oz' } });
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1.18' } });
+    expect(screen.queryByRole('note')).toBeNull();
+  });
+
+  it('notes nothing under or over for a dose before the plant is picked', () => {
     render(
       <Block
         injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
@@ -215,9 +289,6 @@ describe('the injection record', () => {
     );
     fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'tsp' } });
-    expect(screen.getByRole('note').textContent).toMatch(/^1 tsp is less than the label's dose for a 10-inch trunk/);
-    fireEvent.change(screen.getByLabelText('Dose unit'), { target: { value: 'fl_oz' } });
-    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '1.18' } });
     expect(screen.queryByRole('note')).toBeNull();
   });
 
@@ -263,29 +334,57 @@ describe('the injection record', () => {
     render(
       <Block
         injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
-        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '30 cm DBH' } }}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '30 cm DBH', labelBand: { product: PHOSPHO_JET.name, key: 'tree' } } }}
       />,
     );
     expect(screen.getByLabelText('Trunk (inches across, chest high)').value).toBe('');
     expect(screen.getByText('The saved size "30 cm DBH" is not in inches. Enter the trunk in inches.')).toBeTruthy();
     expect(screen.queryByText('Dose for this tree')).toBeNull();
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '12' } });
-    expect(record().sizeClassOrDbh).toBe('12 in DBH');
     expect(screen.getByText('Dose for this tree')).toBeTruthy();
+    expect(record().sizeClassOrDbh).toBe('12 in DBH');
+    expect(screen.queryByText(/is not in inches/)).toBeNull();
   });
 
-  it('doses a palm per palm, with no trunk size', async () => {
-    render(<Block injectionProducts={[{ name: PALM_JET.name, rate: PALM_RATE }]} />);
-    await waitFor(() => expect(record().product).toBe(PALM_JET.name));
+  it('takes a palm pick with no trunk, no dose, and no under or over note', async () => {
+    render(
+      <Block
+        injectionProducts={[{ name: PHOSPHO_JET.name, rate: PHOSPHO_RATE }]}
+        initial={{ injectionRecord: { product: PHOSPHO_JET.name, sizeClassOrDbh: '10 in DBH', dose: '9 fl oz' } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'palm' } });
+    expect(record().labelBand).toEqual({ product: PHOSPHO_JET.name, key: 'palm' });
+    // Tree to palm starts the size over, and the trunk field gives way to the free-text size.
+    expect(record().sizeClassOrDbh).toBe('');
     expect(screen.queryByLabelText('Trunk (inches across, chest high)')).toBeNull();
-    // The palm-size band is the record's size: no second size field.
-    expect(screen.queryByPlaceholderText('DBH / palm size')).toBeNull();
-    fireEvent.change(screen.getByLabelText('Palm size'), { target: { value: 'medium' } });
-    expect(record().sizeClassOrDbh).toBe('Medium palm (12 to 24 ft spread)');
-    expect(screen.getByText('Dose per palm')).toBeTruthy();
-    expect(screen.getByText(injectionDoseText(PALM_RATE, '', 'medium'))).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('DBH / palm size'), { target: { value: 'Large palm' } });
+    expect(record().sizeClassOrDbh).toBe('Large palm');
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    expect(screen.queryByText('Dose per palm')).toBeNull();
     expect(screen.getByText('Dose you put in, per palm')).toBeTruthy();
-    expect(screen.getByText(injectionLabelText(PALM_RATE, PALM_RATE.bands[1]))).toBeTruthy();
+    // 9 fl oz would be over any tree's label; a palm is dosed from the label's canopy table.
+    expect(screen.queryByRole('note')).toBeNull();
+    expect(screen.queryByText(/is not in inches/)).toBeNull();
+    // The palm option is only its label, no rate.
+    expect(screen.getByLabelText('Plant').selectedOptions[0].textContent).toBe(PHOSPHO_RATE.bands[1].label);
+  });
+
+  it('starts the size over when the pick goes from palm back to tree, but not from tree to tree', () => {
+    render(
+      <Block
+        injectionProducts={[{ name: MN_JET.name, rate: MN_RATE }]}
+        initial={{ injectionRecord: { product: MN_JET.name, sizeClassOrDbh: '10 in DBH', labelBand: { product: MN_JET.name, key: 'tree_low' } } }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Plant and season'), { target: { value: 'tree_late' } });
+    expect(record().sizeClassOrDbh).toBe('10 in DBH');
+    fireEvent.change(screen.getByLabelText('Plant and season'), { target: { value: 'palm' } });
+    expect(record().sizeClassOrDbh).toBe('');
+    fireEvent.change(screen.getByPlaceholderText('DBH / palm size'), { target: { value: 'Medium palm' } });
+    fireEvent.change(screen.getByLabelText('Plant and season'), { target: { value: 'tree_low' } });
+    expect(record().sizeClassOrDbh).toBe('');
+    expect(screen.getByLabelText('Trunk (inches across, chest high)').value).toBe('');
   });
 
   it('keeps an explicit other product, never putting the one injection product back', async () => {
@@ -373,9 +472,11 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     fireEvent.click(await screen.findByText(IMA_JET.name));
     await waitFor(() => expect(screen.getByLabelText('Injection product').value).toBe(IMA_JET.name));
     expect(screen.getByText('½ – 1½ tsp per inch of trunk')).toBeTruthy();
+    // IMA-jet has no band table: the label line only, no picker, no worked-out dose.
+    expect(screen.queryByLabelText('Target pest')).toBeNull();
     fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
-    fireEvent.change(screen.getByLabelText('Target pest'), { target: { value: 'sap_feeders' } });
-    expect(screen.getByText(injectionDoseText(IMA_RATE, 10, 'sap_feeders'))).toBeTruthy();
+    expect(screen.queryByText('Dose for this tree')).toBeNull();
+    expect(screen.getByText(/No dose is worked out for this product/)).toBeTruthy();
   });
 
   it('asks for the injection record for an injectable named only by its catalog label', async () => {
@@ -386,6 +487,9 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     fireEvent.change(search, { target: { value: PHOSPHO_JET.name } });
     fireEvent.click(await screen.findByText(PHOSPHO_JET.name));
     await waitFor(() => expect(screen.getByLabelText('Injection product').value).toBe(PHOSPHO_JET.name));
+    fireEvent.change(screen.getByLabelText('Trunk (inches across, chest high)'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Plant'), { target: { value: 'tree' } });
+    expect(screen.getByText(injectionDoseText(PHOSPHO_RATE, 10, 'tree'))).toBeTruthy();
   });
 });
 
@@ -414,27 +518,45 @@ describe('the closeout check against the product label', () => {
   });
 
   it('finds the product by catalog id after a rename', () => {
-    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { product: 'Old name', productId: 'p-1', sizeClassOrDbh: '30 cm DBH' })).toEqual(['Enter the trunk in inches.']);
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { product: 'Old name', productId: 'p-1', sizeClassOrDbh: '30 cm DBH', labelBand: { product: 'Old name', key: 'tree' } }))
+      .toEqual(['Enter the trunk in inches.']);
+    // The pick belongs to the name the record holds; a renamed record needs its pick again.
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { product: 'Old name', productId: 'p-1' })).toEqual(['Pick the plant for the injection dose.']);
   });
 
-  it('needs the band a label is split by, picked for this product', () => {
-    expect(blocksFor(IMA_JET.name, IMA_RATE, {})).toEqual(['Pick the target pest for the injection dose.']);
-    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: 'Other', key: 'sap_feeders' } })).toEqual(['Pick the target pest for the injection dose.']);
-    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Aphids, scales, whiteflies and other sap feeders' })).toEqual([]);
-    expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' }, targetIssue: 'Borers' }))
-      .toEqual(['Target issue must match the picked band (Aphids, scales, whiteflies and other sap feeders).']);
-    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, {})).toEqual([]);
+  it('needs the plant for PHOSPHO-jet and the plant and season for Mn-jet, picked for this product', () => {
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, {})).toEqual(['Pick the plant for the injection dose.']);
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { labelBand: { product: 'Other', key: 'tree' } })).toEqual(['Pick the plant for the injection dose.']);
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { labelBand: { product: PHOSPHO_JET.name, key: 'tree' } })).toEqual([]);
+    expect(blocksFor(MN_JET.name, MN_RATE, {})).toEqual(['Pick the plant and season for the injection dose.']);
+    expect(blocksFor(MN_JET.name, MN_RATE, { labelBand: { product: PHOSPHO_JET.name, key: 'tree_low' } })).toEqual(['Pick the plant and season for the injection dose.']);
+    expect(blocksFor(MN_JET.name, MN_RATE, { labelBand: { product: MN_JET.name, key: 'tree_late' } })).toEqual([]);
+    // A key from another label's table is no pick.
+    expect(blocksFor(MN_JET.name, MN_RATE, { labelBand: { product: MN_JET.name, key: 'tree' } })).toEqual(['Pick the plant and season for the injection dose.']);
   });
 
-  it('needs the palm size to be the picked palm band', () => {
-    const band = { product: PALM_JET.name, key: 'small' };
-    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' })).toEqual([]);
-    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['Palm size must match the picked band (Small palm (6 to 12 ft spread)).']);
+  it('needs no band for IMA-jet, Palm-jet or a label with no table', () => {
+    expect(blocksFor(IMA_JET.name, IMA_RATE, {})).toEqual([]);
+    expect(blocksFor(PALM_JET.name, PALM_RATE, { sizeClassOrDbh: 'Large palm' })).toEqual([]);
+    expect(blocksFor('Some Injectable', injectionLabelRate({ name: 'Some Injectable', default_rate: '1-6', default_unit: 'ml/inch dbh' }), {})).toEqual([]);
+    // IMA-jet is still per inch: it needs the trunk in inches.
+    expect(blocksFor(IMA_JET.name, IMA_RATE, { sizeClassOrDbh: 'Large' })).toEqual(['Enter the trunk in inches.']);
+  });
+
+  it('needs no trunk in inches for a palm pick, and takes a free-text size', () => {
+    const palm = { labelBand: { product: PHOSPHO_JET.name, key: 'palm' } };
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { ...palm, sizeClassOrDbh: 'Large palm' })).toEqual([]);
+    expect(blocksFor(MN_JET.name, MN_RATE, { labelBand: { product: MN_JET.name, key: 'palm' }, sizeClassOrDbh: '30 cm DBH' })).toEqual([]);
+    // A size is still required.
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { ...palm, sizeClassOrDbh: '' })).toEqual(['Injection record requires DBH or palm size class.']);
+    // The same size on a tree pick is not a trunk in inches.
+    expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { labelBand: { product: PHOSPHO_JET.name, key: 'tree' }, sizeClassOrDbh: 'Large palm' })).toEqual(['Enter the trunk in inches.']);
   });
 
   it('needs a per-inch trunk in inches above zero', () => {
+    const tree = { labelBand: { product: PHOSPHO_JET.name, key: 'tree' } };
     for (const sizeClassOrDbh of ['0 in DBH', '30 cm DBH']) {
-      expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { sizeClassOrDbh })).toEqual(['Enter the trunk in inches.']);
+      expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, { ...tree, sizeClassOrDbh })).toEqual(['Enter the trunk in inches.']);
     }
   });
 });
