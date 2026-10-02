@@ -530,6 +530,19 @@ describe('Codex r5 (#5542): customer words on a public permanent page', () => {
   ])('%p -> %p', (text, expected) => {
     expect(words(text)).toBe(expected);
   });
+  // Codex r7: the card's own filter reads "combination" as an access word only
+  // beside a lock word. (The shared scrub, upstream, still drops every
+  // "combination" sentence as a possible code; a pass-through scrub isolates
+  // the card filter.)
+  const ownFilter = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: (t) => t })?.youToldUs?.text ?? null;
+  test.each([
+    ['A combination of ants and roaches is in the kitchen.', 'A combination of ants and roaches is in the kitchen.'],
+    ['Ants on the patio. The gate combination is on the fridge.', 'Ants on the patio.'],
+    ['Roaches in the garage. Combination to the padlock is the same as before.', 'Roaches in the garage.'],
+    ['Wasps by the shed. Use the combo lock on the side gate.', 'Wasps by the shed.'],
+  ])('card filter: %p -> %p', (text, expected) => {
+    expect(ownFilter(text)).toBe(expected);
+  });
   test('a plain complaint is untouched', () => {
     expect(words('Ants are back in the kitchen.')).toBe('Ants are back in the kitchen.');
   });

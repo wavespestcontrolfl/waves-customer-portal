@@ -146,7 +146,18 @@ function withPeriod(text) {
 
 // Physical access: where a key / lockbox / spare is, or a door/gate/garage
 // code mention without the digits (the shared scrub masks code-shaped tokens).
-const KEY_LOCATION_RE = /\b(?:keys?|spare\s+key|key\s*box|lock\s*box|lockbox|hide-?a-?key|(?:gate|door|garage|alarm|entry|access)\s+codes?|(?:under|beneath|behind)\s+(?:the\s+)?(?:door\s*)?mat|doormat|combination)\b/i;
+// "combination" / "combo" count only beside a lock word ("the gate
+// combination", "combination to the padlock"): "a combination of ants and
+// roaches" is a pest complaint (Codex r7).
+const LOCK_WORD = '(?:lock\\s*box|lockbox|padlock|lock|gate|door|garage|shed|safe)';
+const KEY_LOCATION_RE = new RegExp(
+  '\\b(?:keys?|spare\\s+key|key\\s*box|lock\\s*box|lockbox|hide-?a-?key'
+  + '|(?:gate|door|garage|alarm|entry|access)\\s+codes?'
+  + '|(?:under|beneath|behind)\\s+(?:the\\s+)?(?:door\\s*)?mat|doormat'
+  + `|${LOCK_WORD}\\s+(?:combination|combo)s?`
+  + `|(?:combination|combo)s?\\s+(?:lock|(?:to|for|on)\\s+(?:the\\s+|my\\s+|our\\s+)?${LOCK_WORD}))\\b`,
+  'i',
+);
 // Any pesticide-safety claim: "safe", "pet-safe", "kid friendly", "non-toxic",
 // "harmless", "chemical-free" (AGENTS.md: customer copy never claims safety).
 const SAFETY_CLAIM_RE = /\b(?:safe(?:ty|ly|r|st)?|(?:pet|child|kid|family|people|eco|environment(?:ally)?)[-\s]?(?:safe|friendly)|non-?toxic|harmless|chemical-?free|all-?natural|organic)\b/i;
