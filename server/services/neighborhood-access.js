@@ -570,7 +570,8 @@ async function closeResolvedConflictBells() {
     if (!(await neighborhoodHasCodeConflict(db, key.slice(CONFLICT_KEY_PREFIX.length)))) resolved.push(key);
   }
   return closeAdminAlertKeys(db, resolved, 'gate_code_confirmed', {
-    resolution: 'Cleared: the neighborhood has one gate code on file again',
+    // Not "one code again": two confirmed codes can be two real gates.
+    resolution: "Cleared: the neighborhood's gate codes no longer conflict",
   });
 }
 

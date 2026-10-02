@@ -101,7 +101,9 @@ function EntryForm({ initial, submitLabel, busy, error, onSubmit, onCancel, idPr
 }
 
 function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCancelEdit, onSaveEdit }) {
-  const busy = busyKey.startsWith(`${entry.id}:`);
+  // Any save in flight locks every row's actions, so a finishing save can
+  // never close (or put its error under) a form opened meanwhile.
+  const busy = busyKey !== "";
   const retired = entry.status === "retired";
   const unconfirmed = !retired && (!entry.lastConfirmedAt || entry.status === "needs_confirm");
   if (editing) {
@@ -323,6 +325,7 @@ export default function NeighborhoodGateCodesPage() {
                       <Button
                         size="sm"
                         variant="secondary"
+                        disabled={busyKey !== ""}
                         onClick={() => { closeForms(); setAddingTo(n.id); }}
                       >
                         Add entry

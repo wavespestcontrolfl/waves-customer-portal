@@ -12,6 +12,7 @@ import {
   FileText,
   Gift,
   Home,
+  KeyRound,
   Landmark,
   LayoutDashboard,
   Megaphone,
@@ -63,9 +64,17 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/customers",
     label: "Customers",
     icon: Users,
-    // The neighborhood gate-code directory: admin only on its own (server is
-    // requireAdmin; the path is in OWNER_ONLY_NESTED_PATHS).
-    views: [{ id: "gateCodes", label: "Gate codes", path: "/admin/customers/gate-codes", adminOnly: true, keywords: ["gate", "gate code", "neighborhood", "community", "access"] }],
+  },
+  // The neighborhood gate-code directory: its own admin-only destination, so
+  // both the grouped workspace nav and the section nav list it (server is
+  // requireAdmin; the path is in OWNER_ONLY_NESTED_PATHS).
+  gateCodes: {
+    id: "gateCodes",
+    path: "/admin/customers/gate-codes",
+    label: "Gate codes",
+    icon: KeyRound,
+    adminOnly: true,
+    keywords: ["gate", "gate code", "neighborhood", "community", "access"],
   },
   pipeline: {
     id: "pipeline",
@@ -315,7 +324,7 @@ export const ADMIN_NAV_ITEMS = {
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
   { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-  { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
   { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
   { section: "People", itemIds: ["staff", "recruiting"] },

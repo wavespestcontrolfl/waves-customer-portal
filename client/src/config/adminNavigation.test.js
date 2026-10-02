@@ -69,7 +69,7 @@ describe("admin navigation registry", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
       { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
       { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
