@@ -5494,7 +5494,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .orderBy('quality_score', 'desc')
               .orderBy('photo_order', 'asc')
               .limit(5)
-              .catch(() => null);
+              // Recorded, not only defaulted: the v6 copy writer must not
+              // freeze copy built on an UNKNOWN prior confidence.
+              .catch(failSoft(readFailures, 'prior_photos', null));
             priorForProgress = {
               ...prior,
               confidence: Array.isArray(priorPhotos)
@@ -5505,6 +5507,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
         } catch {
           lawnProgress = null;
+          readFailures.add('progress');
         }
       }
       // AI "What we applied today" narrative — same contract as the T&S path
@@ -5579,7 +5582,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
             .orderBy('scheduled_date', 'asc')
             .first('scheduled_date')
-            .catch(() => null);
+            // Recorded: the v6 copy writer reads the visit gap from this row
+            // and must not freeze copy on a gap a failed read invented.
+            .catch(failSoft(readFailures, 'next_visit', null));
           let nextVisit = null;
           lawnCopyTiming.visitDate = svcIso || null;
           if (nextRow && nextRow.scheduled_date) {
@@ -5609,7 +5614,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
-        } catch { /* next-visit lookup is best-effort */ }
+        } catch { readFailures.add('next_visit'); /* next-visit lookup is best-effort */ }
       }
 
       if (reportV2 && featureGates.lawnReportCopyV6Live()) {

@@ -532,6 +532,42 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     expect(reportV2.progress.overall.direction).toBe('unknown');
   });
 
+  test('a failed prior-photo read (prior confidence unknown) marks the read degraded for the v6 copy freeze', async () => {
+    live();
+    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
+    process.env.GATE_LAWN_REPORT_LEAD = 'true';
+    const v6 = require('../services/service-report/lawn-copy-v6');
+    const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
+    try {
+      setHistory([PRIOR, CUR]);
+      const recs = records();
+      const { knex: base } = withRecords({ ...fixtures(), lawn_assessment_photos: [photo('p1', 80), photo('p2', 80), ...PRIOR_PHOTOS] }, recs);
+      // Only the PRIOR visit's photo read fails; this visit's photos answer.
+      const knex = (table) => {
+        const q = base(table);
+        if (table !== 'lawn_assessment_photos') return q;
+        const where = q.where;
+        q.where = (a, ...rest) => {
+          if (a && typeof a === 'object' && a.assessment_id === 'la-prior') {
+            const failing = { orderBy: () => failing, limit: () => failing, catch: (fn) => Promise.resolve(fn(new Error('read failed'))) };
+            return failing;
+          }
+          return where(a, ...rest);
+        };
+        return q;
+      };
+      knex.raw = base.raw;
+      const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p13', knex, {});
+      expect(data.reportV2.progress.confidence.comparable).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][0].degraded).toBe(true);
+    } finally {
+      spy.mockRestore();
+      delete process.env.GATE_LAWN_REPORT_COPY_V6;
+      delete process.env.GATE_LAWN_REPORT_LEAD;
+    }
+  });
+
   test('the progress block is NOT part of the public payload: not enumerable, not in JSON, not in a spread', async () => {
     live();
     setHistory([PRIOR, CUR]);

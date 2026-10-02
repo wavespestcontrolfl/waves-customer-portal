@@ -286,6 +286,25 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(next.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
   });
 
+  test('a failed next-visit read (the visit gap the writer reads) is a degraded read: no model, no freeze', async () => {
+    live();
+    const recs = records();
+    // Only the next-visit lookup fails; every other scheduled_services read answers.
+    const { knex: base } = withRecords(fixtures(), recs);
+    const knex = (table) => {
+      const q = base(table);
+      if (table !== 'scheduled_services') return q;
+      const first = q.first;
+      q.first = (...args) => (args[0] === 'scheduled_date' ? Promise.reject(new Error('read failed')) : first(...args));
+      return q;
+    };
+    knex.raw = base.raw;
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, {});
+    expect(v6Calls()).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+  });
+
   test('an unavailable model: deterministic lead, no freeze, uncacheable; the retry freezes', async () => {
     live();
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
