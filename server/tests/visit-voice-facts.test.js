@@ -155,6 +155,34 @@ describe('validateVoiceFacts', () => {
     expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
   });
 
+  test('a denial in the note stands even when the quote leaves it out', () => {
+    const note = 'Did not treat inside. No roaches were found. Didn\'t spray around the outside. Checked for spiders, none found.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'inside', quote: 'treat inside' }, { area: 'outside', quote: 'spray around the outside' }],
+      pests: [{ name: 'roaches', quote: 'roaches were found' }, { name: 'spiders', quote: 'Checked for spiders' }],
+      spray: { method: 'perimeter', quote: 'spray around the outside' },
+    }, note);
+    expect(facts).toEqual({ areas: [], pests: [], spray: null });
+  });
+
+  test('a denial about something else in the sentence never drops a fact', () => {
+    const note = 'No ants inside, sprayed around the outside of the house, no activity seen. Treated for ghost ants on the patio.';
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'sprayed around the outside of the house' }],
+      pests: [{ name: 'ghost ants', quote: 'Treated for ghost ants on the patio' }],
+      spray: { method: 'perimeter', quote: 'sprayed around the outside of the house' },
+    }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Outside']);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['ghost ants']);
+    expect(facts.spray).toMatchObject({ method: 'perimeter' });
+  });
+
+  test('a fact said twice stands when one saying is not denied', () => {
+    const note = 'Did not treat inside yesterday. Today we treat inside the kitchen.';
+    const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'treat inside' }], pests: [], spray: { method: 'none', quote: '' } }, note);
+    expect(facts.areas.map((entry) => entry.area)).toEqual(['Inside']);
+  });
+
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
     const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;
