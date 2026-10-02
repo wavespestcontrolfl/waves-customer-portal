@@ -102,6 +102,18 @@ describe('typed voice fill on Generate', () => {
     expect(screen.queryByText('Heard: “german roaches”')).toBeNull();
   });
 
+  it('a person\'s edit drops the words a fill stood on, even when the filled value is picked again (Codex P2 r3 on #5632)', async () => {
+    await openForm(ROACH);
+    await generate();
+    expect(screen.getAllByText('Heard: “german roaches”').length).toBeGreaterThan(0);
+    fireEvent.change(fieldSelect('species'), { target: { value: 'American' } });
+    fireEvent.change(fieldSelect('species'), { target: { value: 'German' } });
+    expect(fieldSelect('species').value).toBe('German');
+    expect(screen.queryByText('Heard: “german roaches”')).toBeNull();
+    // A field nobody touched keeps its words.
+    expect(screen.getAllByText('Heard: “heavy behind the fridge”').length).toBeGreaterThan(0);
+  });
+
   it('a field the notes left unclear asks to be picked, even one kept in the optional drawer', async () => {
     typedAnswer = () => ({ ok: true, json: async () => ({ ...READ, unclearFields: ['evidence_observed'] }) });
     await openForm(ROACH);

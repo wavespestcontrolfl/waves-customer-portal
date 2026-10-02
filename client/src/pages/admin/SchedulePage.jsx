@@ -19352,6 +19352,12 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
+    // A person's edit is theirs: the words a fill stood on no longer show
+    // beside the field, even when the same value is picked again (Codex P2
+    // r3 on #5632).
+    setTypedHeard((prev) => (prev?.values?.[key]
+      ? { ...prev, values: Object.fromEntries(Object.entries(prev.values).filter(([field]) => field !== key)) }
+      : prev));
     // Derived prefill (contract §4): while the picker is untouched, the
     // score recomputes from the derive-field select on every change.
     const activity = typedFindingsSchema?.activity;
