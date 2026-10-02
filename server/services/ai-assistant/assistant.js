@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, executeToolCall } = require('./tools');
+const { TOOLS, PORTAL_TOOLS, executeToolCall } = require('./tools');
 const { recordGap } = require('../agent-gap-reports');
 
 // One texting-AI gap report for an escalation its caller marked as the
@@ -72,6 +72,19 @@ const ESCALATION_TRIGGERS = [
   'manager', 'supervisor', 'owner', 'adam',
 ];
 
+// Portal chat keeps every trigger except the reschedule ones: the portal can
+// hand the customer the visit's own self-serve reschedule page, so a
+// reschedule ask goes to the model and its offer_reschedule_link tool. (The
+// AI bar's "Reschedule my visit" pill hit this list on every tap.)
+const RESCHEDULE_TRIGGERS = ['reschedule', 'change my appointment', 'move my service'];
+const PORTAL_ESCALATION_TRIGGERS = ESCALATION_TRIGGERS.filter((t) => !RESCHEDULE_TRIGGERS.includes(t));
+
+const PORTAL_CHAT = 'portal_chat';
+// Portal chat with its kill switch on (PORTAL_CHAT_SELF_SERVE, default on).
+// Off, portal chat runs exactly as the other channels do.
+const portalSelfServe = (channel) => channel === PORTAL_CHAT
+  && require('../../config/feature-gates').portalChatSelfServeLive();
+
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
 
 PERSONALITY:
@@ -118,6 +131,74 @@ RULES:
 - If you detect the customer is frustrated, acknowledge it before solving
 - End every conversation with an offer to help with anything else`;
 
+// Portal chat only. The SMS prompt above stays as it is: a text thread has no
+// buttons, and its replies go through the SMS send path's own rules.
+const PORTAL_SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant inside the customer portal. The customer is signed in. You help with questions about their pest control and lawn care services in Southwest Florida.
+
+PERSONALITY:
+- Friendly, knowledgeable, direct, like a helpful neighbor who knows pest control
+- Use the customer's first name naturally
+- Keep replies short: two to four sentences
+- Reference SWFL-specific conditions (sandy soil, afternoon storms, St. Augustine grass)
+- Never sound robotic or corporate
+
+WHAT YOU CAN DO:
+- Answer general questions about services, products, pests, and lawn care
+- Look up the customer's upcoming services
+- Show a Reschedule button for a visit (offer_reschedule_link)
+- Show a button that opens a page of the portal (open_portal_section)
+- Hand the conversation to the Waves team (escalate)
+
+You cannot see charges, balances, cards, plan details, past visits, or documents. Never guess at them. The portal pages hold them, so show the page.
+
+RESCHEDULING:
+For any request to reschedule, move, postpone, or bring forward a visit, call offer_reschedule_link. If it returns a button, tell the customer to tap it to see the open times. Never state or promise a new time yourself. If it returns no button, escalate.
+
+SCHEDULING QUESTIONS:
+If the customer asks about their schedule, upcoming visit, arrival window, or "when are you coming", call get_upcoming_services before replying. Confirm the soonest visit by date and time window. If there is none, escalate. Never state a date or month that did not come from a tool.
+
+BILLING, PLAN, REPORTS, PAPERWORK, REFERRALS:
+Call open_portal_section for the matching page and say in one sentence what the customer will find there. For a charge: the Billing page lists every payment with its receipt, plus saved cards and Auto Pay. Say plainly that you cannot see the amounts yourself, and offer to pass a question about a specific charge to the team. Escalate when the customer says the page did not answer it, disputes a charge, or asks for a refund.
+
+WHAT YOU MUST ESCALATE (use the escalate tool):
+- Any request to cancel, pause, or downgrade service
+- A visit that cannot be moved online
+- Complaints about service quality or technician behavior
+- Billing disputes or refund requests
+- Changes to the account: email, phone, address, gate code, pets, adding a service
+- Requests to speak with a manager or the owner
+- Anything you are uncertain about
+
+RULES:
+- Never make up service dates, prices, or technician names
+- Never write a web address or link yourself; buttons come only from the tools
+- Do not quote account-specific pricing
+- If the customer is frustrated, acknowledge it before solving
+- End with an offer to help with anything else`;
+
+// What the customer is told at a hand-off. Portal chat says the team was told
+// only when the bell exists; other channels keep the original wording (an SMS
+// hand-off reply is never sent).
+function escalationReply({ isPortal, teamNotified, firstName }) {
+  if (!isPortal) {
+    return firstName
+      ? `Thanks ${firstName} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
+      : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
+  }
+  const thanks = firstName ? `Thanks ${firstName}` : 'Thanks for reaching out';
+  return teamNotified
+    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?`
+    : `${thanks}. I've saved your request for our team. If it can't wait, please call us at (941) 318-7612.`;
+}
+
+const TOPIC_BY_REASON = {
+  cancellation: 'a cancellation',
+  schedule_change: 'a schedule change',
+  complaint: 'a complaint',
+  billing_dispute: 'a billing question',
+  manager_request: 'a manager',
+};
+
 class WavesAssistant {
 
   /**
@@ -140,7 +221,12 @@ class WavesAssistant {
     }
 
     // 2. Check for escalation triggers in the raw message
-    const needsEscalation = this.checkEscalationTriggers(message);
+    // Portal chat gets its own prompt and button tools; every other channel
+    // (and the portal with its switch off) keeps the original pair.
+    const lane = portalSelfServe(channel)
+      ? { prompt: PORTAL_SYSTEM_PROMPT, tools: PORTAL_TOOLS, actions: [] }
+      : { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null };
+    const needsEscalation = this.checkEscalationTriggers(message, channel);
 
     // 3. Save the user message
     try {
@@ -192,7 +278,7 @@ class WavesAssistant {
       // fragments that shared entry. 1h TTL because customer replies routinely
       // arrive more than 5 minutes apart.
       const system = [
-        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
+        { type: 'text', text: lane.prompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
       ];
       if (contextStr) {
         system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
@@ -207,7 +293,7 @@ class WavesAssistant {
           ...anthropicEffortConfig(MODEL),
           max_tokens: anthropicMaxTokens(MODEL, 800),
           system,
-          tools: TOOLS,
+          tools: lane.tools,
           messages: withCacheBreakpoint(messages),
         }), { laneId: 'portal_assistant' });
 
@@ -249,7 +335,7 @@ class WavesAssistant {
             return escResult;
           }
 
-          const result = await executeToolCall(toolUse.name, toolUse.input, customerId);
+          const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions);
           toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
 
           // Log tool usage
@@ -294,7 +380,11 @@ class WavesAssistant {
       // generated marks true model output — canned fallbacks and the
       // deterministic escalation template never carry it, so the portal's
       // "report AI content" affordance only attaches to real AI replies.
-      return { reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true };
+      return {
+        reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
+        // Buttons the portal tools asked for, shown under the reply.
+        ...(lane.actions?.length ? { actions: lane.actions } : {}),
+      };
 
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
@@ -395,9 +485,10 @@ class WavesAssistant {
   /**
    * Check if message contains escalation trigger keywords.
    */
-  checkEscalationTriggers(message) {
+  checkEscalationTriggers(message, channel) {
     const lower = (message || '').toLowerCase();
-    return ESCALATION_TRIGGERS.some(trigger => lower.includes(trigger));
+    const triggers = portalSelfServe(channel) ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
+    return triggers.some(trigger => lower.includes(trigger));
   }
 
   /**
@@ -414,10 +505,11 @@ class WavesAssistant {
     if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
     if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
 
+    const escalationClass = this.classifyEscalation(customerMessage);
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: this.classifyEscalation(customerMessage),
+      reason: escalationClass,
       summary: reason,
       customer_message: customerMessage,
       ai_draft_response: null,
@@ -443,10 +535,16 @@ class WavesAssistant {
       updated_at: new Date(),
     }).catch(e => logger.error(`[ai-assistant] Failed to mark session escalated: ${e.message}`, { conversationId: conversation.id }));
 
-    // Reply to customer
-    const reply = customer
-      ? `Thanks ${customer.first_name} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
-      : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
+    // Portal chat: ring the office, then tell the customer only what really
+    // happened. Before this the hand-off was a queue row nobody was shown,
+    // while the reply said a team member had been notified. (A text already
+    // rings the office as an inbound SMS, and its escalation reply is never
+    // sent, so SMS keeps its wording.)
+    const isPortal = portalSelfServe(conversation.channel);
+    const teamNotified = isPortal
+      && await this.notifyTeamOfEscalation({ escalation, escalationClass, conversation, customer, customerMessage });
+
+    const reply = escalationReply({ isPortal, teamNotified, firstName: customer?.first_name });
 
     await db('agent_messages').insert({
       conversation_id: conversation.id,
@@ -471,7 +569,44 @@ class WavesAssistant {
 
     logger.info(`AI escalated: ${conversation.id} reason="${reason}" priority=${priority}`);
 
-    return { reply, conversationId: conversation.id, escalated: true, escalationId: escalation.id };
+    return {
+      reply, conversationId: conversation.id, escalated: true, escalationId: escalation.id,
+      ...(isPortal ? { teamNotified } : {}),
+    };
+  }
+
+  /**
+   * Ring the admin bell for a portal-chat hand-off. Returns true only when a
+   * notification row exists (new or already standing for this escalation).
+   * Never throws: the ai_escalations row is the record, the bell is delivery.
+   */
+  async notifyTeamOfEscalation({ escalation, escalationClass, conversation, customer, customerMessage }) {
+    if (!customer?.id) return false;
+    try {
+      const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
+      const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
+      const topic = TOPIC_BY_REASON[escalationClass] || 'a question it could not answer';
+      const result = await raiseAdminAlert('alert', {
+        area: 'Comms',
+        action: 'Reply to a portal chat request',
+        why: cutAtWord(`${name} asked the portal assistant about ${topic}`, 110),
+        severity: 'needs-you',
+        link: `/admin/communications?thread=${customer.id}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'customer_answered',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `portal-chat-escalation:${escalation.id}`,
+        // The customer's own words, read from the bell's "Show full text".
+        detail: String(customerMessage || '').slice(0, 1000),
+        metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
+      });
+      return Boolean(result?.notification);
+    } catch (err) {
+      logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
+      return false;
+    }
   }
 
   classifyEscalation(message) {
