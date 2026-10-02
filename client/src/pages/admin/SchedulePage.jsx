@@ -1063,6 +1063,9 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
 export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// An open photo description (GATE_NOTE_BOX_PHOTOS) may hold typed or
+// dictated words not yet on the photo: Generate and Complete wait for it.
+export const PHOTO_DESCRIPTION_OPEN_ALERT = "Save or cancel the photo description first.";
 // The promise list is an optional read: a stalled one gives up rather than
 // hold the form (Codex #5516).
 const PROMISE_CHECK_TIMEOUT_MS = 15000;
@@ -12821,6 +12824,7 @@ export function CompletionPanel({
   // Completion photos are intentionally kept out of localStorage (a handful
   // of base64 images can exceed its quota).
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [photoDescriptionOpen, setPhotoDescriptionOpen] = useState(false);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -17682,6 +17686,10 @@ export function CompletionPanel({
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
     // Marks restored with a draft are checked against the promise list once
     // it loads; completing before then would drop them (Codex #5516).
     if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
@@ -20024,6 +20032,7 @@ export function CompletionPanel({
                     onAdd={() => photoInputRef.current?.click()}
                     onRemove={removePhoto}
                     onCaption={setPhotoCaption}
+                    onEditingChange={setPhotoDescriptionOpen}
                     onDescribeWithAi={handlePhotoAnalyze}
                     describing={photoAnalyzing}
                     describeError={photoAiError}
@@ -20297,6 +20306,10 @@ export function CompletionPanel({
                   // it. Hold the action until the transcript has landed.
                   if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                    return;
+                  }
+                  if (photoDescriptionOpen) {
+                    alert(PHOTO_DESCRIPTION_OPEN_ALERT);
                     return;
                   }
                   if (promiseMarksPending) {
@@ -22506,6 +22519,7 @@ export function CompletionPanel({
                 onAdd={() => photoInputRef.current?.click()}
                 onRemove={removePhoto}
                 onCaption={setPhotoCaption}
+                onEditingChange={setPhotoDescriptionOpen}
                 onDescribeWithAi={handlePhotoAnalyze}
                 describing={photoAnalyzing}
                 describeError={photoAiError}
@@ -22780,6 +22794,10 @@ export function CompletionPanel({
                 // it. Hold the action until the transcript has landed.
                 if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                  return;
+                }
+                if (photoDescriptionOpen) {
+                  alert(PHOTO_DESCRIPTION_OPEN_ALERT);
                   return;
                 }
                 if (promiseMarksPending) {

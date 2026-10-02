@@ -95,4 +95,21 @@ describe('NoteBoxPhotos', () => {
     fireEvent.keyDown(screen.getByLabelText('Description for photo 2'), { key: 'Enter' });
     expect(screen.getByTestId('captions').textContent).toBe('a.jpg:First photo|b.jpg:|c.jpg:Third photo');
   });
+
+  it('Escape cancels the description from anywhere in the editor, not only the input (codex local r2 on #5589)', () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Save description' }), { key: 'Escape' });
+    expect(screen.queryByLabelText('Description for photo 1')).toBeNull();
+  });
+
+  it('tells the form whenever a description is open', () => {
+    const onEditingChange = vi.fn();
+    render(<NoteBoxPhotos photos={start} max={5} disabled={false} palette={palette} dictationServiceId="svc-1" onAdd={() => {}} onRemove={() => {}} onCaption={() => {}} onEditingChange={onEditingChange} summary="" />);
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+  });
 });

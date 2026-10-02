@@ -5,7 +5,7 @@
 // notes and prints under the photo on the customer's report. The AI photo
 // read ("Describe with AI") and its summary live here too, so the separate
 // photo section goes away.
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Camera, Mic, MicOff } from 'lucide-react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 
@@ -20,6 +20,7 @@ export default function NoteBoxPhotos({
   onAdd,
   onRemove,
   onCaption,
+  onEditingChange,
   onDescribeWithAi,
   describing,
   describeError,
@@ -39,6 +40,12 @@ export default function NoteBoxPhotos({
   };
   const close = () => setEditing(null);
   const editingPhoto = editing != null ? photos[editing] : null;
+  // The form holds Generate and Complete while a description is open: it may
+  // carry typed or dictated words not yet on the photo.
+  useEffect(() => {
+    onEditingChange?.(editing != null);
+  }, [editing, onEditingChange]);
+  useEffect(() => () => onEditingChange?.(false), [onEditingChange]);
   const button = {
     background: 'transparent',
     color: palette.text,
@@ -144,7 +151,13 @@ function CaptionEditor({ index, initial, disabled, palette, button, dictationSer
   // Escape cancels the description, never the form around it
   // (useModalFocus leaves an owned Escape to its owner).
   return (
-    <div style={{ display: 'grid', gap: 8 }} data-modal-escape-owned="true">
+    <div
+      style={{ display: 'grid', gap: 8 }}
+      data-modal-escape-owned="true"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      }}
+    >
       <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
         {`Description for photo ${index + 1}`}
         <span style={{ position: 'relative', display: 'block' }}>
@@ -155,7 +168,6 @@ function CaptionEditor({ index, initial, disabled, palette, button, dictationSer
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); save(); }
-              if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
             }}
             placeholder={dictation.listening ? 'Listening… say what the photo shows' : 'What the photo shows, in a few words'}
             autoFocus

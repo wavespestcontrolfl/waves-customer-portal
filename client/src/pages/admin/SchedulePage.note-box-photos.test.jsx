@@ -106,6 +106,21 @@ describe('photos in the notes box', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('an open photo description holds Generate and Complete until it is saved or cancelled (codex local r2 on #5589)', async () => {
+    const onSubmit = await restoreWithPhotos({ ...base, noteBoxPhotosEnabled: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Droppings under the sink' } });
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    expect(globalThis.alert).toHaveBeenCalledWith('Save or cancel the photo description first.');
+    expect(generateReportCalls).toHaveLength(0);
+    const submit = screen.getByRole('button', { name: /^(Complete & Send Recap|Complete Service)/i });
+    await act(async () => fireEvent.click(submit));
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(generateReportCalls).toHaveLength(1));
+  });
+
   it('removing a photo from the notes box drops it and its description', async () => {
     await restoreWithPhotos({ ...base, noteBoxPhotosEnabled: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Remove photo 1' }));
