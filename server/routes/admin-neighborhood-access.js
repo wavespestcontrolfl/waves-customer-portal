@@ -260,6 +260,7 @@ async function propertyViews(conn, props) {
       id: p.id,
       label: p.label || null,
       addressLine1: p.address_line1 || null,
+      addressLine2: p.address_line2 || null,
       city: p.city || null,
       zip: p.zip || null,
       neighborhood: hood ? { id: hood.id, name: hood.name, county: hood.county || null } : null,
@@ -278,7 +279,7 @@ async function propertyViews(conn, props) {
   });
 }
 
-const PROPERTY_COLUMNS = ['id', 'label', 'address_line1', 'city', 'zip', 'neighborhood_id', 'neighborhood_source'];
+const PROPERTY_COLUMNS = ['id', 'label', 'address_line1', 'address_line2', 'city', 'zip', 'neighborhood_id', 'neighborhood_source'];
 
 router.get('/customers/:customerId/properties', async (req, res) => {
   const { customerId } = req.params;

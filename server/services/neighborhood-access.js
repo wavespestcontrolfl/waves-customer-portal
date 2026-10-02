@@ -446,8 +446,11 @@ async function fileOneSavedCode(customerId, lookup) {
 const CONFLICT_KEY_PREFIX = 'neighborhood-gate-conflict:';
 
 // Two or more live codes in a neighborhood, at least one awaiting the office.
+// A switched-off neighborhood never conflicts: the directory hides it, so a
+// bell could not be resolved there (its open bell closes on the next pass).
 async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
   const rows = await conn('neighborhood_access').where({ neighborhood_id: neighborhoodId })
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
     .whereNotNull('code').whereNot('status', 'retired').select('status');
   return rows.length > 1 && rows.some((r) => r.status === 'needs_confirm');
 }
@@ -508,6 +511,8 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
 // Every neighborhood that has a code conflict right now.
 async function conflictedNeighborhoods(conn) {
   return conn('neighborhood_access as a')
+    .join('neighborhoods as n', 'n.id', 'a.neighborhood_id')
+    .where('n.active', true)
     .whereNotNull('a.code').whereNot('a.status', 'retired')
     .groupBy('a.neighborhood_id')
     .havingRaw('count(*) > 1')

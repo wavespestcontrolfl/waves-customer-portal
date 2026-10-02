@@ -7373,11 +7373,15 @@ function NeighborhoodPicker({ property, onSaved, onCancel }) {
 function PropertyNeighborhood({ property, showAddress, onUpdated }) {
   const [changing, setChanging] = useState(false);
   const hood = property.neighborhood;
-  const address = [property.addressLine1, property.city].filter(Boolean).join(", ");
+  // Label, street, unit and city, so two properties in one building never
+  // read the same (their Change buttons name the same text).
+  const street = [property.addressLine1, property.addressLine2].filter(Boolean).join(" ");
+  const address = [street, property.city].filter(Boolean).join(", ");
+  const heading = [property.label, address].filter(Boolean).join(" · ") || "Property";
   return (
     <div className="mb-2 last:mb-0">
       {showAddress && (
-        <div className="text-ui-label text-ink-secondary">{address || property.label || "Property"}</div>
+        <div className="text-ui-label text-ink-secondary">{heading}</div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-2 py-1">
         <div className="min-w-0">
@@ -7392,7 +7396,7 @@ function PropertyNeighborhood({ property, showAddress, onUpdated }) {
           <button
             type="button"
             onClick={() => setChanging(true)}
-            aria-label={`Change neighborhood${showAddress && address ? ` for ${address}` : ""}`}
+            aria-label={`Change neighborhood${showAddress ? ` for ${heading}` : ""}`}
             className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
           >
             Change

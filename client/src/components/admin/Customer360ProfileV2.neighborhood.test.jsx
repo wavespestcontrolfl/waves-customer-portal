@@ -88,8 +88,20 @@ describe('CustomerNeighborhoodBlock', () => {
     render(<CustomerNeighborhoodBlock customerId="customer-a" />);
     expect(await screen.findByText('Set by office')).toBeInTheDocument();
     expect(screen.getByText('Not linked')).toBeInTheDocument();
-    // Two properties: each is named by its address.
-    expect(screen.getByText('200 Sample Ct, Lakewood Ranch')).toBeInTheDocument();
+    // Two properties: each is named by its label and address.
+    expect(screen.getByText('Home · 200 Sample Ct, Lakewood Ranch')).toBeInTheDocument();
+  });
+
+  it('two units in one building read (and their Change buttons name) different rows', async () => {
+    stubFetch(() => response({ properties: [
+      unlinked({ id: 'p1', label: 'Unit A', addressLine2: 'Apt 101' }),
+      unlinked({ id: 'p2', label: 'Unit B', addressLine2: 'Apt 202' }),
+    ] }));
+    render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    expect(await screen.findByText('Unit A · 100 Synthetic Way Apt 101, Lakewood Ranch')).toBeInTheDocument();
+    expect(screen.getByText('Unit B · 100 Synthetic Way Apt 202, Lakewood Ranch')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change neighborhood for Unit A · 100 Synthetic Way Apt 101, Lakewood Ranch' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change neighborhood for Unit B · 100 Synthetic Way Apt 202, Lakewood Ranch' })).toBeInTheDocument();
   });
 
   it.each([404, 403])('renders nothing at all on %i', async (status) => {

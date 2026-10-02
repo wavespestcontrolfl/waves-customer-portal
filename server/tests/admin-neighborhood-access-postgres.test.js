@@ -377,7 +377,7 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(r.body.properties).toHaveLength(2);
     const linked = r.body.properties.find((p) => p.id === first.propertyId);
     expect(linked).toMatchObject({
-      label: 'Synthetic', addressLine1: '100 Synthetic Way', city: 'Lakewood Ranch', zip: '34202',
+      label: 'Synthetic', addressLine1: '100 Synthetic Way', addressLine2: null, city: 'Lakewood Ranch', zip: '34202',
       neighborhood: { id: n, name: 'Tupelo Bend', county: 'Manatee' }, neighborhoodSource: 'county',
     });
     expect(linked.entries.map((e) => [e.gateLabel, e.code, e.status])).toEqual([

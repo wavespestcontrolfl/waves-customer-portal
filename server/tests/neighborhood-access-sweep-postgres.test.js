@@ -415,6 +415,19 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await accessRows(n2)).map((r) => r.code)).toEqual(['4545']);
   });
 
+  test('a switched-off neighborhood never rings a conflict bell, and its open bell closes', async () => {
+    const n = await neighborhood('Parked Conflict');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1212', status: 'active', source: 'backfill' });
+    await customerWithCode('3434', { neighborhoodId: n });
+    await trx('neighborhoods').where({ id: n }).update({ active: false });
+    // Open-bell keys are read twice per pass (reconcile, then close).
+    const openKey = `neighborhood-gate-conflict:${n}`;
+    mockOpenKeys.mockResolvedValueOnce([openKey]).mockResolvedValueOnce([openKey]);
+    await sweepSavedGateCodes();
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(mockClose).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([`neighborhood-gate-conflict:${n}`]), 'gate_code_confirmed', expect.anything());
+  });
+
   test('free text files for the office to confirm, with no bell', async () => {
     const n = await neighborhood('Pinebrook Village');
     await customerWithCode('Text the owner on arrival; north gate only', { neighborhoodId: n });
