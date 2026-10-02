@@ -55,6 +55,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
+import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -390,6 +391,7 @@ export default function TechHomePage({ section = 'today' }) {
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
+  const staffIdForDevice = staff?.id ? String(staff.id) : '';
   const staffRef = useRef(staff);
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -558,6 +560,11 @@ export default function TechHomePage({ section = 'today' }) {
       if (seq === scheduleSeq.current) { setLoading(false); setRefreshing(false); }
     }
   }, [fetchTechLine]);
+
+  // Recap clips kept on this device past the draft retention window are
+  // abandoned (the visit left the route): sweep them here, since a tech who
+  // stays in this page never runs the admin schedule's full sweep.
+  useEffect(() => { pruneRecapClipDrafts().catch(() => {}); }, []);
 
   useEffect(() => {
     fetchSchedule();
@@ -979,7 +986,7 @@ export default function TechHomePage({ section = 'today' }) {
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
                 {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture
-                  service={selectedVisit.primary} request={techRequest}
+                  service={selectedVisit.primary} request={techRequest} staffId={staffIdForDevice}
                   recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
                   onRecoveryChange={notifyRecapRecoveryChange}
                 />}
@@ -1224,7 +1231,7 @@ export default function TechHomePage({ section = 'today' }) {
         {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
         {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
           <TechRecapCapture
-            service={nextStop} request={techRequest}
+            service={nextStop} request={techRequest} staffId={staffIdForDevice}
             recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
             onRecoveryChange={notifyRecapRecoveryChange}
           />
