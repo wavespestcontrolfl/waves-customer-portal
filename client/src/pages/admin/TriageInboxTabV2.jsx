@@ -99,6 +99,7 @@ function parsePayload(payload) {
 
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function ConfirmEvidence({ payload }) {
   const p = parsePayload(payload);
@@ -141,6 +142,11 @@ export function ConfirmEvidence({ payload }) {
     // the header prefers the linked customer's on-file phone, so without
     // these rows the office sees the on-file identity but never the number
     // it's being asked to verify (or save to the account).
+    // household_address_match: the SUGGESTED account (the call is not linked to it) and
+    // the address that matched; the "Open account" link below sits with the rows.
+    p.suggested_customer_id && { label: "Suggested account", value: p.suggested_customer_name || "Existing customer at this address" },
+    p.suggested_customer_id && p.address && { label: "Caller's address", value: p.address },
+    p.suggested_customer_id && { label: "To resolve", value: "If the caller is part of that household, book the visit on that account, then Resolve. Dismiss if it is not the same household." },
     p.caller_phone && { label: "Caller dialed from", value: p.caller_phone },
     p.caller_phone && p.matched_customer_name && { label: "Linked to", value: p.matched_customer_name },
     // "On file" only makes sense on the phone-mismatch card (matched customer
@@ -294,6 +300,9 @@ export function ConfirmEvidence({ payload }) {
       ))}
       {p.confirmation_question && (
         <div className="text-14 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
+      )}
+      {UUID_RE.test(String(p.suggested_customer_id || "")) && (
+        <a href={`/admin/customers?customerId=${encodeURIComponent(p.suggested_customer_id)}`} className="inline-block mt-1 text-14 font-medium text-zinc-900 underline">Open account</a>
       )}
       {p.street_level_address && typeof p.visit_link === "string" && ADMIN_LINK_PATTERN.test(p.visit_link) && (
         <a href={p.visit_link} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open visit</a>
@@ -941,7 +950,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
           ) : (
             <div className="divide-y divide-zinc-200">
               {items.map((item) => {
-                const synopsis = item.lead_synopsis || item.call_summary || item.summary || "No summary available.";
+                const synopsis = item.reason_code === "household_address_match" && item.summary
+                  ? item.summary
+                  : (item.lead_synopsis || item.call_summary || item.summary || "No summary available.");
                 const recId = item.recording_sid || item.call_log_id;
                 const busyKey = isTriage ? item.id : item.call_log_id;
                 // Bounce follow-up cards aren't call verdicts — the server
@@ -963,6 +974,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // Accepting a house-number conflict stores a calibration
                 // `deny · address` on route_feedback; neither the settled
                 // conflict nor the recovery task it files is judged by it.
+                // A SUGGESTION to book on an existing account, not a call verdict (the
+                // server 400s /verdict on it): Open account (evidence link), Resolve
+                // once booked, Dismiss if it is not the same household.
+                const isHouseholdCard = isTriage && item.reason_code === "household_address_match";
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -1008,7 +1023,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isHouseholdCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1080,6 +1095,16 @@ export default function TriageInboxTabV2({ isAdmin }) {
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
+                            </Button>
+                          ) : isHouseholdCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Resolve"}
                             </Button>
                           ) : isFollowUpCard ? (
                             <Button

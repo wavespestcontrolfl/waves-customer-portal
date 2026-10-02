@@ -122,6 +122,19 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
     expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored)).toBe(false);
     expect(firstNameAdvisoryAddressOk(null, stored)).toBe(false);
   });
+  test('the unit must agree with the address the verdict was computed on (none = none)', () => {
+    const v2 = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Unit 3'))).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Apt 4'))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2(null))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, stored, v2('Apt 4'))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, stored, v2(null))).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, stored)).toBe(true);
+    // a unit riding inside the stored street line counts
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' }, v2('Apt 4'))).toBe(false);
+    expect(source).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
+  });
+
   test('shadow mode: a verdict for a DIFFERENT street, ZIP or city than the V1 address being inserted means no creation', () => {
     expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '102 Example Loop' })).toBe(false);
     expect(firstNameAdvisoryAddressOk(AV, { ...stored, zip: '34241' })).toBe(false);
@@ -131,7 +144,7 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
     expect(firstNameAdvisoryAddressOk({ ...AV, normalized: {} }, stored)).toBe(false);
     // a missing city on either side is silent; suffix aliases are equivalent
     expect(firstNameAdvisoryAddressOk(AV, { ...stored, city: '' })).toBe(true);
-    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' })).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line1: '100 Example Loop Apt 3' }, { street_line_1: '100 Example Loop', street_line_2: 'Apt 3' })).toBe(true);
   });
 });
 
@@ -141,7 +154,7 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
     expect(predicate).toContain('callFirstNameAdvisoryLive()');
     expect(predicate).toContain("String(extracted.last_name || '').trim()");
-    expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted)');
+    expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address)');
   });
 
   test('customer_creation_failed expectation follows the same predicate', () => {
@@ -331,6 +344,20 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').insert(member({ property_type: 'commercial' }));
     expect((await lookup()).reason).toBe('commercial_account');
     expect((await lookup({}, { commercialCall: true })).reason).toBe('commercial_call');
+  });
+
+  test('a commercial customer_properties row (property_type or occupancy_type) refuses the match even when the customer row is residential', async () => {
+    const row = member({ property_type: 'single_family' });
+    await trx('customers').insert(row);
+    await trx('customer_properties').insert({ customer_id: row.id, address_line1: '1083 Example Shell Loop', zip: '34240', active: true, address_key: 'k9', property_type: 'single_family', occupancy_type: 'owner_occupied' });
+    expect((await lookup()).customer?.id).toBe(row.id);
+    await trx('customer_properties').update({ property_type: 'commercial' });
+    expect((await lookup()).reason).toBe('commercial_account');
+    await trx('customer_properties').update({ property_type: 'single_family', occupancy_type: 'commercial' });
+    expect((await lookup()).reason).toBe('commercial_account');
+    // an INACTIVE commercial row is a former use, not a classification of this address
+    await trx('customer_properties').update({ active: false });
+    expect((await lookup()).customer?.id).toBe(row.id);
   });
 
   test('inactive, deleted or non-established (lead) customers never match', async () => {

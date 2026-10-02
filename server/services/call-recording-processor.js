@@ -3756,9 +3756,9 @@ function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
 // GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be
 // the premise the verdict validated — explicit PREMISE granularity, and the stored
 // street + ZIP (and city, when both carry one) agree with the verdict's normalized
-// form. With V2 in shadow the verdict can describe a different address than the V1
+// form, and its unit equals the unit of the address the verdict was computed on. With V2 in shadow the verdict can describe a different address than the V1
 // one being inserted; that means no creation. Pure.
-function firstNameAdvisoryAddressOk(av, extracted = {}) {
+function firstNameAdvisoryAddressOk(av, extracted = {}, verdictAddress = {}) {
   if (!verdictAcceptsAddress(av, { requirePremise: true })) return false;
   const n = av.normalized || {};
   if (!addressRenderingsAgree(
@@ -3766,6 +3766,11 @@ function firstNameAdvisoryAddressOk(av, extracted = {}) {
     { address_line1: n.street_line_1, zip: n.postal_code },
     { strict: true },
   )) return false;
+  // The UNIT must agree too (none = none): the verdict's normalized form omits the
+  // subpremise, so the unit it was computed on is the verdict address's own
+  // (the V2 service_address). V1 "Apt 3" vs V2 "Apt 4" means no creation.
+  if (addressLineUnit(extracted.address_line1, extracted.address_line2)
+    !== addressLineUnit(verdictAddress.street_line_1, verdictAddress.street_line_2)) return false;
   const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   return !cityKey(extracted.city) || !cityKey(n.city) || cityKey(extracted.city) === cityKey(n.city);
 }
@@ -3803,16 +3808,21 @@ async function loadHouseholdCandidates(conn, { street, zip5 }) {
       const rowZip = addressZip5(r.zip);
       if (!sameHouseNumberStreet(r.address_line1, street) || (rowZip && rowZip !== zip5)) continue;
       const list = sourcesById.get(r[idCol]) || [];
-      list.push({ line1: r.address_line1, line2: r.address_line2, zipExact: rowZip === zip5 });
+      // The classification rides the address SOURCE itself: a commercial
+      // customer_properties row must refuse the match even when the customer
+      // row says residential.
+      const kinds = [r.property_type, r.occupancy_type].map((v) => String(v || '').toLowerCase());
+      list.push({ line1: r.address_line1, line2: r.address_line2, zipExact: rowZip === zip5,
+        commercial: kinds.some((k) => ['commercial', 'business'].includes(k)) });
       sourcesById.set(r[idCol], list);
     }
   };
   if (tokens.length) {
     take(await conn('customers').whereRaw('address_line1 ~* ?', [houseRe])
-      .select('id', 'address_line1', 'address_line2', 'zip'), 'id');
+      .select('id', 'address_line1', 'address_line2', 'zip', 'property_type'), 'id');
     if (await conn.schema.hasTable('customer_properties')) {
       take(await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
-        .select('customer_id', 'address_line1', 'address_line2', 'zip'), 'customer_id');
+        .select('customer_id', 'address_line1', 'address_line2', 'zip', 'property_type', 'occupancy_type'), 'customer_id');
     }
   }
   const candidates = sourcesById.size
@@ -3839,7 +3849,8 @@ function classifyHouseholdCandidates({ sourcesById, candidates }, wantUnit) {
     // A unit on one side only is a different door.
     [sources.some((src) => addressLineUnit(src.line1, src.line2) !== wantUnit), 'unit_differs'],
     [['commercial', 'business'].includes(String(match.property_type || '').toLowerCase())
-      || String(match.waveguard_tier || '') === 'Commercial', 'commercial_account'],
+      || String(match.waveguard_tier || '') === 'Commercial'
+      || sources.some((src) => src.commercial), 'commercial_account'],
     [!FAIL_OPEN_CUSTOMER_STAGES.has(String(match.pipeline_stage || '').trim().toLowerCase()), 'not_established_customer'],
   ].find(([refused]) => refused);
   return refusal ? { reason: refusal[1] } : { customer: match, reason: 'address_match' };
@@ -12151,7 +12162,7 @@ const CallRecordingProcessor = {
     const firstNameAdvisoryCreate = !extracted.first_name
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
       && !!String(extracted.last_name || '').trim()
-      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted);
+      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction?.property?.service_address);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {

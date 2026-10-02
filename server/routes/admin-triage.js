@@ -1838,6 +1838,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A household-address suggestion (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH) asks the office
+    // to book on an existing account; a call verdict would close it without doing that.
+    if (item.reason_code === 'household_address_match') {
+      return res.status(400).json({ error: 'This card suggests booking on an existing account, not a call verdict — open the account, then use Resolve or Dismiss.' });
+    }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
       return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
@@ -2078,7 +2083,7 @@ router.post('/:id/verdict', async (req, res) => {
         // it in would resolve (and release the hold of) evidence the
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
-          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
+          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'household_address_match',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

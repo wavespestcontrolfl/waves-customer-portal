@@ -125,7 +125,7 @@ const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // (account-holder confirmation), rental_or_tenant_occupied (access/
 // property confirmation), second_service_address and
 // secondary_contact_captured (captured data awaiting application),
-// missing_last_name (owed full-name capture — the name_moot rule closes it
+// missing_first_name / missing_last_name (owed name capture — first_name_moot / name_moot close it
 // on independent surname evidence), missing_unit_number (owed unit capture
 // for a multi-unit building — street+zip on file does NOT answer it), and
 // low_extraction_confidence / name_email_mismatch (the office owes
@@ -144,6 +144,7 @@ const ADVISORY_AGE_CODES = new Set([
 const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
+  first_name_moot: 'Auto-resolved: customer record now has a first name that was added after this card was filed; flag is moot.',
   // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
@@ -929,6 +930,13 @@ function heardNames(item) {
   return { first: pick('first_name'), last: pick('last_name') };
 }
 
+function firstNameCameFromCall(item) {
+  const onFile = String(item.customer_first_name || '').trim().toLowerCase();
+  const names = heardNames(item);
+  // No filing-time names (a pre-snapshot card): not independent evidence.
+  return !names || names.first.includes(onFile);
+}
+
 function surnameCameFromCall(item) {
   const onFile = String(item.customer_last_name || '').trim().toLowerCase();
   if (!onFile) return false;
@@ -1018,6 +1026,18 @@ const CLASSIFY_RULES = [
       && callerMatchesCustomerFirstName(item)
       && !surnameCameFromCall(item)
       && filled(item.customer_last_name) },
+  // GATE_CALL_FIRST_NAME_ADVISORY's missing_first_name card: the customer was
+  // CREATED from this very call (first_name stored empty), so the surname rule's
+  // "pre-existing customer" guard cannot apply. The ask is moot once the record
+  // carries a nonblank first name that (a) the call did not hear — never one the
+  // card's own filing-time snapshot holds — and (b) was written after the card
+  // (record updated_at strictly later), so nothing the filing pass wrote counts.
+  { rule: 'first_name_moot', action: 'resolve',
+    when: (item) => item.reason_code === 'missing_first_name'
+      && !item.customer_deleted_at
+      && filled(item.customer_first_name)
+      && !firstNameCameFromCall(item)
+      && toDate(item.customer_updated_at)?.getTime() > toDate(item.created_at)?.getTime() },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
@@ -1126,6 +1146,7 @@ function loadCandidateItems(conn, itemIds = null) {
       'cl.metadata as call_metadata',
       'c.created_at as customer_created_at',
       'c.deleted_at as customer_deleted_at',
+      'c.updated_at as customer_updated_at',
       'c.pipeline_stage as customer_pipeline_stage',
       'c.address_line1 as customer_address_line1',
       'c.address_line2 as customer_address_line2',

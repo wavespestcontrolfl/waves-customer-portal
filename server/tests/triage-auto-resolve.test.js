@@ -226,6 +226,28 @@ describe('moot-condition resolves', () => {
     expect(classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample', payload: { heard_name: { first_name: 'Pat', last_name: null } } }), noBookings, { now: NOW })).toBeNull();
   });
 
+  test('missing_first_name resolves once a first name that the call did not hear is written AFTER the card (customer born from the call)', () => {
+    const card = (over = {}) => item({
+      reason_code: 'missing_first_name', customer_first_name: 'Sam', customer_last_name: 'Murphy',
+      customer_created_at: CUSTOMER_AFTER, // created FROM the call: the surname rule's pre-existing guard would never fire
+      customer_updated_at: new Date(new Date(FRESH).getTime() + 3600 * 1000).toISOString(),
+      ...heardV1(null, 'Murphy'), ...over,
+    });
+    expect(classifyTriageItem(card(), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'first_name_moot' });
+    // still blank, or only whitespace -> stays open
+    expect(classifyTriageItem(card({ customer_first_name: '' }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ customer_first_name: '  ' }), noBookings, { now: NOW })).toBeNull();
+    // written at/before the card (the filing pass itself) is not proof
+    expect(classifyTriageItem(card({ customer_updated_at: FRESH }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ customer_updated_at: null }), noBookings, { now: NOW })).toBeNull();
+    // a first name the card's own snapshot heard is the call's, not independent
+    expect(classifyTriageItem(card(heardV1('Sam', 'Murphy')), noBookings, { now: NOW })).toBeNull();
+    // no filing-time snapshot -> fail closed; deleted customer -> stays open
+    expect(classifyTriageItem(card({ payload: { flag: 'missing_first_name' } }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ customer_deleted_at: FRESH }), noBookings, { now: NOW })).toBeNull();
+    expect(RULE_NOTES.first_name_moot).toBeTruthy();
+  });
+
   test('a customer born from the call never moots its own surname card (V1-merged surname is not independent evidence)', () => {
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Sample',

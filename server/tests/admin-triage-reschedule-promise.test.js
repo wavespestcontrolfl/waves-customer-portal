@@ -309,6 +309,19 @@ test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the p
 });
 
 describe('POST /admin/triage/:id/verdict', () => {
+  test('rejects a direct call verdict on a household_address_match suggestion (it asks the office to book on an account)', async () => {
+    const { conn, tables } = fixture();
+    tables.triage_items[0].reason_code = 'household_address_match';
+    tables.triage_items[0].payload = { suggested_customer_id: 'cust-1' };
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/not a call verdict/);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
   test('rejects a direct call verdict on a reschedule_link_promise card', async () => {
     const { conn, tables } = fixture();
     wireDb(db, { conn });

@@ -281,6 +281,46 @@ describe('follow-up card Resolve path', () => {
   });
 });
 
+describe('household address suggestion card', () => {
+  const ACCOUNT = '11111111-1111-4111-8111-111111111111';
+  const card = { ...ordinary, id: 'hh', first_name: 'Sally', last_name: 'Caller', feedback_verdict: null,
+    reason_code: 'household_address_match', call_summary: 'Wasps by the lanai; John put out ant traps.',
+    summary: "Caller at Pat Example's address — book on that account?",
+    payload: JSON.stringify({ suggested_customer_id: ACCOUNT, suggested_customer_name: 'Pat Example', address: '1083 Example Shell Loop, Sarasota, 34240' }) };
+
+  it('shows its own summary, the suggested account with an Open account link, and no Accept/Deny', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Sally Caller')).closest('.py-4');
+    expect(within(el).getByText("Caller at Pat Example's address — book on that account?")).toBeInTheDocument();
+    expect(within(el).queryByText(/Wasps by the lanai/)).toBeNull();
+    expect(within(el).getByText('Suggested account:')).toBeInTheDocument();
+    expect(within(el).getByText('Pat Example')).toBeInTheDocument();
+    expect(within(el).getByRole('link', { name: 'Open account' })).toHaveAttribute('href', `/admin/customers?customerId=${ACCOUNT}`);
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+  });
+
+  it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Sally Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/hh/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+
+  it('a malformed suggested id never becomes a link', () => {
+    render(<ConfirmEvidence payload={{ flag: 'household_address_match', suggested_customer_id: 'not-a-uuid', suggested_customer_name: 'Pat Example' }} />);
+    expect(screen.queryByRole('link', { name: 'Open account' })).toBeNull();
+  });
+});
+
 describe('verdict 409 with its own instruction', () => {
   it('shows the server message for a relinked call instead of reloading and looping', async () => {
     const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };
