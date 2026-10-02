@@ -506,6 +506,20 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
 // tip-picker payload plus the independently gated completion-choice history.
 // When both gates are off this remains a no-read availability probe. Read-only.
+// A visit's add-on lines by their catalog key: the key stamped on the line,
+// else its catalog row's. Fail-soft: a failed read only loses their tips.
+async function addonServiceKeys(scheduledServiceId) {
+  try {
+    const rows = await db('scheduled_service_addons')
+      .leftJoin('services', 'services.id', 'scheduled_service_addons.service_id')
+      .where({ 'scheduled_service_addons.scheduled_service_id': scheduledServiceId })
+      .select('scheduled_service_addons.service_key_snapshot as key_snapshot', 'services.service_key as catalog_key');
+    return rows.map((row) => row.key_snapshot || row.catalog_key).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
     const completionChoicesEnabled = gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES');
@@ -527,6 +541,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         'current_property.address_line1 as current_property_address_line1',
         'current_property.address_line2 as current_property_address_line2',
         'current_property.city as current_property_city', 'current_property.zip as current_property_zip',
+        'scheduled_services.service_id as service_id', 'scheduled_services.service_key_snapshot as service_key_snapshot',
+        'scheduled_services.is_recurring as is_recurring',
       );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's tip
@@ -568,8 +584,20 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         previousRecommendations,
       });
     }
+    // The visit's catalog service leads with its own tips (owner-approved
+    // service tips, 2026-10-02), and so does each add-on line (a pest visit
+    // with a flea or rodent add-on, Codex #5582); an unresolved identity only
+    // loses that lead.
+    const [serviceKey, addonKeys] = await Promise.all([
+      resolveCompletionProfileForScheduledService(svc)
+        .then((profile) => profile?.serviceKey || null)
+        .catch(() => null),
+      addonServiceKeys(svc.id),
+    ]);
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
+      serviceKey,
+      serviceKeys: addonKeys,
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current
