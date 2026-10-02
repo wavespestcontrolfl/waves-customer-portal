@@ -86,10 +86,12 @@ function completionRequestHashSegments(body) {
   // (codex P1 on the reconciliation round). promiseMarksConfirmed is the same
   // kind of bit: an office edit between a failed claimed attempt and its
   // retry can raise the promise check's prompt only on the retry, and its
-  // confirmation must resume that attempt (Codex #5516).
+  // confirmation must resume that attempt (Codex #5516). So is
+  // reportRulesConfirmed: the edit heads-up is pre-claim too, and a retry can
+  // meet it first (the actives read recovered) and confirm it (Codex #5538).
   const {
     idempotencyKey, timeOnSite, completionTelemetry, backfill,
-    reportReconcileConfirmed, promiseMarksConfirmed, ...stableBody
+    reportReconcileConfirmed, promiseMarksConfirmed, reportRulesConfirmed, ...stableBody
   } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))

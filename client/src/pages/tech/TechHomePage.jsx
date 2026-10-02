@@ -1175,6 +1175,9 @@ export default function TechHomePage({ section = 'today' }) {
             // address the context resolves) for visits without a property.
             routedPropertyId: 'propertyId' in fastCompleteService ? fastCompleteService.propertyId : undefined,
             routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
+            // The row's service, so the report flow (any open pest visit) can
+            // tell an office edit to another service from the one tapped.
+            routedServiceKey: fastCompleteService.completionProfile?.serviceKey || null,
             // GATE_FAST_COMPLETE_RECAP rides the same schedule row: only an
             // exact true turns the customer recap on (see the sheet). Absent
             // (an older payload) or false = the sheet sends no customer text.

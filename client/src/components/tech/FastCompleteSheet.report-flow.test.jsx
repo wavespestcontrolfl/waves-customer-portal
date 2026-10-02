@@ -114,6 +114,21 @@ function conflict(code, message) {
   return err;
 }
 
+describe('the visit the tech tapped', () => {
+  test('a visit the office moved to another service since the schedule loaded is not completed here', async () => {
+    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Bi-Monthly Pest Control', serviceKey: 'pest_general_bimonthly' } });
+    render(<FastCompleteSheet service={{ ...SERVICE, routedServiceKey: 'pest_general_quarterly' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
+  });
+
+  test('the same service key under a new name is a changed visit too (the header shows the tapped name)', async () => {
+    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Monthly Pest Control' } });
+    render(<FastCompleteSheet service={{ ...SERVICE, routedServiceKey: 'pest_general_quarterly' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+  });
+});
+
 describe('the visit step', () => {
   test('a regular pest visit opens as a service: no pest, where or how taps, customer not home with full access', async () => {
     await openSheet(makeRequest());
@@ -466,7 +481,7 @@ describe('complete and send', () => {
     }
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    expect(await screen.findByText('Promise closed: Check under the dishwasher')).toBeTruthy();
+    expect(await screen.findByText('Off the customer’s open list: Check under the dishwasher')).toBeTruthy();
     expect(screen.getByText('Still open: Look at the garage door seal. The office will settle it.')).toBeTruthy();
     const reread = request.calls.map((call) => call.path).filter((path) => path.includes('/promises?include='));
     expect(reread).toEqual(['/admin/dispatch/svc-1/promises?include=p-1%2Cp-2']);
@@ -560,12 +575,22 @@ describe('complete and send', () => {
     ]);
   });
 
-  test('a trace with no perimeter in the note leaves the sprays spot treatments', async () => {
+  test('a spot visit has no trace step, and a trace already saved holds the send (the report would show a sprayed perimeter)', async () => {
     const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 140.4, capture_mode: 'perimeter' } } });
     await openSheet(request);
     await generate();
-    expect(screen.getByText('Perimeter traced · 140 ft')).toBeTruthy();
-    expect(screen.getByText('With the trace.')).toBeTruthy();
+    expect(screen.queryByText('Perimeter traced · 140 ft')).toBeNull();
+    expect(screen.queryByText('With the trace.')).toBeNull();
+    expect(screen.getByText('Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(request.bodies('/complete')).toEqual([]);
+  });
+
+  test('a spot visit with no trace saved completes with spot treatments and no trace step', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');

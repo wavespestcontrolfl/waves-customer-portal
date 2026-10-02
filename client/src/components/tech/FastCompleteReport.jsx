@@ -486,7 +486,9 @@ function usePromisesStillOpen({ base, request, ids }) {
 }
 
 // After Complete & send: what the server says went out, what it billed, and
-// which promises it closed.
+// which promises are off the customer's open list. Off the list is not proof
+// the completion closed one (the office may have moved it to another
+// customer), so it never says "closed".
 export function SentSummary({ result, doneMarks = [], base, request }) {
   const open = usePromisesStillOpen({ base, request, ids: doneMarks.map((mark) => String(mark.id)) });
   if (!result) return null;
@@ -496,7 +498,7 @@ export function SentSummary({ result, doneMarks = [], base, request }) {
       {lines.map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
       {open && doneMarks.map((mark) => (
         <p key={mark.id} className="tech-visit-muted">
-          {open.has(String(mark.id)) ? `Still open: ${mark.description}. The office will settle it.` : `Promise closed: ${mark.description}`}
+          {open.has(String(mark.id)) ? `Still open: ${mark.description}. The office will settle it.` : `Off the customer’s open list: ${mark.description}`}
         </p>
       ))}
     </div>

@@ -147,9 +147,21 @@ const ACTIVITY_LEVELS = [
 // be that visit (same customer, day and property), still an open pest
 // re-service (any open pest visit in the report flow), and still eligible
 // for the short form (not typed or project-backed).
+// The report flow opens on any open pest visit, so the live visit must still
+// be the service the tech tapped (the header shows the schedule's): an office
+// edit that changed the service since the schedule loaded is a changed visit.
+function serviceChangedSinceSchedule(visit, service) {
+  const changedType = service?.routedServiceType && visit?.serviceType
+    && String(service.routedServiceType).trim() !== String(visit.serviceType).trim();
+  const changedKey = service?.routedServiceKey && visit?.serviceKey && service.routedServiceKey !== visit.serviceKey;
+  return !!(changedType || changedKey);
+}
+
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
-  if (visitChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  if (visitChangedSinceSchedule(visit, service) || (service?.reportFlow && serviceChangedSinceSchedule(visit, service))) {
+    return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  }
   if (!service?.reportFlow && visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
@@ -319,7 +331,7 @@ function sheetVisitIdentity(visit, reportFlow) {
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow }) {
+function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceKey, reportFlow }) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -347,7 +359,9 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow }),
+          blockedReason: blockedReasonFor(data, {
+            routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow, routedServiceType: serviceType, routedServiceKey,
+          }),
           visit,
           products,
           commonProducts,
@@ -371,7 +385,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceKey, reportFlow]);
   // The stock on hand the server has now, for a product restocked while the
   // sheet is open; nothing else is re-read. Resolves to the fresh catalog
   // rows by id.
@@ -430,6 +444,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedScheduledDate: service?.routedScheduledDate,
     routedPropertyId: service?.routedPropertyId,
     routedAddress: service?.routedAddress,
+    routedServiceKey: service?.routedServiceKey,
     reportFlow,
   });
   const submission = useFastCompleteSubmit({ base, request });
@@ -802,8 +817,11 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
 // and the Full form stays open for an outage); and, for a perimeter spray,
 // the trace that gives it its length.
 function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable }) {
-  const untraced = draft && !perimeterFeet
-    && active.find((row) => rowMethod(row, reportSprayMethod(draft.facts)) === 'perimeter_spray');
+  const perimeterRow = draft && active.find((row) => rowMethod(row, reportSprayMethod(draft.facts)) === 'perimeter_spray');
+  const untraced = !perimeterFeet && perimeterRow;
+  // A trace saved while the note now records no spray around the house would
+  // show on the customer's report as a sprayed perimeter.
+  const unusedTrace = draft && perimeterFeet && !perimeterRow;
   return [
     [writing, 'Writing the report…'],
     [!draft, 'Generate the report first.'],
@@ -812,6 +830,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable }) {
     [untraced, untraced && (traceAvailable
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
+    [unusedTrace, 'Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.'],
   ];
 }
 
@@ -1010,7 +1029,8 @@ function ReportFlowForm({
         generateMissing={generateMissing}
         completeMissing={completeMissing}
         stockButton={stockButton}
-        trace={traceAvailable ? trace : null}
+        // Only a perimeter spray is traced: a spot visit has no trace step.
+        trace={traceAvailable && draft?.facts?.spray === 'perimeter' ? trace : null}
         sources={writerSources({
           productCount: active.length,
           photoCount: visitPhotos.photos.length,
