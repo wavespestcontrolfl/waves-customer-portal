@@ -51,6 +51,17 @@ function response(status, body) {
   };
 }
 
+// A JWT-shaped staff token (only its shape, exp and signature segment are
+// read on the device) and the offline pass a verified check leaves behind.
+function staffJwt(exp = Math.floor(Date.now() / 1000) + 3600, sig = 'fixture-signature') {
+  const part = (value) => btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${part({ alg: 'HS256' })}.${part({ exp })}.${sig}`;
+}
+const LIVE_TOKEN = staffJwt();
+function seedOfflinePass(token, profile = { id: 'tech-1', name: 'River Tech', role: 'technician' }) {
+  localStorage.setItem('waves_tech_offline_pass', JSON.stringify({ binding: token.split('.')[2], profile }));
+}
+
 describe('TechLayout staff-session verification', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -168,23 +179,23 @@ describe('TechLayout staff-session verification', () => {
     });
   });
 
-  it('renders from the stored profile when /admin/auth/me gets no answer at all', async () => {
-    localStorage.setItem('waves_admin_token', 'staff-access-token');
-    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+  it('renders from this token\'s offline pass when /admin/auth/me gets no answer at all', async () => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
 
     renderTech();
 
     expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
     expect(screen.getByText('River Tech')).toBeInTheDocument();
-    expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+    expect(localStorage.getItem('waves_admin_token')).toBe(LIVE_TOKEN);
   });
 
-  it('falls back to the stored profile when the verification request hangs', async () => {
+  it('falls back to the offline pass when the verification request hangs', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      localStorage.setItem('waves_admin_token', 'staff-access-token');
-      localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+      localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+      seedOfflinePass(LIVE_TOKEN);
       vi.stubGlobal('fetch', vi.fn((_url, options = {}) => new Promise((_, reject) => {
         options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
       })));
@@ -204,14 +215,40 @@ describe('TechLayout staff-session verification', () => {
     ['the body read fails', () => Promise.reject(new TypeError('network error'))],
     ['the body is not JSON', () => Promise.reject(new SyntaxError('Unexpected token <'))],
   ])('treats a 2xx whose body never arrives as weak signal when %s', async (_label, body) => {
-    localStorage.setItem('waves_admin_token', 'staff-access-token');
-    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seedOfflinePass(LIVE_TOKEN);
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: body })));
 
     renderTech();
 
     expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
-    expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+    expect(localStorage.getItem('waves_admin_token')).toBe(LIVE_TOKEN);
+  });
+
+  it.each([
+    ['a pass written for another token', () => seedOfflinePass(staffJwt(undefined, 'previous-login'))],
+    ['an expired token', () => { localStorage.setItem('waves_admin_token', staffJwt(Math.floor(Date.now() / 1000) - 60)); seedOfflinePass(staffJwt(Math.floor(Date.now() / 1000) - 60)); }],
+    ['only a stored profile and no pass', () => localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', role: 'technician' }))],
+  ])('never opens offline with %s', async (_label, seed) => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    seed();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+
+    renderTech();
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+  });
+
+  it('writes the offline pass for the token it verified', async () => {
+    localStorage.setItem('waves_admin_token', LIVE_TOKEN);
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-1', name: 'River Tech', role: 'technician' })));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    const pass = JSON.parse(localStorage.getItem('waves_tech_offline_pass'));
+    expect(pass).toMatchObject({ binding: 'fixture-signature', profile: { id: 'tech-1' } });
   });
 
   it('clears the saved route with the session on a 401', async () => {
@@ -398,12 +435,13 @@ describe('TechLayout staff-session verification', () => {
     renderTech();
     expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
 
-    // Another tab's login, then an unrelated public path: neither ends it.
+    // Another tab's login, then a host outside the API: neither ends it.
     await act(async () => { await fetch('/api/tech/services/s1/en-route', { method: 'POST', headers: { Authorization: 'Bearer other-login' } }); });
-    await act(async () => { await fetch('/api/public/thing', { headers: { Authorization: 'Bearer staff-access-token' } }); });
+    await act(async () => { await fetch('https://elsewhere.example/public/thing', { headers: { Authorization: 'Bearer staff-access-token' } }); });
     expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
 
-    await act(async () => { await fetch('/api/tech/services/s1/en-route', { method: 'POST', headers: { Authorization: 'Bearer staff-access-token' } }); });
+    // A staff route outside /admin and /tech (visual moments) counts too.
+    await act(async () => { await fetch('/api/jobs/job-1/visual-moments/en-route', { headers: { Authorization: 'Bearer staff-access-token' } }); });
 
     expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
     expect(localStorage.getItem('waves_admin_token')).toBeNull();

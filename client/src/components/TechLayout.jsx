@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { TrendingUp } from 'lucide-react';
-import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, loadStaffOfflinePass, saveStaffOfflinePass } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import { installStaffSessionGuard } from '../lib/staffSessionGuard';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
@@ -126,6 +126,7 @@ export default function TechLayout() {
         } catch {
           try { localStorage.removeItem('waves_admin_user'); } catch { /* storage unavailable */ }
         }
+        saveStaffOfflinePass(token, profile);
         setTechName(profile.name || getAdminDisplayName('Tech'));
         setTechRole(profile.role);
         setStaffProfile(profile);
@@ -148,16 +149,14 @@ export default function TechLayout() {
           return;
         }
         // No answer at all (dead zone, DNS, airplane mode, or the bound
-        // above firing): a TypeError or AbortError with no HTTP status. The stored profile was written by a previous
-        // successful /admin/auth/me, so let the shell render from it — the
-        // route page then shows its saved copy. Every API call still carries
-        // the token and the server rejects a dead session the moment it is
-        // reachable; a server answer of any kind (401 above, 5xx here) and a
-        // missing or malformed stored profile keep the verification error.
-        const stored = error?.transport === true && error?.status === undefined ? getAdminUser() : null;
-        // A profile stored with mustChangePassword (written just before the
-        // forced-reset redirect) never unlocks the shell offline.
-        if (stored?.id && ['admin', 'technician'].includes(stored.role) && !stored.mustChangePassword) {
+        // above firing): a transport failure with no HTTP status. The shell
+        // may open from the offline pass a previous /admin/auth/me wrote for
+        // THIS token while it is unexpired (lib/adminAuth); the route page
+        // then shows its saved copy. A server answer of any kind (401 above,
+        // 5xx here), no pass, another token's pass, an expired token or a
+        // forced reset keep the verification error.
+        const stored = error?.transport === true && error?.status === undefined ? loadStaffOfflinePass(token) : null;
+        if (stored) {
           setTechName(stored.name || getAdminDisplayName('Tech'));
           setTechRole(stored.role);
           setStaffProfile(stored);

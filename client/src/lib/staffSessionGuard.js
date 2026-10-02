@@ -5,13 +5,17 @@
 // inline error and keep the token, the stored profile and the saved route on
 // the device — and the offline fallback in TechLayout would later unlock the
 // shell from that profile. TechLayout installs this guard while it is
-// mounted: any staff API response (/admin/*, /tech/*, both behind the
-// admin-auth middleware) that answers 401 to the CURRENT token calls
-// onRejected once. Requests under another token (a login switch in another
-// tab) and every other path pass through untouched; the response itself is
-// never read or altered.
+// mounted: any API response (/api/*) that answers 401 to a request carrying
+// the CURRENT staff token calls onRejected once. Staff routes are not only
+// /admin and /tech (visual moments, dispatch, knowledge and more sit behind
+// the same admin-auth middleware), so the token, not the path, decides.
+// Requests under another token (a login switch in another tab) pass through
+// untouched; the response itself is never read or altered.
 
-const STAFF_PATH = /\/api\/(admin|tech)\//;
+const API_PATH = /\/api\//;
+// 401s that are not a verdict on the staff session: the terminal handoff
+// check rejects the HANDOFF token it is given.
+const NOT_SESSION_401 = [/\/api\/stripe\/terminal\/validate-handoff(?:[?#]|$)/];
 
 function headerValue(headers, name) {
   if (!headers) return null;
@@ -38,7 +42,7 @@ export function installStaffSessionGuard({ getToken, onRejected, target = global
       const token = getToken();
       if (!fired && response?.status === 401 && token) {
         const { url, auth } = requestParts(input, init);
-        if (STAFF_PATH.test(url) && auth === `Bearer ${token}`) {
+        if (API_PATH.test(url) && !NOT_SESSION_401.some((re) => re.test(url)) && auth === `Bearer ${token}`) {
           fired = true;
           onRejected();
         }
