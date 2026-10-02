@@ -67,13 +67,13 @@ describe('tokenParity', () => {
 
   test('a changed, dropped or added figure fails', () => {
     expect(tokenParity(REPLY, REPLY_ES.replace('30', '20'))).toMatchObject({ ok: false, missing: ['30'], added: ['20'] });
-    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['45.50'], added: ['45'] });
+    expect(tokenParity('Your balance is $45.50.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: false, missing: ['$45.50'], added: ['$45'] });
     expect(tokenParity('We will call you back.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: false, added: ['2'] });
     expect(tokenParity('We will call you back in 2 hours.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: true });
   });
 
   test('only a PM time may come back as a 24-hour time: a price or count never gets the +12 pass', () => {
-    expect(tokenParity('The fee is $2.', 'La tarifa es de $14.')).toMatchObject({ ok: false, missing: ['2'], added: ['14'] });
+    expect(tokenParity('The fee is $2.', 'La tarifa es de $14.')).toMatchObject({ ok: false, missing: ['$2'], added: ['$14'] });
     expect(tokenParity('We need 3 more days.', 'Necesitamos 15 días más, a las 15 h.')).toMatchObject({ ok: false });
     expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:30.')).toEqual({ ok: true, missing: [], added: [] });
     expect(tokenParity('See you at 2 AM.', 'Nos vemos a las 14 h.')).toMatchObject({ ok: false });
@@ -125,6 +125,19 @@ describe('tokenParity', () => {
   test('one-word foreign replies are asked about; English ones are not', () => {
     expect(needsTranslation('Ndiyo')).toBe(true);
     expect(needsTranslation('Yes')).toBe(false);
+  });
+
+  test('an amount keeps its currency and sign', () => {
+    expect(tokenParity('Your balance is $45.', 'Su saldo es de €45.')).toMatchObject({ ok: false });
+    expect(tokenParity('You have a credit of -$45.', 'Tiene un crédito de $45.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your balance is $45.', 'Su saldo es de 45 dólares.')).toMatchObject({ ok: true });
+    expect(tokenParity('Your balance is $45.', 'Su saldo es de 45 $.')).toMatchObject({ ok: true });
+    expect(tokenParity('The fee is $2.', 'La tarifa es de $14.')).toMatchObject({ ok: false });
+  });
+
+  test('an email\'s local part keeps its case; only the domain may differ in case', () => {
+    expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a casesensitive@custom.example.')).toMatchObject({ ok: false });
+    expect(tokenParity('Email CaseSensitive@custom.example.', 'Escriba a CaseSensitive@Custom.Example.')).toMatchObject({ ok: true });
   });
 
   test('links and emails must come through exactly', () => {
@@ -301,6 +314,13 @@ describe('runTranslationTrial', () => {
     const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(row.hold_reason).not.toBe('reply_failed_comms_lint');
     expect(Array.isArray(row.checks.english_lint)).toBe(true);
+  });
+
+  test('language tags compare canonically: "spa" = "es"; "zh-TW" = "zh-Hant"; "zh" (Simplified) is not Traditional', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'spa' }, backLang: 'es' });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready', language_code: 'es' });
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language_code: 'zh-TW' }, translated: '謝謝！技術人員到達前約30分鐘會傳訊息。下次：10月14日星期二14:00。', backLang: 'zh' });
+    expect(await runTranslationTrial({ inboundMessage: '請問狗狗什麼時候可以出去？', customer, smsLogId: 's2' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_in_other_language', language_code: 'zh-Hant' });
   });
 
   test('a failed insert is reported as not saved, never as a stored ready answer', async () => {

@@ -100,7 +100,7 @@ function clip(text) {
 async function translateInbound(inbound) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `You read text messages from a pest control company's customer thread. Say what language the message is written in and translate it into plain English, keeping every name, number, time, date, address, price and link exactly as written. Do not answer the message. If the message is already English (including short replies, names, addresses or emoji), set is_english true and copy it unchanged. ${DATA_NOTE}`,
+    system: `You read text messages from a pest control company's customer thread. Say what language the message is written in (language_code: a BCP-47 tag that names the script when the language is written in more than one, e.g. "es", "zh-Hant", "sr-Latn") and translate it into plain English, keeping every name, number, time, date, address, price and link exactly as written. Do not answer the message. If the message is already English (including short replies, names, addresses or emoji), set is_english true and copy it unchanged. ${DATA_NOTE}`,
     text: `<text>\n${clip(inbound)}\n</text>`,
     jsonSchema: INBOUND_SCHEMA,
   });
@@ -112,7 +112,7 @@ async function translateInbound(inbound) {
   if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
   const code = languageCodeOf(languageCode);
-  const name = code && !code.startsWith('en') ? languageNameOf(code) : null;
+  const name = code && !/^en(?:-|$)/.test(code) ? languageNameOf(code) : null;
   if (!name) return { ok: false, reason: 'language_not_supported' };
   return { ok: true, isEnglish: false, english, language: name, languageCode: code, model: out.model };
 }
@@ -135,7 +135,7 @@ async function translateReply({ englishReply, language }) {
 async function backTranslate({ translated }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Say what language this text message is written in (its ISO 639-1 code, e.g. "es") and translate it into English, word for word as far as natural English allows. Keep every number, time, date, price, phone number, link, email and name exactly as written. Do not fix, soften or add anything. ${DATA_NOTE}`,
+    system: `Say what language this text message is written in, as a BCP-47 tag that names the script when the language is written in more than one (e.g. "es", "zh-Hant", "zh-Hans", "sr-Latn") and translate it into English, word for word as far as natural English allows. Keep every number, time, date, price, phone number, link, email and name exactly as written. Do not fix, soften or add anything. ${DATA_NOTE}`,
     text: `<text>\n${translated}\n</text>`,
     jsonSchema: BACK_SCHEMA,
   });
@@ -156,22 +156,30 @@ function languageNameOf(code) {
   return typeof name === 'string' && /^\p{L}[\p{L}\p{M} ()'-]{1,40}$/u.test(name) && name.toLowerCase() !== code.toLowerCase() ? name : null;
 }
 
-// "es", "es-MX", "PT_br" -> "es" / "pt"; a script subtag is kept because it
-// changes the written language ("zh-Hant" stays "zh-Hant", never "zh");
-// anything else -> null
+// Any BCP-47 tag a model returns ("es", "spa", "es-MX", "zh-TW", "zh-Hant")
+// is canonicalised the same way on both calls: CLDR's likely-subtags
+// (Intl.Locale.maximize) supply the script, and the stored code is the
+// language alone when that is its default script ("spa" -> "es"), else
+// language-script ("zh-TW" -> "zh-Hant"). The script is kept because it changes the written language.
 function languageCodeOf(value) {
-  const m = /^([a-z]{2,3})(?:[-_]([a-z]{4}))?(?:[-_][a-z0-9]{2,8})*$/i.exec(String(value || '').trim());
-  if (!m) return null;
-  return m[2] ? `${m[1].toLowerCase()}-${m[2][0].toUpperCase()}${m[2].slice(1).toLowerCase()}` : m[1].toLowerCase();
+  const raw = String(value || '').trim().replace(/_/g, '-');
+  if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(raw)) return null;
+  try {
+    const { language, script } = new Intl.Locale(raw).maximize();
+    // the bare language when its default script is this one ("es"), else language-script ("zh-Hant")
+    return !script || new Intl.Locale(language).maximize().script === script ? language : `${language}-${script}`;
+  } catch { return null; }
 }
 
-// The written language matches when the base language does and, when the
-// customer's text named a script, the reply is in that same script.
+// The written language matches when language and script both do ("zh-Hant"
+// answered in "zh" = Simplified is a different written language).
 function sameWrittenLanguage(asked, written) {
   if (!asked || !written) return false;
-  const [askedBase, askedScript] = asked.split('-');
-  const [writtenBase, writtenScript] = written.split('-');
-  return askedBase === writtenBase && (!askedScript || askedScript === writtenScript);
+  try {
+    const a = new Intl.Locale(asked).maximize();
+    const w = new Intl.Locale(written).maximize();
+    return a.language === w.language && a.script === w.script;
+  } catch { return false; }
 }
 
 async function meaningCheck({ englishReply, backTranslation }) {
@@ -231,6 +239,30 @@ function clockValue(raw, after) {
   return `t:${hour}${mm && mm !== '00' ? `:${mm}` : ''}`;
 }
 
+// An amount keeps its currency and sign: "$45", "45 $", "45 dólares" are
+// $45; "€45" is not, and neither is "-$45". A symbol or currency word right
+// before or after the number marks it (other languages' words for dollar are
+// not listed, so such an amount holds the trial rather than passing unread).
+const CURRENCY_BEFORE_RE = /([-\u2212]\s*)?(US\$|[$€£¥])\s*$/i;
+const CURRENCY_AFTER_RE = /^\s*(US\$|[$€£¥]|usd\b|d[oó]lar(?:es)?\b|dollars?\b|eur\b|euros?\b|gbp\b)/i;
+const NEGATIVE_BEFORE_RE = /(?:^|\s)[-\u2212]\s*$/;
+
+function currencySymbol(mark) {
+  const m = mark.toLowerCase();
+  if (m === '$' || m === 'us$' || m === 'usd' || m.startsWith('dol') || m.startsWith('dól')) return '$';
+  if (m === '€' || m === 'eur' || m.startsWith('euro')) return '€';
+  if (m === '£' || m === 'gbp') return '£';
+  return m;
+}
+
+function moneyPrefix(before, after) {
+  const pre = CURRENCY_BEFORE_RE.exec(before);
+  const post = pre ? null : CURRENCY_AFTER_RE.exec(after);
+  if (!pre && !post) return '';
+  const negative = pre ? Boolean(pre[1]) : NEGATIVE_BEFORE_RE.test(before);
+  return `${negative ? '-' : ''}${currencySymbol(pre ? pre[2] : post[1])}`;
+}
+
 function trimZeros(n) {
   return n.replace(/^0+(?=\d)/, '');
 }
@@ -263,10 +295,15 @@ function numberValues(text, { strictTimes = false } = {}) {
       continue;
     }
     let values;
+    const money = raw.includes(':') ? '' : moneyPrefix(str.slice(0, m.index), after);
     if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) values = [raw.replace(/[.,]/g, '')];
     else if (/^\d+[.,]\d{1,2}$/.test(raw)) values = [raw.replace(',', '.').replace(/\.0+$/, '')];
     else if (/^\d{1,2}:\d{2}$/.test(raw)) values = [raw.replace(/:00$/, '')];
     else values = raw.split(/[.,:]/);
+    if (money && values.length === 1) {
+      out.push({ value: `${money}${values[0].replace(/^\d+/, trimZeros)}`, ...flags });
+      continue;
+    }
     // only the whole part loses leading zeros: cents and minutes keep theirs ($45.05 is not $45.50 or $45.5)
     for (const v of values) out.push({ value: v.replace(/^\d+/, trimZeros), ...flags });
   }
@@ -276,7 +313,7 @@ function numberValues(text, { strictTimes = false } = {}) {
 function protectedTokens(text, opts = {}) {
   const str = String(text || '');
   const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?]+$/, ''));
-  const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').toLowerCase());
+  const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').replace(/@.*$/, (d) => d.toLowerCase()));
   const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '), opts);
   return { links, emails, numbers, digits: numbers.map((n) => n.value) };
 }
