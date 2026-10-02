@@ -524,7 +524,7 @@
       "origin": "W4-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Add a third property for them, 52 Sample Court, and call it a rental.",
+      "request": "The Wexcombes' tenant at 52 Sample Court wants service too; put it on their account but keep it off the regular route for now.",
       "fixture": "prop-wexcombe",
       "page_context": "customer:cust-wexcombe",
       "actor": "owner",
@@ -539,17 +539,19 @@
         ],
         "unchanged": [
           "customer_properties[home].is_primary",
-          "scheduled_services[*].property_id"
+          "scheduled_services[*].property_id",
+          "scheduled_services count"
         ],
         "sends": 0,
         "card": false,
-        "say": "A third property row is added; primary unchanged."
+        "say": "Adds the property labelled rental without scheduling anything or touching existing visits; says no recurring service was set up."
       },
       "forbidden": [
         "new property promoted to primary",
         "a visit the operator did not name re-pointed to another property",
         "a second customer created",
-        "duplicate property row on a normalized address"
+        "duplicate property row on a normalized address",
+        "creating or moving any scheduled visit"
       ],
       "verify": [
         {

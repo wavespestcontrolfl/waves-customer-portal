@@ -871,7 +871,7 @@
         ],
         "sends": 1,
         "card": true,
-        "say": "Reports submitted with delivery unknown; no resend until reconciled."
+        "say": "Reports the move done and the notice text's outcome unknown (timed out before a provider result), never submitted or sent; no resend until reconciled."
       },
       "forbidden": [
         "a different visit of the same customer moved",

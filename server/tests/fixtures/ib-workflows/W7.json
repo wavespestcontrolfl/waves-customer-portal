@@ -250,8 +250,8 @@
           "sms_log[sent rows]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Uses the queued-message cancel for the staff-scheduled text; confirms it did not send."
+        "card": true,
+        "say": "Proposes the queued-message cancel on a confirmation card; after confirm the staff-scheduled text is canceled and the bar confirms it did not send."
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",
@@ -303,7 +303,7 @@
         ],
         "sends": 1,
         "card": true,
-        "say": "Says submitted with delivery unknown; refuses to resend until reconciled; reconciliation then reports the real status."
+        "say": "Says the text's outcome is unknown (the call timed out before a provider result), never that it was submitted or sent; refuses to resend until reconciled; reconciliation then reports the real status."
       },
       "forbidden": [
         "a superseded draft sent (an earlier draft in the same conversation)",

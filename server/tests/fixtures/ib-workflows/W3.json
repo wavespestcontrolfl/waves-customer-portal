@@ -17,7 +17,7 @@
   },
   "fixtures": {
     "murphy-leads": "Four Murphy leads (murphy-lead-1 to 4); murphy-lead-3 has no first name, a phone ending 0142 and no linked customer; murphy-lead-4 also has no first name but is linked to a customer; leads 1 and 2 have first names. Three Murphy customers (cust-murphy-a, b, c) with distinct phones.",
-    "murphy-customers": "cust-murphy-a (phone ending 0111, email on file) and cust-murphy-b (phone ending 0222), same street name different numbers.",
+    "murphy-customers": "cust-murphy-a (phone ending 0111, email on file, a pending newsletter opt-in row for that email) and cust-murphy-b (phone ending 0222, a pending newsletter opt-in row for its email), same street name different numbers.",
     "lead-single": "One lead, lead-ostrander, with a last name only."
   },
   "required_corrections": {
@@ -267,12 +267,37 @@
           "page": "/admin/customers (customer detail) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "Yes, confirm it.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].email = murphy.test@example.invalid",
+              "newsletter_subscribers[cust-murphy-a pending opt-in].email = murphy.test@example.invalid",
+              "newsletter_subscribers[cust-murphy-a pending opt-in].confirmation_token and unsubscribe_token = rotated (old tokens no longer resolve)",
+              "opt-in confirmation email = re-sent once to murphy.test@example.invalid with the fresh token"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-a].phone",
+              "customers[other Murphy]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "After confirm: the email changes, the pending opt-in follows it with fresh tokens, and one opt-in confirmation goes to the new address; receipt shown."
+          },
+          "forbidden": [
+            "an opt-in email to the old address",
+            "an old confirmation or unsubscribe token still resolving",
+            "a change to the other Murphy"
+          ]
+        }
+      ],
       "tags": [],
       "covers": [
         "W3-C3"
       ],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W3-dev-06",
@@ -420,10 +445,32 @@
           "page": "/admin/customers (customer detail) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "Go ahead.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "leads[murphy-lead-3].pipeline_stage = estimate sent",
+              "leads[murphy-lead-3].stage timestamps = canonical lifecycle stamps for estimate sent"
+            ],
+            "unchanged": [
+              "leads[murphy-lead-1, 2, 4]",
+              "customers[*]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "After confirm the stage changes with its lifecycle stamps and a receipt."
+          },
+          "forbidden": [
+            "a stage change on another Murphy lead",
+            "a stage value outside the pipeline list"
+          ]
+        }
+      ],
       "tags": [],
       "covers": [],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W3-dev-09",
@@ -699,12 +746,37 @@
           "page": "/admin/customers (customer detail) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "Looks right, save it.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-b].email = pat.test@example.invalid",
+              "newsletter_subscribers[cust-murphy-b pending opt-in].email = pat.test@example.invalid",
+              "newsletter_subscribers[cust-murphy-b pending opt-in].confirmation_token and unsubscribe_token = rotated (old tokens no longer resolve)",
+              "opt-in confirmation email = re-sent once to pat.test@example.invalid with the fresh token"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-b].phone",
+              "customers[other Murphy]"
+            ],
+            "sends": 1,
+            "card": true,
+            "say": "After confirm: the email changes, the pending opt-in follows it with fresh tokens, and one opt-in confirmation goes to the new address; receipt shown."
+          },
+          "forbidden": [
+            "an opt-in email to the old address",
+            "an old confirmation or unsubscribe token still resolving",
+            "a change to the other Murphy"
+          ]
+        }
+      ],
       "tags": [],
       "covers": [
         "W3-C3"
       ],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W3-held-05",

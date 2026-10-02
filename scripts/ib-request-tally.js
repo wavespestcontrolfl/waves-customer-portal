@@ -24,10 +24,11 @@
  * Limits to keep in mind when reading the numbers:
  *   - one row per bar turn; tool_calls holds the tools called in that turn, so
  *     tool counts are not request counts
- *   - operator_id is a nullable column the bar route does not populate today,
- *     so expect a single "(none)" operator unless that changes
- *   - public estimate Q&A rows share the table and appear as the tool
- *     public_estimate_ask; ignore them for workflow ranking
+ *   - operator_id is written by the bar route since #5591 (October 2, 2026);
+ *     turns before that show as the "(none)" operator
+ *   - public estimate Q&A rows share the table (a turn that called
+ *     public_estimate_ask); they are customer traffic, not operator turns, and
+ *     are left out of every count here
  *   - tool_health_events records a carded write when it is PROPOSED (and a
  *     read when it runs); the write that runs after Confirm records no health
  *     event. Confirmed-write failures (a rejected text, a stale write, a
@@ -40,6 +41,8 @@ require('dotenv').config();
 const DEFAULT_DAYS = 14;
 const MAX_DAYS = 365;
 const HEALTH_SOURCES = ['intelligence-bar', 'tech-intelligence-bar'];
+// Customer estimate questions share intelligence_bar_queries; drop those turns.
+const NOT_PUBLIC_ESTIMATE = `not (jsonb_typeof(q.tool_calls) = 'array' and q.tool_calls @> '[{"name": "public_estimate_ask"}]'::jsonb)`;
 
 // Neither statement names the prompt or response columns.
 const CALLS_SQL = `
@@ -57,6 +60,7 @@ const CALLS_SQL = `
     case when jsonb_typeof(q.tool_calls) = 'array' then q.tool_calls else '[]'::jsonb end
   ) as tc(elem)
   where q.created_at >= now() - make_interval(days => ?)
+    and ${NOT_PUBLIC_ESTIMATE}
     and jsonb_typeof(tc.elem) = 'object'
     and tc.elem ->> 'name' is not null
   group by 1, 2, 3
@@ -77,6 +81,7 @@ const TURNS_SQL = `
     ))::int as turns_without_tools
   from intelligence_bar_queries q
   where q.created_at >= now() - make_interval(days => ?)
+    and ${NOT_PUBLIC_ESTIMATE}
   group by 1, 2
   order by 1, 2
 `;
@@ -243,7 +248,7 @@ async function main() {
   }
 }
 
-module.exports = { parseArgs, summarize, formatText, classifyConfirmed, CALLS_SQL, TURNS_SQL, FAILURES_SQL, CONFIRMED_SQL, HEALTH_SOURCES, DEFAULT_DAYS };
+module.exports = { NOT_PUBLIC_ESTIMATE, parseArgs, summarize, formatText, classifyConfirmed, CALLS_SQL, TURNS_SQL, FAILURES_SQL, CONFIRMED_SQL, HEALTH_SOURCES, DEFAULT_DAYS };
 
 if (require.main === module) {
   main().catch((err) => {

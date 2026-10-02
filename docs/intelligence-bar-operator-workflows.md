@@ -64,7 +64,7 @@ A recovery tag describes a step that happens: `pre_exec_change` needs a follow-u
 | --- | --- | --- | --- |
 | W1 | 9 / 1 | 8 / 2 | 0 |
 | W2 | 8 / 2 | 8 / 2 | 0 |
-| W3 | 6 / 4 | 6 / 4 | 0 |
+| W3 | 8 / 2 | 7 / 3 | 0 |
 | W4 | 6 / 4 | 6 / 4 | 0 |
 | W5 | 5 / 5 | 4 / 6 | 0 |
 | W6 | 7 / 3 | 6 / 4 | 0 |

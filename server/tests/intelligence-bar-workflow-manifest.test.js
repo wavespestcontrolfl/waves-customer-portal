@@ -374,6 +374,11 @@ describe('request tally script', () => {
     }
   });
 
+  test('public estimate Q&A turns are left out of the call and turn counts', () => {
+    for (const sql of [tally.CALLS_SQL, tally.TURNS_SQL]) expect(sql).toContain(tally.NOT_PUBLIC_ESTIMATE);
+    expect(tally.NOT_PUBLIC_ESTIMATE).toMatch(/public_estimate_ask/);
+  });
+
   test('arguments: default window, --days and --json, bad input refused', () => {
     expect(tally.parseArgs([])).toEqual({ days: 14, json: false, help: false });
     expect(tally.parseArgs(['--days', '30', '--json'])).toEqual({ days: 30, json: true, help: false });
