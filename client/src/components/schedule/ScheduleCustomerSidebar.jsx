@@ -379,7 +379,7 @@ export default function ScheduleCustomerSidebar({
             {phone && (
               <div>
                 <div className="u-label text-ink-tertiary mb-1">Phone</div>
-                <CallBridgeLink phone={phone} customerName={service.customerName} className="text-14 text-zinc-900 hover:underline">
+                <CallBridgeLink phone={phone} customerId={service.customerId} customerName={service.customerName} className="text-14 text-zinc-900 hover:underline">
                   {phone}
                 </CallBridgeLink>
               </div>

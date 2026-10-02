@@ -1643,7 +1643,7 @@ function Pipeline({
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({ to: c.phone }),
+                                  body: JSON.stringify({ to: c.phone, customerId: c.id }),
                                 },
                               );
                               if (!r?.success)
@@ -2122,7 +2122,7 @@ function CustomerDrawer({
                     // client-side GBP number would 400.
                     const r = await adminFetch("/admin/communications/call", {
                       method: "POST",
-                      body: JSON.stringify({ to: c.phone }),
+                      body: JSON.stringify({ to: c.phone, customerId: c.id }),
                     });
                     if (!r?.success) {
                       showToast(
