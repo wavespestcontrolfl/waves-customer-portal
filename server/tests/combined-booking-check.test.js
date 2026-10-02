@@ -249,6 +249,27 @@ describe('visit prices', () => {
     expect(plan.prices.get('pest_control')).toBe(150);
   });
 
+  test('the billed service price is compared: primary_line_price when stamped; add-ons or a discount skip the visit', () => {
+    const lawn = priced(lawnRows(), 175).map((row, i) => {
+      if (i === 1) return { ...row, primary_line_price: 100 }; // $100 service + $75 add-on total: correct
+      if (i === 2) return { ...row, has_addons: true }; // add-ons, no primary stamp: not readable, skipped
+      if (i === 3) return { ...row, estimated_price: 90, line_discount_amount: 10 }; // discounted: skipped
+      if (i === 4) return { ...row, estimated_price: 90, discount_id: 'disc-1' };
+      return { ...row, estimated_price: 100 };
+    });
+    expect(verdictFor(priced(pestRows(), 150), lawn).ok).toBe(true);
+    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), wrongPrimary))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+  });
+
+  test('a name-only combined route (no catalog row) is read as both of its services', () => {
+    const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30 };
+    const combo = lawnRows().map((row) => ({ ...row, catalog_service_key: null, service_type: 'Lawn + Tree & Shrub Service',
+      ...(row.recurring_parent_id ? { estimated_price: 100 } : {}) }));
+    const verdict = evaluateCombinedBooking({ estimate: estimate([PEST, LAWN, tree]), rows: [...priced(pestRows(), 150), ...combo] });
+    expect(texts(verdict)).toEqual(['5 lawn visits priced $100.00, accepted $160.00', '5 T&S visits priced $100.00, accepted $160.00']);
+  });
+
   test('a prepay term link with no live prepaid amount (a voided term keeps the link) is still price-checked', () => {
     const lawn = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, annual_prepay_term_id: 'term-voided' } : row));
     expect(codes(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['price_mismatch']);

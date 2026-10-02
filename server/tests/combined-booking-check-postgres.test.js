@@ -499,6 +499,31 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a name-only combined-route series (no catalog row) is a price candidate too', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30, perTreatment: 60, catalog: 'tree_shrub_bimonthly' };
+      const est = await acceptedEstimate(trx, [...lines, tree]);
+      await trx('estimates').where({ id: est.estimateId }).update({ annual_total: 1560, monthly_total: 130 });
+      await repair(trx, est);
+      const rows = await rowsOf(trx, est.estimateId);
+      await trx('scheduled_services').whereIn('id', rows.filter((row) => !/lawn/i.test(row.service_type)).map((row) => row.id)).del();
+      const lawnIds = rows.filter((row) => /lawn/i.test(row.service_type)).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds)
+        .update({ service_id: null, service_key_snapshot: null, service_type: 'Lawn + Tree & Shrub Service' });
+      const child = rows.find((row) => row.recurring_parent_id && lawnIds.includes(row.id));
+      await trx('scheduled_services').where({ id: child.id }).update({ estimated_price: 100, primary_line_price: null });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/priced \$100\.00, accepted \$160\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a booking that kept an existing series for one service is still price-checked on the new one', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

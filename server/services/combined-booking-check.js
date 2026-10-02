@@ -192,19 +192,24 @@ function acceptedFamilies(estimate) {
   return acceptedPlan(estimate)?.families || null;
 }
 
-// The catalog keys of combined routes that perform two services (from the
-// converter's own route table; the bait + bond routes are one service plus a
-// rider).
-function multiServiceRouteKeys() {
+// The combined routes that perform two services (from the converter's own
+// route table; the bait + bond routes are one service plus a rider), by
+// catalog key and by name: when the catalog row is missing the converter
+// schedules the combined route by its name alone (no service_id, no key).
+function multiServiceRoutes() {
   const converter = require('./estimate-converter');
-  return [...new Set(converter.COMBINED_SERVICE_ROUTES.map((route) => route.catalogServiceKey)
-    .filter((key) => converter.comboRouteFamiliesFromCatalogKey(key).length >= 2))];
+  return converter.COMBINED_SERVICE_ROUTES
+    .filter((route) => converter.comboRouteFamiliesFromCatalogKey(route.catalogServiceKey).length >= 2);
 }
+const multiServiceRouteKeys = () => [...new Set(multiServiceRoutes().map((route) => route.catalogServiceKey))];
+const multiServiceRouteNames = () => [...new Set(multiServiceRoutes().map((route) => route.name))];
 
 /** Service families a scheduled row performs (a combined route spans two). */
 function rowFamilies(row) {
   const converter = require('./estimate-converter');
-  const identity = row.catalog_service_key || row.service_key_snapshot;
+  // A name-only combined route (no catalog row) is read through its route.
+  const byName = multiServiceRoutes().find((route) => route.name === row.service_type);
+  const identity = row.catalog_service_key || row.service_key_snapshot || byName?.catalogServiceKey;
   const families = converter.comboRouteFamiliesFromCatalogKey(identity);
   return families.length ? families
     : [converter.seedingFamilyKey({ service: identity, name: row.service_type })];
@@ -252,7 +257,7 @@ function checkTimeAndTech(dated, families, { firstDay, byId, todayET }) {
 function checkPrices(dated, families, prices) {
   const off = new Map();
   for (const row of dated) {
-    const price = Number(row.estimated_price);
+    const price = billedServicePrice(row);
     if (!row.recurring_parent_id || row.is_recurring === false || !(price > 0)) continue;
     // Fully covered by a prepayment (markPrepayCovered): its price never bills.
     if (row.prepay_covered) continue;
@@ -279,6 +284,19 @@ function checkPrices(dated, families, prices) {
     const priced = seen.size === 1 ? [...seen.keys()][0] : [...seen].map(([amount, n]) => `${amount} x${n}`).join(', ');
     return { code: 'price_mismatch', families: [family], earliest, text: `${count} ${lowerLabel(family)} visits priced ${priced}, accepted ${money(expected)}` };
   });
+}
+
+// The service charge a visit bills, the way invoicing builds it
+// (invoice.js: primary_line_price when stamped, else the visit price): null
+// when that cannot be read on its own, that is, the visit carries add-ons
+// (row.has_addons, so estimated_price is the appointment total) or any
+// line / appointment discount (it cannot be apportioned to the service).
+function billedServicePrice(row) {
+  const discounted = row.line_discount_id || Number(row.line_discount_amount) > 0 || Number(row.line_discount_dollars) > 0
+    || row.discount_id || Number(row.discount_amount) > 0 || Number(row.discount_dollars) > 0;
+  if (row.has_addons || discounted) return null;
+  const primary = row.primary_line_price;
+  return primary != null && primary !== '' ? Number(primary) : Number(row.estimated_price);
 }
 
 /**
@@ -438,6 +456,11 @@ async function loadContext(conn, estimate) {
     .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   await markPrepayCovered(conn, rows);
+  // A visit with add-ons: its estimated_price is the appointment total, not the service.
+  const withAddons = rows.length ? new Set((await conn('scheduled_service_addons')
+    .whereIn('scheduled_service_id', rows.map((row) => row.id)).distinct('scheduled_service_id'))
+    .map((addon) => String(addon.scheduled_service_id))) : new Set();
+  for (const row of rows) row.has_addons = withAddons.has(String(row.id));
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,
@@ -636,9 +659,9 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
                   WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2
                   OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id
                     WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
-                      AND COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?))
+                      AND (COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?) OR r.service_type = ANY(?)))
                   OR EXISTS (SELECT 1 FROM activity_log a WHERE a.customer_id = e.customer_id
-                    AND a.action = 'recurring_series_skipped' AND a.metadata->>'estimateId' = e.id::text))`, [multiServiceRouteKeys()]));
+                    AND a.action = 'recurring_series_skipped' AND a.metadata->>'estimateId' = e.id::text))`, [multiServiceRouteKeys(), multiServiceRouteNames()]));
             }
           });
       });
