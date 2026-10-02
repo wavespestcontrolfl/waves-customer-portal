@@ -1022,6 +1022,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     // sized for the missed service, not the engine default
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Mosquito Control' });
     expect(result.factsBlock).toContain('- MISSED VISIT: the Mosquito Control visit');
+    expect(result.factsBlock).toContain('then offer the earliest OPEN TIMES slot (the OPEN TIMES are for this service)');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the missed visit IS the job: no service-identity model call
     expect(dispatchWithFallback.mock.calls.some(([, payload]) => payload?.laneId === 'sms_service_identity')).toBe(false);
@@ -1061,6 +1062,44 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       // either answer sizes the times for the missed service, never the upcoming lawn visit
       expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Mosquito Control' });
     }
+  });
+
+  test('gate on: an explicit request to move an UNRELATED upcoming visit gets that visit\'s times, and the miss is routed to the SLA, never offered them (pre-push audit P1, #5610 r2)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-10-05', fullDate: 'Monday, October 5', slots: [{ startTime24: '09:00' }] }],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async (policy, payload) => {
+        if (payload?.laneId === 'sms_service_identity') {
+          // the model picks the lawn visit the text names
+          const lawnId = /^(\S+): Lawn Care/m.exec(payload.text)[1];
+          return { ok: true, json: { about: 'visit', visit: lawnId, service: null } };
+        }
+        return { ok: true, text: JSON.stringify({ reply: 'Sure.', intended_actions: [], missing_info: null }), model: 'fixture-model' };
+      }),
+    }));
+    jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: {
+        summary: 'Test customer', customer: { id: 'cust-1' },
+        upcomingServices: [{ type: 'Lawn Care', date: '2026-10-20', scheduledServiceId: 'visit-lawn' }],
+        visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+      },
+      inboundMessage: 'Can I move my lawn visit on the 20th?',
+      intent: { intent: 'service_scheduling_window_reply' }, schedulingIntent: true, city: 'Venice', voiceProfile: null,
+    });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Lawn Care' });
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+    expect(result.factsBlock).toContain('- MISSED VISIT: the Mosquito Control visit');
+    expect(result.factsBlock).toContain('then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised (no OPEN TIMES here are for this service: never offer times for it)');
+    expect(result.factsBlock).not.toContain('the OPEN TIMES are for this service');
   });
 
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {

@@ -4336,7 +4336,7 @@ LABEL FACTS (product timing from the label):
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
-- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging). Offer a specific time from OPEN TIMES for it (declared in offered_times) ONLY when its line says the OPEN TIMES are for that service; otherwise never offer OPEN TIMES for the missed visit — say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4559,12 +4559,19 @@ function visitLoopPastWindowLine(past) {
 }
 // A logged customer no-show nobody followed up (visit-loops-facts loadMissedVisit):
 // the service and the day/window that were missed, as frozen when it was logged.
-function visitLoopMissedLine(missed) {
+// timesForMiss: the OPEN TIMES in this block were fetched FOR the missed service
+// (generateGroundedDraft: identity reason 'missed_visit' and a non-empty block).
+// Otherwise any OPEN TIMES are sized for another job — offered_times checks the
+// day and window, not the service — so the line routes the miss to the SLA.
+function visitLoopMissedLine(missed, { timesForMiss = false } = {}) {
   if (!missed || typeof missed !== 'object') return null;
   const type = visitLoopText(missed.type, 60) || 'visit';
   const date = visitLoopText(formatEtDate(missed.date), 40);
   const win = visitLoopText(missed.windowDisplay, 40);
-  return `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and not yet rebooked — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology`;
+  const what = `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and not yet rebooked — apologize once, `;
+  return timesForMiss
+    ? `${what}then offer the earliest OPEN TIMES slot (the OPEN TIMES are for this service); never point them to a visit weeks out without an apology`
+    : `${what}then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised (no OPEN TIMES here are for this service: never offer times for it)`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
@@ -4645,12 +4652,12 @@ function visitLoopStatus(context, factsBlock) {
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
 // header, then one line per present field, or the single line "- none", then the
 // fixed MISSED_VISIT_SCOPE_LINE. Pure.
-function renderVisitLoopsSection(visitLoops) {
+function renderVisitLoopsSection(visitLoops, { timesForMiss = false } = {}) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const lines = [
     visitLoopLateLine(v.lateAlert),
     visitLoopPastWindowLine(v.pastWindow),
-    visitLoopMissedLine(v.missedVisit),
+    visitLoopMissedLine(v.missedVisit, { timesForMiss }),
     // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);
@@ -4716,7 +4723,7 @@ function buildFactsBlock(context, extras = {}) {
   // sms-company-facts all trust the exact "...SLA\nFREE RE-SERVICE\n[COMPANY
   // FACTS][LABEL FACTS]BILLING:" tail, so nothing may be inserted there.
   const visitLoopsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? renderVisitLoopsSection(context.visitLoops)
+    ? renderVisitLoopsSection(context.visitLoops, { timesForMiss: extras.missedOpenTimes === true && Boolean(extras.openTimesBlock) })
     : '';
   // LABEL FACTS (owner ruling 2026-09-30), gate-on only, and only when the
   // fetch found verified label timing for the last visit's products.
@@ -5490,7 +5497,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
+  // the OPEN TIMES were sized for the missed visit (missedVisitIdentity), not another job
+  const missedOpenTimes = identity.reason === 'missed_visit';
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, missedOpenTimes, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
