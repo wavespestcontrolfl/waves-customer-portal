@@ -547,6 +547,15 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(record).not.toMatch(/new baby/);
   });
 
+  test('#5524 r8: the writer is never handed the treated-areas list to list', async () => {
+    mockTables.service_records = [{ structured_notes: JSON.stringify({ ...REPORT, areasTreated: ['Kitchen', 'Garage', 'Lanai'] }) }];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    const text = mockDispatch.mock.calls[0][1].text;
+    expect(text).not.toMatch(/Areas treated/);
+    expect(text).toContain('Moisture under the kitchen sink');
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);

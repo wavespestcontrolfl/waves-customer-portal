@@ -4657,8 +4657,11 @@ const ReviewService = {
       serviceRecordId, serviceDate, technicianId,
       // The record's own service type decides (it gates the termite rule),
       // never a sequence's cached type, on every touch.
-      serviceType: (serviceRecordId && await db("service_records").where({ id: serviceRecordId }).first("service_type")
-        .then((sr) => sr?.service_type || null).catch(() => null)) || serviceType,
+      serviceType: (serviceRecordId
+        ? await db("service_records").where({ id: serviceRecordId }).first("service_type")
+          .then((sr) => sr?.service_type || null).catch(() => null)
+        : await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type")
+          .then((ss) => ss?.service_type || null).catch(() => null)) || serviceType,
     };
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName

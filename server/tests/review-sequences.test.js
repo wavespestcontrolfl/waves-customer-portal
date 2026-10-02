@@ -4939,6 +4939,21 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Termite Inspection');
     });
 
+    test('#5524 r8: a cadence anchored to a scheduled visit drafts with that visit\'s own service type', async () => {
+      mockGates.reviewAskTechVoice = true;
+      const mock = makeMock({
+        customers: [{ id: 'tv-8', first_name: 'Ravi', last_name: 'P', phone: '+19410000089', nearest_location_id: 'venice' }],
+        scheduled_services: [{ id: 'ss-tv-8', customer_id: 'tv-8', service_type: 'Quarterly Pest Control', scheduled_date: new Date(), technician_id: null }],
+      });
+      db.mockImplementation(mock);
+      await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
+        sequenceId: 'seq-tv8', sequenceStep: 1, scheduledServiceId: 'ss-tv-8', serviceType: 'Termite Inspection', // stale cache
+      });
+      expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+      expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Quarterly Pest Control');
+    });
+
     test('#5524 r5: a cadence with no visit of its own never calls the writer (fixed copy), even when the customer has recent visits', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({

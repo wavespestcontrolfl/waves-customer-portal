@@ -386,14 +386,15 @@ const TECH_VOICE_SMS_HISTORY = 20;
 const TECH_VOICE_MAX_EMAILS = 4;
 const TECH_VOICE_EMAIL_CHARS = 300;
 // Service-report fields the writer may use. Products, inventory, billing and
-// closeout bookkeeping are never read.
+// closeout bookkeeping are never read, and neither is the treated-areas list:
+// review texts never list treated areas (owner ruling 2026-10-01), so the
+// writer is not handed one to list.
 const REPORT_FIELDS = [
   ["customerRecap", "Recap"],
   ["customerConcernText", "Customer's concern"],
   ["observations", "Observations"],
   ["customerInteraction", "Conversation with the customer"],
   ["techTips", "Tech tips"],
-  ["areasTreated", "Areas treated"],
   ["visitOutcome", "Visit outcome"],
 ];
 const OFFICE_PHRASE_RE = /questions\?\s*just reply|reply if anything|we value your feedback|means the world|don'?t hesitate|at your earliest convenience|thanks? (?:you )?for choosing|hope all is well/i;
