@@ -412,7 +412,13 @@ function readWholeWords(tokens, i) {
 
 function readWhole(tokens, i) {
   if (DIGITS_RE.test(tokens[i] || '')) return { value: Number(tokens[i]), next: i + 1 };
-  return readWholeWords(tokens, i);
+  const head = isArticle(tokens[i]) && tokens[i + 1] === 'thousand' ? { value: 1, next: i + 1 } : readWholeWords(tokens, i);
+  // "one thousand two hundred": the thousands and the rest are one number
+  if (!head || tokens[head.next] !== 'thousand') return head;
+  let j = head.next + 1;
+  if (tokens[j] === 'and') j += 1;
+  const rest = readWholeWords(tokens, j);
+  return rest ? { value: head.value * 1000 + rest.value, next: rest.next } : { value: head.value * 1000, next: head.next + 1 };
 }
 
 // A fraction at tokens[i]: "1/2", "½", "half", "a half", "a quarter".

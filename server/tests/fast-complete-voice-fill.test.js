@@ -1331,3 +1331,10 @@ describe('Codex #5580 round 8', () => {
     expect(out.unclear.map((u) => u.reason)).toContain('product_said_not_filled');
   });
 });
+
+test.each([['one thousand two hundred', 1200], ['two thousand', 2000], ['a thousand and fifty', 1050]])('"%s linear feet" is %p, never its tail', (words, feet) => {
+  const t = `Sprayed ${words} linear feet outside.`;
+  const run = (linearFt) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard: t.replace(/\.$/, '') }) }), ctx, t).visit.linearFt;
+  expect(run(feet)).toBe(feet);
+  if (feet % 1000) expect(run(feet % 1000)).toBeNull();
+});
