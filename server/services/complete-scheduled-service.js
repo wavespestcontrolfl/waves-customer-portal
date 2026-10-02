@@ -6906,9 +6906,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
               || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
-                .where({ scheduled_service_id: svc.id })
-                .first()));
+              // A report-flow completion counts only the trace it judged
+              // (traceSeen): one it never saw drives no exterior timer
+              // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
+                const row = await sp('treatment_zone_maps')
+                  .where({ scheduled_service_id: svc.id })
+                  .first();
+                return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);
+              });
             } catch (traceErr) {
               // Only the EXPECTED missing-table case means "no trace". Any
               // other failure (timeout, permissions) fails CLOSED by

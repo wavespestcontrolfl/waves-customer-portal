@@ -401,6 +401,23 @@ describe('the shared exterior-zone resolver honors the verdict', () => {
     expect(await zoneFor('Termite Bait Quarterly')).toBe(true);
   });
 
+  test('a report-flow record counts only the trace it was judged against, on every surface (Codex #5538)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    const zone = (structuredNotes) => resolveTracedExteriorZone(
+      { scheduled_service_id: 'sched-trace-1', service_type: 'Quarterly Pest Control', service_data: '{}', structured_notes: JSON.stringify(structuredNotes) },
+      stubKnex({
+        treatment_zone_maps: [TRACED_ROW],
+        scheduled_services: [{ id: 'sched-trace-1', service_id: null, service_type: 'Quarterly Pest Control' }],
+      }),
+    );
+    // Judged with no trace (a gate-dark trace kept from before), or another.
+    expect(await zone({ traceJudged: { seen: null } })).toBe(false);
+    expect(await zone({ traceJudged: { seen: '2026-09-01T12:00:00Z' } })).toBe(false);
+    expect(await zone({ traceJudged: { seen: TRACED_ROW.updated_at } })).toBe(true);
+    // Any other record counts its trace as before.
+    expect(await zone({})).toBe(true);
+  });
+
   test('gate on: ineligible lanes lose the exterior claim, eligible lanes keep it', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     expect(await zoneFor('Termite Bait Quarterly')).toBe(false);

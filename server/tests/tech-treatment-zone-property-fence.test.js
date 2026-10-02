@@ -119,6 +119,15 @@ describe('treatment-zone save bound to the loaded property', () => {
     });
   });
 
+  test('only the report flow asks for an open visit; the Zone action may still trace a completed one (Codex #5538)', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await saveTrace(baseUrl, { expectedPropertyId: 'prop-2', openVisitOnly: true })).status).toBe(200);
+      expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ expectedPropertyId: 'prop-2', openVisitOnly: true }));
+      expect((await saveTrace(baseUrl, { expectedPropertyId: 'prop-2' })).status).toBe(200);
+      expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ expectedPropertyId: 'prop-2', openVisitOnly: false }));
+    });
+  });
+
   test('a visit with no property matches a sheet that loaded none', async () => {
     mockFirst.mockImplementation(async () => ({
       id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', service_id: 'cat-1', service_type: 'Quarterly Pest Control', property_id: null,
@@ -195,6 +204,11 @@ describe('the completion re-checks the trace the report was judged against (Code
     expect(block).toContain('...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),');
     const report = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
     expect(report).toMatch(/if \(tracedRow\?\.snapshot_s3_key && PhotoService\s*\n\s*&& require\('\.\.\/treatment-zone-maps'\)\.traceJudgedAllows\(structured, tracedRow\)\) \{/);
+  });
+
+  test('the completion counts only the trace it judged as exterior evidence (Codex #5538)', () => {
+    expect(block).toContain("const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};");
+    expect(block).toContain("return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);");
   });
 
   test('a changed trace answers 409 trace_changed and marks the attempt failed', () => {
