@@ -13,7 +13,8 @@ import {
 } from '../schedule/PromiseCheck';
 import { Chip, ChoiceSection } from './FastCompleteParts';
 import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
-import { Button, Field, Input, Textarea, cn } from '../ui';
+import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
+import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -141,6 +142,89 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
         {count ? 'Add or view photos' : 'Add photos'}
       </Button>
     </section>
+  );
+}
+
+// Photos in the note's box (GATE_NOTE_BOX_PHOTOS, owner "ok go" 2026-10-02
+// on the Fast Complete mockup v8, call 10): the visit's photos sit in the
+// note's box, each with its description, through the office form's own
+// NoteBoxPhotos. These photos are already staged on the visit (the photo
+// manager adds them), so a description is saved and a photo removed on the
+// server (PATCH / DELETE /tech/services/:id/photos/:photoId) and then read
+// again; a removal asks first, as the file is deleted for good. `onHold`
+// tells the sheet what holds the report meanwhile: an open description, a
+// change being saved, or a removal waiting for its answer.
+const NOTE_PHOTO_PALETTE = {
+  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#ef4444', onDanger: '#fff',
+};
+const NOTE_PHOTO_ERRORS = {
+  photo_caption_banned_copy: 'That description has wording we can’t put on a customer’s report. Describe the photo in other words.',
+  visit_completed: 'This visit is completed; its photos are on the report.',
+  photo_not_found: 'That photo is no longer on this visit.',
+};
+
+export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd, onChanged, onHold }) {
+  const [describing, setDescribing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(null);
+  const [error, setError] = useState('');
+  const hold = (saving && 'Saving the photo change…')
+    || (describing && 'Save or cancel the photo description first.')
+    || (removing && 'Remove the photo or keep it first.')
+    || '';
+  useEffect(() => { onHold(hold); }, [hold, onHold]);
+  useEffect(() => () => onHold(''), [onHold]);
+  // One change at a time; true once the server took it. Either way the box
+  // reads the visit's photos again, so it shows what the visit holds.
+  const change = async (photo, options) => {
+    if (!photo?.id) return false;
+    setSaving(true);
+    setError('');
+    try {
+      await request(`/tech/services/${serviceId}/photos/${photo.id}`, options);
+      return true;
+    } catch (err) {
+      setError(NOTE_PHOTO_ERRORS[err?.code] || 'Couldn’t save the photo change. Try again.');
+      return false;
+    } finally {
+      setSaving(false);
+      onChanged();
+    }
+  };
+  return (
+    <>
+      <NoteBoxPhotos
+        photos={photos}
+        disabled={disabled || saving || !!removing}
+        palette={NOTE_PHOTO_PALETTE}
+        dictationServiceId={serviceId}
+        onAdd={onAdd}
+        onEditingChange={setDescribing}
+        onCaption={(index, caption) => change(photos[index], { method: 'PATCH', body: JSON.stringify({ caption }) })}
+        onRemove={(index) => { setError(''); setRemoving(photos[index] || null); }}
+      />
+      {(removing || error) && (
+        <div className="tech-note-photo-after">
+          {removing && (
+            <div className="tech-note-photo-confirm" role="group" aria-label="Remove photo">
+              <p className="tech-visit-muted">Remove this photo? It’s deleted from the visit for good.</p>
+              <div className="tech-note-photo-confirm-actions">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="tech-visit-action"
+                  onClick={() => { const photo = removing; setRemoving(null); change(photo, { method: 'DELETE' }); }}
+                >
+                  Remove photo
+                </Button>
+                <Button type="button" variant="secondary" className="tech-visit-action" onClick={() => setRemoving(null)}>Keep</Button>
+              </div>
+            </div>
+          )}
+          {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
+        </div>
+      )}
+    </>
   );
 }
 

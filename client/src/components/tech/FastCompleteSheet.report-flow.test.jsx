@@ -61,7 +61,7 @@ const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], p
 function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
-  promises = { available: false, promises: [] }, blog = { available: false, posts: [] },
+  promises = { available: false, promises: [] }, blog = { available: false, posts: [] }, photoChange = () => ({}),
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -72,6 +72,7 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.split('?')[0].endsWith('/blog-posts')) return typeof blog === 'function' ? blog(path) : blog;
+    if (/\/photos\/[^/]+$/.test(path)) return photoChange(path, options);
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
     if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace(path, options) : trace;
     if (path === '/admin/schedule/generate-report') {
@@ -1008,5 +1009,92 @@ describe('perimeterFeetOf', () => {
     expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'lawn_highlight' })).toBeNull();
     expect(perimeterFeetOf({ linear_ft: 0, capture_mode: 'perimeter' })).toBeNull();
     expect(perimeterFeetOf(null)).toBeNull();
+  });
+});
+
+describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
+  const NOTE_BOX = { ...SERVICE, noteBoxPhotosEnabled: true };
+  const PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+  // The visit's staged photos, as the server holds them: a description or a
+  // removal changes them, and the next read shows it.
+  function stagedPhotos() {
+    const stored = [{ id: 'ph-1', url: PIXEL, caption: 'Counter edge' }, { id: 'ph-2', url: PIXEL, caption: '' }];
+    return {
+      stored,
+      photos: () => ({ photos: stored.map((photo) => ({ ...photo })) }),
+      photoChange: (path, options) => {
+        const id = path.split('/').pop();
+        const index = stored.findIndex((photo) => photo.id === id);
+        if (options?.method === 'DELETE') { stored.splice(index, 1); return { ok: true, id }; }
+        stored[index].caption = JSON.parse(options.body).caption;
+        return { photo: { ...stored[index], staged: true } };
+      },
+    };
+  }
+  const photoReads = (request) => request.calls.filter((call) => call.path === '/tech/services/svc-1/photos').length;
+
+  test('the photos sit in the note\'s box; a description is saved on the visit and the photos read again', async () => {
+    const staged = stagedPhotos();
+    const request = makeRequest({ photos: staged.photos, photoChange: staged.photoChange });
+    await openSheet(request, NOTE_BOX);
+    expect(await screen.findByText('Counter edge')).toBeTruthy();
+    // No separate photo section beside the box.
+    expect(screen.queryByRole('heading', { name: 'Photos' })).toBeNull();
+    const readsBefore = photoReads(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Ants along the slider track')).toBeTruthy();
+    const patch = request.calls.find((call) => call.path === '/tech/services/svc-1/photos/ph-2');
+    expect(patch.options.method).toBe('PATCH');
+    expect(patch.body).toEqual({ caption: 'Ants along the slider track' });
+    expect(photoReads(request)).toBeGreaterThan(readsBefore);
+    expect(screen.queryByLabelText('Description for photo 2')).toBeNull();
+  });
+
+  test('the report waits while a description is open', async () => {
+    const staged = stagedPhotos();
+    await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    expect(await screen.findByText('Save or cancel the photo description first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+  });
+
+  test('removing a photo asks first: Keep changes nothing, Remove photo deletes it from the visit', async () => {
+    const staged = stagedPhotos();
+    const request = makeRequest({ photos: staged.photos, photoChange: staged.photoChange });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    expect(screen.getByText('Remove this photo? It’s deleted from the visit for good.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    expect(request.calls.some((call) => call.options?.method === 'DELETE')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo' }));
+    await waitFor(() => expect(screen.queryByText('Counter edge')).toBeNull());
+    const removal = request.calls.find((call) => call.options?.method === 'DELETE');
+    expect(removal.path).toBe('/tech/services/svc-1/photos/ph-1');
+    expect(staged.stored.map((photo) => photo.id)).toEqual(['ph-2']);
+  });
+
+  test('a description the server refuses stays open with its words, and says why', async () => {
+    const staged = stagedPhotos();
+    const refused = Object.assign(new Error('Photo caption contains wording we can\'t put on a customer report (eliminated).'), {
+      status: 422, code: 'photo_caption_banned_copy',
+    });
+    const request = makeRequest({ photos: staged.photos, photoChange: () => { throw refused; } });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 1'), { target: { value: 'Ants eliminated from the counter' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText(/That description has wording we can’t put on a customer’s report/)).toBeTruthy();
+    expect(screen.getByLabelText('Description for photo 1').value).toBe('Ants eliminated from the counter');
+    expect(staged.stored[0].caption).toBe('Counter edge');
   });
 });

@@ -4,12 +4,20 @@
 // description is the photo's caption: it goes to the report writer with the
 // notes and prints under the photo on the customer's report. The AI photo
 // read ("Describe with AI") and its summary live here too, so the separate
-// photo section goes away.
+// photo section goes away. The tech's Fast Complete sheet uses it too
+// (FastCompleteReport.jsx TechNoteBoxPhotos), for photos already staged on
+// the visit: those carry an id and a URL instead of data, may have no limit,
+// and save a description on the server (onCaption answers a promise; the
+// editor closes once it resolves true and stays open with the words
+// otherwise).
 import React, { useEffect, useState } from 'react';
 import { Camera, Mic, MicOff } from 'lucide-react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 
 export const PHOTO_CAPTION_MAX_CHARS = 200;
+
+// A photo's identity: a staged photo's id, else the office form's data URL.
+const photoKey = (photo) => (photo ? (photo.id ?? photo.data ?? null) : null);
 
 export default function NoteBoxPhotos({
   photos,
@@ -33,19 +41,19 @@ export default function NoteBoxPhotos({
   // The open description: which photo, and a session count that remounts
   // its editor (and the editor's own mic) for every photo opened.
   const [editing, setEditing] = useState(null);
-  const [editingData, setEditingData] = useState(null);
+  const [editingKey, setEditingKey] = useState(null);
   const [session, setSession] = useState(0);
   const open = (index) => {
     if (disabled) return;
     setEditing(index);
-    setEditingData(photos[index]?.data ?? null);
+    setEditingKey(photoKey(photos[index]));
     setSession((n) => n + 1);
   };
   const close = () => setEditing(null);
   // A restored or discarded draft can replace the photos under an open
   // description: it closes rather than save onto, or wait on, a photo it was
   // not opened for (codex local r3 on #5589).
-  const isOpen = editing != null && photos[editing] != null && photos[editing].data === editingData;
+  const isOpen = editing != null && photos[editing] != null && photoKey(photos[editing]) === editingKey;
   useEffect(() => {
     if (editing != null && !isOpen) setEditing(null);
   }, [editing, isOpen]);
@@ -76,7 +84,7 @@ export default function NoteBoxPhotos({
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           {photos.map((photo, index) => (
             <PhotoThumb
-              key={photo.data ? `${index}-${photo.name}` : index}
+              key={photo.id ?? (photo.data ? `${index}-${photo.name}` : index)}
               photo={photo}
               index={index}
               disabled={disabled}
@@ -104,8 +112,12 @@ export default function NoteBoxPhotos({
           button={button}
           dictationServiceId={dictationServiceId}
           onSave={(caption) => {
-            onCaption(editing, caption);
-            close();
+            const saved = onCaption(editing, caption);
+            if (saved && typeof saved.then === 'function') {
+              saved.then((ok) => { if (ok) close(); });
+            } else {
+              close();
+            }
           }}
           onCancel={close}
         />
@@ -249,7 +261,7 @@ function PhotoThumb({ photo, index, disabled, palette, onOpen, onRemove }) {
         style={{ display: 'block', padding: 0, border: 'none', background: 'none', cursor: disabled ? 'default' : 'pointer', width: '100%', textAlign: 'left' }}
       >
         <img
-          src={photo.data}
+          src={photo.data || photo.url}
           alt={caption || photo.name || `Photo ${index + 1}`}
           style={{ width: 112, aspectRatio: '4 / 3', objectFit: 'cover', borderRadius: 8, border: `1px solid ${palette.border}`, display: 'block' }}
         />
@@ -338,13 +350,14 @@ function PhotoSummary({ summary, label, disabled, palette, button, onSummary, on
 // The notes box's photo actions: Add photo (up to the visit's limit),
 // "Describe with AI" once there are photos, and the tap-to-describe hint.
 function PhotoActions({ count, max, disabled, editing, button, palette, onAdd, onDescribeWithAi, describing }) {
-  const addOff = disabled || count >= max;
+  const limited = Number.isFinite(max);
+  const addOff = disabled || (limited && count >= max);
   const describeOff = disabled || describing;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
       <button type="button" onClick={onAdd} disabled={addOff} style={{ ...button, opacity: addOff ? 0.5 : 1 }}>
         <Camera size={15} strokeWidth={2.2} aria-hidden="true" />
-        {count ? `Add photo (${count}/${max})` : 'Add photo'}
+        {count && limited ? `Add photo (${count}/${max})` : 'Add photo'}
       </button>
       {count > 0 && onDescribeWithAi && (
         <button

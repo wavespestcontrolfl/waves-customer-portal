@@ -80,7 +80,7 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  BlogPostSection, PromisesSection, ReportCard, SentSummary, StepFooter, TraceSection, WritingView, customerHomeWriterLabel,
+  BlogPostSection, PromisesSection, ReportCard, SentSummary, StepFooter, TechNoteBoxPhotos, TraceSection, WritingView, customerHomeWriterLabel,
   factsHold, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
@@ -823,11 +823,12 @@ function reportCompletionBody({
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photosLoaded, promisesLoaded, stage, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, promisesLoaded, stage, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
+    [photoHold, photoHold],
     [!photosLoaded, 'Loading photos…'],
     [!promisesLoaded, 'Loading promises…'],
     [!active.length, 'Select at least one product.'],
@@ -993,7 +994,12 @@ function ReportFlowForm({
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
   const blog = useBlogPostOffer({ base, request });
-  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version });
+  // A description saved or a photo removed in the note's box reads the
+  // photos again, as closing the photo manager does.
+  const [photoReloads, setPhotoReloads] = useState(0);
+  const reloadPhotos = useCallback(() => setPhotoReloads((n) => n + 1), []);
+  const [photoHold, setPhotoHold] = useState('');
+  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads });
   const trace = useVisitTrace({ serviceId: service.id, request });
   const report = useReportDraft({ request, base });
   const { draft, writing } = report;
@@ -1009,7 +1015,7 @@ function ReportFlowForm({
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
-  const holdInputs = { form, active, ratingAllowed, dictationPending, photosLoaded: visitPhotos.loaded, promisesLoaded: visitPromises.loaded };
+  const holdInputs = { form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, promisesLoaded: visitPromises.loaded };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
@@ -1152,6 +1158,11 @@ function ReportFlowForm({
       visitPromises={visitPromises}
       photos={visitPhotos.photos}
       onPhotos={photos.open}
+      noteBoxPhotos={service.noteBoxPhotosEnabled === true}
+      request={request}
+      photoHold={photoHold}
+      onPhotoHold={setPhotoHold}
+      onPhotosChanged={reloadPhotos}
       locked={locked}
       dictationPending={dictationPending}
       onDictationPending={onDictationPending}
@@ -1235,6 +1246,7 @@ function ReportStep({
 function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
+  noteBoxPhotos, request, photoHold, onPhotoHold, onPhotosChanged,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -1262,7 +1274,22 @@ function VisitStep({
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
+              waits while a photo's description is open or a change is
+              saving, so one microphone records at a time. */}
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || !!photoHold}>
+            {noteBoxPhotos ? (
+              <TechNoteBoxPhotos
+                serviceId={service.id}
+                request={request}
+                photos={photos}
+                disabled={locked || dictationPending}
+                onAdd={onPhotos}
+                onChanged={onPhotosChanged}
+                onHold={onPhotoHold}
+              />
+            ) : null}
+          </VisitNote>
           {productsOpen ? (
             <ProductsSection
               products={products}
@@ -1280,7 +1307,7 @@ function VisitStep({
           )}
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
-          <PhotoStripSection photos={photos} locked={locked || dictationPending} onOpen={onPhotos} />
+          {!noteBoxPhotos && <PhotoStripSection photos={photos} locked={locked || dictationPending} onOpen={onPhotos} />}
           <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {ctx.rating.allowed && (
             <ActivitySection
