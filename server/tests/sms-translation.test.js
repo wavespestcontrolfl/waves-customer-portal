@@ -128,6 +128,12 @@ describe('runTranslationTrial', () => {
     expect(row.checks.thread_rows_translated).toBe(2);
   });
 
+  test('scheduling intent is read off the English translation', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Can we reschedule to Friday?' } });
+    await runTranslationTrial({ inboundMessage: '¿Podemos cambiar la cita al viernes?', customer, smsLogId: 's1' });
+    expect(mockDraft).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Can we reschedule to Friday?', schedulingIntent: true }));
+  });
+
   test('a draft that did not pass the English checks is held before any translation', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     mockDraft.mockResolvedValue({ parsed: { reply: REPLY }, converged: false, passes: 3 });

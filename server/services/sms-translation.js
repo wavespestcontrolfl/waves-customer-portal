@@ -242,7 +242,8 @@ async function recordTrial(row) {
   try {
     await db(TRIAL_TABLE).insert({ ...row, checks: row.checks ? JSON.stringify(row.checks) : null }).onConflict('sms_log_id').ignore();
   } catch (err) {
-    logger.warn(`[sms-translation] trial row not saved: ${err.message}`);
+    // never err.message: knex puts the bound values (the customer's words) in it
+    logger.warn(`[sms-translation] trial row not saved (sms_log ${row.sms_log_id}): ${err.code || err.name || 'error'}`);
   }
 }
 
@@ -250,7 +251,7 @@ async function recordTrial(row) {
  * Write one test answer for a customer text the English checks cannot read.
  * Never throws, never sends. Returns the verdict for logging/tests.
  */
-async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId, schedulingIntent = false }) {
+async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId }) {
   if (!trialEnabled() || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
   const startedAt = Date.now();
   const base = { sms_log_id: smsLogId, customer_id: customer.id, inbound_original: clip(inboundMessage), prompt_version: PROMPT_VERSION };
@@ -272,7 +273,9 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     if (!thread.ok) return await hold(`thread_translation_failed:${thread.reason}`.slice(0, 80), langFields);
     const { context } = thread;
     const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
+    // both read off the English: the webhook's own reads ran on the foreign text
     const intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
+    const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const drafter = require('./sms-shadow-drafter');
@@ -313,7 +316,7 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     logger.info(`[sms-translation] test answer ready (customer=${customer.id} language=${inbound.languageCode || inbound.language})`);
     return row;
   } catch (err) {
-    logger.warn(`[sms-translation] trial failed (customer=${customer.id}): ${err.message}`);
+    logger.warn(`[sms-translation] trial failed (customer=${customer.id}): ${err.code || err.name || 'error'}`);
     return hold('error');
   }
 }

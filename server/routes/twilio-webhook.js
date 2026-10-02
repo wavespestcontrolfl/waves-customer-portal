@@ -1566,8 +1566,7 @@ router.post('/sms', async (req, res) => {
           fromPhone: From,
           customer,
           smsLogId: smsLogEntry?.id || null,
-          schedulingIntent,
-        }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.message}`));
+        }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
