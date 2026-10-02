@@ -1050,6 +1050,16 @@ function hasUnknownShortWord(text, { namesExempt = false } = {}) {
   });
 }
 
+// Lowercase words a model's English output copied straight from the text it
+// translated without the lexicon knowing them ("We can come tomorrow if kesho
+// works" from "... kesho ..."): a word left untranslated, at any length. A
+// capitalized word (a name or product) is exempt.
+function untranslatedWords(text, source) {
+  const letters = (t) => [...stripMarks(canonText(t)).matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  const src = new Set(letters(source).map((w) => w.toLowerCase()));
+  return letters(text).filter((raw) => !/^\p{Lu}/u.test(raw) && raw.length > 2 && src.has(raw.toLowerCase()) && !englishKnown(raw.toLowerCase()));
+}
+
 function isPureReaction(text) {
   if (!REACTION_RE.test(text)) return false;
   const open = text.search(/[\u201c\u2018"']/);
@@ -1801,6 +1811,7 @@ module.exports = {
   isUnverifiedLanguageInbound,
   isEnglishInbound,
   hasUnknownShortWord,
+  untranslatedWords,
   nonEnglishTimingWords,
   labelFactsForInbound,
   parseReentryText,
