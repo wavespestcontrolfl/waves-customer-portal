@@ -243,7 +243,7 @@ describe('application method and area', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.find((p) => p.productId === 'headway')).toEqual({
-      productId: 'headway', applicationMethod: 'spot_treatment', totalAmount: 6, amountUnit: 'oz', targets: [],
+      productId: 'headway', applicationMethod: 'spot_treatment', totalAmount: 6, amountUnit: 'oz', targets: ['Dollarweed'],
     });
   });
 
@@ -274,7 +274,7 @@ describe('application method and area', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products[0]).toEqual({
-      productId: 'celsius', applicationMethod: 'broadcast_spray', totalAmount: 1.5, amountUnit: 'oz', targets: [], areaValue: 3200, areaUnit: 'sqft',
+      productId: 'celsius', applicationMethod: 'broadcast_spray', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'], areaValue: 3200, areaUnit: 'sqft',
     });
   });
 
@@ -304,7 +304,7 @@ describe('application method and area', () => {
     expect(areaInput('Celsius WG').value).toBe('6400');
     fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Spot treatment' }));
     const body = await completeBody(request);
-    expect(body.products[0]).toEqual({ productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: [] });
+    expect(body.products[0]).toEqual({ productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'] });
   });
 
   test('a context with no methods cannot complete a product (nothing is guessed)', async () => {
@@ -395,8 +395,8 @@ describe('the /complete body', () => {
         scheduledDate: '2026-10-04', address: { line1: '123 Main St' },
       },
       products: [
-        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: [] },
-        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: [], areaValue: 5200, areaUnit: 'sqft' },
+        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Chinch bug damage', 'Dollarweed'] },
+        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: ['Chinch bug damage', 'Dollarweed'], areaValue: 5200, areaUnit: 'sqft' },
       ],
       structuredFindings: {
         type: 'one_time_lawn_treatment',

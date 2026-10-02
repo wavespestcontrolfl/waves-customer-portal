@@ -288,7 +288,10 @@ function completionBody({ form, rows, ctx }) {
         applicationMethod: row.method,
         totalAmount,
         amountUnit,
-        targets: [],
+        // What the tech treated for rides every row (as the pest sheet's pests
+        // do): service_products.targets feeds the compliance ledger's
+        // target_pest and the report's per-product facts.
+        targets: TURF_ISSUE_OPTIONS.filter((option) => form.issues.has(option)),
         // Only a method /complete needs an area for sends one.
         ...(needsSqft(ctx, row) ? { areaValue: Number(row.area), areaUnit: 'sqft' } : {}),
       };
