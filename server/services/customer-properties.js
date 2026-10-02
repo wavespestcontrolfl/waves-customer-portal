@@ -520,6 +520,21 @@ async function completePrimaryCore(customerId, call, conn) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
+// The neighborhood columns to clear when the address moves to a different
+// street, city, state or ZIP — compared canonically (streetKey: suffix spelling
+// and unit tails ignored; city/state case and ZIP+4 ignored), so a unit-only or
+// format-only edit ("Main St" → "Main Street") clears nothing.
+function neighborhoodResetOnMove(from, to) {
+  const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  const moved = streetKey(from.address_line1) !== streetKey(to.address_line1)
+    || !same(from.city, to.city)
+    || !same(from.state, to.state)
+    || normalizeZip(from.zip) !== normalizeZip(to.zip);
+  return moved
+    ? { neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null }
+    : {};
+}
+
 async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
@@ -562,6 +577,10 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
     next.latitude = null;
     next.longitude = null;
   }
+  // A street/locality move takes the property out of its neighborhood (and
+  // the shared gate code) — an office pick included — so clear it for a later
+  // relink, whatever the caller does with coords.
+  Object.assign(next, neighborhoodResetOnMove(primary, next));
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than
