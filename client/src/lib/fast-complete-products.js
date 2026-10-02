@@ -45,7 +45,7 @@ export function productGroup(product) {
 // products".
 const LAWN_CATEGORIES = new Set([
   "herbicide", "pre-emergent", "post-emergent", "fungicide", "insecticide", "fertilizer",
-  "liquid fertilizer", "micronutrient", "amendment", "soil amendment", "biostimulant",
+  "liquid fertilizer", "micronutrient", "micronutrient fertilizer", "pgr", "amendment", "soil amendment", "biostimulant",
   "wetting agent", "adjuvant", "surfactant", "soil surfactant",
 ]);
 
