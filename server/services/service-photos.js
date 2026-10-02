@@ -460,9 +460,12 @@ async function lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, acto
   if (!STAGED_PHOTO_ID_RE.test(String(scheduledServiceId)) || !STAGED_PHOTO_ID_RE.test(String(photoId))) {
     return { error: { status: 404, code: 'photo_not_found' } };
   }
-  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id', 'technician_id');
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id', 'technician_id', 'status', 'scheduled_date');
   if (!visit) return { error: { status: 404, code: 'service_not_found' } };
-  if (actor?.techRole !== 'admin' && visit.technician_id !== actor?.technicianId) {
+  // The canonical current-assignment rule (own, not dead, inside the access
+  // window), judged as a technician for every non-admin role (#5568 sweep).
+  const { technicianVisitRowInScope } = require('./technician-visit-scope');
+  if (actor?.techRole !== 'admin' && !technicianVisitRowInScope({ techRole: 'technician', technicianId: actor?.technicianId }, visit)) {
     return { error: { status: 403, code: 'not_assigned' } };
   }
   const record = await trx('service_records').where({ scheduled_service_id: scheduledServiceId }).first('id');

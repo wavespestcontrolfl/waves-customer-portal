@@ -33,6 +33,12 @@ jest.mock('../middleware/admin-auth', () => ({
       : next()
   ),
 }));
+// Ownership is covered in technician-scope-r3.test.js; this suite is about
+// the route's copy, so the technician services the record's customer.
+jest.mock('../services/technician-visit-scope', () => ({
+  ...jest.requireActual('../services/technician-visit-scope'),
+  technicianServicesCustomer: jest.fn(async () => true),
+}));
 jest.mock('../services/review-request', () => ({
   create: jest.fn(),
   unshortenedReviewUrl: jest.fn((token) => `https://portal.test/rate/${token}`),
@@ -76,7 +82,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation((table) => {
     if (table === 'service_records') {
-      return { where: jest.fn(() => ({ first: jest.fn(async () => ({ id: 'sr-1', customer_id: 'cust-1' })) })) };
+      return { where: jest.fn(() => ({ first: jest.fn(async () => ({ id: 'sr-1', customer_id: 'cust-1', technician_id: 'technician-1' })) })) };
     }
     throw new Error(`unexpected table ${table}`);
   });

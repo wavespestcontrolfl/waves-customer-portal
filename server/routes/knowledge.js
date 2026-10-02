@@ -54,7 +54,7 @@ router.post('/query', async (req, res) => {
 });
 
 // GET /api/knowledge/queries — recent query log
-router.get('/queries', async (req, res) => {
+router.get('/queries', require('../middleware/admin-auth').requireAdmin, async (req, res) => {
   try {
     const { withoutSavedGaps } = require('../services/knowledge/knowledge-gaps-weekly');
     const queries = await withoutSavedGaps(getDb()('knowledge_queries'))
