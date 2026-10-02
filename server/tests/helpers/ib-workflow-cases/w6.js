@@ -142,7 +142,7 @@ CASES['W6-dev-04'] = async (ctx, h, cast, c) => {
   const ids = allIds(s);
   const { turn, row } = await moveVisit(ctx, h, s, { visit: s.pellhamVisit, customer: s.pellham, date: s.friday, time: '10:00 AM', prompt: c.request, ids, expectEnd: '12:00', card: false });
   // The response is lost between the move and the notice card: the task is resumed.
-  const resumed = await ctx.turn(h.actors.owner, { prompt: c.request, page: { customerId: s.pellham.id }, resumeTaskId: turn.body.taskId, sessionId: turn.sessionId, rounds: moveRounds(s.pellhamVisit.id, s.friday, '10:00 AM') });
+  const resumed = await ctx.turn(h.actors.owner, { prompt: c.request, page: { customerId: s.pellham.id }, resumeTaskId: turn.body.taskId, sessionId: turn.sessionId, expectStatus: 409, rounds: moveRounds(s.pellhamVisit.id, s.friday, '10:00 AM') }); // a task whose move already committed has nothing to resume: the route answers 409 not_resumable
   const after = await rowOf(h, s.pellhamVisit.id);
   ctx.check(sameDay(after.scheduled_date, s.friday) && hhmm(after.window_start) === hhmm(row.window_start), 'recovery', 'resume_moved_again', 'the resumed task changed the visit again');
   ctx.check(resumed.cards.length === 0, 'recovery', 'resume_reproposed_the_move', `resume offered ${resumed.cards.length} card(s) for a move that already committed`);

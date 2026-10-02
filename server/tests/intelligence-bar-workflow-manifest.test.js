@@ -283,12 +283,29 @@ describe('row references', () => {
   const MIGRATIONS = path.join(__dirname, '..', 'models', 'migrations');
   const files = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(MIGRATIONS, f), 'utf8'));
   const tables = new Set(files.flatMap((src) => [...src.matchAll(/createTable\(\s*'([a-z_]+)'/g)].map((m) => m[1])));
-  // A column counts for a table only if it is named in a migration that
-  // creates or alters THAT table (knex or raw SQL), not anywhere in the tree.
-  const columnsOf = (table) => {
-    const touches = new RegExp(`(?:createTable|alterTable|table)\\(\\s*'${table}'|ALTER TABLE\\s+(?:IF EXISTS\\s+)?"?${table}"?\\b|CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?"?${table}"?\\b`, 'i');
-    return new Set(files.filter((src) => touches.test(src)).flatMap((src) => [...src.matchAll(/['"\s]([a-z0-9_]+)['"\s]/g)].map((m) => m[1])));
+  // A column counts for a table only if it is named INSIDE the statement that creates or alters THAT table: the knex
+  // createTable/alterTable/table callback block, or the raw ALTER TABLE / CREATE TABLE statement, never elsewhere in the same
+  // file (one migration often touches several tables).
+  const braceBlock = (src, from) => {
+    const open = src.indexOf('{', from);
+    if (open < 0) return '';
+    let depth = 0;
+    for (let i = open; i < src.length; i += 1) {
+      if (src[i] === '{') depth += 1;
+      else if (src[i] === '}') { depth -= 1; if (depth === 0) return src.slice(open, i + 1); }
+    }
+    return src.slice(open);
   };
+  const blocksOf = (src, table) => {
+    const blocks = [];
+    for (const m of src.matchAll(new RegExp(`(?:createTable|alterTable|\\.table)\\(\\s*'${table}'\\s*,`, 'g'))) blocks.push(braceBlock(src, m.index + m[0].length));
+    for (const m of src.matchAll(new RegExp(`(?:ALTER TABLE|CREATE TABLE)\\s+(?:IF EXISTS\\s+|IF NOT EXISTS\\s+)?"?${table}"?\\b`, 'gi'))) {
+      const end = src.indexOf(';', m.index);
+      blocks.push(src.slice(m.index, end < 0 ? src.length : end));
+    }
+    return blocks;
+  };
+  const columnsOf = (table) => new Set(files.flatMap((src) => blocksOf(src, table)).flatMap((block) => [...block.matchAll(/['"\s(]([a-z0-9_]+)['"\s),]/g)].map((m) => m[1])));
   const columnCache = new Map();
   const hasColumn = (table, field) => {
     if (!columnCache.has(table)) columnCache.set(table, columnsOf(table));
@@ -317,6 +334,12 @@ describe('row references', () => {
     expect(hasColumn('sms_log', 'message_body')).toBe(true);
     expect(hasColumn('sms_log', 'window_start')).toBe(false);
     expect(hasColumn('scheduled_services', 'message_body')).toBe(false);
+  });
+
+  test('the column check is per statement: a column of another table in the same migration file is refused', () => {
+    // window_start belongs to scheduled_services; the initial migration also creates customers
+    expect(hasColumn('scheduled_services', 'window_start')).toBe(true);
+    expect(hasColumn('customers', 'window_start')).toBe(false);
   });
 
   test('the doc lists every logical field name', () => {

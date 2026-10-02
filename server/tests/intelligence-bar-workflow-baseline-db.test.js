@@ -126,7 +126,9 @@ suite('ten-workflow controlled baseline, dev partition (scripted model)', () => 
         const now = await sendState(h, cast);
         // Exactly the declared count: fewer is a send that never happened, more is an undisclosed one. (No case clears the stub mid-case.)
         ctx.check(now.sms_provider === declared, 'side_effect', 'guard_send_count_not_declared', `${now.sms_provider} provider submissions, the manifest declares exactly ${declared}`);
-        ctx.check(now.sendgrid_provider === 0 && now.gmail_provider === 0, 'side_effect', 'guard_sent_an_email', `SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider} in a text-only case`);
+        const base = ctx.sendBaseline || {};
+        const emailMoves = ['email_rows', 'email_message_rows', 'email_automation_rows', 'blocked_sender_hosts'].filter((k) => now[k] !== (base[k] ?? now[k]));
+        ctx.check(now.sendgrid_provider === 0 && now.gmail_provider === 0 && !emailMoves.length, 'side_effect', 'guard_sent_an_email', `SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider}${emailMoves.length ? `, ${emailMoves.map((k) => `${k} ${base[k]} -> ${now[k]}`).join('; ')}` : ''} in a text-only case`);
       }
     }
     if (!skip('unchanged') && ctx.rowBaseline) {

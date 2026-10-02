@@ -131,8 +131,7 @@ async function noSends(ctx, h, cast, { what = 'a read', codes = {}, since = null
   const emailCode = codes.email || 'read_sent_an_email';
   ctx.check(now.sms_provider === was('sms_provider'), 'side_effect', smsCode, `${now.sms_provider - was('sms_provider')} SMS provider submissions for ${what}`);
   const outboundBase = base.outbound_sms_rows ?? now.outbound_sms_rows;
-  // A queued text cancelled (its row removed) is not a send: the count may fall, never rise.
-  ctx.check(now.outbound_sms_rows <= outboundBase && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
+  ctx.check(now.outbound_sms_rows === outboundBase && now.audit_rows === (base.audit_rows ?? now.audit_rows), 'side_effect', codes.smsRows || `${smsCode}_row`, () => `${what}: outbound sms rows ${base.outbound_sms_rows} -> ${now.outbound_sms_rows}, messaging audit rows ${base.audit_rows} -> ${now.audit_rows}`);
   ctx.check(now.sendgrid_provider === was('sendgrid_provider') && now.gmail_provider === was('gmail_provider') && now.blocked_sender_hosts === (base.blocked_sender_hosts ?? now.blocked_sender_hosts), 'side_effect', emailCode, () => `${what}: SendGrid ${now.sendgrid_provider}, Gmail ${now.gmail_provider}, unstubbed sender calls ${base.blocked_sender_hosts} -> ${now.blocked_sender_hosts}`);
   const rows = ['email_rows', 'email_message_rows', 'email_automation_rows'].filter((k) => now[k] !== (base[k] ?? now[k]));
   ctx.check(rows.length === 0, 'side_effect', codes.emailRows || `${emailCode}_row`, () => `${what}: ${rows.map((k) => `${k} ${base[k]} -> ${now[k]}`).join('; ')}`);

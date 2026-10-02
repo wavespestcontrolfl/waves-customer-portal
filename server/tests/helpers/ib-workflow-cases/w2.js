@@ -31,6 +31,16 @@ async function seedBriefSet(cast) {
 }
 
 // The four readers a pre-call brief draws on, in one round after the customer lookup.
+// The schedule view pages at 200 rows and the reused isolated database keeps earlier runs' completed visits, so a correct model
+// follows next_offset until the page that holds the visit it wants. These rounds do that (up to 12 pages), and allAppointments
+// merges every page the turn read.
+const schedulePages = (range) => Array.from({ length: 12 }, () => (prev) => {
+  const last = prev.filter((p) => p.name === 'get_schedule_view').pop();
+  const next = last && last.result && last.result.next_offset;
+  return next ? { tools: [['get_schedule_view', { ...range, offset: next }]] } : { text: 'Done.' };
+});
+const allAppointments = (turn) => turn.toolCalls.filter((t) => t.name === 'get_schedule_view').flatMap((t) => (t.result && t.result.appointments) || []);
+
 const briefTools = (id) => [['get_customer_detail', { customer_id: id }], ['get_open_commitments', { customer_id: id }], ['get_conversation_thread', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(-30), date_to: plusDaysET(30) }]];
 
 /** Facts in the detail result against the seeded rows. */
@@ -135,10 +145,9 @@ CASES['W2-dev-05'] = async (ctx, h, cast, c) => {
   const set = await seedBriefSet(cast);
   const before = await snapshot(h, cast);
   const { prompt } = await ctx.establish({ prompt: c.request, customer: set.pellham });
-  const turn = await ctx.turn(h.actors.owner, { prompt, rounds: lookupThen('Pellham', (id) => [['get_customer_detail', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(0), date_to: plusDaysET(14) }]]) });
+  const turn = await ctx.turn(h.actors.owner, { prompt, rounds: [...lookupThen('Pellham', (id) => [['get_customer_detail', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(0), date_to: plusDaysET(14) }]]), ...schedulePages({ date_from: plusDaysET(0), date_to: plusDaysET(14) })] });
   checkDetail(ctx, pick(turn, 'get_customer_detail'), set.pellham, { properties: [set.pellhamHome], upcoming: [set.pellhamNext] });
-  const schedule = pick(turn, 'get_schedule_view');
-  const entry = schedule && (schedule.appointments || []).find((a) => a.id === set.pellhamNext.id);
+  const entry = allAppointments(turn).find((a) => a.id === set.pellhamNext.id);
   ctx.check(!!entry && sameDay(entry.date, set.pellhamNext.scheduled_date), 'tool_result', 'schedule_view_missing_visit', 'next visit absent from the schedule view');
   if (entry) ctx.check(String(entry.time_window || '').includes('11'), 'tool_result', 'schedule_view_window_has_no_end', `schedule view window "${entry.time_window}" carries the start only, seeded 09:00-11:00`);
   await noWrites(ctx, h, cast, before);
@@ -152,11 +161,10 @@ CASES['W2-dev-06'] = async (ctx, h, cast, c) => {
   await h.db('service_records').where({ customer_id: set.pellham.id }).del();
   const before = await snapshot(h, cast);
   const { prompt } = await ctx.establish({ prompt: c.request, customer: set.pellham });
-  const turn = await ctx.turn(h.actors.owner, { prompt, rounds: lookupThen('Pellham', (id) => [['get_customer_detail', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(-14), date_to: plusDaysET(0) }]]) });
+  const turn = await ctx.turn(h.actors.owner, { prompt, rounds: [...lookupThen('Pellham', (id) => [['get_customer_detail', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(-14), date_to: plusDaysET(0) }]]), ...schedulePages({ date_from: plusDaysET(-14), date_to: plusDaysET(0) })] });
   const detail = pick(turn, 'get_customer_detail');
   ctx.check(!((detail && detail.recent_services) || []).some((s) => sameDay(s.date, set.pellhamLastDate) && s.status === 'completed'), 'tool_result', 'completion_invented', 'a completed service record exists for a visit that has none');
-  const schedule = pick(turn, 'get_schedule_view');
-  const row = schedule && (schedule.appointments || []).find((a) => a.id === set.pellhamLast.id);
+  const row = allAppointments(turn).find((a) => a.id === set.pellhamLast.id);
   ctx.check(!!row && row.status !== 'completed', 'tool_result', 'unfinished_visit_not_visible', `the past scheduled visit is ${row ? `reported as ${row.status}` : 'absent from the schedule view'}, so the brief cannot say its outcome is unknown`);
   await noWrites(ctx, h, cast, before);
   ctx.markCompleted();

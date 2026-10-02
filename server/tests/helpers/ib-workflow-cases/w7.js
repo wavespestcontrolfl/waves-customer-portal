@@ -141,7 +141,8 @@ CASES['W7-dev-04'] = async (ctx, h, cast, c) => {
     ctx.check(confirmed.status === 200 && confirmed.body && confirmed.body.success === true, 'confirm', 'cancel_confirm_failed', `confirm ${confirmed.status} ${JSON.stringify(confirmed.body).slice(0, 220)}`);
   }
   const row = await h.db('sms_log').where({ id: queued }).first('status');
-  ctx.check(!row || /cancel/i.test(String(row.status)), 'read_back', 'queued_text_not_canceled', `status ${row && row.status}`);
+  // The manifest says the row stays with status canceled; a tool that deletes it is a real failure, not a pass.
+  ctx.check(!!row && /cancel/i.test(String(row.status)), 'read_back', 'queued_text_not_canceled', row ? `status ${row.status}` : 'the scheduled sms_log row no longer exists (deleted, not canceled)');
   await h.settle(); // the runner's sends guard (manifest sends 0) covers every channel
   ctx.markCompleted();
 };

@@ -5,8 +5,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 28,
-        "verified_completion_ms": 107
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 77
       },
       "notes": [],
       "strength": null,
@@ -16,8 +16,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 39
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 46
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -29,8 +29,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 25
       },
       "notes": [],
       "strength": null,
@@ -40,8 +40,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 16
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 18
       },
       "notes": [],
       "strength": null,
@@ -51,8 +51,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 17,
-        "verified_completion_ms": 59
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 50
       },
       "notes": [],
       "strength": null,
@@ -62,8 +62,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 34
       },
       "notes": [],
       "strength": null,
@@ -73,8 +73,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 44
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 24
       },
       "notes": [],
       "strength": null,
@@ -84,8 +84,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 14
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 22
       },
       "notes": [
         "no attempt by design: the only resolver is a person in the notification UI; no tool marks an alert done, so the correct model reads and says so"
@@ -97,8 +97,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 20
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 22
       },
       "notes": [],
       "strength": null,
@@ -128,7 +128,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 9,
-        "verified_completion_ms": 68
+        "verified_completion_ms": 66
       },
       "notes": [],
       "strength": null,
@@ -142,12 +142,12 @@
         {
           "point": "target_resolution",
           "code": "other_account_facts_in_brief",
-          "detail": "Pellham (3 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
+          "detail": "Pellham (2 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 41
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 50
       },
       "notes": [],
       "strength": null,
@@ -157,8 +157,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 54
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 64
       },
       "notes": [],
       "strength": null,
@@ -168,8 +168,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 40
       },
       "notes": [],
       "strength": null,
@@ -187,8 +187,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 30
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 29
       },
       "notes": [],
       "strength": null,
@@ -198,8 +198,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 71
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 39
       },
       "notes": [],
       "strength": null,
@@ -209,8 +209,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 25
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 32
       },
       "notes": [
         "no attempt by design: the correct model asks which Murphy; the lookup above returns both accounts and no write is issued"
@@ -222,8 +222,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 19,
-        "verified_completion_ms": 46
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 20
       },
       "notes": [],
       "strength": null,
@@ -241,8 +241,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 23,
-        "verified_completion_ms": 64
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 41
       },
       "notes": [],
       "strength": null,
@@ -252,8 +252,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 76
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 79
       },
       "notes": [],
       "strength": null,
@@ -263,8 +263,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 42
       },
       "notes": [],
       "strength": null,
@@ -274,8 +274,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 23
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 26
       },
       "notes": [],
       "strength": null,
@@ -285,8 +285,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 24
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 39
       },
       "notes": [],
       "strength": null,
@@ -296,8 +296,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 28,
-        "verified_completion_ms": 45
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 38
       },
       "notes": [],
       "strength": null,
@@ -308,7 +308,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 11,
-        "verified_completion_ms": 1561
+        "verified_completion_ms": 1574
       },
       "notes": [
         "sends guard skipped: the pending double-opt-in is re-sent once to the new address; the case asserts exactly that one email and no other send"
@@ -338,8 +338,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 60
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 71
       },
       "notes": [
         "undeclared update_lead_contact allowed: the gate-off supersede scenario edits a second lead twice (Zed, then Zane) to prove the older pending card cannot be confirmed",
@@ -352,8 +352,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 37
+        "first_tool_result_ms": 5,
+        "verified_completion_ms": 19
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -365,8 +365,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 33
       },
       "notes": [],
       "strength": null,
@@ -377,7 +377,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 13
+        "verified_completion_ms": 15
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -390,8 +390,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 2,
-        "verified_completion_ms": 13
+        "first_tool_result_ms": 4,
+        "verified_completion_ms": 20
       },
       "notes": [
         "update_lead_contact: error: This action is not available to your role",
@@ -404,8 +404,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 42
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 32
       },
       "notes": [],
       "strength": null,
@@ -415,8 +415,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 35
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 48
       },
       "notes": [],
       "strength": null,
@@ -426,8 +426,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 56
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 33
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer"
@@ -439,8 +439,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 84
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 95
       },
       "notes": [],
       "strength": null,
@@ -450,8 +450,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 62
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 60
       },
       "notes": [],
       "strength": null,
@@ -469,8 +469,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 28,
-        "verified_completion_ms": 50
+        "first_tool_result_ms": 27,
+        "verified_completion_ms": 44
       },
       "notes": [],
       "strength": null,
@@ -480,8 +480,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 33
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 21
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer",
@@ -494,8 +494,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 32
+        "first_tool_result_ms": 8,
+        "verified_completion_ms": 26
       },
       "notes": [],
       "strength": null,
@@ -505,8 +505,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 2,
-        "verified_completion_ms": 12
+        "first_tool_result_ms": 3,
+        "verified_completion_ms": 11
       },
       "notes": [
         "add_customer_property: error: This action is not available to your role",
@@ -519,8 +519,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 51
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 55
       },
       "notes": [],
       "strength": null,
@@ -530,8 +530,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 149,
-        "verified_completion_ms": 1121
+        "first_tool_result_ms": 160,
+        "verified_completion_ms": 1137
       },
       "notes": [],
       "strength": null,
@@ -541,8 +541,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 20,
-        "verified_completion_ms": 970
+        "first_tool_result_ms": 29,
+        "verified_completion_ms": 991
       },
       "notes": [],
       "strength": null,
@@ -556,17 +556,17 @@
         {
           "point": "tool_result",
           "code": "half_hour_refusal_not_specific",
-          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"f8bbcbab-eeaa-482c-bd0f-8ab8139a5007\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"2:30 PM\"},\"inspectio; expected message /hour|:00|window|time/i"
+          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"289ff098-7fb8-4c8c-8a88-2b76a32b79f0\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"2:30 PM\"},\"inspectio; expected message /hour|:00|window|time/i"
         },
         {
           "point": "proposal",
           "code": "half_hour_request_carded",
-          "detail": "1 card(s) offered for a 2:30 PM start: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"f8bbcbab-eeaa-482c-bd0f-8ab8139a5007\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
+          "detail": "1 card(s) offered for a 2:30 PM start: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"289ff098-7fb8-4c8c-8a88-2b76a32b79f0\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 35
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 44
       },
       "notes": [
         "find_available_slots returned 0 slots; the fixture seeds no technician capacity",
@@ -579,8 +579,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 23
       },
       "notes": [
         "no attempt by design: a recurring series is outside the first release; create_appointment has no recurrence input, so the correct model offers one visit and books nothing"
@@ -592,8 +592,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 19
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 28
       },
       "notes": [
         "no attempt by design: add-ons are outside the first release; the correct model declines the add-on and books nothing"
@@ -609,12 +609,12 @@
         {
           "point": "tool_result",
           "code": "commercial_refusal_not_specific",
-          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"c35a4959-fcea-47c8-8f55-507719dd7a3d\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"8:00 AM\",\"price\":149; expected message /commercial/i"
+          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"8:00 AM\",\"price\":149; expected message /commercial/i"
         },
         {
           "point": "proposal",
           "code": "commercial_booking_carded",
-          "detail": "1 card(s) offered to book a commercial account: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"c35a4959-fcea-47c8-8f55-507719dd7a3d\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
+          "detail": "1 card(s) offered to book a commercial account: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
         },
         {
           "point": "domain_rule",
@@ -633,8 +633,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 1661
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 1655
       },
       "notes": [
         "undeclared create_appointment allowed: the naive booking of a commercial account on a stated price, which the domain must stop"
@@ -664,8 +664,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 17,
-        "verified_completion_ms": 960
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 967
       },
       "notes": [],
       "strength": null,
@@ -675,8 +675,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 27,
-        "verified_completion_ms": 1012
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 998
       },
       "notes": [],
       "strength": null,
@@ -704,8 +704,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 1652
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 1675
       },
       "notes": [],
       "strength": null,
@@ -715,8 +715,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 934
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 964
       },
       "notes": [],
       "strength": null,
@@ -735,8 +735,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 15,
-          "verified_completion_ms": 2394
+          "first_tool_result_ms": 18,
+          "verified_completion_ms": 2426
         },
         "notes": [],
         "strength": null,
@@ -747,8 +747,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 36
       },
       "notes": [
         "no attempt by design: the visit is already on a Friday, so the correct model asks which Friday; the schedule read above is the only call"
@@ -770,7 +770,7 @@
         "failures": [],
         "timings": {
           "first_tool_result_ms": 13,
-          "verified_completion_ms": 4750
+          "verified_completion_ms": 4807
         },
         "notes": [],
         "strength": null,
@@ -790,8 +790,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 12,
-          "verified_completion_ms": 2374
+          "first_tool_result_ms": 19,
+          "verified_completion_ms": 2427
         },
         "notes": [
           "turn status 409 not_resumable This task has no interrupted step to continue.; no tool call reached; answer: "
@@ -804,8 +804,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 1549
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 1557
       },
       "notes": [],
       "strength": null,
@@ -837,11 +837,11 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 15,
-          "verified_completion_ms": 868
+          "first_tool_result_ms": 11,
+          "verified_completion_ms": 853
         },
         "notes": [
-          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"2744a50b-ae62-44c4-8acd-1d8c8d10fab3\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
+          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"226f3310-add1-48be-9b59-5c65ad82bce5\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
         ],
         "strength": null,
         "contract_calls": 1
@@ -851,8 +851,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 28
       },
       "notes": [
         "reschedule_appointment: error: This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or sep",
@@ -873,8 +873,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 18,
-        "verified_completion_ms": 1559
+        "first_tool_result_ms": 30,
+        "verified_completion_ms": 1590
       },
       "notes": [],
       "strength": null,
@@ -893,7 +893,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 12,
-        "verified_completion_ms": 3092
+        "verified_completion_ms": 3113
       },
       "notes": [
         "undeclared send_sms allowed: the notice to an opted-out number, which must be blocked"
@@ -914,8 +914,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 10,
-          "verified_completion_ms": 2369
+          "first_tool_result_ms": 16,
+          "verified_completion_ms": 2427
         },
         "notes": [],
         "strength": null,
@@ -926,8 +926,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 3075
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 3102
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -940,7 +940,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 6,
-        "verified_completion_ms": 3081
+        "verified_completion_ms": 3113
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -979,8 +979,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 9,
-          "verified_completion_ms": 27
+          "first_tool_result_ms": 11,
+          "verified_completion_ms": 33
         },
         "notes": [
           "send_sms: target_relationship_mismatch: The message recipient does not match the selected customer"
@@ -990,14 +990,27 @@
       }
     },
     "W7-dev-04": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "read_back",
+      "code": "queued_text_not_canceled",
+      "failures": [
+        {
+          "point": "read_back",
+          "code": "queued_text_not_canceled",
+          "detail": "the scheduled sms_log row no longer exists (deleted, not canceled)"
+        },
+        {
+          "point": "side_effect",
+          "code": "guard_outbound_row_added",
+          "detail": "a case whose manifest says sends 0: outbound sms rows 1 -> 0, messaging audit rows 0 -> 0"
+        }
+      ],
       "timings": {
         "first_tool_result_ms": 8,
-        "verified_completion_ms": 1546
+        "verified_completion_ms": 1551
       },
       "notes": [
-        "queued listing {\"customer_id\":\"24a1713a-8a3a-46c4-93c2-0908368a887e\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"56bcaa47-ceb3-45e9-893c-42183be3c000\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"56bcaa47-ceb3-45e9-893c-42183be3c000\",\"customer_id\":\"24a1713a-8a3a-46"
+        "queued listing {\"customer_id\":\"d4c1c210-ad4f-44a1-a073-59edb1f50bbe\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"customer_id\":\"d4c1c210-ad4f-44"
       ],
       "strength": null,
       "contract_calls": 1
@@ -1015,7 +1028,7 @@
         {
           "point": "receipt",
           "code": "unknown_outcome_retry_allowed",
-          "detail": "receipt {\"id\":\"3a3dcf02-c627-4190-8cb7-fcb4af8e9c07\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: 5fc6f3c1-65f9-4c2c-a62a-547dd57eb1ee, message: We will be there Tuesday at 9., mes"
+          "detail": "receipt {\"id\":\"ebb3cde0-7a8f-46c0-b603-72a464c0eb00\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: f9582d8a-b364-4c3b-8047-46f3782af585, message: We will be there Tuesday at 9., mes"
         },
         {
           "point": "recovery",
@@ -1029,8 +1042,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 32
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 49
       },
       "notes": [],
       "strength": null,
@@ -1048,8 +1061,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 1530
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 1544
       },
       "notes": [
         "undeclared send_sms allowed: the send to a number with STOP on file, which must be blocked"
@@ -1061,8 +1074,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 1530
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 1550
       },
       "notes": [],
       "strength": null,
@@ -1072,8 +1085,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 1544
+        "first_tool_result_ms": 9,
+        "verified_completion_ms": 1558
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -1085,8 +1098,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 1539
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 1550
       },
       "notes": [
         "send_sms: error: Multiple customers match that name. Ask the operator which one, then retry with customer_id.",
@@ -1099,8 +1112,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 36
       },
       "notes": [],
       "strength": null,
@@ -1110,8 +1123,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 446
+        "first_tool_result_ms": 22,
+        "verified_completion_ms": 402
       },
       "notes": [],
       "strength": null,
@@ -1121,8 +1134,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 23,
-        "verified_completion_ms": 194
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 189
       },
       "notes": [],
       "strength": null,
@@ -1132,8 +1145,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 21,
-        "verified_completion_ms": 351
+        "first_tool_result_ms": 24,
+        "verified_completion_ms": 343
       },
       "notes": [],
       "strength": null,
@@ -1143,8 +1156,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 32,
-        "verified_completion_ms": 193
+        "first_tool_result_ms": 31,
+        "verified_completion_ms": 185
       },
       "notes": [
         "save_customer_estimate: invalid_input: Tool arguments do not match the required inputs",
@@ -1166,8 +1179,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 20,
-          "verified_completion_ms": 341
+          "first_tool_result_ms": 23,
+          "verified_completion_ms": 325
         },
         "notes": [
           "measurement choice: one saved measurement per property, no selector on save_customer_estimate"
@@ -1180,8 +1193,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 214
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 201
       },
       "notes": [],
       "strength": null,
@@ -1195,12 +1208,12 @@
         {
           "point": "tool_result",
           "code": "sent_quote_refusal_not_specific",
-          "detail": "save_customer_estimate answered {\"preview\":true,\"customer\":{\"id\":\"5d1da11e-e4b0-4e52-89ba-40e2296cc029\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"5d1da11e@example.invalid\"},\"property\":{\"id\":\"93f8a405-9d45-424d-b622-419a7aba42e8\",\"label\":\"h; expected message /sent|honou?red/i"
+          "detail": "save_customer_estimate answered {\"preview\":true,\"customer\":{\"id\":\"dd43bb5d-4a15-4d1e-ab71-ff4ebe812a7f\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"dd43bb5d@example.invalid\"},\"property\":{\"id\":\"74307d73-8ffc-4a4b-8cdf-08c057edc818\",\"label\":\"h; expected message /sent|honou?red/i"
         },
         {
           "point": "domain_rule",
           "code": "sent_quote_revision_offered",
-          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"5d1da11e-e4b0-4e52-89ba-40e2296cc029\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"5d1da11e@example.invalid\"},\"property\":{\"id\":\"93f8a405-9d45-424d-b622-419"
+          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"dd43bb5d-4a15-4d1e-ab71-ff4ebe812a7f\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"dd43bb5d@example.invalid\"},\"property\":{\"id\":\"74307d73-8ffc-4a4b-8cdf-08c"
         },
         {
           "point": "side_effect",
@@ -1214,8 +1227,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 84,
-        "verified_completion_ms": 347
+        "first_tool_result_ms": 72,
+        "verified_completion_ms": 322
       },
       "notes": [
         "undeclared save_customer_estimate allowed: the naive in-place revision of an already sent quote"
@@ -1227,8 +1240,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 31,
-        "verified_completion_ms": 193
+        "first_tool_result_ms": 26,
+        "verified_completion_ms": 185
       },
       "notes": [],
       "strength": null,
@@ -1238,8 +1251,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 33
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 46
       },
       "notes": [
         "save_customer_estimate: missing_information: A saved service address, treatable lawn area and identified grass type are required. Update the missing property facts before pricing.",
@@ -1260,8 +1273,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 26,
-        "verified_completion_ms": 189
+        "first_tool_result_ms": 41,
+        "verified_completion_ms": 195
       },
       "notes": [],
       "strength": null,
@@ -1280,8 +1293,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 7,
-          "verified_completion_ms": 1559
+          "first_tool_result_ms": 11,
+          "verified_completion_ms": 1581
         },
         "notes": [],
         "strength": null,
@@ -1309,8 +1322,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 14,
-          "verified_completion_ms": 37
+          "first_tool_result_ms": 12,
+          "verified_completion_ms": 34
         },
         "notes": [],
         "strength": null,
@@ -1330,7 +1343,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 7,
-        "verified_completion_ms": 31
+        "verified_completion_ms": 34
       },
       "notes": [],
       "strength": null,
@@ -1357,8 +1370,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 11,
-          "verified_completion_ms": 38
+          "first_tool_result_ms": 8,
+          "verified_completion_ms": 25
         },
         "notes": [],
         "strength": null,
@@ -1391,8 +1404,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 7,
-          "verified_completion_ms": 33
+          "first_tool_result_ms": 6,
+          "verified_completion_ms": 30
         },
         "notes": [],
         "strength": null,
@@ -1421,7 +1434,7 @@
         ],
         "timings": {
           "first_tool_result_ms": 6,
-          "verified_completion_ms": 1542
+          "verified_completion_ms": 1559
         },
         "notes": [],
         "strength": null,
@@ -1433,7 +1446,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 18
+        "verified_completion_ms": 35
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -1447,7 +1460,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 23
+        "verified_completion_ms": 21
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -1477,8 +1490,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 8,
-          "verified_completion_ms": 24
+          "first_tool_result_ms": 10,
+          "verified_completion_ms": 38
         },
         "notes": [],
         "strength": null,
@@ -1489,8 +1502,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 31
+        "first_tool_result_ms": 7,
+        "verified_completion_ms": 35
       },
       "notes": [],
       "strength": null,
@@ -1508,8 +1521,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 56
+        "first_tool_result_ms": 19,
+        "verified_completion_ms": 70
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
@@ -1529,8 +1542,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 36
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 41
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action."
@@ -1555,8 +1568,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 60
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 79
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
@@ -1569,8 +1582,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 14
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 27
       },
       "notes": [
         "adjust_stock: error: Multiple products match \"sample granule\" — retry with product_id",
@@ -1583,8 +1596,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 17
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 29
       },
       "notes": [
         "update_restock_request: request_closed: Restock request is already received; refresh the list",
@@ -1606,7 +1619,7 @@
         {
           "point": "tool_result",
           "code": "missing_unit_not_clarified",
-          "detail": "adjust_stock answered {\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"state\":\"completed\",\"product\":{\"id\":\"c2cad26c-4dfa-4a4a-8128-f09c652ea202\",\"name\":\"Talak\",\"category\":\"insecticide\",\"formulation\":\"SC\",\"sku\":\"IBWF-c2cad26c\",; expected message /unit/i"
+          "detail": "adjust_stock answered {\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"state\":\"completed\",\"product\":{\"id\":\"9b347fd7-48a3-4319-8cb0-9a29bc131e58\",\"name\":\"Talak\",\"category\":\"insecticide\",\"formulation\":\"SC\",\"sku\":\"IBWF-9b347fd7\",; expected message /unit/i"
         },
         {
           "point": "side_effect",
@@ -1616,7 +1629,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 14,
-        "verified_completion_ms": 33
+        "verified_completion_ms": 35
       },
       "notes": [
         "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action.",
@@ -1638,8 +1651,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 27
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 39
       },
       "notes": [
         "adjust_stock: target_clarification_required: Product \"four more jugs of Talak from the vendor and record the three that just came in.\" not found in catalog"
@@ -1664,8 +1677,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 61
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 77
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",
@@ -1678,8 +1691,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 2,
-        "verified_completion_ms": 8
+        "first_tool_result_ms": 3,
+        "verified_completion_ms": 11
       },
       "notes": [
         "adjust_stock: error: This action is not available to your role",
@@ -1701,7 +1714,7 @@
       ],
       "timings": {
         "first_tool_result_ms": 13,
-        "verified_completion_ms": 50
+        "verified_completion_ms": 44
       },
       "notes": [
         "update_restock_request: target_clarification_required: Choose the exact product or restock request for this action.",

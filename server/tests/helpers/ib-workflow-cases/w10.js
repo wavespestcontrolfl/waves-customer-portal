@@ -83,6 +83,13 @@ const receiveOpenRequest = (productId, quantity, unit) => [
 /** The step's commit the way the contract says: a card to confirm, or an owner-direct write already executed in the turn. */
 const commitStock = (ctx, turn, { card, tool, label }) => ctx.commit(turn, { card, tool, label });
 
+/** The receipt closes the source request: status received and a close time. */
+async function checkRequestReceived(ctx, h, request) {
+  const row = await reqOf(h, request);
+  ctx.check(row.status === 'received', 'read_back', 'request_not_marked_received', `request status ${row.status}`);
+  ctx.check(!!row.closed_at, 'read_back', 'request_close_time_not_stamped', 'receiving the request did not stamp closed_at');
+}
+
 /** A receipt movement against the contract: one movement, type restock (never a set_total), converted into the inventory unit. */
 function checkReceiptMovement(ctx, moves, { quantity, entered, unit = 'fl_oz' }) {
   const restocks = moves.filter((m) => m.movement_type === 'restock');
@@ -108,6 +115,7 @@ async function receiveTwoGallons(ctx, h, cast, c, { prompt }) {
   const after = await stockOf(h, s.taurus);
   ctx.check(after.onHand === TAURUS_BASE + 2 * GAL, 'read_back', 'on_hand_wrong_after_receipt', `on hand ${after.onHand} ${after.unit}, expected ${TAURUS_BASE + 2 * GAL}`);
   ctx.check(JSON.stringify(await stockOf(h, s.talak)) === JSON.stringify(talakBefore), 'side_effect', 'other_product_changed', 'a different product changed');
+  await checkRequestReceived(ctx, h, s.taurusReq);
   return { s, turn, moves: await movesOf(h, s.taurus) };
 }
 
@@ -133,9 +141,7 @@ CASES['W10-dev-02'] = async (ctx, h, cast, c) => {
   ] });
   ctx.check((turn.toolCalls.find((t) => t.name === 'get_restock_queue') || {}).result && ((pick(turn, 'get_restock_queue') || {}).requests || []).some((r) => r.id === s.taurusReq.id), 'tool_result', 'open_request_not_listed', 'the open Taurus request is not in the queue');
   await commitStock(ctx, turn, { card: c.expected.card, tool: 'update_restock_request', label: 'request_receive' });
-  const request = await reqOf(h, s.taurusReq);
-  ctx.check(request.status === 'received', 'read_back', 'request_not_marked_received', `request status ${request.status}`);
-  ctx.check(!!request.closed_at, 'read_back', 'request_close_time_not_stamped', 'receiving the request did not stamp closed_at');
+  await checkRequestReceived(ctx, h, s.taurusReq);
   const moves = await movesOf(h, s.taurus);
   const m = checkReceiptMovement(ctx, moves, { quantity: 2 * GAL, entered: { quantity: 2, unit: 'gal' } });
   const meta = m && (typeof m.metadata === 'string' ? JSON.parse(m.metadata) : m.metadata);
@@ -151,6 +157,7 @@ CASES['W10-dev-03'] = async (ctx, h, cast, c) => {
   const first = await stockTurn(ctx, h, { prompt: c.request, control: `Receive restock request ${s.taurusReq.id}`, rounds: receiveOpenRequest(s.taurus.id, 2, 'qt') });
   await commitStock(ctx, first, { card: c.expected.card, tool: 'update_restock_request', label: 'receipt' });
   const afterFirst = await movesOf(h, s.taurus);
+  await checkRequestReceived(ctx, h, s.taurusReq);
   ctx.check(afterFirst.length === 1 && Number(afterFirst[0].quantity) === 64, 'read_back', 'first_movement_wrong', `movements ${afterFirst.map((m) => m.quantity).join(',')}`);
   // "that was 2 gallons, not 2 quarts": a correcting movement for the 1.5 gallon difference with its own receipt; the first is not edited.
   const second = await stockTurn(ctx, h, { prompt: c.corrections[0].request, control: 'Add 1.5 gallons of Taurus SC that arrived', sessionId: first.sessionId, sessionKey: 'fix', rounds: adjust({ product_name: 'Taurus SC', movement_type: 'correction', quantity: 1.5, unit: 'gal', note: 'Correction: 2 gal received, not 2 qt' }) });
@@ -279,6 +286,7 @@ CASES['W10-dev-10'] = async (ctx, h, cast, c) => {
   const resumed = await h.task(h.actors.owner, turn.body.taskId, turn.sessionId);
   ctx.check(resumed.status === 200 && (resumed.body.receipts || []).length === 1, 'recovery', 'task_resume_receipts_wrong', `receipts ${(resumed.body && resumed.body.receipts || []).length}`);
   checkReceiptMovement(ctx, await movesOf(h, s.taurus), { quantity: 2 * GAL, entered: { quantity: 2, unit: 'gal' } });
+  await checkRequestReceived(ctx, h, s.taurusReq);
   ctx.check((await stockOf(h, s.taurus)).onHand === TAURUS_BASE + 2 * GAL, 'recovery', 'on_hand_wrong_after_double_submit', `on hand ${(await stockOf(h, s.taurus)).onHand}`);
   ctx.markCompleted();
 };

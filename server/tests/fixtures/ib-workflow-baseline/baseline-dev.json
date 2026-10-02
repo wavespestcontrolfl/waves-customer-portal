@@ -298,7 +298,13 @@
       ]
     },
     "W7-dev-04": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "read_back",
+      "code": "queued_text_not_canceled",
+      "failures": [
+        "read_back:queued_text_not_canceled",
+        "side_effect:guard_outbound_row_added"
+      ]
     },
     "W7-dev-05": {
       "outcome": "fail",

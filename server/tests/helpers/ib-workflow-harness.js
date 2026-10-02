@@ -466,6 +466,9 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
         ctx.timings.first_tool_result_ms = (state.firstToolAt || nowMs()) - started + (ctx.startedAt ? 0 : 0);
       }
       if (ctx) for (const t of toolCalls) if (t.result && typeof t.result === 'object' && t.result.error) ctx.note(`${t.name}: ${t.result.code || 'error'}: ${String(t.result.error).slice(0, 140)}`);
+      // An error status after tool rounds ran means the committed work was reported through a broken response (an owner-direct write
+      // then has no receipt to look up): that is a harness failure, not a note. A case that expects an error declares `expectStatus`.
+      if (ctx && response.status !== (options.expectStatus || 200)) ctx.fail('harness', 'query_route_error', `the turn answered ${response.status} ${response.body && (response.body.code || response.body.error) ? `${response.body.code || ''} ${String(response.body.error || '').slice(0, 120)}` : ''} where ${options.expectStatus || 200} was expected`);
       if (ctx && (response.status !== 200 || !toolCalls.length)) ctx.note(`turn status ${response.status}${response.body && (response.body.error || response.body.code) ? ` ${response.body.code || ''} ${String(response.body.error || '').slice(0, 120)}` : ''}${toolCalls.length ? '' : `; no tool call reached; answer: ${String((response.body && (response.body.response || response.body.answer || response.body.message || response.body.text)) || '').slice(0, 160)}`}`);
       const cards = (response.body && response.body.pendingActions) || [];
       return { ...response, sessionId, requestBody: body, toolCalls, cards, card: cards[0] || null, modelCalls: state.modelCalls, ms: total, prompt, requests: mockModel.mock.calls.map((c) => c[0]) };
@@ -506,6 +509,8 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
     // The case's own mode decides the owner-direct gate; the route reads it at call time on every request.
     newContext(spec, cast) {
       process.env.GATE_IB_OWNER_DIRECT = spec.mode === 'owner_direct_on' ? 'true' : 'false';
+      // A fresh conversation per case: a session id reused from an earlier case carries that case's task target (a customer) into this one.
+      harness.sessions.clear();
       const ctx = new CaseContext(harness, spec);
       ctx.cast = cast || null;
       harness.current = ctx;
