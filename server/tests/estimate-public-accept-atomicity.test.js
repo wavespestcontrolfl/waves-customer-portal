@@ -539,7 +539,9 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(response.data.invoicePayUrl == null).toBe(true);
     const NotificationService = require('../services/notification-service');
     const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
-    expect(estimateNotice[2]).toContain('($448.00)');
+    // The full admin text (the bell's detail since the who-and-what copy, #5576)
+    // quotes the park's frozen total.
+    expect(estimateNotice[3].detail).toContain('($448.00)');
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 

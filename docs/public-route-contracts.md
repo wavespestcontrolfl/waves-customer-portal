@@ -3415,8 +3415,17 @@ data — for operator preview/share. Token in path, `noindex`).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
-per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
-legacy 5-char codes still resolve).
+per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07.
+Legacy 1-7 char codes (5-char space minted 2026-04-19 → 2026-08-07, ~26
+bits) still resolve while `GATE_SHORTLINK_LEGACY_EXPIRE` is unset; with the
+gate `=== 'true'` a legacy code whose row exists answers 410 with the same
+expired page as a past `expires_at` (no telemetry bump), and a legacy code
+with no row stays the generic 404 — so the gate never turns an unknown code
+into an existence oracle. Independently of the gate, a re-send never reuses
+a legacy code for its entity: `existingShortUrlFor` mints a fresh 10-char
+code instead; send-reconciliation readers that search historical bodies use
+`allShortUrlsFor`, which returns every code ever minted for the entity,
+legacy and replacement alike).
 `/go/:code` (outside-link click redirect for prep-guide links to third-party
 sites — 302 to the registered destination / generic 404 with no enumeration
 leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
