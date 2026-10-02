@@ -351,10 +351,21 @@ describe('counts and the technician\'s rating (step 4)', () => {
     else expect(facts.unclearFields).toContain('traps_checked');
   });
 
-  test('a rating stated as a fraction waits for a person (pre-push P1)', () => {
-    const facts = read(trapAnswer({}, { said: true, value: 2, quote: 'Activity rating 2.5' }), `${TRAP_NOTE} Activity rating 2.5.`);
+  test.each([
+    ['in digits', 'Activity rating 2.5'],
+    ['as a spoken decimal', 'Activity rating two point five'],
+    ['as a spoken fraction', 'Activity rating two and a half'],
+    ['as a written fraction', 'Activity rating 2 1/2'],
+  ])('a rating stated as a fraction %s waits for a person (pre-push P1)', (_label, quote) => {
+    const facts = read(trapAnswer({}, { said: true, value: 2, quote }), `${TRAP_NOTE} ${quote}.`);
     expect(facts).not.toHaveProperty('score');
     expect(facts.scoreUnclear).toBe(true);
+  });
+
+  test('"entry point" is no decimal: the count beside it still stands', () => {
+    const note = 'Sealed the entry point by the AC chase and set 6 traps.';
+    const facts = read(trapAnswer({ traps_checked: { said: true, value: 6, quote: 'Sealed the entry point by the AC chase and set 6 traps' } }), note);
+    expect(facts.values.traps_checked).toBe('6');
   });
 
   test('a count not said fills nothing and asks nothing; one already on the form is never filled over', () => {
