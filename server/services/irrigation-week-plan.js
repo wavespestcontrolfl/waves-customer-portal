@@ -869,7 +869,9 @@ class PinnedWeekPlanUnavailable extends Error {
   }
 }
 
-async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedAvailableAt, strict = false } = {}) {
+// `onFailure` (optional): called when the lookup THREW (as opposed to finding no
+// plan), for a non-strict caller that would otherwise read a failure as absence.
+async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedAvailableAt, strict = false, onFailure } = {}) {
   if (!customerId) return null;
   // A render pinned to the cache-signature lookup's answer: the snapshot
   // counts only if it is the SAME one that lookup saw (its first availability timestamp), so a
@@ -927,6 +929,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedAvailab
   } catch (err) {
     if (err instanceof PinnedWeekPlanUnavailable) throw err;
     logger.warn(`[irrigation-week-plan] snapshot load failed for ${customerId}: ${err.message}`);
+    if (typeof onFailure === 'function') onFailure(err);
     // A PINNED render must not quietly render plan-less under a plan-present
     // cache key — refuse the render (the caller retries) instead.
     if (strict) throw err;

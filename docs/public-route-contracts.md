@@ -2004,6 +2004,26 @@ lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
 trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
 print `seasonalNote`, so its content and cache signature are unchanged.
+`GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key
+for key, and makes no read or write) adds an optional `reportV2.sinceLast` to the
+`/api/reports/:token/data` lawn payload (lawn only, never tree & shrub; no new
+route, token, privacy or rate-limit surface; nothing renders it yet, the web
+report and PDF are unchanged and keep their cache signature). It is DATA for the
+progress engine and the copy writer: `{ v: 1, priorAssessmentId, priorDate,
+applied: [{ name, activeIngredient, kind, tag, targets (at most 3) }], checks:
+[{ key, status }] }`, read from the PRIOR visit's frozen treatment memory: what
+that visit applied and which of water, weeds, damage, coverage and mowing it said
+it would keep watching (at most 3; the customer's own concern is not carried).
+No state words ("clear", "still watching") are decided here. The prior visit is
+the previous confirmed assessment at the SAME property with a strictly earlier
+date (needs `GATE_LAWN_PROPERTY_HISTORY`; a later-dated or same-day row is never
+the prior, and a customer who moved gets no prior). The key is absent when there
+is no prior or the prior has no frozen memory. Each visit's own entry is frozen
+into `service_records.structured_notes.lawnVisitMemory[<assessment id>]` at its
+first render (first writer wins per assessment, no migration) together with the
+`sinceLast` block it carried, and replayed byte for byte after, so a permanent
+token never changes when later visits are added. A render whose entry could not
+be frozen is marked uncacheable (`weekWeatherUncacheable`); delivery is not held.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
