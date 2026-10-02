@@ -30,7 +30,16 @@ so it never counts as a staff decision or a graduation outcome. The draft become
 and leaves the judge pool. The claim's `input_snapshot.unanswered_reply.suggestion_id` names the
 card; a crash between send and label is repaired by the next sweep.
 
+## Staff replies always win
+
+While the variable is present (`true` or `false`), staff sends (admin composer, scheduled sends,
+tech line, the manual-send wrapper) take the same thread interlock as Phase E auto-send: a staff
+reply backs off while an AI claim is mid-send, and a staff reply in flight keeps the AI from
+claiming. After an enable, the sweep claims nothing for the first 15 minutes of a process's
+life, so every instance reads the gate before any claim exists.
+
 ## Rollback
 
-Unset `GATE_SMS_UNANSWERED_REPLY`. The sweep stops, no new drafts are stamped, and any claim in
-flight refuses at its next check.
+Set `GATE_SMS_UNANSWERED_REPLY=false` (do not delete it yet). The sweep stops, no new drafts are
+stamped, any claim in flight refuses at its next check, and the staff-reply interlock stays on
+through the deploy overlap. Delete the variable later, once nothing is in flight.

@@ -968,7 +968,8 @@ async function reserveHumanReply({
     // a later kill-switch flip while the activation stamp is set.
     // The same predicate publishes the reservation below, so a claim made by an
     // older instance during a rolling disable always observes this reply.
-    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible();
+    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible()
+      || require('./sms-unanswered-reply').unansweredClaimsPossible();
     if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };

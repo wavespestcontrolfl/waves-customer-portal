@@ -28,6 +28,7 @@ const suggest = require('../services/sms-suggest-mode');
 const autoSend = require('../services/sms-auto-send');
 const graduation = require('../services/sms-graduation');
 const unanswered = require('../services/sms-unanswered-reply');
+const gratitudeContext = require('../services/sms-gratitude-context');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 jest.setTimeout(30000);
 
@@ -68,6 +69,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     db.connection = trx;
     customerId = randomUUID();
     jest.spyOn(graduation, 'evaluateJudgeBackstop').mockResolvedValue({ clear: true, blockers: [] });
+    jest.spyOn(gratitudeContext, 'gratitudeRolloutSettled').mockReturnValue(true);
     sendCustomerMessage.mockReset();
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}` });
   });
@@ -315,6 +317,44 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect(totals.sent).toBe(0);
     expect(totals.refused.visit_changed).toBe(1);
     expect((await card(s.decisionId)).status).toBe('pending_review');
+  });
+
+  test('a rolling enable claims nothing until every instance reads the gate', async () => {
+    const s = await waitingSuggestion();
+    gratitudeContext.gratitudeRolloutSettled.mockReturnValue(false);
+    expect(await sweep()).toMatchObject({ attempted: 0, reason: 'rollout_settling' });
+    await expectUntouched(s, { sent: 0, refused: {} });
+  });
+
+  test('a staff reply while the unanswered claim is mid-send backs off', async () => {
+    const s = await waitingSuggestion();
+    let staff;
+    sendCustomerMessage.mockImplementation(async () => {
+      staff = await suggest.reserveHumanReply({ to: CUSTOMER_PHONE, customerId, fromNumber: WAVES_LINE, body: 'Thursday, see you then.' });
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'b'.repeat(32)}` };
+    });
+    expect((await sweep()).sent).toBe(1);
+    expect(staff.autoSendInFlight).toBe(true);
+    expect(staff.reservationId).toBeNull();
+  });
+
+  test('a staff reply in flight before the sweep keeps the card for the person', async () => {
+    const s = await waitingSuggestion();
+    const staff = await suggest.reserveHumanReply({ to: CUSTOMER_PHONE, customerId, fromNumber: WAVES_LINE, body: 'Thursday, see you then.' });
+    expect(staff.autoSendInFlight).toBe(false);
+    expect(staff.reservationId).toBeTruthy();
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(await claimFor(s.inboundId)).toBeUndefined();
+  });
+
+  test('the staff-reply interlock stays on after a rollback to false', () => {
+    process.env.GATE_SMS_UNANSWERED_REPLY = 'false';
+    expect(unanswered.unansweredReplyLive()).toBe(false);
+    expect(unanswered.unansweredClaimsPossible()).toBe(true);
+    delete process.env.GATE_SMS_UNANSWERED_REPLY;
+    expect(unanswered.unansweredClaimsPossible()).toBe(false);
   });
 
   test('closing time between the claim and the provider call holds the send and the card returns', async () => {

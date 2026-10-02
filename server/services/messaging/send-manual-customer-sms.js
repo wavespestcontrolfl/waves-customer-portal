@@ -161,7 +161,8 @@ async function dispatchReserved(input, {
  */
 async function sendManualCustomerSms(input) {
   if (!isEnabled('smsGratitudeReplies')
-    && !require('../sms-gratitude-context').gratitudeClaimsPossible()) return sendCustomerMessage(input);
+    && !require('../sms-gratitude-context').gratitudeClaimsPossible()
+    && !require('../sms-unanswered-reply').unansweredClaimsPossible()) return sendCustomerMessage(input);
 
   const reviewedBy = input.metadata?.adminUserId || null;
   // Canonical send metadata historically also carries symbolic provenance

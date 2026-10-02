@@ -76,6 +76,18 @@ function unansweredReplyLive() {
 }
 
 /**
+ * Whether a claim from this lane can exist anywhere, for the staff-reply
+ * interlocks (reserveHumanReply, the admin composer, scheduled sends). Wider
+ * than the gate: during a rolling disable an older instance still claims, so
+ * the interlocks stay on while the variable is present at all. Roll back with
+ * GATE_SMS_UNANSWERED_REPLY=false; delete it later, once nothing is in flight.
+ */
+function unansweredClaimsPossible() {
+  const raw = process.env.GATE_SMS_UNANSWERED_REPLY;
+  return raw === 'true' || raw === 'false';
+}
+
+/**
  * What the drafter records on a draft so a later sweep can decide without
  * re-deriving it. Written ONLY while the gate is on (off → {} and the stored
  * JSON is byte-identical to before), which also fences the lane to texts
@@ -397,6 +409,9 @@ async function processUnansweredReplyCandidates({ now = new Date() } = {}) {
   // The executor marks its sends conversational (never deferred), so the
   // 8 AM–8 PM ET window is enforced here.
   if (!isWithinSendWindowET(now)) return { ...totals, reason: 'outside_send_window' };
+  // On a rolling enable, an older instance that never saw the gate does not
+  // interlock staff replies; claim nothing until every instance reads it.
+  if (!require('./sms-gratitude-context').gratitudeRolloutSettled()) return { ...totals, reason: 'rollout_settling' };
 
   try {
     await settleAnsweredSuggestions({ now });
@@ -471,6 +486,7 @@ module.exports = {
   STAMP_VERSION,
   ANSWERED_STATUS,
   unansweredReplyLive,
+  unansweredClaimsPossible,
   draftStamp,
   candidatePage,
   candidateRefusal,
