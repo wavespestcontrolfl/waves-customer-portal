@@ -158,9 +158,10 @@ describe('weekday / date / clock deny (G9)', () => {
     accepts('We will mon the turf closely.', {});
   });
 
-  test('"today" and month names without a day number pass', () => {
-    accepts('Today we treated the broadleaf weeds along the edge.', {});
+  test('month names without a day number pass; "today" is timing but "today\'s" is not', () => {
     accepts('Your score has held steady since March.', { progress: 'flat' });
+    rejects('Today we treated the broadleaf weeds along the edge.', 'timing', {});
+    accepts("Chinch bugs were not seen in today's photos.", {});
   });
 });
 
@@ -815,8 +816,9 @@ describe('whole numeric expressions, bare dry idiom, negation, line wraps (termi
       expect(checkProgressCoupling('The lawn is behind schedule.', everything)).toEqual([]);
     });
 
-    test('a negator beyond three words, or in another sentence, does not negate', () => {
-      expect(checkProgressCoupling('We did not see any weeds today, and one more thing, the lawn is improving.', everything)).toEqual([]);
+    test('a negator ANYWHERE in the sentence negates; another sentence does not', () => {
+      expect(checkProgressCoupling('We did not see any weeds near the fence, and one more thing, the lawn is improving.', everything).length).toBe(1);
+      expect(checkProgressCoupling('The lawn is improving, though the edge looks thin and we did not see weeds.', everything).length).toBe(1);
       expect(checkProgressCoupling('No weeds were seen. The lawn is improving.', everything)).toEqual([]);
     });
 
@@ -1245,6 +1247,190 @@ describe('no digits in model copy; normalization is a fixpoint (terminal review 
     test('"4p.m." and "4 pm." are the same canonical sentence', () => {
       expect(guards.normalizeCopy('Expect color at 4p.m.')).toBe(guards.normalizeCopy('Expect color at 4 pm.'));
       expect(guards.normalizeCopy('4p.m.')).toBe('4 pm.');
+    });
+  });
+});
+
+describe('sentence-wide negation, abbreviations, shared timing and number vocabulary (terminal review pass 6)', () => {
+  describe('negation anywhere in a claim sentence rejects', () => {
+    const up = { progress: 'up', progressStates: ['on_track', 'ahead', 'behind'] };
+    const down = { progress: 'down', progressStates: ['behind'] };
+    test.each([
+      ['Your score is not higher.', up],
+      ['Your score is not lower.', down],
+      ['Your score is no longer higher.', up],
+      ['Your score isn’t higher than before.', up],
+      ['Your score is higher, not lower.', up],
+      ['Your score is never lower than before.', down],
+      ['Your score is not down.', down],
+      ['Your score isn’t up.', up],
+      ['The lawn is not improving.', up],
+      ['The lawn is not on track.', up],
+      ['The lawn is no longer behind.', up],
+      ['The lawn is hardly improving.', up],
+      ['The lawn is barely recovering.', up],
+      ['The lawn cannot be called improving.', up],
+      ['Without help the lawn is improving.', up],
+      ['None of it is improving.', up],
+      ['The lawn is improving, nor is it behind.', up],
+      ["The lawn hasn't improved.", up],
+      ['The lawn is not holding steady.', { progress: 'flat' }],
+      ['The lawn is not too early.', { progressStates: ['too_early'] }],
+      ['The lawn is not ahead of schedule.', up],
+    ])('%s', (text, facts) => {
+      const out = checkProgressCoupling(text, facts);
+      expect(out.some((r) => r.detail === 'negated progress word')).toBe(true);
+      rejects(text, 'progress_coupling', facts);
+    });
+
+    test('the claim words themselves are not searched for a negator ("no change")', () => {
+      expect(checkProgressCoupling('There is no change since March.', { progress: 'flat' })).toEqual([]);
+      expect(checkProgressCoupling('No change since March.', { progress: 'flat' })).toEqual([]);
+      expect(checkProgressCoupling('There is no change since March, and no pests.', { progress: 'flat' }).some((r) => r.detail === 'negated progress word')).toBe(true);
+    });
+
+    test('un-negated comparatives pass with their direction and nothing else', () => {
+      expect(checkProgressCoupling('Your score is higher.', up)).toEqual([]);
+      expect(checkProgressCoupling('Your score is lower than before.', down)).toEqual([]);
+      expect(checkProgressCoupling('Your score is higher.', down).length).toBe(1);
+    });
+  });
+
+  describe('sentence splitting does not cut at common abbreviations', () => {
+    test.each([
+      'approx.', 'approx', 'apprx.', 'est.', 'e.g.', 'i.e.', 'etc.', 'vs.', 'no.', 'min.', 'hr.', 'hrs.', 'mins.', 'sec.',
+      'ft.', 'in.', 'oz.', 'lb.', 'lbs.', 'gal.', 'qt.', 'pt.', 'Mr.', 'Mrs.', 'Dr.', 'St.',
+    ])('"%s" keeps the trigger and the figure in one sentence', (abbr) => {
+      const text = `Keep pets off for ${abbr} thirty minutes.`;
+      const dotted = abbr.endsWith('.') ? abbr : `${abbr}.`;
+      const sentence = `Keep pets off for ${dotted} thirty minutes.`;
+      expect(guards.normalizeCopy(sentence)).toBeTruthy();
+      expect(checkReentryPattern(sentence).length).toBe(1);
+      expect(checkBannerCopy(sentence).map((r) => r.rule)).toContain('reentry_figure');
+      expect(text).toBeTruthy();
+    });
+
+    test('the audit reproduction', () => {
+      const text = 'Keep pets off for approx. thirty minutes.';
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+      expect(checkReentryPattern(text).length).toBe(1);
+      rejects(text, 'reentry_figure', {});
+      // and the same sentence with "about" rejects the same way
+      expect(checkBannerCopy('Keep pets off for about thirty minutes.').map((r) => r.rule)).toContain('reentry_figure');
+    });
+
+    test('a real sentence end is still a boundary', () => {
+      expect(checkReentryPattern('Keep pets off the sod. The visit took thirty minutes.')).toEqual([]);
+      expect(checkReentryPattern('Keep pets off the sod! The visit took thirty minutes.')).toEqual([]);
+    });
+  });
+
+  describe('timing vocabulary is one shared list for model copy and banner checks', () => {
+    test.each([
+      'Return to the lawn immediately.',
+      'Return to the lawn right away.',
+      'Return to the lawn at once.',
+      'Return to the lawn straight away.',
+      'Return to the lawn instantly.',
+      'Return to the lawn tomorrow.',
+      'Return to the lawn tonight.',
+      'Return to the lawn today.',
+      'Return to the lawn this evening.',
+      'Return to the lawn this afternoon.',
+      'Return to the lawn overnight.',
+      'Return to the lawn over the weekend.',
+      'Return to the lawn after tomorrow.',
+      'Return to the lawn until Friday.',
+    ])('model copy rejects: %s', (text) => {
+      expect(checkLawnModelCopy(text, {}).ok).toBe(false);
+    });
+
+    test.each([
+      'Return to the lawn immediately.',
+      'Return to the lawn right away.',
+      'Return to the lawn at once.',
+      'Return to the lawn straight away.',
+      'Return to the lawn instantly.',
+      'Return to the lawn today.',
+      'Return to the lawn this evening.',
+      'Return to the lawn this afternoon.',
+      'Return to the lawn overnight.',
+      'Return to the lawn over the weekend.',
+    ])('timing rule rejects as timing: %s', (text) => {
+      expect(guards.checkTimingLanguage(text).length).toBeGreaterThan(0);
+    });
+
+    test.each([
+      'Keep pets off until tomorrow.',
+      'Keep pets off until tonight.',
+      'Keep pets off until this evening.',
+      'Keep pets off until the weekend.',
+      'Keep pets off immediately.',
+      'Keep pets off right away.',
+      'Keep pets off for now and after tomorrow.',
+      'Stay off the turf until today.',
+      'Wait until overnight.',
+      'Please wait until later.',
+      'Let it dry until noon.',
+    ])('banner re-entry check rejects: %s', (text) => {
+      expect(checkReentryPattern(text).length).toBe(1);
+      expect(checkBannerCopy(text).map((r) => r.rule)).toContain('reentry_figure');
+    });
+
+    test('the audit reproductions', () => {
+      expect(checkLawnModelCopy('Return to the lawn immediately.').ok).toBe(false);
+      expect(checkBannerCopy('Keep pets off until tomorrow.').map((r) => r.rule)).toContain('reentry_figure');
+    });
+
+    test('"today’s" is the one allowed form (approved absence phrasing and the banner)', () => {
+      accepts("Chinch bugs were not seen in today's photos.", {});
+      expect(guards.checkTimingLanguage("No watering change from today's treatment.")).toEqual([]);
+    });
+  });
+
+  describe('number vocabulary is complete', () => {
+    const CARDINALS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+      'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty',
+      'sixty', 'seventy', 'eighty', 'ninety', 'hundred', 'thousand', 'million', 'billion', 'trillion', 'dozen', 'hundreds',
+      'thousands', 'millions', 'billions', 'dozens', 'half', 'quarter', 'third'];
+    const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh',
+      'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth',
+      'thirtieth', 'fortieth', 'fiftieth', 'sixtieth', 'seventieth', 'eightieth', 'ninetieth', 'hundredth', 'thousandth',
+      'millionth', 'billionth', 'trillionth'];
+
+    test.each(CARDINALS)('cardinal "%s" rejects', (w) => {
+      expect(checkNumbers(`We saw ${w} spots.`).length).toBeGreaterThan(0);
+    });
+
+    test.each(ORDINALS)('ordinal "%s" rejects', (w) => {
+      const reasons = checkNumbers(`This is the ${w} spot.`);
+      expect(reasons.length).toBeGreaterThan(0);
+    });
+
+    test('the audit reproductions', () => {
+      rejects('This is the sixtieth application.', 'numeric', {});
+      rejects('The treatment contains a billion beneficial microbes.', 'numeric', {});
+      rejects('This is the ninety-ninth spot.', 'numeric', {});
+    });
+
+    test('every compound from twenty-one to ninety-nine rejects through its parts', () => {
+      const tens = ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+      const units = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+      tens.forEach((t) => units.forEach((u) => {
+        expect(checkNumbers(`We saw ${t}-${u} spots.`).length).toBeGreaterThan(0);
+        expect(checkNumbers(`This is the ${t}-${u === 'one' ? 'first' : `${u}th`} spot.`).length).toBeGreaterThan(0);
+      }));
+    });
+
+    test('"a score of" and "a couple of" reject; plain "score" and "couple" do not', () => {
+      expect(checkNumbers('This is a score of good news.').length).toBe(1);
+      expect(checkNumbers('We saw a couple of spots.').length).toBe(1);
+      expect(checkNumbers('Your score ring shows the number.')).toEqual([]);
+      expect(checkNumbers('The couple next door waved.')).toEqual([]);
+    });
+
+    test('plain prose with no numbers still passes', () => {
+      accepts('The edge along the front looks thin and we will keep an eye on it.', {});
     });
   });
 });

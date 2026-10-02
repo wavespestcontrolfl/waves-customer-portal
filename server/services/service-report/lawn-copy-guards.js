@@ -25,7 +25,12 @@
  *   timing             any time-unit word (second ... year, season, night,
  *                      overnight, wk/hr/min/mo/yr, daily/weekly ...) or
  *                      relative-time word (next, coming, following, within, soon,
- *                      shortly, later, "a while", ago, yesterday, eventually).
+ *                      shortly, later, "a while", ago, yesterday, eventually),
+ *                      immediacy (immediately, right away, at once, straight
+ *                      away, instantly) or relative day (today, tomorrow,
+ *                      tonight, this evening, this afternoon, weekend, noon,
+ *                      midnight). "today's" is the one allowed form. One shared
+ *                      list feeds this rule and the re-entry rule.
  *   numeric            NO digits at all: any digit, fraction, spelled number word
  *                      or ordinal. There is no score allowance; the score ring,
  *                      trend chart and other deterministic surfaces print every
@@ -45,8 +50,8 @@
  *                      "higher" / "lower" in a score or trend sense ("is down",
  *                      "up since") are progress claims too. "behind" is a
  *                      progress claim unless a spatial noun follows ("behind the
- *                      house"). A negator within three words before one ("not
- *                      improving", "no longer behind", "hasn't improved")
+ *                      house"). A negator anywhere in the same sentence ("not
+ *                      improving", "no longer behind", "is not higher")
  *                      rejects whatever states were supplied.
  *   banned_copy        G1/G6: the shared findBannedCustomerCopy list (cleared,
  *                      resolved, gone, guarantee, fixed re-entry figures ...).
@@ -165,9 +170,28 @@ function normalizeCopy(text) {
   return current;
 }
 
-// A sentence ends at . ! ? or a blank line, never at a single newline.
+// A sentence ends at . ! ? or a blank line, never at a single newline, and never
+// at the period of a common abbreviation ("approx. thirty minutes" stays one
+// sentence). Joining is conservative: a wider sentence can only reject more.
+const ABBREVIATIONS = new Set([
+  'approx', 'apprx', 'est', 'e.g', 'i.e', 'etc', 'vs', 'no', 'min', 'hr', 'hrs', 'mins', 'sec', 'secs', 'ft', 'in',
+  'oz', 'lb', 'lbs', 'gal', 'qt', 'pt', 'mr', 'mrs', 'ms', 'dr', 'st',
+]);
+const endsWithAbbreviation = (chunk) => {
+  const last = (chunk.match(/([A-Za-z][A-Za-z.]*)\.$/) || [])[1];
+  return Boolean(last) && ABBREVIATIONS.has(last.toLowerCase());
+};
+
+function splitParagraph(paragraph) {
+  return paragraph.split(/(?<=[.!?])\s+/).reduce((out, chunk) => {
+    if (out.length && endsWithAbbreviation(out[out.length - 1])) out[out.length - 1] += ` ${chunk}`;
+    else out.push(chunk);
+    return out;
+  }, []);
+}
+
 function splitSentences(text) {
-  return normalizeCopy(text).split('\n\n').flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+/)).filter(Boolean);
+  return normalizeCopy(text).split('\n\n').flatMap(splitParagraph).filter(Boolean);
 }
 
 // Every check takes raw text or an already-split sentence list.
@@ -197,16 +221,40 @@ function sentenceKey(s) {
 const TIME_WORDS_SRC = 'seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|months?|mos?|years?|yrs?|seasons?|nights?|overnight|decades?|fortnights?|hourly|nightly|daily|weekly|biweekly|monthly|yearly|annual(?:ly)?';
 const TIME_WORD_RE = new RegExp(`\\b(?:${TIME_WORDS_SRC})\\b`, 'i');
 const RELATIVE_TIME_RE = /\b(?:next|coming|following|within|soon|shortly|later|ago|yesterday|eventually)\b|\ba\s+while\b/i;
-const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|halves|quarters?|thirds?)\b/i;
+const IMMEDIATE_RE = /\b(?:immediate(?:ly)?|instant(?:ly)?)\b|\bright\s+away\b|\bat\s+once\b|\bstraight\s+away\b/i;
+// "today" is timing, but not the possessive: "not seen in today's photos" is the
+// one approved absence phrasing (G6) and the banner says "today's treatment".
+const TIMING_RELATIVE_DAY_RE = /\btoday\b(?!'s)|\b(?:tomorrow|tonight|weekends?|noon|midnight)\b|\bthis\s+(?:evening|afternoon)\b/i;
+// "until" / "after" plus any time word is covered because every time word, relative
+// day and number is in the one shared list below.
+const TIMING_RES = [TIME_WORD_RE, RELATIVE_TIME_RE, IMMEDIATE_RE, TIMING_RELATIVE_DAY_RE];
+
+// Number vocabulary is built from parts, not enumerated: cardinals zero..ninety-
+// nine by their word parts plus the scales, and ordinals first..ninety-ninth and
+// the scale ordinals by theirs. "twenty-one" and "ninety-ninth" reject through
+// their parts.
+const UNIT_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+const TEEN_WORDS = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const TENS_WORDS = ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const SCALE_WORDS = ['hundred', 'thousand', 'million', 'billion', 'trillion'];
+const IRREGULAR_ORDINALS = {
+  one: 'first', two: 'second', three: 'third', five: 'fifth', eight: 'eighth', nine: 'ninth', twelve: 'twelfth',
+};
+const ordinalOf = (word) => IRREGULAR_ORDINALS[word] || (word.endsWith('y') ? `${word.slice(0, -1)}ieth` : `${word}th`);
+const CARDINAL_WORDS = ['zero', ...UNIT_WORDS, ...TEEN_WORDS, ...TENS_WORDS];
+const ORDINAL_WORDS = [...UNIT_WORDS, ...TEEN_WORDS, ...TENS_WORDS, ...SCALE_WORDS].map(ordinalOf);
+const FRACTION_WORDS = ['half', 'halves', 'quarter', 'quarters', 'third', 'thirds'];
+const wordsRe = (words) => new RegExp(`\\b(?:${words.join('|')})\\b`, 'i');
+const NUMBER_WORD_RE = new RegExp(`${wordsRe([...CARDINAL_WORDS, ...FRACTION_WORDS]).source}|\\b(?:${[...SCALE_WORDS, 'dozen'].join('|')})s?\\b|\\ba\\s+(?:score|couple)\\s+of\\b`, 'i');
+const ORDINAL_WORD_RE = wordsRe(ORDINAL_WORDS);
 // any time word, relative phrase, number word, ordinal or digit
-const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
+const ANY_TIMING_RE = new RegExp([...TIMING_RES, NUMBER_WORD_RE, ORDINAL_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
 
 // No digits, number words, fractions or ordinals at all outside approved
 // sentences. The score ring, trend chart and other deterministic surfaces print
-// every number, so the model never needs to; there is no score allowance (it
-// produced holes four passes in a row). facts.allowedNumbers is accepted and
-// ignored. Fractions are digits after normalization ("1/2"), so they reject too.
-const ORDINAL_WORD_RE = /\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|(?:thir|four|fif|six|seven|eigh|nine)teenth|twentieth|thirtieth|fortieth|fiftieth|hundredth|thousandth)\b/i;
+// every number, so the model never needs to; there is no score allowance.
+// facts.allowedNumbers is accepted and ignored. Fractions are digits after
+// normalization ("1/2"), so they reject too.
 const NUMBER_FORMS = [
   { re: /\S*\d\S*/g, detail: 'digit' },
   { re: new RegExp(NUMBER_WORD_RE.source, 'gi'), detail: 'spelled number' },
@@ -219,7 +267,7 @@ function checkNumbers(input) {
 }
 
 function checkTimingLanguage(input) {
-  return sentencesOf(input).flatMap((sentence) => [TIME_WORD_RE, RELATIVE_TIME_RE].flatMap((re) => (sentence.match(globalOf(re)) || [])
+  return sentencesOf(input).flatMap((sentence) => TIMING_RES.flatMap((re) => (sentence.match(globalOf(re)) || [])
     .map((m) => ({ rule: 'timing', match: m, detail: 'no time language outside approved sentences' }))));
 }
 
@@ -284,8 +332,8 @@ const BEHIND_PROGRESS_RE = new RegExp(`\\bbehind\\b(?!\\s+(?:(?:the|your|our|a|a
 const DIRECTION_RE = /\b(?:up|down)\b/gi;
 const DIRECTION_BEFORE_RE = /\b(?:is|are|was|were|be|been|being|am|went|go|goes|going|gone|moved|moves|moving|trending|trended|stayed|stays|staying|got|gets|getting|come|came|comes|coming|ticked|swung|not|never|no|only|just|still|now|currently)\b|\b\w+n't\b/i;
 const DIRECTION_AFTER_RE = /^\s+(?:from|since|over|compared|versus|vs|again|overall|slightly|somewhat|by|this|today|a\s+(?:bit|little|touch))\b/i;
-const HIGHER_RE = /\b(?:is|are|was|were)\s+(?:\w+\s+)?higher\b|\bhigher\s+than\b/i;
-const LOWER_RE = /\b(?:is|are|was|were)\s+(?:\w+\s+)?lower\b|\blower\s+than\b/i;
+const HIGHER_RE = /(?<=\b(?:is|are|was|were)\s+(?:\w+\s+){0,3})higher\b|\bhigher(?=\s+than\b)/i;
+const LOWER_RE = /(?<=\b(?:is|are|was|were)\s+(?:\w+\s+){0,3})lower\b|\blower(?=\s+than\b)/i;
 
 function directionMatches(sentence, word) {
   return [...sentence.matchAll(DIRECTION_RE)].filter((m) => m[0].toLowerCase() === word).filter((m) => {
@@ -304,19 +352,17 @@ const ITEM_PHRASES = [
 
 const stateKey = (s) => String(s || '').toLowerCase().replace(/[\s-]+/g, '_');
 
-// A negator within three words before a progress or state word flips its
-// meaning ("not improving", "no longer behind", "hasn't improved"), so it
-// rejects whatever states were supplied.
+// A negator ANYWHERE in a sentence that carries a progress, state, direction or
+// comparative claim ("not improving", "no longer behind", "hasn't improved",
+// "is not higher") flips its meaning, so it rejects whatever states were
+// supplied. The matched claim words themselves are not searched ("no change").
 const NEGATOR_RE = /\b(?:not|no|never|nor|without|hardly|barely|cannot|none)\b|\b\w+n't\b/i;
-function isNegated(t, index) {
-  const sentence = t.slice(0, index).split(/[.!?;:]/).pop();
-  return NEGATOR_RE.test(sentence.trim().split(/\s+/).slice(-3).join(' '));
-}
+const isNegated = (sentence, m) => NEGATOR_RE.test(`${sentence.slice(0, m.index)} ${sentence.slice(m.index + m[0].length)}`);
 
 const matchesOf = (re, t) => [...t.matchAll(new RegExp(re.source, 'gi'))];
 
 function judgeProgressMatch(m, t, ok, reasonDetail) {
-  if (isNegated(t, m.index)) return { rule: 'progress_coupling', match: m[0], detail: 'negated progress word' };
+  if (isNegated(t, m)) return { rule: 'progress_coupling', match: m[0], detail: 'negated progress word' };
   return ok ? null : { rule: 'progress_coupling', match: m[0], detail: reasonDetail };
 }
 
