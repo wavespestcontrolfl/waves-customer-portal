@@ -40,7 +40,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, stops, nextStop, loading, error, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough }) {
+export default function TechFieldHome({ section, stops, nextStop, loading, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -67,6 +67,7 @@ export default function TechFieldHome({ section, stops, nextStop, loading, error
       {rainChance >= 40 && <div className="tf-alert"><CloudRain size={18} aria-hidden="true" /> {rainChance}% rain today</div>}
       {followThrough}
       {error && <div role="alert" className="tf-alert tf-error">{error}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>}
+      {notice && !error && <div role="status" className="tf-alert">{notice}<div><button type="button" className="tf-button" onClick={onRetry} disabled={loading}>Try again</button></div></div>}
       {loading ? <p role="status">Loading your route…</p> : !error && <>
         <div className="tf-progress-label"><strong>{completed} of {stops.length} stops complete</strong><span className="tf-muted">{stops.reduce((count, stop) => count + stop.services.length, 0)} services</span></div>
         <div className="tf-progress" aria-hidden="true">{stops.map((stop) => <span key={stop.key} className={stop.services.every((s) => s.status === 'completed') ? 'done' : stop.key === nextStop?.key ? 'current' : ''} />)}</div>

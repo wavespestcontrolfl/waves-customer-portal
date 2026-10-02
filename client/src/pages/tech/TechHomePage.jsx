@@ -65,6 +65,7 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
@@ -214,6 +215,22 @@ function scheduleRowsFromResponse(data) {
   return [];
 }
 
+// One shape for the live payload and the saved snapshot of it, so the
+// offline fallback renders exactly what the last good load rendered.
+function scheduleStateFromResponse(data) {
+  return {
+    rows: scheduleRowsFromResponse(data).map((service) => ({
+      ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
+    })),
+    rainChance: typeof data.rainChance === 'number' ? data.rainChance : null,
+  };
+}
+
+function refreshingRouteNotice(savedAt) {
+  const time = formatSnapshotTime(savedAt);
+  return `Refreshing your route — showing the copy saved${time ? ` at ${time}` : ''}.`;
+}
+
 function serviceTechnicianId(service) {
   return service?.technicianId || service?.technician_id || service?.tech_id || '';
 }
@@ -250,7 +267,14 @@ export default function TechHomePage({ section = 'today' }) {
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
   const notifyRecapRecoveryChange = useCallback(() => setRecapRecoveryRevision((revision) => revision + 1), []);
-  const [schedule, setSchedule] = useState([]);
+  // Last good route this device saw for this tech today (routeSnapshot.js).
+  // Hydrated before the first fetch so a reopen in a dead zone shows the
+  // saved stops at once instead of a spinner that ends in a red banner.
+  const [initialSnapshot] = useState(() => loadRouteSnapshot({ techId: getAdminUser()?.id, date: etDateString() }));
+  const [schedule, setSchedule] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rows : []));
+  // '' while the route on screen is live; otherwise the sentence that tells
+  // the tech they are looking at a saved copy (refreshing, or offline).
+  const [routeNotice, setRouteNotice] = useState(() => (initialSnapshot ? refreshingRouteNotice(initialSnapshot.savedAt) : ''));
   // The tech's own Twilio line, if they hold one (GET /api/tech/line):
   // the brief panel's Call/Text then go through the line. Null = personal
   // phone links as before. Re-read with every schedule refresh (mount,
@@ -281,7 +305,7 @@ export default function TechHomePage({ section = 'today' }) {
       setTechLine((prev) => (prev?.line ? prev : { unknown: true }));
     }
   }, []);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialSnapshot);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
@@ -302,7 +326,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
-  const [rainChance, setRainChance] = useState(null);
+  const [rainChance, setRainChance] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rainChance : null));
   // Visit Brief accordion: one stop expanded at a time (keyed by the
   // stop's primary service id) + a per-stop session cache of the two
   // detail fetches (estimate-source + visit-brief).
@@ -333,25 +357,62 @@ export default function TechHomePage({ section = 'today' }) {
     // while the answer is in flight — the initial `{ unknown: true }` hides
     // every contact link until the lookup succeeds (r4 / r5 P2s).
     fetchTechLine();
+    const today = etDateString();
+    const techId = getAdminUser()?.id || null;
+    // A request that hangs in a dead zone must not hold the page: cut it
+    // off and fall back to the saved route (below) instead.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), ROUTE_FETCH_TIMEOUT_MS) : null;
     try {
       const token = getAdminAuthToken();
-      const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
+        ...(abort ? { signal: abort.signal } : {}),
       });
       const data = await res.json().catch(() => ({}));
       if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      const next = scheduleStateFromResponse(data);
       setScheduleError('');
-      setSchedule(scheduleRowsFromResponse(data).map((service) => ({
-        ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
-      })));
-      setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
+      setRouteNotice('');
+      setSchedule(next.rows);
+      setRainChance(next.rainChance);
+      // Keep only this tech's own stops on the device: the board payload
+      // carries every tech's route, and the saved copy needs just the rows
+      // this page would render for this login.
+      saveRouteSnapshot({ techId, date: today, data: {
+        visitCloseout: data?.visitCloseout === true,
+        rainChance: next.rainChance,
+        services: scheduleRowsFromResponse(data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
+      } });
     } catch (err) {
       if (seq !== scheduleSeq.current) return;
       console.error('Failed to fetch schedule:', err);
-      setScheduleError(err.message || 'Your route could not be loaded.');
+      // Offline fallback: the last good route this tech loaded today, read
+      // fresh each time (another tab or a later login may have replaced
+      // it). A 401/403 is not a connectivity failure — the server answered
+      // and said no — so the saved copy stays hidden behind the real error.
+      // fetch() rejects with a TypeError when the network is unreachable
+      // ("Failed to fetch" / "Load failed"); our own non-ok throw above is a
+      // plain Error and the timeout aborts with AbortError.
+      const offline = err?.name === 'AbortError' || err instanceof TypeError;
+      const snapshot = offline ? loadRouteSnapshot({ techId, date: today }) : null;
+      if (snapshot) {
+        const saved = scheduleStateFromResponse(snapshot.data);
+        setSchedule(saved.rows);
+        setRainChance(saved.rainChance);
+        setScheduleError('');
+        setRouteNotice(savedRouteNotice(snapshot.savedAt));
+      } else {
+        // The server answered (or there is nothing saved): drop any copy
+        // hydrated at mount so stale stops never sit under a real error.
+        setSchedule([]);
+        setRainChance(null);
+        setRouteNotice('');
+        setScheduleError(offline ? 'Your route could not be loaded (no connection).' : (err.message || 'Your route could not be loaded.'));
+      }
     } finally {
+      if (timer) clearTimeout(timer);
       if (seq === scheduleSeq.current) setLoading(false);
     }
   }, [fetchTechLine]);
@@ -734,7 +795,7 @@ export default function TechHomePage({ section = 'today' }) {
       {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} error={scheduleError} rainChance={rainChance}
+          loading={loading} error={scheduleError} notice={routeNotice} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
@@ -811,6 +872,18 @@ export default function TechHomePage({ section = 'today' }) {
       <TechTimeTrackingCard nextStop={nextStop} />
       <TechFollowThroughCards />
 
+      {routeNotice && !scheduleError && (
+        <div role="status" style={{
+          background: '#f59e0b22', border: '1px solid #f59e0b', color: '#fbbf24',
+          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
+        }}>
+          <div style={{ marginBottom: 8 }}>{routeNotice}</div>
+          <button type="button" onClick={fetchSchedule} style={{
+            border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
+            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: 'pointer',
+          }}>Try again</button>
+        </div>
+      )}
       {scheduleError && (
         <div role="alert" style={{
           background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
