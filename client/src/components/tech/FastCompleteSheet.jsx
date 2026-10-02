@@ -803,11 +803,12 @@ function reportCompletionBody({
 }
 
 // What still holds the report (generate) or the completion (complete), in
-// screen order, and the product whose stock holds it.
+// screen order, the product whose stock holds it, and the fix the hold
+// offers on the sheet ('remove_trace').
 function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photosLoaded, promisesLoaded, stage, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
-  const [, reason = '', stockRow = null] = [
+  const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [!photosLoaded, 'Loading photos…'],
     [!promisesLoaded, 'Loading promises…'],
@@ -817,7 +818,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
     ...(stage === 'complete' ? sendHolds({ active, ...sendInputs }) : []),
   ].find(([missing]) => missing) || [];
-  return { reason, stockRow };
+  return { reason, stockRow, fix };
 }
 
 // What else holds Complete & send: the report itself; the note's read of
@@ -858,8 +859,9 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
     [untraced, untraced && (traceAvailable
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
-    [unusedTrace, 'Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.'],
-    [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, or trace again without Interior spray.'],
+    // A trace the note doesn't back can also come off ("Remove the trace").
+    [unusedTrace, 'Your saved trace shows a spray around the house, but your note says spots only. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
+    [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.', null, 'remove_trace'],
   ];
 }
 
@@ -975,6 +977,9 @@ function ReportFlowForm({
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
   const traceAvailable = trace.enabled && service?.traceEligible !== false;
+  // The property this sheet loaded: a trace saved or removed here is refused
+  // if the office has moved the visit to another one since.
+  const loadedPropertyId = ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined;
   const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
   const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos);
   const stale = !!draft && draft.signature !== signature;
@@ -1029,9 +1034,7 @@ function ReportFlowForm({
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
       serviceId={service?.id}
-      // The property this sheet loaded: the save is refused if the office has
-      // moved the visit to another one since (the map would be the old home's).
-      expectedPropertyId={ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined}
+      expectedPropertyId={loadedPropertyId}
       customerName={customerNameOf(ctx.visit, service) || 'Customer'}
       address={service?.routedAddress || service?.address || ''}
       lat={service?.lat}
@@ -1040,6 +1043,24 @@ function ReportFlowForm({
       onSaved={trace.saved}
     />,
   );
+
+  // "Remove the trace": a saved trace the note no longer backs comes off,
+  // then the trace is read again. A refusal (the visit moved, or was
+  // completed elsewhere) is shown and the hold stays.
+  const [removingTrace, setRemovingTrace] = useState(false);
+  const [traceError, setTraceError] = useState('');
+  const removeTrace = async () => {
+    setRemovingTrace(true);
+    setTraceError('');
+    const bound = loadedPropertyId === undefined ? '' : `?expectedPropertyId=${encodeURIComponent(loadedPropertyId ?? '')}`;
+    try {
+      await request(`/tech/services/${service.id}/treatment-zone${bound}`, { method: 'DELETE' });
+    } catch (err) {
+      setTraceError(err?.message || 'Couldn’t remove the trace. Try again.');
+    }
+    setRemovingTrace(false);
+    trace.reload();
+  };
 
   if (submission.done) {
     const doneMarks = promiseMarks.filter((mark) => mark.mark === 'done').map((mark) => ({
@@ -1067,6 +1088,9 @@ function ReportFlowForm({
         // Only a perimeter spray is traced: a spot visit has no trace step.
         trace={traceAvailable && perimeterSprayRow(active, draft) ? trace : null}
         onRetryTrace={trace.failed ? trace.reload : null}
+        onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
+        removingTrace={removingTrace}
+        traceError={traceError}
         sources={writerSources({
           productCount: active.length,
           photoCount: visitPhotos.photos.length,
@@ -1122,7 +1146,7 @@ function ReportFlowForm({
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, sources, photoCount,
-  onWrite, onSubmit, onTrace, onRetryTrace, onBack, onConfirm, onBackFromPrompt,
+  onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm, onBackFromPrompt,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1132,6 +1156,9 @@ function ReportStep({
       {stockButton}
       {onRetryTrace && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
       )}
     </CompleteFooter>
   );
@@ -1152,6 +1179,7 @@ function ReportStep({
         </Button>
         {writing && <WritingView sources={sources} />}
         {writeError && !writing && <ActionFeedback error className="tech-visit-feedback">{writeError}</ActionFeedback>}
+        {traceError && <ActionFeedback error className="tech-visit-feedback">{traceError}</ActionFeedback>}
         {showDraft && (
           <ReportCard
             draft={draft}

@@ -13,6 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
   normalizePathPoints,
   TREATMENT_ZONE_PREFIX,
@@ -341,6 +342,72 @@ describe('saveTreatmentZoneMap bound to a property', () => {
     expect(row.id).toBe('row-1');
     const plain = makeKnex();
     expect((await saveTreatmentZoneMap(args(plain, undefined))).id).toBe('row-1');
+  });
+});
+
+describe('deleteTreatmentZoneMap (Remove the trace)', () => {
+  function removalKnex({ visit, removed = null }) {
+    const state = { locks: [], deleted: false };
+    const knex = jest.fn();
+    knex.transaction = async (work) => work((table) => {
+      if (table === 'scheduled_services') {
+        return {
+          where: () => ({
+            forUpdate: () => {
+              state.locks.push(table);
+              return { first: () => Promise.resolve(visit) };
+            },
+          }),
+        };
+      }
+      return {
+        where: () => ({
+          del: () => ({
+            returning: () => {
+              state.deleted = true;
+              return Promise.resolve(removed ? [removed] : []);
+            },
+          }),
+        }),
+      };
+    });
+    knex.state = state;
+    return knex;
+  }
+
+  beforeEach(() => {
+    mockS3Send.mockClear();
+    mockS3Send.mockResolvedValue({});
+  });
+
+  test('an open visit at the loaded property loses its trace under the visit lock, then both images', async () => {
+    const knex = removalKnex({
+      visit: { property_id: 'prop-1', status: 'on_site' },
+      removed: { snapshot_s3_key: 'snap.png', mask_s3_key: 'mask.png' },
+    });
+    expect(await deleteTreatmentZoneMap({ scheduledServiceId: 'svc-1', expectedPropertyId: 'prop-1', knex }))
+      .toEqual({ snapshot_s3_key: 'snap.png', mask_s3_key: 'mask.png' });
+    expect(knex.state.locks).toEqual(['scheduled_services']);
+    expect(knex.state.deleted).toBe(true);
+    expect(mockS3Send.mock.calls.map(([cmd]) => [cmd.commandType, cmd.input.Key]))
+      .toEqual([['delete', 'snap.png'], ['delete', 'mask.png']]);
+  });
+
+  test('a completed visit keeps its trace, and a visit moved since the sheet loaded is refused', async () => {
+    const completed = removalKnex({ visit: { property_id: 'prop-1', status: 'completed' } });
+    await expect(deleteTreatmentZoneMap({ scheduledServiceId: 'svc-1', expectedPropertyId: 'prop-1', knex: completed }))
+      .rejects.toMatchObject({ code: 'visit_completed', statusCode: 409 });
+    const moved = removalKnex({ visit: { property_id: 'prop-2', status: 'on_site' } });
+    await expect(deleteTreatmentZoneMap({ scheduledServiceId: 'svc-1', expectedPropertyId: 'prop-1', knex: moved }))
+      .rejects.toMatchObject({ code: 'visit_property_changed', statusCode: 409 });
+    expect(completed.state.deleted || moved.state.deleted).toBe(false);
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('no saved trace removes nothing and touches no image', async () => {
+    const knex = removalKnex({ visit: { property_id: null, status: 'confirmed' } });
+    expect(await deleteTreatmentZoneMap({ scheduledServiceId: 'svc-1', expectedPropertyId: null, knex })).toBeNull();
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 });
 

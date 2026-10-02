@@ -60,6 +60,9 @@ async function createSchema(trx) {
     table.date('scheduled_date'); table.string('stop_base_key'); table.integer('stop_seq');
     table.uuid('technician_id'); table.string('status');
   });
+  await trx.schema.createTable('treatment_zone_maps', table => {
+    table.uuid('id').primary(); table.uuid('scheduled_service_id').notNullable().unique();
+  });
   await trx.schema.createTable('audit_log', table => {
     table.increments('id'); table.string('actor_type'); table.uuid('actor_id');
     table.string('action'); table.string('resource_type'); table.string('resource_id');

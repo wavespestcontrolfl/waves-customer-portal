@@ -61,6 +61,13 @@ function normalizePathPoints(raw) {
   });
 }
 
+function propertyChangedError() {
+  return Object.assign(
+    operationalError('This visit moved to another property. Close it and reopen it from the schedule.', 409),
+    { code: 'visit_property_changed' },
+  );
+}
+
 // The visit must still be at the property the caller loaded it at, read
 // under its row lock at the write itself, so an office move that commits
 // after the route's own read is refused too (Codex #5538).
@@ -70,10 +77,7 @@ async function assertVisitProperty(conn, scheduledServiceId, expectedPropertyId)
     .forUpdate()
     .first('property_id');
   if (!visit || String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
-    throw Object.assign(
-      operationalError('This visit moved to another property. Close it and reopen it from the schedule.', 409),
-      { code: 'visit_property_changed' },
-    );
+    throw propertyChangedError();
   }
 }
 
@@ -243,6 +247,44 @@ async function saveTreatmentZoneMap({
   return row;
 }
 
+// "Remove the trace" (the Fast Complete report flow): a trace that no longer
+// matches the note comes off before the visit is completed. Under the visit
+// row's lock, which the completion takes before it reads the trace: a visit
+// moved to another property, or already completed (its report shows the
+// trace), is refused. The images come off S3 after the commit, best effort.
+async function deleteTreatmentZoneMap({ scheduledServiceId, expectedPropertyId, knex = db }) {
+  if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
+  const removed = await knex.transaction(async (trx) => {
+    const visit = await trx('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .forUpdate()
+      .first('property_id', 'status');
+    if (!visit) throw operationalError('Service not found', 404);
+    if (expectedPropertyId !== undefined && String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
+      throw propertyChangedError();
+    }
+    if (visit.status === 'completed') {
+      throw Object.assign(
+        operationalError('This visit is complete, so its trace stays on the report.', 409),
+        { code: 'visit_completed' },
+      );
+    }
+    const [row] = await trx('treatment_zone_maps')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .del()
+      .returning(['snapshot_s3_key', 'mask_s3_key']);
+    return row || null;
+  });
+  for (const key of [removed?.snapshot_s3_key, removed?.mask_s3_key].filter(Boolean)) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+    } catch (err) {
+      logger.warn(`[treatment-zone] removed trace image delete failed: ${err.message}`);
+    }
+  }
+  return removed;
+}
+
 async function getTreatmentZoneMapForScheduledService(scheduledServiceId, { knex = db } = {}) {
   if (!scheduledServiceId) return null;
   return (
@@ -318,6 +360,7 @@ async function treatmentZonePdfSignature(service, knex = db) {
 
 module.exports = {
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
   treatmentZonePdfSignature,
   normalizePathPoints,

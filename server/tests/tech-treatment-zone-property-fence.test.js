@@ -10,6 +10,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockFirst = jest.fn();
 const mockSave = jest.fn();
+const mockDelete = jest.fn();
 
 jest.mock('../models/db', () => {
   const chain = {
@@ -22,6 +23,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/treatment-zone-maps', () => ({
   saveTreatmentZoneMap: (...args) => mockSave(...args),
+  deleteTreatmentZoneMap: (...args) => mockDelete(...args),
   getTreatmentZoneMapForScheduledService: jest.fn(),
   treatmentZonePdfSignature: jest.fn(),
 }));
@@ -116,5 +118,47 @@ describe('treatment-zone save bound to the loaded property', () => {
       expect((await saveTrace(baseUrl, { expectedPropertyId: null })).status).toBe(200);
       expect((await saveTrace(baseUrl, { expectedPropertyId: 'prop-1' })).status).toBe(409);
     });
+  });
+});
+
+describe('Remove the trace (DELETE, the report flow)', () => {
+  const remove = (baseUrl, query = '?expectedPropertyId=prop-2') => fetch(`${baseUrl}/api/tech/services/svc-1/treatment-zone${query}`, {
+    method: 'DELETE', headers: { Authorization: 'Bearer tech' },
+  });
+  beforeEach(() => {
+    mockFirst.mockReset();
+    mockDelete.mockReset();
+    mockFirst.mockImplementation(async () => ({ id: 'svc-1', technician_id: 'tech-1' }));
+    mockDelete.mockResolvedValue({ snapshot_s3_key: 'snap.png' });
+  });
+
+  test('the assigned tech removes it, bound to the property the sheet loaded', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await remove(baseUrl);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ removed: true });
+    });
+    expect(mockDelete).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', expectedPropertyId: 'prop-2' });
+  });
+
+  test('a visit with no property sends an empty binding, and another tech\'s visit is refused', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await remove(baseUrl, '?expectedPropertyId=')).status).toBe(200);
+      mockFirst.mockImplementation(async () => ({ id: 'svc-1', technician_id: 'tech-9' }));
+      expect((await remove(baseUrl)).status).toBe(403);
+    });
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', expectedPropertyId: null });
+  });
+
+  test('a completed or moved visit answers 409 with its reason', async () => {
+    for (const code of ['visit_completed', 'visit_property_changed']) {
+      mockDelete.mockRejectedValueOnce(Object.assign(new Error(`refused: ${code}`), { code, statusCode: 409 }));
+      await withServer(async (baseUrl) => {
+        const res = await remove(baseUrl);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: `refused: ${code}`, code });
+      });
+    }
   });
 });

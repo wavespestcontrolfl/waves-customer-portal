@@ -72,7 +72,7 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
-    if (path.endsWith('/treatment-zone')) return typeof trace === 'function' ? trace() : trace;
+    if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace(path, options) : trace;
     if (path === '/admin/schedule/generate-report') {
       if (report instanceof Error) throw report;
       return { report };
@@ -651,9 +651,43 @@ describe('complete and send', () => {
     await generate();
     expect(screen.queryByText('Perimeter traced · 140 ft')).toBeNull();
     expect(screen.queryByText('With the trace.')).toBeNull();
-    expect(screen.getByText('Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.')).toBeTruthy();
+    expect(screen.getByText('Your saved trace shows a spray around the house, but your note says spots only. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     expect(request.bodies('/complete')).toEqual([]);
+  });
+
+  test('Remove the trace takes a trace the note no longer backs off, bound to the loaded property, and the send goes (codex local r12)', async () => {
+    let zone = { linear_ft: 140.4, capture_mode: 'perimeter' };
+    const request = makeRequest({
+      trace: (path, options) => {
+        if (options?.method === 'DELETE') { zone = null; return { removed: true }; }
+        return { enabled: true, treatmentZone: zone };
+      },
+    });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove the trace' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    expect(request.calls.filter((call) => call.options?.method === 'DELETE').map((call) => call.path))
+      .toEqual(['/tech/services/svc-1/treatment-zone?expectedPropertyId=prop-1']);
+    expect(screen.queryByRole('button', { name: 'Remove the trace' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+  });
+
+  test('a refused removal shows why and keeps the hold', async () => {
+    const request = makeRequest({
+      trace: (path, options) => {
+        if (options?.method === 'DELETE') throw conflict('visit_property_changed', 'This visit moved to another property. Close it and reopen it from the schedule.');
+        return { enabled: true, treatmentZone: { linear_ft: 140.4, capture_mode: 'perimeter' } };
+      },
+    });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove the trace' }));
+    expect(await screen.findByText('This visit moved to another property. Close it and reopen it from the schedule.')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
   test('a product set to Perimeter spray by hand gets the trace step even when the note says spots', async () => {
@@ -716,7 +750,8 @@ describe('complete and send', () => {
     });
     await openSheet(request);
     await generate();
-    expect(screen.getByText('Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, or trace again without Interior spray.')).toBeTruthy();
+    expect(screen.getByText('Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
