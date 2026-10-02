@@ -192,7 +192,12 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
     // checks the card exists before inserting, and only stamps completed_at when the contact write did not error.
     expect(source).toContain('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {');
     expect(source).toContain("{household_link,completed_at}");
-    expect(source).toContain("if (householdPersist !== 'error') {");
+    expect(source).toContain("householdIncomplete = householdPersist === 'skipped_slot_race';");
+    expect(source).toContain('if (!householdIncomplete) {');
+    expect(source).toContain("incomplete.code = 'HOUSEHOLD_COMPLETION_INCOMPLETE';");
+    // an incomplete write throws into the bounded retry; it is never swallowed into a 'processed' finish
+    const tail = source.slice(source.indexOf('if (householdIncomplete) {'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
+    expect(tail).toContain('throw incomplete;');
     expect(source).toContain("reason_code: 'household_contact_linked' }).first('id')");
   });
 

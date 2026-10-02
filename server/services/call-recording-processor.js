@@ -12462,25 +12462,30 @@ const CallRecordingProcessor = {
     // card. The contact writer no-ops on a number already on record; the card
     // is checked for existence first (a resolved card is not re-opened).
     if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {
+      const householdContact = {
+        first_name: extracted.first_name || null,
+        last_name: extracted.last_name || null,
+        phone,
+        email: null,
+        role: ['tenant', 'spouse_partner', 'family_member'].includes(v2CanonicalExtraction?.caller?.relationship_to_property)
+          ? v2CanonicalExtraction.caller.relationship_to_property : null,
+        wants_notifications: true,
+      };
+      // Only these outcomes are a retry: a thrown write or a lost slot race. Every
+      // other result is final (written, already on record, no free slot, the
+      // number belongs to another customer, nothing to save) and the card says so.
+      let householdPersist = 'error';
+      let householdIncomplete = false;
       try {
-        const householdContact = {
-          first_name: extracted.first_name || null,
-          last_name: extracted.last_name || null,
-          phone,
-          email: null,
-          role: ['tenant', 'spouse_partner', 'family_member'].includes(v2CanonicalExtraction?.caller?.relationship_to_property)
-            ? v2CanonicalExtraction.caller.relationship_to_property : null,
-          wants_notifications: true,
-        };
-        let householdPersist = 'not_attempted';
-        try {
-          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
-        } catch (persistErr) {
-          householdPersist = 'error';
-          logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
-        }
-        logger.info(`[call-proc] ${maskSid(callSid)} household contact on customer ${customerId}: ${householdPersist}`);
-        if (!bridgeNeedsConfirmation.includes('household_contact_linked')) bridgeNeedsConfirmation.push('household_contact_linked');
+        householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
+        householdIncomplete = householdPersist === 'skipped_slot_race';
+      } catch (persistErr) {
+        householdIncomplete = true;
+        logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
+      }
+      logger.info(`[call-proc] ${maskSid(callSid)} household contact on customer ${customerId}: ${householdPersist}`);
+      if (!bridgeNeedsConfirmation.includes('household_contact_linked')) bridgeNeedsConfirmation.push('household_contact_linked');
+      try {
         const cardExists = await db('triage_items')
           .where({ call_log_id: call.id, reason_code: 'household_contact_linked' }).first('id');
         if (!cardExists) {
@@ -12507,7 +12512,7 @@ const CallRecordingProcessor = {
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore();
         }
-        if (householdPersist !== 'error') {
+        if (!householdIncomplete) {
           await db('call_log')
             .where({ id: call.id })
             .where('processing_token', procToken)
@@ -12518,9 +12523,19 @@ const CallRecordingProcessor = {
               ),
             });
         }
-      } catch (householdErr) {
-        // Left un-marked: the next pass resumes. Code/name only (bound payloads carry the caller's number).
-        logger.warn(`[call-proc] household completion incomplete for ${maskSid(callSid)}: ${householdErr.code || householdErr.name || 'db_error'}`);
+      } catch (cardErr) {
+        householdIncomplete = true;
+        logger.warn(`[call-proc] household card/marker write failed for ${maskSid(callSid)}: ${cardErr.code || cardErr.name || 'db_error'}`);
+      }
+      if (householdIncomplete) {
+        // Fail the pass into the existing bounded retry (extraction_failed with a
+        // capped budget, blocking card at the cap): the stamp is already durable,
+        // so the retry resumes this step instead of finishing 'processed'
+        // without the contact or the card. Code only — bound payloads carry the
+        // caller's number.
+        const incomplete = new Error('household contact/card persistence incomplete');
+        incomplete.code = 'HOUSEHOLD_COMPLETION_INCOMPLETE';
+        throw incomplete;
       }
     }
 
