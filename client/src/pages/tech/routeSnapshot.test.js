@@ -18,9 +18,14 @@ describe('routeSnapshot', () => {
   it('never restores another day or another technician', () => {
     const storage = memoryStorage();
     saveRouteSnapshot({ techId: 't1', date: '2026-10-01', data: { services: [] } }, storage);
-    expect(loadRouteSnapshot({ techId: 't1', date: '2026-10-02' }, storage)).toBeNull();
-    expect(loadRouteSnapshot({ techId: 't2', date: '2026-10-01' }, storage)).toBeNull();
     expect(loadRouteSnapshot({ techId: null, date: '2026-10-01' }, storage)).toBeNull();
+    expect(storage.map.has(ROUTE_SNAPSHOT_KEY)).toBe(true);
+    expect(loadRouteSnapshot({ techId: 't1', date: '2026-10-02' }, storage)).toBeNull();
+    // A mismatched copy is deleted, not just skipped.
+    expect(storage.map.has(ROUTE_SNAPSHOT_KEY)).toBe(false);
+    saveRouteSnapshot({ techId: 't1', date: '2026-10-01', data: { services: [] } }, storage);
+    expect(loadRouteSnapshot({ techId: 't2', date: '2026-10-01' }, storage)).toBeNull();
+    expect(storage.map.has(ROUTE_SNAPSHOT_KEY)).toBe(false);
   });
 
   it('treats corrupt or partial storage as no snapshot', () => {

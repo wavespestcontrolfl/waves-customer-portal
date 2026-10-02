@@ -312,6 +312,10 @@ export default function TechHomePage({ section = 'today' }) {
     }
   }, []);
   const [loading, setLoading] = useState(!initialSnapshot);
+  // A route read is in flight. Separate from `loading` (which hides the
+  // route): saved stops stay on screen while the retry controls are held,
+  // so taps on a weak connection cannot stack schedule reads.
+  const [refreshing, setRefreshing] = useState(false);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
@@ -357,6 +361,7 @@ export default function TechHomePage({ section = 'today' }) {
   const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
     const seq = ++scheduleSeq.current;
+    setRefreshing(true);
     // Runs alongside the schedule read but never gates it: the route must
     // render even when the line lookup hangs on a poor connection (codex
     // #4072 r8 P2). The first render cannot show the personal-phone links
@@ -431,7 +436,7 @@ export default function TechHomePage({ section = 'today' }) {
       }
     } finally {
       if (timer) clearTimeout(timer);
-      if (seq === scheduleSeq.current) setLoading(false);
+      if (seq === scheduleSeq.current) { setLoading(false); setRefreshing(false); }
     }
   }, [fetchTechLine]);
 
@@ -813,7 +818,7 @@ export default function TechHomePage({ section = 'today' }) {
       {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} error={scheduleError} notice={routeNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
@@ -896,9 +901,9 @@ export default function TechHomePage({ section = 'today' }) {
           borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
         }}>
           <div style={{ marginBottom: 8 }}>{routeNotice}</div>
-          <button type="button" onClick={fetchSchedule} style={{
+          <button type="button" onClick={fetchSchedule} disabled={refreshing} style={{
             border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
-            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: 'pointer',
+            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.6 : 1,
           }}>Try again</button>
         </div>
       )}

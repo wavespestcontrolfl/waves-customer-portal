@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { TrendingUp } from 'lucide-react';
-import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 import TechFieldShell from './tech/TechFieldShell';
@@ -60,6 +60,7 @@ export default function TechLayout() {
       localStorage.removeItem('waves_admin_token');
       localStorage.removeItem('adminToken');
       localStorage.removeItem('waves_admin_user');
+      clearStaffDeviceData();
     };
     const loginDestination = `${location.pathname}${location.search}`;
     // A verification that never answers (dead zone) must not hold the shell
@@ -73,10 +74,15 @@ export default function TechLayout() {
       ...(abort ? { signal: abort.signal } : {}),
     })
       .then(async (response) => {
-        // The server did answer: a body that times out keeps the status so a
-        // rejected session (401) is still cleared below and never mistaken
-        // for a dead zone.
+        // Body-read failures split on the status the server already sent:
+        //   - non-2xx: the server rejected; keep the status so a 401 whose
+        //     body times out still clears the session below.
+        //   - 2xx: the session was accepted but the answer never arrived
+        //     (stall, connection dropped mid-body). That is weak signal, not
+        //     an invalid profile — no status, so the stored-profile fallback
+        //     applies and the valid session is NOT cleared.
         const profile = await response.json().catch((bodyErr) => {
+          if (response.ok) throw Object.assign(new Error('Staff profile unreadable'), { name: bodyErr?.name || 'Error' });
           if (bodyErr?.name === 'AbortError') throw Object.assign(bodyErr, { status: response.status });
           return null;
         });
@@ -124,7 +130,9 @@ export default function TechLayout() {
         // reachable; a server answer of any kind (401 above, 5xx here) and a
         // missing or malformed stored profile keep the verification error.
         const stored = error?.status === undefined && !error?.invalidProfile ? getAdminUser() : null;
-        if (stored?.id && ['admin', 'technician'].includes(stored.role)) {
+        // A profile stored with mustChangePassword (written just before the
+        // forced-reset redirect) never unlocks the shell offline.
+        if (stored?.id && ['admin', 'technician'].includes(stored.role) && !stored.mustChangePassword) {
           setTechName(stored.name || getAdminDisplayName('Tech'));
           setTechRole(stored.role);
           setAuthStatus('ready');

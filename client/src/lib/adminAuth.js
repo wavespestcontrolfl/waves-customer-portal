@@ -1,3 +1,13 @@
+// Staff data saved on the device for offline use (the technician's last
+// route, routeSnapshot.js). It carries customer names, addresses and access
+// notes, so EVERY path that ends a staff session must call
+// clearStaffDeviceData() next to removing the token.
+export const TECH_ROUTE_SNAPSHOT_KEY = 'waves_tech_route_snapshot';
+
+export function clearStaffDeviceData() {
+  try { localStorage.removeItem(TECH_ROUTE_SNAPSHOT_KEY); } catch { /* storage unavailable */ }
+}
+
 export function getAdminAuthToken() {
   return localStorage.getItem('waves_admin_token') || '';
 }

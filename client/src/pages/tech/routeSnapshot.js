@@ -1,3 +1,5 @@
+import { TECH_ROUTE_SNAPSHOT_KEY } from '../../lib/adminAuth';
+
 // Last-good route snapshot for the technician home page.
 //
 // The service worker never caches /api/ responses (client/public/sw.js), so
@@ -14,7 +16,10 @@
 //     must not see the first tech's stops.
 //   - Read-only fallback. Nothing here replays writes; en-route / on-site
 //     taps still need signal and keep their own inline errors.
-export const ROUTE_SNAPSHOT_KEY = 'waves_tech_route_snapshot';
+//   - Deleted when the staff session ends (lib/adminAuth clearStaffDeviceData,
+//     called by every logout / 401 / forced-reset path), and swept here the
+//     moment a different login or a different day finds it.
+export const ROUTE_SNAPSHOT_KEY = TECH_ROUTE_SNAPSHOT_KEY;
 // A hung request in a dead zone can take a minute to fail. Give up sooner so
 // the saved route appears while the tech still has the phone in hand.
 export const ROUTE_FETCH_TIMEOUT_MS = 15000;
@@ -32,10 +37,14 @@ export function loadRouteSnapshot({ techId, date }, storage = defaultStorage()) 
     const raw = storage.getItem(ROUTE_SNAPSHOT_KEY);
     if (!raw) return null;
     const snapshot = JSON.parse(raw);
-    if (snapshot?.techId !== String(techId) || snapshot?.date !== date) return null;
-    if (typeof snapshot.savedAt !== 'string' || !snapshot.data || typeof snapshot.data !== 'object') return null;
+    const usable = snapshot?.techId === String(techId) && snapshot?.date === date
+      && typeof snapshot.savedAt === 'string' && !!snapshot.data && typeof snapshot.data === 'object';
+    // Another login's, another day's or a corrupt copy is never restored —
+    // and never left sitting on the device either.
+    if (!usable) { storage.removeItem(ROUTE_SNAPSHOT_KEY); return null; }
     return snapshot;
   } catch {
+    try { storage.removeItem(ROUTE_SNAPSHOT_KEY); } catch { /* ignore */ }
     return null;
   }
 }

@@ -40,7 +40,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, stops, nextStop, loading, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough }) {
+export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -56,18 +56,21 @@ export default function TechFieldHome({ section, stops, nextStop, loading, error
       {timekeeping}
     </div>
   );
-  if (visit) return <div className="tf-page">{visit}</div>;
+  // The saved-copy warning must sit above the visit view too: a reopen at a
+  // persisted ?visit= URL lands here, never on the route list.
+  const savedNotice = notice && !error && <div role="status" className="tf-alert">{notice}<div><button type="button" className="tf-button" onClick={onRetry} disabled={loading || refreshing}>Try again</button></div></div>;
+  if (visit) return <div className="tf-page">{savedNotice}{visit}</div>;
   const completed = stops.filter((stop) => stop.services.every((service) => service.status === 'completed')).length;
   return (
     <div className="tf-page">
       <div className="tf-page-heading">
         <div><h1>Today</h1><p className="tf-muted">{new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' })}</p></div>
-        <button type="button" className="tf-button" aria-label="Refresh route" onClick={onRetry} disabled={loading}><RefreshCw aria-hidden="true" /></button>
+        <button type="button" className="tf-button" aria-label="Refresh route" onClick={onRetry} disabled={loading || refreshing}><RefreshCw aria-hidden="true" /></button>
       </div>
       {rainChance >= 40 && <div className="tf-alert"><CloudRain size={18} aria-hidden="true" /> {rainChance}% rain today</div>}
       {followThrough}
       {error && <div role="alert" className="tf-alert tf-error">{error}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>}
-      {notice && !error && <div role="status" className="tf-alert">{notice}<div><button type="button" className="tf-button" onClick={onRetry} disabled={loading}>Try again</button></div></div>}
+      {savedNotice}
       {loading ? <p role="status">Loading your route…</p> : !error && <>
         <div className="tf-progress-label"><strong>{completed} of {stops.length} stops complete</strong><span className="tf-muted">{stops.reduce((count, stop) => count + stop.services.length, 0)} services</span></div>
         <div className="tf-progress" aria-hidden="true">{stops.map((stop) => <span key={stop.key} className={stop.services.every((s) => s.status === 'completed') ? 'done' : stop.key === nextStop?.key ? 'current' : ''} />)}</div>

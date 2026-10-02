@@ -200,6 +200,31 @@ describe('TechLayout staff-session verification', () => {
     }
   });
 
+  it.each([
+    ['the body read fails', () => Promise.reject(new TypeError('network error'))],
+    ['the body is not JSON', () => Promise.reject(new SyntaxError('Unexpected token <'))],
+  ])('treats a 2xx whose body never arrives as weak signal when %s', async (_label, body) => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: body })));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+  });
+
+  it('clears the saved route with the session on a 401', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    localStorage.setItem('waves_tech_route_snapshot', JSON.stringify({ techId: 'tech-1' }));
+    vi.stubGlobal('fetch', vi.fn(async () => response(401, { error: 'Session expired' })));
+
+    renderTech();
+
+    expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
+    expect(localStorage.getItem('waves_tech_route_snapshot')).toBeNull();
+  });
+
   it('still clears a rejected session when the 401 body times out', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -228,6 +253,7 @@ describe('TechLayout staff-session verification', () => {
     ['a server error', () => response(503, { error: 'Unavailable' }), { id: 'tech-1', name: 'River Tech', role: 'technician' }],
     ['no stored profile', () => { throw new TypeError('Failed to fetch'); }, null],
     ['a stored profile with a non-staff role', () => { throw new TypeError('Failed to fetch'); }, { id: 'x', role: 'customer' }],
+    ['a stored profile that still owes a password change', () => { throw new TypeError('Failed to fetch'); }, { id: 'tech-1', role: 'technician', mustChangePassword: true }],
   ])('keeps the verification error offline with %s', async (_label, respond, stored) => {
     localStorage.setItem('waves_admin_token', 'staff-access-token');
     if (stored) localStorage.setItem('waves_admin_user', JSON.stringify(stored));

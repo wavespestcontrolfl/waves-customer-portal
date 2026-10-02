@@ -34,10 +34,10 @@ function seedSnapshot(overrides = {}) {
   }));
 }
 
-function mount({ enabled = false, id = 'tech-fixture' } = {}) {
+function mount({ enabled = false, id = 'tech-fixture', path = '/tech' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role: 'technician' }));
-  return render(<MemoryRouter initialEntries={['/tech']}><Routes>
+  return render(<MemoryRouter initialEntries={[path]}><Routes>
     <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
     </Route>
@@ -88,6 +88,24 @@ it('shows the saved route with an offline notice when the network is unreachable
   await screen.findAllByText(/Fixture live-one/);
   await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
   expect(screen.queryByText(/Fixture saved-one/)).not.toBeInTheDocument();
+});
+
+it('holds the retry control while a route read is already in flight', async () => {
+  seedSnapshot();
+  scheduleMode = 'hang';
+  mount();
+  expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled();
+  expect(fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length).toBe(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length).toBe(1);
+});
+
+it('shows the saved-copy warning inside the visit view of the field layout', async () => {
+  seedSnapshot();
+  scheduleMode = 'offline';
+  mount({ enabled: true, path: '/tech?visit=row%3Asaved-one' });
+  await screen.findByText(/No connection — showing your route as saved at 7:42 AM/);
+  expect(await screen.findByText('Property brief for saved-one')).toBeInTheDocument();
 });
 
 it('renders the saved route at once while the live request is still pending', async () => {
