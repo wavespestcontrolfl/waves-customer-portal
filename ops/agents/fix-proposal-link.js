@@ -69,7 +69,12 @@ function parseArgs(argv) {
     const m = a.match(/^--([a-z-]+)(?:=(.*))?$/);
     if (!m) throw usageError(`unrecognized argument: ${a}`);
     const [, name, value] = m;
-    if (name === 'execute' || name === 'list') { out[name] = true; continue; }
+    if (name === 'execute' || name === 'list') {
+      // Bare only: `--execute=false` must never read as a yes.
+      if (value !== undefined) throw usageError(`--${name} takes no value`);
+      out[name] = true;
+      continue;
+    }
     if (value == null || value === '') throw usageError(`--${name} needs a value`);
     if (OPTION_FLAGS.includes(name)) { out[name] = value; continue; }
     if (!STAMP_FLAGS[name]) throw usageError(`unknown flag --${name}`);

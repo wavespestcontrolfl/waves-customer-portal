@@ -208,6 +208,9 @@ test('the service and the migration name the same statuses, fix kinds and open s
     const base = { area: 'sms', ...CELL, fix_kind: 'facts', evidence_count: 5, evidence_cutoff_at: new Date(), proposal: 'p' };
     await expect(database('ai_fix_proposals').insert({ ...base, status: 'pr_open' })).rejects.toMatchObject({ code: '23514' });
     await expect(database('ai_fix_proposals').insert({ ...base, status: 'shipped', pr_number: 1, shipped_version: 'v', shipped_at: new Date() })).rejects.toMatchObject({ code: '23514' });
+    const shippedStamps = { pr_number: 1, reviewed_commit: 'abc1234', shipped_version: 'v', shipped_at: new Date() };
+    await expect(database('ai_fix_proposals').insert({ ...base, status: 'reverted', ...shippedStamps, reverted_at: new Date() })).rejects.toMatchObject({ code: '23514' });
+    await expect(database('ai_fix_proposals').insert({ ...base, status: 'reverted', ...shippedStamps, revert_pr_number: 2 })).rejects.toMatchObject({ code: '23514' });
     await expect(database('ai_fix_proposals').insert({ ...base, status: 'later' })).rejects.toMatchObject({ code: '23514' });
     await expect(database('ai_fix_proposals').insert({ ...base, fix_kind: 'vibes' })).rejects.toMatchObject({ code: '23514' });
     await database('ai_fix_proposals').insert(base);
@@ -231,6 +234,10 @@ test('the service and the migration name the same statuses, fix kinds and open s
     expect(row).toMatchObject({ status: 'pr_open', pr_number: 5601 });
     expect(row.history.at(-1)).toMatchObject({ by: 'lane:correction-loop', from: 'pending', to: 'pr_open' });
     await expect(link.run({ dbi: database, argv: ['--id=zzzzzzzz', '--status=dismissed'], log })).rejects.toMatchObject({ exitCode: 2 });
+    for (const flag of ['--execute=false', '--execute=0', '--execute=']) {
+      expect(() => link.parseArgs([`--id=${id}`, '--status=dismissed', flag])).toThrow(/takes no value/);
+    }
+    expect((await database('ai_fix_proposals').where({ id }).first()).status).toBe('pr_open');
   });
 
   test('down drops the table and up restores it', async () => {

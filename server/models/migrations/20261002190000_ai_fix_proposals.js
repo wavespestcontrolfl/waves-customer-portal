@@ -77,12 +77,12 @@ exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE ai_fix_proposals ADD CONSTRAINT ai_fix_proposals_fix_kind_check CHECK (fix_kind IN (${list(FIX_KINDS)}))`);
   // A status implies its stamps: no PR-open row without a PR, no shipped row
   // without the version and the Codex-clean commit, no reverted row without
-  // the time it was reverted.
+  // the revert PR and when it was reverted.
   await knex.raw(`
     ALTER TABLE ai_fix_proposals ADD CONSTRAINT ai_fix_proposals_stamps_check CHECK (
       (status NOT IN ('pr_open', 'shipped', 'reverted') OR pr_number IS NOT NULL)
       AND (status NOT IN ('shipped', 'reverted') OR (shipped_version IS NOT NULL AND shipped_at IS NOT NULL AND reviewed_commit IS NOT NULL))
-      AND (status <> 'reverted' OR reverted_at IS NOT NULL)
+      AND (status <> 'reverted' OR (reverted_at IS NOT NULL AND revert_pr_number IS NOT NULL))
     )
   `);
   await knex.raw(`
