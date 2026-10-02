@@ -95,6 +95,7 @@
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
+ *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
@@ -752,6 +753,12 @@ const gates = {
   // TypeSafe Jev typed decisions: ships DARK. CALL-TIME reader is
   // typedDecisionsLive() below; this entry is for logGateStatus only.
   typedDecisions: gateEnvValue('GATE_TYPED_DECISIONS'),
+  // Cloudflare Clef as a second typed-decision provider: ships DARK. CALL-TIME
+  // reader is typedDecisionsClefLive() below; this entry is for logGateStatus
+  // and the integrations page, so it carries the same prerequisite the reader
+  // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
+  // variable says, and the status must not read as enabled (Codex r1 on #5557).
+  typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
@@ -3902,6 +3909,15 @@ function typedDecisionsLive() {
   return gateEnvValue('GATE_TYPED_DECISIONS');
 }
 
+// GATE_TYPED_DECISIONS_CLEF read at CALL time — ships DARK, off unless set,
+// and honoured only while GATE_TYPED_DECISIONS is also live (the second
+// provider answers the same packages into the same review lane). Off,
+// askPackage(..., { provider: 'cloudflare' }) returns gate_off before any
+// provider call; unset is the kill, no redeploy.
+function typedDecisionsClefLive() {
+  return typedDecisionsLive() && gateEnvValue('GATE_TYPED_DECISIONS_CLEF');
+}
+
 // GATE_REPORT_WRITER_RULES read at CALL time — off unless exactly 'true'.
 // On, POST /generate-report (admin-schedule.js) gives every report writer
 // except lawn and tree/shrub/palm the owner rules block, withholds product
@@ -4714,6 +4730,7 @@ module.exports.portalYardCalendarLive = portalYardCalendarLive;
 // GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
+module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 // GATE_LLM_COST_TRACKING reader, on its own line.
 module.exports.llmCostTrackingLive = llmCostTrackingLive;
