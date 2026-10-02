@@ -489,7 +489,7 @@ function sanitizeServiceType(serviceType) {
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
-const { clearOfBlackout, isBlackedOut } = require('../services/scheduling/blackout-nudge');
+const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 const { deferredCommitScope } = require('../utils/trx-commit-promise');
 
 const MONTH_RECURRENCE_INTERVALS = {
@@ -19027,9 +19027,6 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
-// Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
-// The proof a grouped-or-nothing placement is judged by: the canonical
-// maybeGroupRow decided, we only read what it did.
 // The stop's technician for a grouped placement, through the SAME eligibility
 // fence a template technician gets (employment, field dispatchability, absence
 // that day, FOR SHARE on a trx). Not assignable = the grouped attempt fails and
@@ -19059,6 +19056,9 @@ async function placedRowOverlapsOutsideVisit(conn, rowId) {
   return outside.length > 0;
 }
 
+// Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
+// The proof a grouped-or-nothing placement is judged by: the canonical
+// maybeGroupRow decided, we only read what it did.
 async function rowsShareVisit(conn, rowId, otherIds) {
   const rows = await conn('scheduled_services').whereIn('id', [rowId, ...otherIds]).select('id', 'visit_id');
   const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
@@ -19066,67 +19066,191 @@ async function rowsShareVisit(conn, rowId, otherIds) {
   return !!mine && otherIds.every((id) => String(visitOf(id) || '') === String(mine));
 }
 
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT: the lawn-series occurrences a rider series'
-// next visit may ride, best first. [] = no ride (gate off, no link, not a
-// pairing the table allows, no usable lawn date near) and the caller walks its
-// normal cadence. Only candidates: nothing here decides that a rider groups —
-// extendSeriesOnceLocked inserts, runs maybeGroupRow and checks the result.
-// Date choice is the one 77/84/105 rule (planRiderDates); the host rows come
-// from the shared live-plan reader. A failed read is a no-ride, never an error.
-async function riderExtensionHostRows(conn, parent, cols, anchor, { skipWeekends, weekendShift, blackoutDates, existingDates }) {
-  const fg = require('../config/feature-gates');
-  if (!fg.pestRidesLawnAtAcceptLive?.() || !fg.gates?.visitGroups) return [];
-  if (!cols.rides_parent_id || !parent.rides_parent_id || !parent.property_id) return [];
-  const read = async (c) => {
-    const Preview = require('../services/rider-series-preview');
-    const host = await c('scheduled_services').where({ id: parent.rides_parent_id }).first();
-    if (!host || host.recurring_parent_id || String(host.customer_id) !== String(parent.customer_id)) return [];
-    const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
-    const family = serviceKeyFor({ service_key: parent.service_key_snapshot || parent.service_type });
-    if (!Preview.riderPairingEnabled(host, family, parent.recurring_pattern)) return [];
-    const today = etDateString();
-    const rows = await Preview.livePlanSeriesRows(c, [host.id], cols, {
-      fromDate: today, extraColumns: ['property_id', 'window_start', 'window_end', 'technician_id'],
-    });
-    const byDate = new Map();
-    for (const r of rows) {
-      const d = dateOnly(r.scheduled_date);
-      if (!d || d <= today || byDate.has(d) || existingDates.has(d)) continue;
-      // Only the rider's own property, on a placed window, on a day the
-      // customer and the owner allow.
-      if (String(r.property_id || '') !== String(parent.property_id) || !normalizeHHMM(r.window_start)) continue;
-      if (isBlackedOut(d, blackoutDates) || shiftPastWeekend(d, skipWeekends, 'forward') !== d) continue;
-      byDate.set(d, r);
-    }
-    const first = Preview.planRiderDates({
-      hostDates: [...byDate.keys()], lastRiderDate: anchor,
-      horizonDate: etDateString(addETDays(parseETDateTime(`${anchor}T12:00`), Preview.MAX_WAIT_DAYS + 1)),
-      skipWeekends, weekendShift, blackoutDates,
-    })[0];
-    // The rule's own +84 fallback (no lawn date in the window) is not a ride.
-    if (!first || !byDate.has(first)) return [];
-    const last = etDateString(addETDays(parseETDateTime(`${anchor}T12:00`), Preview.MAX_WAIT_DAYS));
-    return [...byDate.keys()].sort().filter((d) => d >= first && d <= last).map((d) => byDate.get(d));
-  };
-  try {
-    return conn.isTransaction ? await conn.transaction(read) : await read(conn);
-  } catch (err) {
-    logger.warn(`[recurring] rider host read failed for parent=${parent.id} (walking the normal cadence): ${err.message}`);
-    return [];
+// Grouped-or-nothing placement of ONE extension row:
+// insert it inside a SAVEPOINT (extendSeriesOnceLocked re-entered with a forced
+// date, so the insert stays the one canonical insert), let the canonical
+// maybeGroupRow decide, and keep the row only if it actually shares a visit with
+// every row in `mustShare`; otherwise roll the savepoint back and treat the date
+// as taken. Never a prediction of whether it will group. `stop` = { technicianId,
+// window? }: the stop's own technician (and, for a ride, its window), carried on
+// the template row the insert copies, so no member is re-assigned. Post-commit
+// work waits on a deferredCommitScope: it fires only for a KEPT row, once every
+// enclosing transaction completes. Returns the spawned-visit payload, or null
+// (nothing left behind).
+async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
+  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
+  if (cols.recurring_ongoing) {
+    const fresh = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
+    if (!fresh || !fresh.recurring_ongoing) return null;
   }
+  const scope = deferredCommitScope(conn);
+  try {
+    const placed = await conn.transaction(async (sp) => {
+      const technicianId = await assignablePlacementTechnicianId(sp, parent, stop.technicianId, dateStr);
+      const template = {
+        ...parent, ...stop.window, recurring_technician_override: true, recurring_technician_id: technicianId,
+      };
+      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
+        ...opts, onSkip: undefined, forceDate: dateStr, commitScope: scope,
+      });
+      if (!visit) throw new Error('nothing placed');
+      if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
+      // The placed row's OWN window (a ride ends by the rider's duration, so it
+      // can run past the stop) must not overlap anything outside its visit —
+      // another customer, a hold. Top-up keeps its advisory-only overlap policy.
+      if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
+        throw new Error('overlaps a booking outside the stop');
+      }
+      return visit;
+    });
+    scope.keep();
+    return placed;
+  } catch (err) {
+    scope.drop(err);
+    logger.info(`[recurring] parent=${parentId} ${dateStr} does not group (${err.message}) — treated as taken`);
+    return null;
+  }
+}
+
+// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a rider series (rides_parent_id) puts its
+// next visit on a lawn occurrence, at that occurrence's CURRENT window and
+// technician (dispatch may have moved it), ending by the rider's own duration.
+// The candidate is not derived here: it is the next date the read-only pair
+// preview (rider-series-preview.previewRiderPair) says the plan still wants to
+// insert — the real anchor, the today+8 plan floor, override-aware property
+// scope, lawn-service identity of the host and of each occurrence, blackouts and
+// weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
+// that rule a ride out). null = no ride: the caller walks its normal cadence.
+async function rideLawnExtension(ctx) {
+  const {
+    conn, parent, parentId, cols, opts, latest, existingDates,
+  } = ctx;
+  const fg = require('../config/feature-gates');
+  if (!fg.pestRidesLawnAtAcceptLive?.() || !fg.gates?.visitGroups || !cols.rides_parent_id || !parent.rides_parent_id) return null;
+  const Preview = require('../services/rider-series-preview');
+  let plan;
+  try {
+    // Savepoint: the preview swallows its own read failures, which would leave
+    // the caller's transaction aborted (25P02) without it.
+    plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
+  } catch (err) {
+    logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
+    return null;
+  }
+  if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
+  const after = dateOnly(latest.scheduled_date);
+  const date = plan.insert.find((d) => d >= plan.planFloor && d > after && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
+  // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
+  const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
+  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  if (!window || window.unplaceable) return null;
+  return placeGroupedExtension(ctx, date, [host.id], {
+    technicianId: host.technician_id || null,
+    window: { window_start: window.start, window_end: window.end },
+  });
+}
+
+// The customer's OWN visit at the candidate's stop (their lawn visit) is not a
+// clash if the new row joins it. Anyone else's visit, a hold, own rows on two
+// technicians (not one stop), or an own visit the row cannot join
+// (placeGroupedExtension rolls back) stays a clash. The row takes the stop's own
+// technician, so no member is re-assigned.
+async function joinOwnStopExtension(ctx, candidate, clashRows) {
+  const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
+  const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
+  if (!ownOnly || stopTechs.length !== 1) return null;
+  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+}
+
+// The next-date search of extendSeriesOnceLocked: a ride on the lawn first
+// (rideLawnExtension), else the cadence walk. Returns { joined } (a grouped
+// placement already made), or { nextStr, hitMaxDate } for the caller to insert.
+async function walkExtensionCandidates(ctx) {
+  const {
+    conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
+    blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
+  } = ctx;
+  const { maxDate = null } = opts;
+  const ridden = await rideLawnExtension(ctx);
+  if (ridden) return { joined: ridden };
+  // Advance until we find an open date or give up. Each step
+  // moves one cadence interval forward from latestStr; capped to
+  // avoid runaway loops on degenerate patterns.
+  let attempt = 1;
+  let nextStr = null;
+  // Set whenever the maxDate cap (top-up's horizon — never set by the
+  // completion path) rejects a candidate. Dates only advance forward as
+  // `attempt` climbs, so once one candidate falls past maxDate every
+  // later attempt does too — this loop can only exit with `nextStr`
+  // still null AND hitMaxDate true because the horizon, not a busy
+  // calendar, is why nothing more got booked (Codex GitHub r1 P2).
+  let hitMaxDate = false;
+  while (attempt <= 12) {
+    const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+    const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+    if (!candidate) {
+      attempt++;
+      continue;
+    }
+    if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
+      attempt++;
+      continue;
+    }
+    // Never seed a past-dated visit (+ its reminder) off a stale anchor.
+    if (candidate <= etDateString()) {
+      attempt++;
+      continue;
+    }
+    // topUp's horizon / annual-prepay term_end cap — refuse rather than
+    // insert (never a compensating delete after the fact): a candidate
+    // past the cap is not "the next date", it's "stop for this series".
+    if (maxDate && candidate > maxDate) {
+      hitMaxDate = true;
+      attempt++;
+      continue;
+    }
+    if (existingDates.has(candidate)) { attempt++; continue; }
+    // The blackout nudge can land a candidate on an adjacent day
+    // another visit already occupies (the series dedupe above only
+    // covers THIS series) — probe global occupancy before accepting,
+    // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
+    // (top-up only — never set by the completion path, so its own
+    // behavior is unchanged): seriesCandidateDateClashes is tech-blind
+    // (it has no idea which technician the office actually intends), and
+    // guardRecurrenceDestination's own ruling for every OTHER admin write
+    // path is that an overlap is advisory, never a hard block (staff-side
+    // saves never block on schedule conflicts, owner ruling 2026-08-25).
+    // Treating a clash as a hard skip here on an unattended nightly loop
+    // silently drops whole cadence slots on a busy calendar — a monthly
+    // series can lose most of a year's candidates to one recurring
+    // conflict. Insert on the cadence date and log the overlap instead.
+    if (opts.overlapAdvisoryOnly) {
+      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+      }
+    } else {
+      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
+      if (clashRows.length) {
+        const joined = await joinOwnStopExtension(ctx, candidate, clashRows);
+        if (joined) return { joined };
+        attempt++; continue;
+      }
+    }
+    nextStr = candidate;
+    break;
+  }
+  return { nextStr, hitMaxDate };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
 async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
-  const { maxDate = null, onSkip } = opts;
-  // opts.forceDate (set only by this function's own grouped-or-nothing
-  // attempts, below): insert on exactly that date and skip the candidate
-  // search; opts.placement { windowStart, windowEnd, technicianId } overrides
-  // the template's; opts.tentative marks an attempt that may be rolled back;
-  // opts.commitScope is what its post-commit work waits on.
-  const placement = opts.placement || {};
+  const { onSkip } = opts;
+  // opts.forceDate / opts.commitScope are set only by placeGroupedExtension's
+  // grouped-or-nothing attempts: insert on exactly that date (the template
+  // `parent` then carries the stop's window and technician), skip the candidate
+  // search, and file post-commit work only if the attempt is kept.
   let spawnedVisit = null;
   // Find the latest LIVE visit (pending/confirmed or completed) to
   // calculate the next date — shared anchor query (cancelled/rescheduled
@@ -19192,137 +19316,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    // Grouped-or-nothing placement: insert the row inside a SAVEPOINT, let the
-    // canonical maybeGroupRow (inside the insert) decide, and keep the row only if
-    // it actually shares a visit with every row in `mustShare`; otherwise roll
-    // the savepoint back, so the date reads as taken. Never a prediction of
-    // whether it will group. Post-commit work waits on a deferredCommitScope:
-    // it fires only for a KEPT row, once the caller's transaction commits.
-    // Returns the spawned-visit payload, or null (nothing left behind).
-    const placeGrouped = async (dateStr, mustShare, ride = {}) => {
-      if (cols.recurring_ongoing) {
-        const fresh = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
-        if (!fresh || !fresh.recurring_ongoing) return null;
-      }
-      const scope = deferredCommitScope(conn);
-      try {
-        const placed = await conn.transaction(async (sp) => {
-          const visit = await extendSeriesOnceLocked(sp, parent, parentId, cols, svcLike, {
-            ...opts, forceDate: dateStr, placement: ride, tentative: true, commitScope: scope,
-          });
-          if (!visit) throw new Error('nothing placed');
-          if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
-          // The placed row's OWN window (a ride ends by the rider's duration, so
-          // it can run past the stop) must not overlap anything outside its
-          // visit — another customer, a hold. Top-up keeps its advisory-only
-          // overlap policy.
-          if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
-            throw new Error('overlaps a booking outside the stop');
-          }
-          return visit;
-        });
-        scope.keep();
-        return placed;
-      } catch (err) {
-        scope.drop(err);
-        logger.info(`[recurring] parent=${parentId} ${dateStr} does not group (${err.message}) — treated as taken`);
-        return null;
-      }
-    };
-    // Rider extension: a series linked to a lawn series (rides_parent_id) takes
-    // its next visit on a lawn occurrence, at that occurrence's CURRENT window
-    // and technician (dispatch may have moved it), ending by the rider's own
-    // duration. None kept = the normal cadence walk below, unchanged.
-    const rideRows = opts.forceDate ? [] : await riderExtensionHostRows(conn, parent, cols, latestStr, {
-      skipWeekends: skipParent, weekendShift: dirParent, blackoutDates: autoExtendBlackoutDates, existingDates,
+    // Grouped riding, then the cadence walk (walkExtensionCandidates); a
+    // forced date (a grouped attempt re-entering this function) has neither.
+    const walked = opts.forceDate ? { nextStr: opts.forceDate } : await walkExtensionCandidates({
+      conn, parent, parentId, cols, svcLike, opts, latest, latestStr, rOpts, skipParent, dirParent,
+      blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
-    for (const host of rideRows) {
-      const hostDate = dateOnly(host.scheduled_date);
-      if (maxDate && hostDate > maxDate) continue;
-      const window = normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
-      if (!window || window.unplaceable) continue;
-      const ridden = await placeGrouped(hostDate, [host.id], {
-        windowStart: window.start, windowEnd: window.end, technicianId: host.technician_id || null,
-      });
-      if (ridden) return ridden;
-    }
-    // Advance until we find an open date or give up. Each step
-    // moves one cadence interval forward from latestStr; capped to
-    // avoid runaway loops on degenerate patterns.
-    let attempt = opts.forceDate ? 13 : 1;
-    let nextStr = opts.forceDate || null;
-    // Set whenever the maxDate cap (top-up's horizon — never set by the
-    // completion path) rejects a candidate. Dates only advance forward as
-    // `attempt` climbs, so once one candidate falls past maxDate every
-    // later attempt does too — this loop can only exit with `nextStr`
-    // still null AND hitMaxDate true because the horizon, not a busy
-    // calendar, is why nothing more got booked (Codex GitHub r1 P2).
-    let hitMaxDate = false;
-    while (attempt <= 12) {
-      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
-      if (!candidate) {
-        attempt++;
-        continue;
-      }
-      if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) {
-        attempt++;
-        continue;
-      }
-      // Never seed a past-dated visit (+ its reminder) off a stale anchor.
-      if (candidate <= etDateString()) {
-        attempt++;
-        continue;
-      }
-      // topUp's horizon / annual-prepay term_end cap — refuse rather than
-      // insert (never a compensating delete after the fact): a candidate
-      // past the cap is not "the next date", it's "stop for this series".
-      if (maxDate && candidate > maxDate) {
-        hitMaxDate = true;
-        attempt++;
-        continue;
-      }
-      if (existingDates.has(candidate)) { attempt++; continue; }
-      // The blackout nudge can land a candidate on an adjacent day
-      // another visit already occupies (the series dedupe above only
-      // covers THIS series) — probe global occupancy before accepting,
-      // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
-      // (top-up only — never set by the completion path, so its own
-      // behavior is unchanged): seriesCandidateDateClashes is tech-blind
-      // (it has no idea which technician the office actually intends), and
-      // guardRecurrenceDestination's own ruling for every OTHER admin write
-      // path is that an overlap is advisory, never a hard block (staff-side
-      // saves never block on schedule conflicts, owner ruling 2026-08-25).
-      // Treating a clash as a hard skip here on an unattended nightly loop
-      // silently drops whole cadence slots on a busy calendar — a monthly
-      // series can lose most of a year's candidates to one recurring
-      // conflict. Insert on the cadence date and log the overlap instead.
-      if (opts.overlapAdvisoryOnly) {
-        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-        }
-      } else {
-        const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
-        if (clashRows.length) {
-          // The customer's OWN visit at the same stop (their lawn visit) is
-          // not a clash if this row joins it. Anyone else's visit, a hold, or
-          // an own visit it cannot join (placeGrouped rolls back) stays a clash.
-          const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(parent.customer_id));
-          // The new row takes the stop's own technician (as a ride takes the
-          // host's): no member is re-assigned, so a rolled-back attempt leaves
-          // no assignment broadcast or tech card behind. Own rows on two
-          // different techs are not one stop — a clash.
-          const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
-          const joined = ownOnly && stopTechs.length === 1
-            ? await placeGrouped(candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] })
-            : null;
-          if (joined) return joined;
-          attempt++; continue;
-        }
-      }
-      nextStr = candidate;
-      break;
-    }
+    if (walked.joined) return walked.joined;
+    const { nextStr, hitMaxDate } = walked;
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
     // portal auto-processor or an admin churn) can stop the series
@@ -19352,11 +19353,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
-        technician_id: placement.technicianId !== undefined
-          ? await assignablePlacementTechnicianId(conn, parent, placement.technicianId, nextStr)
-          : await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
+        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
-        window_start: placement.windowStart || nextWindowStart, window_end: placement.windowEnd || nextWindowEnd,
+        window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',
         time_window: parent.time_window, zone: parent.zone,
         estimated_duration_minutes: parent.estimated_duration_minutes,
@@ -19438,9 +19437,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           // completion path (no onSkip passed there) or by any other
           // extendSeriesOnceLocked caller (reconcile, etc.) — this is
           // top-up-only plumbing.
-          // An attempt that may be rolled back reports nothing: the walk's own
-          // candidate is judged (and reported) on its own date.
-          if (onSkip && !opts.tentative) onSkip('unbillable');
+          onSkip?.('unbillable');
           return spawnedVisit;
         }
       }
@@ -19500,7 +19497,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
           scheduledDate: nextStr,
-          windowStart: placement.windowStart || parent.window_start,
+          windowStart: parent.window_start,
           serviceType: childIdentity.service_type,
         };
       }

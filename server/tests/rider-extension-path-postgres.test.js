@@ -126,10 +126,14 @@ postgres('series extension keeps riding the lawn', () => {
   async function world(trx, {
     autopay = false, rides = true, pestTech = null, lawnTech = null, pestSkipWeekends = false,
     pestWindow = ['09:00', '10:00'], lawnWindow = ['09:00', '10:00'], pestExtra = {},
+    // d0Back: how long ago the (completed) first visits were; lawnDates: explicit
+    // lawn child dates instead of every 42 days; lawnParentExtra / lawnChildExtra:
+    // extra columns on the lawn root / each lawn child.
+    d0Back = 7, lawnDates = null, lawnParentExtra = {}, lawnChildExtra = {}, base: passedBase = null,
   } = {}) {
-    const base = await customer(trx, { autopay });
+    const base = passedBase || await customer(trx, { autopay });
     const techLawn = lawnTech || await technician(trx);
-    const d0 = weekdayBack(7);
+    const d0 = weekdayBack(d0Back);
     const lawnRow = (extra) => ({
       customer_id: base.customerId, property_id: base.propertyId, technician_id: techLawn,
       service_id: ids.lawn_care_6week, service_type: 'Every 6 Weeks Lawn Care Service',
@@ -137,11 +141,13 @@ postgres('series extension keeps riding the lawn', () => {
       estimated_duration_minutes: 60, estimated_price: 60, recurring_pattern: 'every_6_weeks',
       is_recurring: true, recurring_ongoing: true, ...extra,
     });
-    const [lawnParent] = await trx('scheduled_services').insert(lawnRow({ scheduled_date: d0, status: 'completed' })).returning('*');
+    const [lawnParent] = await trx('scheduled_services').insert(lawnRow({
+      scheduled_date: d0, status: 'completed', ...lawnParentExtra,
+    })).returning('*');
     const lawnChildren = [];
-    for (let k = 1; k <= 12; k++) {
+    for (const date of lawnDates || Array.from({ length: 12 }, (_, i) => addDays(d0, 42 * (i + 1)))) {
       const [child] = await trx('scheduled_services').insert(lawnRow({
-        scheduled_date: addDays(d0, 42 * k), status: 'pending', recurring_parent_id: lawnParent.id,
+        scheduled_date: date, status: 'pending', recurring_parent_id: lawnParent.id, ...lawnChildExtra,
       })).returning('*');
       lawnChildren.push(child);
     }
@@ -370,6 +376,19 @@ postgres('series extension keeps riding the lawn', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('top-up (advisory overlap policy): a ride that cannot group is still rolled back, never kept ungrouped', async () => {
+    const trx = await mockPg.transaction();
+    try {
+      const w = await world(trx, { autopay: true });
+      const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 120 });
+      expect(result.skipped).toBeNull();
+      const rows = await extensionRows(trx, w.pestParent.id);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(w.d0, 84));
+      expect(rows.every((r) => r.visit_id === null)).toBe(true);
+    } finally { await trx.rollback(); }
+  });
+
   test('top-up rides successive lawn dates (each kept, grouped)', async () => {
     const trx = await mockPg.transaction();
     try {
@@ -386,6 +405,103 @@ postgres('series extension keeps riding the lawn', () => {
         expect(row.visit_id).toBe(host.visit_id);
       }
     } finally { await trx.rollback(); }
+  });
+
+  describe('host selection comes from the pair preview (override-aware, floor-aware, service-aware)', () => {
+    const weekdayAhead = (days) => {
+      let d = addETDays(new Date(), days);
+      while ([0, 6].includes(etParts(d).dayOfWeek)) d = addETDays(d, 1);
+      return etDateString(d);
+    };
+
+    test('a series-scoped address edit (new address only in the overrides and on the live rows) still rides', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const base = await customer(trx);
+        const [p2] = await trx('customer_properties').insert({
+          id: randomUUID(), customer_id: base.customerId, is_primary: false, active: true,
+          address_line1: '500 Moved Court', city: 'Parrish', state: 'FL', zip: '34219', source: 'estimate_accept',
+        }).returning('*');
+        const moved = {
+          property_id: p2.id, service_address_line1: p2.address_line1, service_address_city: 'Parrish',
+          service_address_state: 'FL', service_address_zip: '34219',
+        };
+        const overrides = JSON.stringify({ appointment_address: moved });
+        // The completed roots keep the OLD property; only the overrides and the
+        // live lawn rows carry the new address (appointment-address.js).
+        const w = await world(trx, {
+          lawnParentExtra: { recurring_template_overrides: overrides },
+          lawnChildExtra: moved,
+          pestExtra: { recurring_template_overrides: overrides },
+          base,
+        });
+        const spawned = await extend(trx, w.pestParent.id);
+        expect(spawned).toBeTruthy();
+        const [row] = await extensionRows(trx, w.pestParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 84));
+        expect(row.property_id).toBe(p2.id);
+        const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
+        expect(row.visit_id).not.toBeNull();
+        expect(row.visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    test('a lapsed rider revived by top-up keeps off the protected week and rides the first lawn date after the floor', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const protectedDate = weekdayAhead(3); // inside today+8: never joined
+        const first = weekdayAhead(14);
+        const later = weekdayAhead(40);
+        const w = await world(trx, { d0Back: 200, lawnDates: [protectedDate, first, later] });
+        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 120 });
+        expect(result.skipped).toBeNull();
+        const rows = await extensionRows(trx, w.pestParent.id);
+        expect(dateOf(rows[0].scheduled_date)).toBe(first);
+        expect(rows.map((r) => dateOf(r.scheduled_date))).not.toContain(protectedDate);
+        const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
+        expect(rows[0].visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    test('an upcoming lawn occurrence re-serviced to another groupable service is not a host', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const w = await world(trx);
+        const expected = await cadenceDate(trx, w.pestParent.id);
+        // "This and following" re-service: the +84 row now says pest (same
+        // visit group family as lawn).
+        await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).update({
+          service_id: ids.pest_general_quarterly, service_type: 'Quarterly Pest Control Service',
+          service_key_snapshot: 'pest_general_quarterly',
+        });
+        await extend(trx, w.pestParent.id);
+        const rows = await extensionRows(trx, w.pestParent.id);
+        expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
+        expect(dateOf(rows[0].scheduled_date)).not.toBe(addDays(w.d0, 84));
+        expect(rows[0].visit_id).toBeNull();
+      } finally { await trx.rollback(); }
+    });
+
+    test('a host root whose service was changed through the template overrides is not a host', async () => {
+      const trx = await mockPg.transaction();
+      const savedScope = gates.editApptPriceServiceScope;
+      gates.editApptPriceServiceScope = true;
+      try {
+        const w = await world(trx, {
+          lawnParentExtra: {
+            recurring_template_overrides: JSON.stringify({
+              service_id: ids.pest_general_quarterly, service_type: 'Quarterly Pest Control Service',
+              service_key_snapshot: 'pest_general_quarterly',
+            }),
+          },
+        });
+        const expected = await cadenceDate(trx, w.pestParent.id);
+        await extend(trx, w.pestParent.id);
+        const rows = await extensionRows(trx, w.pestParent.id);
+        expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
+        expect(dateOf(rows[0].scheduled_date)).not.toBe(addDays(w.d0, 84));
+      } finally { gates.editApptPriceServiceScope = savedScope; await trx.rollback(); }
+    });
   });
 
   describe('own lawn visit on the candidate date is not a clash (ungated)', () => {
