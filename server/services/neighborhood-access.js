@@ -641,6 +641,58 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
 }
 
+// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
+// The neighborhood's gate entries for each visit, keyed by visit id, so the
+// office's day feed can show "Gate: …" for a customer with no gate code of
+// their own. The visit's own property (scheduled_services.property_id), else
+// the customer's ONE active property; none or several = no fallback. Shown:
+// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
+// (a conflict shows every code, flagged) — never an unconfirmed instruction,
+// which may be meant for one house only. Raw codes: staff surfaces only, never
+// an LLM prompt or a customer page.
+async function neighborhoodGateEntriesForVisits(conn, visits) {
+  const out = new Map();
+  if (!visits?.length) return out;
+  const withProperty = visits.filter((v) => v.property_id);
+  const withoutProperty = visits.filter((v) => !v.property_id && v.customer_id);
+  const propertyNeighborhood = new Map();
+  if (withProperty.length) {
+    const rows = await conn('customer_properties')
+      .whereIn('id', [...new Set(withProperty.map((v) => v.property_id))])
+      .select('id', 'neighborhood_id');
+    for (const r of rows) propertyNeighborhood.set(r.id, r.neighborhood_id);
+  }
+  const customerNeighborhood = new Map();
+  if (withoutProperty.length) {
+    const rows = await conn('customer_properties')
+      .whereIn('customer_id', [...new Set(withoutProperty.map((v) => v.customer_id))])
+      .where({ active: true })
+      .select('customer_id', 'neighborhood_id');
+    const byCustomer = new Map();
+    for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r.neighborhood_id]);
+    for (const [customerId, ids] of byCustomer) if (ids.length === 1) customerNeighborhood.set(customerId, ids[0]);
+  }
+  const visitNeighborhood = new Map();
+  for (const v of visits) {
+    const n = v.property_id ? propertyNeighborhood.get(v.property_id) : customerNeighborhood.get(v.customer_id);
+    if (n) visitNeighborhood.set(v.id, n);
+  }
+  if (!visitNeighborhood.size) return out;
+  const entries = await conn('neighborhood_access')
+    .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    .where((w) => w.where('status', 'active')
+      .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
+    .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
+    .select('neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status');
+  const byNeighborhood = new Map();
+  for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
+  for (const [visitId, n] of visitNeighborhood) {
+    const list = byNeighborhood.get(n);
+    if (list?.length) out.set(visitId, list);
+  }
+  return out;
+}
+
 module.exports = {
   sweepSavedGateCodes,
   sameStreetLine,
@@ -653,4 +705,5 @@ module.exports = {
   fileNeighborhoodCode,
   countyHint,
   VALUE_HASH_SQL,
+  neighborhoodGateEntriesForVisits,
 };
