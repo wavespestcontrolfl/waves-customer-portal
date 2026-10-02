@@ -156,7 +156,7 @@ function recordingKnex(rows) {
       }
       return chain;
     };
-    for (const m of ['where', 'whereNotNull', 'orderByRaw', 'orderBy', 'limit']) chain[m] = rec(m);
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit']) chain[m] = rec(m);
     chain.select = async (...args) => { calls.push(['select', ...args]); return rows; };
     return chain;
   };
@@ -176,6 +176,15 @@ describe('searchReportBlogPosts', () => {
       ['inner whereRaw', 'title ILIKE ?', ['%ghost%']],
       ['inner orWhereRaw', "COALESCE(keyword, '') ILIKE ?", ['%ants%']],
     ]));
+  });
+
+  test('only rows that can be on the site\'s own host reach the limit (GitHub Codex on #5547)', async () => {
+    const knex = recordingKnex([LIVE]);
+    await searchReportBlogPosts(knex, 'ghost ants');
+    const names = knex.calls.map(([name]) => name);
+    const host = knex.calls.findIndex(([name, sql]) => name === 'whereRaw' && sql === 'astro_live_url ILIKE ?');
+    expect(knex.calls[host]).toEqual(['whereRaw', 'astro_live_url ILIKE ?', ['%wavespestcontrol.com%']]);
+    expect(host).toBeLessThan(names.indexOf('limit'));
   });
 
   test('no usable words, no read', async () => {
@@ -237,7 +246,7 @@ function scriptedDb(service, posts, calls) {
   return (table) => {
     calls.push(table);
     const chain = {};
-    for (const m of ['where', 'whereNotNull', 'orderByRaw', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'orderByRaw', 'orderBy', 'limit']) {
       chain[m] = (arg) => {
         if (typeof arg === 'function') arg.call({ whereRaw() { return this; }, orWhereRaw() { return this; } });
         return chain;

@@ -15,7 +15,7 @@
  */
 
 const { blogPostShareability } = require('../content/blog-share-gate');
-const { isSiteUrl } = require('../link-library');
+const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
 
 const MAX_RESULTS = 8;
@@ -79,7 +79,10 @@ const likeArg = (term) => `%${term.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 
 /**
  * Live hub posts matching every typed word, newest first, at most eight.
- * No usable words, no results.
+ * No usable words, no results. Only a row whose live URL can be on the
+ * site's own host reaches the limit (a superset of reportBlogLink's
+ * isSiteUrl, which still decides), so a spoke site's newer matches never
+ * crowd the Waves posts out of the eight (GitHub Codex on #5547).
  */
 async function searchReportBlogPosts(knex, query) {
   const terms = searchTerms(query);
@@ -87,7 +90,8 @@ async function searchReportBlogPosts(knex, query) {
   let q = knex('blog_posts')
     .where('status', 'published')
     .where('astro_status', 'live')
-    .whereNotNull('astro_live_url');
+    .whereNotNull('astro_live_url')
+    .whereRaw('astro_live_url ILIKE ?', [`%${SITE_HOST}%`]);
   for (const term of terms) {
     q = q.where(function eachTerm() {
       this.whereRaw('title ILIKE ?', [likeArg(term)]).orWhereRaw("COALESCE(keyword, '') ILIKE ?", [likeArg(term)]);
