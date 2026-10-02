@@ -192,6 +192,21 @@ const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 // writing path promotes it to), and a stale pre-submit or fresh claim reads as
 // in progress (STRIPE_CHARGE_IN_PROGRESS) — a read never releases a claim
 // whose worker may still commit. Nothing is updated.
+// The JS form of the fence's no-PI ambiguous-attempt query below (a failed payments row with no
+// PaymentIntent whose metadata.ambiguous_outcome is true and that no DIFFERENT payment superseded): Stripe may
+// have collected money, so the row is reconciliation-required, not a definitive decline. Read-only reporters
+// call this instead of copying the rule; keep it in step with that query.
+function failedPaymentOutcomeIsAmbiguous(row) {
+  if (!row || row.status !== 'failed' || row.stripe_payment_intent_id) return false;
+  let metadata = row.metadata;
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch { metadata = null; }
+  }
+  const flag = metadata && metadata.ambiguous_outcome;
+  const ambiguous = flag === true || ['true', 't', 'yes', 'y', 'on', '1'].includes(String(flag).trim().toLowerCase());
+  return ambiguous && (row.superseded_by_payment_id == null || String(row.superseded_by_payment_id) === String(row.id));
+}
+
 async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false } = {}) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
@@ -6354,6 +6369,7 @@ module.exports = StripeService;
 module.exports.friendlyStripeError = friendlyStripeError;
 module.exports.isAmbiguousStripeChargeError = isAmbiguousStripeChargeError;
 module.exports.assertNoInvoiceChargeReconciliationPending = assertNoInvoiceChargeReconciliationPending;
+module.exports.failedPaymentOutcomeIsAmbiguous = failedPaymentOutcomeIsAmbiguous;
 module.exports.claimInvoiceSavedCardCharge = claimInvoiceSavedCardCharge;
 module.exports.markInvoiceSavedCardChargeAttempt = markInvoiceSavedCardChargeAttempt;
 module.exports.commitInvoiceSavedCardChargeSubmission = commitInvoiceSavedCardChargeSubmission;

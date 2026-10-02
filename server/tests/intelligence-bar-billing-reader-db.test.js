@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C; let D; let E; let F; let G; let P;
+  let A; let B; let H; let C; let D; let E; let F; let G; let P; let P2; let W;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -196,11 +196,37 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: gBoth.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gboth-${run}`, status: 'succeeded', amount: 45,
       stripe_payment_intent_id: `pi_both_${run}`, resolved_at: new Date(), submitted_at: new Date() });
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_both_${run}`, customer_id: G, invoice_id: gBoth.id, amount: 45, source: 'invoice_card_on_file', original_db_error: 'synthetic ledger failure' });
-    // More payment rows than the reader keeps: whether a payment was recorded is unknown.
+    // A failed row the fence treats as ambiguous (no PaymentIntent, ambiguous_outcome) vs one a different payment superseded.
+    const gAmb = await invoice('g_amb', G, { total: 65 });
+    await db('payments').insert({ customer_id: G, payment_date: day(0), amount: 65, status: 'failed', processor: 'stripe', description: 'Connection failure',
+      failure_reason: 'connection reset', metadata: json({ invoice_id: gAmb.id, ambiguous_outcome: true }) });
+    const gAmbSup = await invoice('g_amb_sup', G, { total: 66 });
+    const [replacement] = await db('payments').insert({ customer_id: G, payment_date: day(0), amount: 66, status: 'paid', description: 'Replacement', metadata: json({}) }).returning('id');
+    await db('payments').insert({ customer_id: G, payment_date: day(-1), amount: 66, status: 'failed', processor: 'stripe', description: 'Connection failure, reconciled',
+      superseded_by_payment_id: replacement.id || replacement, metadata: json({ invoice_id: gAmbSup.id, ambiguous_outcome: true }) });
+    // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every child invoice.
+    const [statement] = await db('payer_statements').insert({ payer_id: funderId, period_start: day(-30), period_end: day(-1), status: 'paid', terms_snapshot: 'net_30',
+      subtotal: 900, total: 900, invoice_count: 3, token: crypto.randomBytes(16).toString('hex'), paid_at: new Date() }).returning('id');
+    const statementId = statement.id || statement;
+    await invoice('g_stmt', G, { total: 300, status: 'paid', paid_at: new Date(), payer_statement_id: statementId });
+    await db('payments').insert({ customer_id: null, payer_id: funderId, statement_id: statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe',
+      description: `Payer statement S-${statementId} settlement (ach)`, metadata: json({ statement_id: statementId, payer_id: funderId, source: 'synthetic' }) });
+    inv.statementId = statementId;
+    // A packet invoice whose Bill-To moved AFTER it was sent: both payer columns stay null, only the withdrawal stamp records it.
+    W = await customer(`Withdrawn${run}`, `Packet${run}`);
+    await invoice('w_self', W, { total: 100 });
+    await invoice('w_withdrawn', W, { total: 40, scheduled_send_error: `payer_billed:${funderId}` });
+    // More payment rows than the reader keeps: whether a payment was recorded is unknown (unless a retained row proves it).
+    const bulkRows = (customerId, invoiceId) => Array.from({ length: 501 }, (_, n) => ({ customer_id: customerId, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
+      description: `Synthetic failed ${n}`, metadata: json({ invoice_id: invoiceId }) }));
     P = await customer(`Bulk${run}`, `Payments${run}`);
     const bulk = await invoice('p_bulk', P, { total: 90 });
-    await db.batchInsert('payments', Array.from({ length: 501 }, (_, n) => ({ customer_id: P, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
-      description: `Synthetic failed ${n}`, metadata: json({ invoice_id: bulk.id }) })), 100);
+    await db.batchInsert('payments', bulkRows(P, bulk.id), 100);
+    P2 = await customer(`Proof${run}`, `Payments${run}`);
+    const proof = await invoice('p_proof', P2, { total: 95, status: 'paid', paid_at: new Date() });
+    await db.batchInsert('payments', bulkRows(P2, proof.id), 100);
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: proof.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-proof-${run}`, status: 'succeeded', amount: 95,
+      stripe_payment_intent_id: `pi_proof_${run}`, resolved_at: new Date(), submitted_at: new Date() });
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -252,7 +278,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(by('paid')).toMatchObject({ status: 'paid', balance_due: 0, amount_paid: 120, payment_recorded: true, overdue: false });
     expect(by('voided')).toMatchObject({ status: 'void', balance_due: 0, overdue: false });
     expect(by('archived')).toMatchObject({ archived: true, balance_due: 33 });
-    expect(by('open')).toMatchObject({ status: 'overdue', balance_due: 200, overdue: true, has_active_payment_plan: true, payment_recorded: false, amount_paid: 0 });
+    // The open invoice holds a submitted, unresolved saved-card attempt: Stripe may have charged it, so money fields are unknown.
+    expect(by('open')).toMatchObject({ status: 'overdue', balance_due: null, overdue: true, has_active_payment_plan: true, payment_recorded: null, amount_paid: null, unresolved_charge_attempts: 1 });
+    expect(by('open').unknown.join(' ')).toMatch(/Do not collect or retry/);
     expect(by('open').payment_plan).toMatchObject({ payment_amount: 50, payment_frequency: 'monthly', total_balance: 200 });
     expect(by('open').due_date).toBe(inv.open.due_date);
     expect(by('draft')).toMatchObject({ status: 'draft', balance_due: 40 });
@@ -497,6 +525,71 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(plain.invoice).not.toHaveProperty('portal_recorded_balance_due');
   });
 
+  test('review: a packet invoice withdrawn from the customer (stamp only, no payer columns) is payer-billed, not presented self-pay', async () => {
+    const result = await read('get_customer_invoices', { customer_id: W, limit: 50 });
+    const withdrawn = result.invoices.find((i) => i.id === inv.w_withdrawn.id);
+    expect(withdrawn).toMatchObject({ payer_billed: true });
+    expect(result.invoices.find((i) => i.id === inv.w_self.id)).toMatchObject({ payer_billed: false });
+    expect(result.account_summary).toMatchObject({ total_due: 140, payer_billed_due: 40, presented_self_pay_due: 100 });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.w_withdrawn.id });
+    expect(detail.invoice.payer_billed).toBe(true);
+  });
+
+  test('review: a payer statement settlement (customer_id NULL, statement_id) is payer evidence, named, with the statement amount kept statement-level', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
+    const entry = detail.payments_timeline.find((e) => e.type === 'payer_payment');
+    expect(entry).toMatchObject({ received: false, received_from_customer: false, amount: null, linked_by: 'payer_statement',
+      funded_by: { kind: 'third_party_payer', name: `Synthetic Funder ${run}` },
+      statement_level: { statement_id: String(inv.statementId), statement_amount: 900 } });
+    expect(detail.payment_summary).toMatchObject({ received: false, payer_funded_payments: 1 });
+    const text = detail.payment_summary.statement;
+    expect(text).toMatch(/^No payment has been received from the customer/);
+    expect(text).toMatch(new RegExp(`payer statement S-${inv.statementId}`));
+    expect(text).toMatch(/not this invoice's share/);
+    expect(text).not.toMatch(/unknown/i);
+    const list = await read('get_customer_invoices', { customer_id: G, limit: 50 });
+    expect(list.invoices.find((i) => i.id === inv.g_stmt.id)).toMatchObject({ payer_funded_payments: 1, amount_paid: 0 });
+  });
+
+  test('review: a failed row the collection fence treats as ambiguous is receipt-unconfirmed; a superseded one is an ordinary failure', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_amb.id });
+    const entry = detail.payments_timeline.find((e) => e.type === 'payment_attempt');
+    expect(entry).toMatchObject({ status: 'failed', received: false, ambiguous_outcome: true });
+    expect(entry.state_note).toMatch(/Receipt is unconfirmed/);
+    expect(entry.state_note).not.toMatch(/no money received/);
+    expect(detail.payment_summary).toMatchObject({ attempts_unknown_outcome: 1, attempts_failed_or_canceled: 0 });
+    expect(detail.payment_summary.statement).toMatch(/^Payment receipt is not confirmed/);
+    const superseded = await read('get_invoice_detail', { invoice_id: inv.g_amb_sup.id });
+    expect(superseded.payments_timeline.find((e) => e.status === 'failed')).not.toHaveProperty('ambiguous_outcome');
+    expect(superseded.payment_summary).toMatchObject({ attempts_unknown_outcome: 0, attempts_failed_or_canceled: 1 });
+    const list = await read('get_customer_invoices', { customer_id: G, limit: 50 });
+    expect(list.invoices.find((i) => i.id === inv.g_amb.id)).toMatchObject({ unresolved_charge_attempts: 1, balance_due: null, payment_recorded: null });
+  });
+
+  test('review: the list holds an unresolved claimed attempt (no payment or orphan row yet) as unknown, and the account summary warns', async () => {
+    const list = await read('get_customer_invoices', { customer_id: G, limit: 50 });
+    const item = list.invoices.find((i) => i.id === inv.g_claim.id);
+    expect(item).toMatchObject({ unresolved_charge_attempts: 1, balance_due: null, amount_paid: null, payment_recorded: null });
+    expect(item.unknown.join(' ')).toMatch(/Do not collect or retry/);
+    expect(list.account_summary.unresolved_charge_attempts).toBeGreaterThanOrEqual(2);
+    expect(list.account_summary.unknown).toMatch(/saved-card charge attempt/);
+    const clean = await read('get_customer_invoices', { customer_id: E, limit: 50 });
+    expect(clean.account_summary).toMatchObject({ unresolved_charge_attempts: 0, unreconciled_stripe_charges: 0 });
+    expect(clean.account_summary.unknown).toBeUndefined();
+  });
+
+  test('review: with truncated detail evidence every model-facing boolean is null unless a retained row proves it', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.p_bulk.id });
+    expect(detail.payment_summary).toMatchObject({ evidence_complete: false, received: null, attached_intent_outcome_unknown: null });
+    expect(detail.payment_summary.counts_note).toMatch(/zero is not proof/);
+    const proof = await read('get_invoice_detail', { invoice_id: inv.p_proof.id });
+    expect(proof.payment_summary).toMatchObject({ evidence_complete: false, received: true });
+    expect(proof.payments_timeline.find((e) => e.type === 'stripe_charge_attempt')).toMatchObject({ received: true, ledger_recorded: null });
+    const complete = await read('get_invoice_detail', { invoice_id: inv.e_self.id });
+    expect(complete.payment_summary).toMatchObject({ evidence_complete: true, received: false, attached_intent_outcome_unknown: false });
+    expect(complete.payment_summary).not.toHaveProperty('counts_note');
+  });
+
   test('review: a failed per-invoice hold lookup is unknown (null), never false', async () => {
     const hold = require('../services/collections/collection-hold');
     const spy = jest.spyOn(hold, 'collectionHoldInvoiceIds').mockRejectedValueOnce(new Error('synthetic lookup failure'));
@@ -515,8 +608,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const item = list.invoices.find((i) => i.id === inv.p_bulk.id);
     expect(item).toMatchObject({ payment_recorded: null, amount_paid: null });
     expect(item.unknown.join(' ')).toMatch(/exceeded the read bound/);
-    const normal = await read('get_customer_invoices', { customer_id: A, limit: 50 });
-    expect(normal.invoices.find((i) => i.id === inv.open.id).payment_recorded).toBe(false);
+    const normal = await read('get_customer_invoices', { customer_id: E, limit: 50 });
+    expect(normal.invoices.find((i) => i.id === inv.e_self.id)).toMatchObject({ payment_recorded: false, amount_paid: 0, balance_due: 100 });
   });
 
   test('review: the list surfaces an unresolved orphan charge: balance and payment state unknown, do not collect or retry', async () => {
@@ -530,7 +623,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.orphan.id });
     expect(detail.payment_summary.unreconciled_stripe_charges).toBe(1);
     // Unaffected invoices keep their numbers.
-    expect(list.invoices.find((i) => i.id === inv.open.id)).toMatchObject({ unreconciled_stripe_charges: 0, balance_due: 200 });
+    expect(list.invoices.find((i) => i.id === inv.credited.id)).toMatchObject({ unreconciled_stripe_charges: 0, unresolved_charge_attempts: 0, balance_due: 100 });
     const noOrphans = await read('get_customer_invoices', { customer_id: B });
     expect(noOrphans.account_summary.unreconciled_stripe_charges).toBe(0);
   });

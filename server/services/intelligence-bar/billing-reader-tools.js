@@ -47,7 +47,10 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString } = require('../../utils/datetime-et');
-const { invoiceAmountDue, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../invoice-helpers');
+const { invoiceAmountDue, invoiceWithdrawnFromCustomer, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../invoice-helpers');
+
+// The collection fence's own ambiguous-failed-payment rule (stripe.js); loaded on use, not at module load.
+const failedPaymentOutcomeIsAmbiguous = (row) => require('../stripe').failedPaymentOutcomeIsAmbiguous(row);
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -55,6 +58,9 @@ const SUMMARY_PAGE = 100;
 const SUMMARY_MAX_PAGES = 10;
 const TIMELINE_ROW_CAP = 50;
 const PAYMENT_ROW_CAP = 500;
+const PAYMENT_COLUMNS = ['id', 'customer_id', 'payment_date', 'amount', 'status', 'description', 'metadata', 'created_at', 'processor',
+  'stripe_payment_intent_id', 'stripe_charge_id', 'refund_amount', 'refund_status', 'refunded_at', 'failure_reason',
+  'card_brand', 'payment_method_type', 'payer_id', 'retry_count', 'next_retry_at', 'superseded_by_payment_id', 'statement_id'];
 // metadata keys that name the invoice a payment settles, in precedence order.
 const INVOICE_LINK_KEYS = ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id'];
 
@@ -174,7 +180,10 @@ function isOverdue(invoice, today) {
   return invoiceStatusKey(invoice.status) === 'overdue' || Boolean(dateOnly(invoice.due_date) && dateOnly(invoice.due_date) < today);
 }
 
-const isPayerBilled = (invoice) => invoice.payer_id != null || invoice.payer_statement_id != null;
+// Billed to a third party: a payer or statement on the invoice, or the packet withdrawal stamp the payment
+// paths read through invoiceWithdrawnFromCustomer (a sent invoice whose Bill-To moved leaves both payer
+// columns null and records ownership only in scheduled_send_error).
+const isPayerBilled = (invoice) => invoice.payer_id != null || invoice.payer_statement_id != null || invoiceWithdrawnFromCustomer(invoice);
 
 // ─── customer selection ─────────────────────────────────────────────
 
@@ -230,7 +239,7 @@ async function loadLinkedPayments(customerId, invoices) {
   const charges = [...new Set(invoices.map((invoice) => invoice.stripe_charge_id).filter(Boolean))];
   const numbers = invoices.map((invoice) => invoice.invoice_number).filter((number) => /^[A-Za-z0-9-]+$/.test(String(number || '')));
   const patterns = numbers.map((number) => `Invoice ${number} — %`);
-  const rows = await db('payments')
+  const customerRows = await db('payments')
     .where({ customer_id: customerId })
     .where(function linkedToPage() {
       // The canonical linkage keys (admin-invoices applied-money fence): the dispute webhook clears the
@@ -242,15 +251,29 @@ async function loadLinkedPayments(customerId, invoices) {
     })
     .orderBy('created_at', 'desc')
     .limit(PAYMENT_ROW_CAP + 1)
-    .select('id', 'customer_id', 'payment_date', 'amount', 'status', 'description', 'metadata', 'created_at', 'processor',
-      'stripe_payment_intent_id', 'stripe_charge_id', 'refund_amount', 'refund_status', 'refunded_at', 'failure_reason',
-      'card_brand', 'payment_method_type', 'payer_id', 'retry_count', 'next_retry_at');
-  const truncated = rows.length > PAYMENT_ROW_CAP;
-  for (const row of rows.slice(0, PAYMENT_ROW_CAP).reverse()) {
+    .select(PAYMENT_COLUMNS);
+  // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every child invoice it
+  // covers (payer-statement-settle.js): read it for invoices carrying payer_statement_id.
+  const statementIds = [...new Set(invoices.map((invoice) => invoice.payer_statement_id).filter((id) => id != null).map(String))];
+  const statementRows = statementIds.length
+    ? await db('payments').whereRaw('payments.statement_id::text = ANY(?)', [statementIds]).orderBy('created_at', 'desc').limit(PAYMENT_ROW_CAP + 1)
+      .select(PAYMENT_COLUMNS)
+    : [];
+  const truncated = customerRows.length > PAYMENT_ROW_CAP || statementRows.length > PAYMENT_ROW_CAP;
+  const seen = new Set();
+  const rows = [...customerRows.slice(0, PAYMENT_ROW_CAP), ...statementRows.slice(0, PAYMENT_ROW_CAP)].filter((row) => !seen.has(row.id) && seen.add(row.id));
+  for (const row of rows.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))) {
     const metadata = parseJson(row.metadata) || {};
     const explicitKey = INVOICE_LINK_KEYS.find((key) => metadata[key]);
     for (const invoice of invoices) {
       let by = null;
+      if (row.statement_id != null && row.customer_id == null) {
+        // Statement-level money: it belongs to the statement, never to one child invoice's share.
+        if (invoice.payer_statement_id != null && String(invoice.payer_statement_id) === String(row.statement_id)) {
+          linked.get(String(invoice.id)).push({ ...row, linked_by: 'payer_statement', payer_funded: true, payer_ref: row.payer_id, statement_level: true });
+        }
+        continue;
+      }
       // An explicit metadata.invoice_id is authoritative: a combined payment
       // writes one row per invoice, each with its own invoice_id but a shared
       // PaymentIntent and charge, so the PaymentIntent link below must never
@@ -322,8 +345,11 @@ function payerPaymentEntry(row) {
     received: false,
     received_from_customer: false,
     funded_by: { kind: 'third_party_payer', name: row.payer_name || null },
-    state_note: `Funded by a third-party payer${row.payer_name ? ` (${row.payer_name})` : ''}, not by the customer: never call it the customer's payment. Recorded status: ${row.status}.`,
-    amount: money(row.amount),
+    state_note: row.statement_level
+      ? `Settled by a third-party payer${row.payer_name ? ` (${row.payer_name})` : ''} through payer statement S-${row.statement_id}, not by the customer. The statement amount covers every invoice on that statement: it is statement-level and is NOT this invoice's share. Recorded status: ${row.status}.`
+      : `Funded by a third-party payer${row.payer_name ? ` (${row.payer_name})` : ''}, not by the customer: never call it the customer's payment. Recorded status: ${row.status}.`,
+    amount: row.statement_level ? null : money(row.amount),
+    ...(row.statement_level ? { statement_level: { statement_id: String(row.statement_id), statement_amount: money(row.amount), applies_to: 'all invoices on the statement, not this invoice alone' } } : {}),
     refunded_amount: money(row.refund_amount) || 0,
     stripe_payment_intent_id: row.stripe_payment_intent_id || null,
     attempt_ref: (parseJson(row.metadata) || {}).idempotency_key || null,
@@ -335,6 +361,8 @@ function payerPaymentEntry(row) {
 function paymentEntry(row, invoice) {
   if (row.payer_funded) return payerPaymentEntry(row);
   const received = RECEIVED_PAYMENT_STATUSES.includes(row.status);
+  // The payment paths fence a no-PaymentIntent failure flagged ambiguous_outcome: Stripe may have collected.
+  const ambiguous = failedPaymentOutcomeIsAmbiguous(row);
   const manual = !row.processor;
   const entry = {
     type: received || row.status === 'disputed' ? 'recorded_payment' : 'payment_attempt',
@@ -343,7 +371,10 @@ function paymentEntry(row, invoice) {
     payment_date: dateOnly(row.payment_date),
     status: row.status,
     received,
-    state_note: PAYMENT_STATE_NOTES[row.status] || 'Unrecognized payment status: treat as not received.',
+    state_note: ambiguous
+      ? 'Marked failed, but the portal flagged the outcome as ambiguous (no PaymentIntent came back): Stripe may have collected the money. Receipt is unconfirmed: do not call it failed or not received, and do not retry the charge.'
+      : PAYMENT_STATE_NOTES[row.status] || 'Unrecognized payment status: treat as not received.',
+    ...(ambiguous ? { ambiguous_outcome: true } : {}),
     amount: money(row.amount),
     ...(received ? { net_received: fromCents(cents(row.amount) - cents(row.refund_amount)) } : {}),
     refunded_amount: money(row.refund_amount) || 0,
@@ -375,7 +406,7 @@ const ATTEMPT_STATE_NOTES = {
 };
 const CLAIMED_NOT_SUBMITTED_NOTE = 'A saved-card charge was claimed and the portal recorded no submission to Stripe and no result: receipt unconfirmed. Do not call it not received, and do not retry the charge.';
 
-function attemptEntry(row, ledgerStates) {
+function attemptEntry(row, ledgerStates, ledgerComplete = true) {
   const inFlight = row.status === 'claimed' && Boolean(row.submitted_at);
   // A saved-card attempt also closes as succeeded when account credit alone
   // covered the invoice: it then has no PaymentIntent and no card was charged.
@@ -400,7 +431,7 @@ function attemptEntry(row, ledgerStates) {
     state_note: stateNote,
     received: succeeded,
     ...(creditOnly ? { settled_by: 'account_credit' } : {}),
-    ...(row.status === 'succeeded' && stripeCharge ? { ledger_recorded: Boolean(ledgerState), ledger_state: ledgerState } : {}),
+    ...(row.status === 'succeeded' && stripeCharge ? { ledger_recorded: ledgerState ? true : (ledgerComplete ? false : null), ledger_state: ledgerState } : {}),
     ...(succeeded ? { received_basis: 'Stripe attempt state succeeded' } : {}),
     amount: money(row.amount),
     credit_applied_with_attempt: money(row.credit_applied_delta) || 0,
@@ -426,13 +457,23 @@ async function readDisputeHold(customerId) {
   }
 }
 
-// Unresolved stripe_orphan_charges for the customer's invoices (null = could not be read).
-async function countUnreconciledCharges(customerId) {
+// The customer's unresolved charge evidence (null = could not be read): orphan charges, the claimed /
+// ambiguous attempts the collection fence holds (stripe.js assertNoInvoiceChargeReconciliationPending), and
+// failed rows flagged ambiguous_outcome (that fence's no-PaymentIntent query, scoped to the customer).
+async function countUnconfirmedCharges(customerId) {
   try {
-    const row = await db('stripe_orphan_charges').where({ customer_id: customerId, resolved: false }).whereNotNull('invoice_id').count({ n: '*' }).first();
-    return Number(row && row.n) || 0;
+    const count = async (query) => Number((await query.count({ n: '*' }).first() || {}).n) || 0;
+    const [orphans, attempts, ambiguous] = await Promise.all([
+      count(db('stripe_orphan_charges').where({ customer_id: customerId, resolved: false }).whereNotNull('invoice_id')),
+      count(db('stripe_invoice_charge_attempts as a').join('invoices as i', 'i.id', 'a.invoice_id').where('i.customer_id', customerId)
+        .whereIn('a.status', ['claimed', 'ambiguous']).whereNull('a.resolved_at')),
+      count(db('payments').where({ customer_id: customerId, status: 'failed' }).whereNull('stripe_payment_intent_id')
+        .whereRaw("COALESCE((metadata::jsonb ->> 'ambiguous_outcome')::boolean, false) = true")
+        .whereRaw('(superseded_by_payment_id IS NULL OR superseded_by_payment_id = payments.id)')),
+    ]);
+    return { orphans, attempts: attempts + ambiguous };
   } catch (err) {
-    logger.warn(`[intelligence-bar:billing-reader] unreconciled charge count failed (${err.code || err.name || 'error'})`);
+    logger.warn(`[intelligence-bar:billing-reader] unconfirmed charge count failed (${err.code || err.name || 'error'})`);
     return null;
   }
 }
@@ -476,7 +517,7 @@ async function accountSummary(InvoiceService, customer, today) {
     listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }),
     readCredit(customerId),
     readDisputeHold(customerId),
-    countUnreconciledCharges(customerId),
+    countUnconfirmedCharges(customerId),
   ]);
   const sum = (rows) => fromCents(rows.reduce((total, invoice) => total + cents(balanceDue(invoice)), 0));
   const totalDue = sum(unpaid.rows);
@@ -493,15 +534,17 @@ async function accountSummary(InvoiceService, customer, today) {
     processing: { count: processing.total, amount: fromCents(processing.rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)), note: 'Payments in flight (for example ACH): not received yet, and not counted in total_due.' },
     ...credit,
     dispute_hold: hold,
-    unreconciled_stripe_charges: unreconciled,
+    unreconciled_stripe_charges: unreconciled ? unreconciled.orphans : null,
+    unresolved_charge_attempts: unreconciled ? unreconciled.attempts : null,
     as_of: today,
     basis: 'Admin Invoices page rules for this customer, archived invoices excluded: owes = total minus applied credit on every invoice not paid, prepaid, processing, void, refunded or canceled; overdue = still owed and (status overdue or due date before today, Eastern). total_due includes not_yet_sent_due (drafts and scheduled invoices the customer has not been sent) and payer_billed_due (billed to a third party); the two can overlap, so never subtract them from total_due: presented_self_pay_due is what the customer was actually sent and owes personally.',
     complete: unpaid.complete && processing.complete,
   };
   const unknowns = [];
   if (!summary.complete) unknowns.push('More invoices than the summary reads in one call: total_due may be understated.');
-  if (unreconciled === null) unknowns.push('Unreconciled Stripe charges could not be read: whether total_due includes money Stripe already charged is unknown.');
-  else if (unreconciled > 0) unknowns.push(`${unreconciled} Stripe charge(s) for this customer's invoices are accepted by Stripe but not recorded in the portal: total_due may include money already charged. Do not collect or retry; check those invoices with get_invoice_detail.`);
+  if (unreconciled === null) unknowns.push('Unresolved charge evidence could not be read: whether total_due includes money Stripe already charged is unknown.');
+  if (unreconciled && unreconciled.orphans > 0) unknowns.push(`${unreconciled.orphans} Stripe charge(s) for this customer's invoices are accepted by Stripe but not recorded in the portal: total_due may include money already charged. Do not collect or retry; check those invoices with get_invoice_detail.`);
+  if (unreconciled && unreconciled.attempts > 0) unknowns.push(`${unreconciled.attempts} saved-card charge attempt(s) for this customer's invoices have no confirmed result (claimed, ambiguous, or failed with an ambiguous outcome): Stripe may already have charged them, so total_due may include money already charged. Do not collect or retry; check those invoices with get_invoice_detail.`);
   if (unknowns.length) summary.unknown = unknowns.join(' ');
   return summary;
 }
@@ -527,9 +570,10 @@ function paymentPlanFromList(row) {
   };
 }
 
-// `heldIds` is null when the per-invoice hold lookup failed (unknown, never false); `orphans` is the
-// invoice's unresolved stripe_orphan_charges rows, or null when that lookup failed.
-function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, orphans = []) {
+// `heldIds` is null when the per-invoice hold lookup failed (unknown, never false); `unconfirmed` is the
+// invoice's unresolved charge evidence { orphans, attempts } (stripe_orphan_charges rows and the fence's
+// claimed / ambiguous attempts), or null when that lookup failed.
+function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unconfirmed = { orphans: [], attempts: [] }) {
   const allPayments = ledger.get(String(row.id)) || [];
   const payerFunded = allPayments.filter((payment) => payment.payer_funded);
   const payments = allPayments.filter((payment) => !payment.payer_funded);
@@ -540,7 +584,10 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, orp
   let amountPaid = netPaid;
   let basis = 'payments table rows linked to this invoice';
   if (!recorded) {
-    if (status === 'paid') {
+    if (status === 'paid' && payerFunded.length) {
+      amountPaid = 0;
+      basis = 'settled by a third-party payer: nothing paid by the customer personally';
+    } else if (status === 'paid') {
       amountPaid = null;
       basis = 'unknown';
       unknown.push('Marked paid, but no recorded payment is linked to it in the payments table: say the amount paid is unknown.');
@@ -564,17 +611,28 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, orp
     const names = [...new Set(payerFunded.map((payment) => payment.payer_name).filter(Boolean))];
     unknown.push(`${payerFunded.length} payment record(s) on this invoice were funded by a third-party payer${names.length ? ` (${names.join(', ')})` : ''}: they are not the customer's own payment and are not counted in amount_paid.`);
   }
-  // Stripe charged the customer but the portal's ordinary payment insert failed (or the bank payment is
-  // still pending): the payments table, amount paid and balance do not yet reflect it. Never "collect" it.
-  const unreconciled = orphans || [];
-  const unreconciledUnknown = orphans === null;
-  const balanceUnreliable = unreconciled.length > 0 && isCollectible(row);
-  if (unreconciled.length) {
+  // Stripe may have charged the customer without the portal's payments table showing it: an orphan row
+  // (charged, insert failed), a claimed / ambiguous saved-card attempt the collection fence still holds, or a
+  // failed row flagged ambiguous_outcome. Amount paid, payment_recorded and the balance are then not reliable.
+  const orphanRows = unconfirmed ? unconfirmed.orphans : [];
+  const attemptRows = unconfirmed ? unconfirmed.attempts : [];
+  const ambiguousRows = payments.filter((payment) => failedPaymentOutcomeIsAmbiguous(payment));
+  const unresolvedAttempts = attemptRows.length + ambiguousRows.length;
+  const unconfirmedUnknown = unconfirmed === null;
+  const uncertain = paymentsTruncated || unconfirmedUnknown || orphanRows.length > 0 || unresolvedAttempts > 0;
+  const balanceUnreliable = (orphanRows.length > 0 || unresolvedAttempts > 0) && isCollectible(row);
+  if (orphanRows.length || unresolvedAttempts) {
     amountPaid = null;
-    basis = 'unknown: an unresolved Stripe charge for this invoice is not recorded in the payments table';
-    unknown.push(`Stripe accepted ${unreconciled.length} charge(s) for this invoice ($${fromCents(unreconciled.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)}) that the portal has not recorded: amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
-  } else if (unreconciledUnknown) {
-    unknown.push('Unreconciled Stripe charges could not be read for this invoice: amount paid and balance due may not reflect a charge Stripe accepted. Say it is unknown; use get_invoice_detail.');
+    basis = 'unknown: Stripe may have charged this invoice and the payments table does not show it';
+  }
+  if (orphanRows.length) {
+    unknown.push(`Stripe accepted ${orphanRows.length} charge(s) for this invoice ($${fromCents(orphanRows.reduce((total, orphan) => total + cents(orphan.amount), 0)).toFixed(2)}) that the portal has not recorded: amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail for the evidence.`);
+  }
+  if (unresolvedAttempts) {
+    unknown.push(`${unresolvedAttempts} saved-card charge attempt(s) for this invoice have no confirmed result (claimed, ambiguous, or failed with an ambiguous outcome): Stripe may already have charged the customer, so amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail.`);
+  }
+  if (unconfirmedUnknown) {
+    unknown.push('Unresolved charge evidence could not be read for this invoice: amount paid and balance due may not reflect a charge Stripe accepted. Say it is unknown; use get_invoice_detail.');
   }
   const item = {
     id: row.id,
@@ -594,8 +652,9 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, orp
     amount_paid: amountPaid,
     amount_paid_basis: basis,
     // null = cannot say (evidence truncated, or Stripe holds an unrecorded charge for it).
-    payment_recorded: paymentsTruncated || unreconciled.length ? null : recorded,
-    unreconciled_stripe_charges: unreconciledUnknown ? null : unreconciled.length,
+    payment_recorded: recorded || !uncertain ? recorded : null,
+    unreconciled_stripe_charges: unconfirmedUnknown ? null : orphanRows.length,
+    unresolved_charge_attempts: unconfirmedUnknown ? null : unresolvedAttempts,
     payer_funded_payments: payerFunded.length,
     has_active_payment_plan: Boolean(paymentPlanFromList(row)),
     payment_plan: paymentPlanFromList(row),
@@ -639,17 +698,22 @@ async function getCustomerInvoices(input, actionContext) {
     heldIds = null;
     unknowns.push('The per-invoice dispute hold could not be read; say it is unknown (the account-level dispute_hold above is the customer-wide state).');
   }
-  let orphanMap = new Map();
+  // Unresolved charge evidence for the page's invoices: orphan rows plus the claimed / ambiguous attempts the
+  // collection fence holds (the same predicate stripe.js assertNoInvoiceChargeReconciliationPending reads).
+  let unconfirmedMap = new Map();
   try {
-    const orphanRows = page.invoices.length
-      ? await db('stripe_orphan_charges').where({ resolved: false }).whereIn('invoice_id', page.invoices.map((invoice) => invoice.id))
-        .select('id', 'invoice_id', 'amount', 'source')
-      : [];
-    for (const orphan of orphanRows) orphanMap.set(String(orphan.invoice_id), [...(orphanMap.get(String(orphan.invoice_id)) || []), orphan]);
+    const ids = page.invoices.map((invoice) => invoice.id);
+    const [orphanRows, attemptRows] = ids.length ? await Promise.all([
+      db('stripe_orphan_charges').where({ resolved: false }).whereIn('invoice_id', ids).select('id', 'invoice_id', 'amount', 'source'),
+      db('stripe_invoice_charge_attempts').whereIn('invoice_id', ids).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').select('id', 'invoice_id', 'status'),
+    ]) : [[], []];
+    const slot = (id) => { if (!unconfirmedMap.has(String(id))) unconfirmedMap.set(String(id), { orphans: [], attempts: [] }); return unconfirmedMap.get(String(id)); };
+    for (const orphan of orphanRows) slot(orphan.invoice_id).orphans.push(orphan);
+    for (const attempt of attemptRows) slot(attempt.invoice_id).attempts.push(attempt);
   } catch (err) {
-    logger.warn(`[intelligence-bar:billing-reader] unreconciled charge lookup failed (${err.code || err.name || 'error'})`);
-    orphanMap = null;
-    unknowns.push('Unreconciled Stripe charges could not be read: whether a charge Stripe accepted is missing from these balances is unknown; say so and use get_invoice_detail.');
+    logger.warn(`[intelligence-bar:billing-reader] unconfirmed charge lookup failed (${err.code || err.name || 'error'})`);
+    unconfirmedMap = null;
+    unknowns.push('Unresolved charge evidence could not be read: whether a charge Stripe accepted is missing from these balances is unknown; say so and use get_invoice_detail.');
   }
 
   const returned = page.invoices.length;
@@ -657,7 +721,7 @@ async function getCustomerInvoices(input, actionContext) {
   return {
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
     account_summary: summary,
-    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, orphanMap ? orphanMap.get(String(row.id)) || [] : null)),
+    invoices: page.invoices.map((row) => invoiceItem(row, today, ledger, heldIds, paymentsTruncated, unconfirmedMap ? unconfirmedMap.get(String(row.id)) || { orphans: [], attempts: [] } : null)),
     returned_count: returned,
     total_matching: page.total,
     has_more: hasMore,
@@ -774,7 +838,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   const isPending = (entry) => entry.status === 'processing' || (entry.unconfirmed === true && entry.source === 'combined_pay_processing');
   // A recorded processing payment for the same attempt resolves a claimed attempt's missing result: that one
   // payment is pending (bank transfer in flight), not an unknown outcome.
-  const isUnknown = (entry, group) => (entry.state === 'claimed' && !group.some((other) => other.status === 'processing'))
+  const isUnknown = (entry, group) => entry.ambiguous_outcome === true || (entry.state === 'claimed' && !group.some((other) => other.status === 'processing'))
     || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing');
   const groupUnknown = (group) => group.some((entry) => isUnknown(entry, group));
   const unknownOutcome = groups.filter(groupUnknown);
@@ -795,13 +859,16 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   const parts = [];
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
   if (recorded.length) parts.push(`${recorded.length} payment(s) recorded as received in the payments table, net $${netRecorded.toFixed(2)}${refundedTotal > 0 ? ` after $${refundedTotal.toFixed(2)} refunded` : ''}`);
-  if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded but are not in the payments table (needs reconciling)`);
+  if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded and are not confirmed in the payments table (needs reconciling)`);
   if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);
   if (unknownOutcome.length) parts.push(`${unknownOutcome.length} charge attempt(s) with an unknown outcome (Stripe may have charged the customer: receipt NOT confirmed)`);
   if (intentUnobserved) parts.push('a Stripe PaymentIntent is attached to this invoice but its outcome is not recorded and its live state is not read here (it may have succeeded)');
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (payerFunded.length) parts.push(`${payerFunded.length} payment record(s) funded by a third-party payer${payerNames.length ? ` (${payerNames.join(', ')})` : ''}, not the customer's own payment`);
+  for (const entry of payerFunded.filter((item) => item.statement_level)) {
+    parts.push(`payer statement S-${entry.statement_level.statement_id} (${entry.status}) covers this invoice: its $${Number(entry.statement_level.statement_amount).toFixed(2)} is the whole statement's amount, not this invoice's share`);
+  }
   if (creditSettled.length) parts.push('settled by account credit with no card charge (a credit settlement is not a payment received)');
   let statement;
   if (receivedAny) statement = `Payment was received: ${parts.join('; ')}.${evidenceComplete ? '' : ' More records exist than were read.'}`;
@@ -813,20 +880,24 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   else if (invoiceStatusKey(invoice.status) === 'paid') statement = `The invoice is marked paid but no received payment is linked to it in the portal's records${parts.length ? `; ${parts.join('; ')}` : ''}. Say the payment evidence is unknown.`;
   else statement = `No payment has been received${parts.length ? `: ${parts.join('; ')}` : ' and none has been attempted that the portal recorded'}.`;
 
+  // Any model-facing boolean is null when evidence is incomplete, unless a retained row positively proves it:
+  // the rows left unread could hold the opposite answer.
+  const provenOrUnknown = (value) => (value || evidenceComplete ? value : null);
   return {
-    received: receivedAny,
+    received: provenOrUnknown(receivedAny),
     recorded_payments_net: netRecorded,
     stripe_succeeded_not_in_ledger: stripeConfirmed.length,
     unreconciled_stripe_charges: unreconciled.length,
     attempts_in_flight_or_unknown: inFlight.length,
     payments_pending: pending.length,
     attempts_unknown_outcome: unknownOutcome.length,
-    attached_intent_outcome_unknown: intentUnobserved,
+    attached_intent_outcome_unknown: provenOrUnknown(intentUnobserved),
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
     payer_funded_payments: payerFunded.length,
     settled_by_account_credit: creditSettled.length,
     evidence_complete: evidenceComplete,
+    ...(evidenceComplete ? {} : { counts_note: 'Every count here covers only the rows that were read; older rows were not read, so a zero is not proof of none.' }),
     statement,
   };
 }
@@ -878,7 +949,7 @@ async function getInvoiceDetail(input, actionContext) {
   }
   const entries = [
     ...linked.map((row) => paymentEntry(row, invoice)),
-    ...attempts.map((row) => attemptEntry(row, ledgerStates)),
+    ...attempts.map((row) => attemptEntry(row, ledgerStates, !loadedPayments.truncated)),
     ...orphans.map(orphanEntry),
     ...credits.map((row) => ({
       type: 'credit_movement',
