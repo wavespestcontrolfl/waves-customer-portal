@@ -258,6 +258,8 @@ describe('a same-key retry skips the edit heads-up', () => {
   test('the completion asks only when neither a committed attempt nor an attempt under this key exists', () => {
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
     expect(source).toMatch(/if \(rulesBlock\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), true\)\)\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCompletionAttemptForKey\(/);
+    // The promise check is the same kind of pre-claim prompt.
+    expect(source).toMatch(/if \(stalePromiseIds\.length\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), true\)\)\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCompletionAttemptForKey\(/);
   });
 });
 

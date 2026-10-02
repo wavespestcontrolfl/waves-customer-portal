@@ -3384,8 +3384,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // aborts the closeout (Codex #5516; waves-db failSoftRead).
         return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
       })().catch(() => []);
+      // Same as the edit heads-up: a same-key retry of a recorded attempt got
+      // past this check before its claim, and the marks it carries are applied
+      // after commit only where they still hold (the rest ring the office), so
+      // asking again would only send the tech back to a request the attempt's
+      // hash refuses (Codex #5538).
       if (stalePromiseIds.length
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCompletionAttemptForKey(
+          svc.id, completionInput.idempotencyKey || bodyIdempotencyKey, k,
+        ), true))) {
         return ({ status: 409, body: {
           error: 'A promise you marked changed after the report was written (the office closed, reopened, reworded or moved it). The report may still mention it.',
           code: 'promise_marks_changed',
