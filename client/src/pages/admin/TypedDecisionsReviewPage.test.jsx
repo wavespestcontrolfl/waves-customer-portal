@@ -63,6 +63,22 @@ it('sends the inverse correct_value on Jev wrong and removes the row', async () 
   await waitFor(() => expect(screen.getByText('Nothing to review.')).toBeInTheDocument());
 });
 
+it('sends the tapped reason with Jev wrong and shows it on a labeled row', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.click(screen.getByRole('button', { name: 'Wrong tone' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, reason: 'wrong_tone' }),
+  }));
+  cleanup();
+  mockList([yesNoRow({ label: { verdict: 'jev_wrong', note: 'asked for text only', reason: 'wrong_tone' }, labelStatus: 'confirmed_error' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText(/Labeled Jev Wrong — asked for text only \(Wrong tone\)/);
+});
+
 it('offers no Jev wrong button for choice questions', async () => {
   mockList([yesNoRow({ jevAnswer: { choice: 'reschedule' }, baselineAnswers: {} })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);

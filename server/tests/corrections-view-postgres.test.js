@@ -1,5 +1,5 @@
 /**
- * The `corrections` view (migrations 20261002100000 through 20261002135000) on a real PostgreSQL:
+ * The `corrections` view (migrations 20261002100000 through 20261002140000) on a real PostgreSQL:
  * one row per human correction across its five sources, the AI text beside
  * what the person put instead, and nothing for rows that are not corrections
  * (an accepted suggestion, a right typed answer, a draft the system retired,
@@ -44,7 +44,7 @@ jest.setTimeout(60000);
       model: 'claude-sonnet-5-5', human_verdict, reviewed_by: 'office@test', reviewed_at: at(10), ...extra,
     });
     await trx('agent_decisions').insert([
-      decision(ids.corrected, 'corrected', { correction_note: 'Reviewed draft edited, scheduled, and sent from the SMS inbox.', corrected_actions: JSON.stringify([{ type: 'reply' }]) }),
+      decision(ids.corrected, 'corrected', { correction_note: 'Reviewed draft edited, scheduled, and sent from the SMS inbox.', corrected_actions: JSON.stringify([{ type: 'reply' }]), correction_reason: 'wrong_fact' }),
       decision(ids.ignored, 'ignored', { correction_note: 'A staff reply to this thread was sent.', reviewed_at: at(9.9) }), // distinct times keep the order deterministic
       decision(ids.dismissed, 'dismissed', { correction_note: 'Not needed.', reviewed_at: at(10.5) }),
       decision(ids.accepted, 'accepted', { correction_note: 'Reviewed draft scheduled and sent from the SMS inbox.' }),
@@ -56,7 +56,7 @@ jest.setTimeout(60000);
       sampled_for: 'random_audit', subject_hash: randomBytes(32).toString('hex'), label: JSON.stringify(label), label_status, labeled_by: 'reviewer@test', labeled_at: at(9),
     });
     await trx('decision_reviews').insert([
-      review(ids.labelWrong, 'confirmed_error', { verdict: 'jev_wrong', correct_value: false, note: 'They asked to move the visit' }),
+      review(ids.labelWrong, 'confirmed_error', { verdict: 'jev_wrong', correct_value: false, note: 'They asked to move the visit', reason: 'wrong_tone' }),
       review(ids.labelRight, 'confirmed_correct', { verdict: 'jev_right', correct_value: null, note: null }),
     ]);
 
@@ -144,7 +144,7 @@ jest.setTimeout(60000);
     for (const absent of [ids.accepted, ids.labelRight, ids.rejectedBySystem, ids.rejectedByGuard, ids.rejectedArrayNoTag, ids.approved, ids.shadowDraft, ids.shadowDraft2, ids.shadowDraft3, ids.shadowDraft4, ids.equivalent, ids.humanBetterAlreadyCorrected, ids.humanBetterNoSend, ids.profilePending, ids.trainingOnCorrected, ids.trainingDecision]) {
       expect(byId[absent]).toBeUndefined();
     }
-    expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'source', 'source_id', 'surface', 'topic', 'version']);
+    expect(Object.keys(rows[0]).sort()).toEqual(['ai_text', 'corrected_at', 'corrected_by', 'customer_id', 'detail', 'human_text', 'kind', 'model', 'reason', 'source', 'source_id', 'surface', 'topic', 'version']);
 
     expect(byId[ids.corrected]).toMatchObject({
       surface: 'sms', topic: 'reschedule', ai_text: `Suggested ${ids.corrected.slice(0, 4)}`, human_text: 'Reviewed draft edited, scheduled, and sent from the SMS inbox.',
@@ -152,6 +152,10 @@ jest.setTimeout(60000);
     });
     expect(byId[ids.corrected].detail).toMatchObject({ workflow: 'sms_suggest', decision_version: 'v1', corrected_actions: [{ type: 'reply' }] });
     expect(byId[ids.corrected].corrected_at).toEqual(at(10));
+    // the one-tap reason: the decision's column, the typed label's reason, null elsewhere
+    expect(byId[ids.corrected].reason).toBe('wrong_fact');
+    expect(byId[ids.labelWrong].reason).toBe('wrong_tone');
+    expect(rows.filter((r) => r.reason === null).map((r) => r.source)).toEqual(expect.arrayContaining(['message_draft', 'shadow_judgment', 'voice_profile', 'reply_training']));
 
     expect(byId[ids.labelWrong]).toMatchObject({ surface: 'typed', topic: 'sms_courtesy', human_text: 'They asked to move the visit', version: 'sms_courtesy.v1', model: 'jev-1.13.0', corrected_by: 'reviewer@test', customer_id: null });
     expect(JSON.parse(byId[ids.labelWrong].ai_text)).toEqual({ p: 0.91, yes: true, confident: true });

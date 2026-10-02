@@ -14,6 +14,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { ActionFeedback, Badge, Button, Card, Input, UiSurface } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import CorrectionReasonChips from "../../components/admin/CorrectionReasonChips";
+import { correctionReasonLabel } from "../../constants/correctionReasons";
 
 const STATUS_OPTIONS = [
   { value: "unreviewed", label: "Unreviewed" },
@@ -117,6 +119,7 @@ function labelFailure(err) {
 
 function ReviewRow({ review, onLabeled, onStale }) {
   const [note, setNote] = useState("");
+  const [reason, setReason] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
@@ -132,6 +135,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
     const body = { verdict, seen_answer: review.jevAnswer, seen_subject: review.subjectVersion ?? null };
     if (verdict === "jev_wrong") body.correct_value = !review.jevAnswer.yes;
     if (note.trim()) body.note = note.trim();
+    if (verdict === "jev_wrong" && reason) body.reason = reason;
     if (force) body.force = true;
     try {
       const result = await adminFetch(`/admin/typed-decisions/reviews/${encodeURIComponent(review.id)}/label`, {
@@ -168,7 +172,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
 
       {review.label?.verdict && (
         <div className="text-14 text-ink-secondary">
-          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}
+          Labeled {titleCase(review.label.verdict)}{review.label.note ? ` — ${review.label.note}` : ""}{review.label.reason ? ` (${correctionReasonLabel(review.label.reason) || review.label.reason})` : ""}
         </div>
       )}
 
@@ -185,6 +189,8 @@ function ReviewRow({ review, onLabeled, onStale }) {
         onChange={(e) => setNote(e.target.value)}
         maxLength={500}
       />
+
+      {yesNo && <CorrectionReasonChips value={reason} onChange={setReason} disabled={!!busy} label="If wrong, why?" />}
 
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" disabled={!!busy} loading={busy === "jev_right" ? true : undefined} onClick={() => submit("jev_right")}>Jev right</Button>

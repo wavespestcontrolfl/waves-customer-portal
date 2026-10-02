@@ -15,6 +15,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import CorrectionReasonChips from "../../components/admin/CorrectionReasonChips";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const STATUSES = ["pending_review", "accepted", "corrected", "dismissed", "all"];
@@ -102,6 +103,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [actionError, setActionError] = useState("");
   const [correctionNote, setCorrectionNote] = useState("");
   const [correctedActions, setCorrectedActions] = useState("");
+  const [correctionReason, setCorrectionReason] = useState(null);
   const [idealReply, setIdealReply] = useState("");
   const [actualReply, setActualReply] = useState("");
   const [replyReviewNote, setReplyReviewNote] = useState("");
@@ -118,6 +120,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const draftBaselineRef = useRef({
     correctionNote: "",
     correctedActions: "",
+    correctionReason: null,
     idealReply: "",
     actualReply: "",
     replyReviewNote: "",
@@ -170,11 +173,13 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     setIdealReply("");
     setReplyReviewNote("");
     setReplyScenarioLabel("");
+    setCorrectionReason(null);
     setDetail(null);
     draftBaselineRef.current = {
       ...draftBaselineRef.current,
       correctionNote: "",
       correctedActions: nextActions,
+      correctionReason: null,
       actualReply: "",
       idealReply: "",
       replyReviewNote: "",
@@ -236,6 +241,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     && detailAppliedRef.current.decisionId === selected?.id;
 
   const hasDraftChanges = correctionNote !== draftBaselineRef.current.correctionNote
+    || correctionReason !== draftBaselineRef.current.correctionReason
     || correctedActions !== draftBaselineRef.current.correctedActions
     || idealReply !== draftBaselineRef.current.idealReply
     || actualReply !== draftBaselineRef.current.actualReply
@@ -281,6 +287,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       } else if (correctionNote.trim()) {
         body.correctionNote = correctionNote;
       }
+      if (verdict !== "accepted" && correctionReason) body.reason = correctionReason;
       await adminFetch(`/admin/agent-decisions/${decision.id}/review`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -293,6 +300,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           ...draftBaselineRef.current,
           correctionNote,
           correctedActions,
+          correctionReason,
         };
         setNotice(`Decision ${statusLabel(verdict).toLowerCase()}.`);
         await load();
@@ -302,7 +310,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     } finally {
       setBusyId("");
     }
-  }, [correctedActions, correctionNote, load]);
+  }, [correctedActions, correctionNote, correctionReason, load]);
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision || !replyContextReady) return;
@@ -753,6 +761,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                     placeholder="Why was this accepted, corrected, or dismissed?"
                   />
                   </FormField>
+                  <CorrectionReasonChips value={correctionReason} onChange={(value) => updateDecisionDraft(setCorrectionReason, value)} disabled={!!busyId} />
                   <div className="ui-record-actions">
                     <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:accepted`} onClick={() => review(selected, "accepted")}>
                       <CheckCircle2 size={16} aria-hidden /> Accept
