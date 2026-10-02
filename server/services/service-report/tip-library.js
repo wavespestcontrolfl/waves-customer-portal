@@ -355,27 +355,30 @@ const TIPS = Object.freeze([
 
   // ── German roaches (service tips, owner-approved 2026-10-02) ──────────────────────────────────────────────
   {
+    // German roach services only: cockroach_control and pest_initial_roach
+    // are priced on the native-roach scale, so German-roach advice is not
+    // theirs (Codex #5582).
     id: 'gr_bait_spots', group: 'roaches', label: "Clean around the bait spots",
     keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
-    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "The small dots of bait in the cabinet corners and hinges are doing the work. Cleaner wiped over them, or anything sprayed near them, makes roaches stay away, so for the next few weeks clean around those spots instead of over them.",
   },
   {
     id: 'gr_no_store_spray', group: 'roaches', label: "No store-bought roach spray",
     keywords: ["spray", "fogger", "raid", "store", "over the counter"], lines: ["pest"], season: 'all',
-    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "Store sprays and foggers scatter German roaches into the walls and teach them to avoid the bait. If you see one, a paper towel and the trash is the better move while the bait works through the colony.",
   },
   {
     id: 'gr_dry_at_night', group: 'roaches', label: "Counters and sink dry at bedtime",
     keywords: ["sink", "counter", "dishes", "water", "night"], lines: ["pest"], season: 'all',
-    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "German roaches can't go long without water. Wiping the counters and sink dry before bed, with no dishes left soaking, takes away what they come out for at night and leaves the bait as their easiest meal.",
   },
   {
     id: 'gr_hitchhikers', group: 'roaches', label: "Unpack deliveries outside",
     keywords: ["delivery", "grocery", "appliance", "secondhand", "moving"], lines: ["pest"], season: 'all',
-    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown", "cockroach_control", "pest_initial_roach"],
+    services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     copy: "German roaches usually ride in: grocery boxes, used appliances, and secondhand furniture. Unpack deliveries in the garage or outside, and get the cardboard out of the house the same day.",
   },
 
@@ -401,7 +404,7 @@ const TIPS = Object.freeze([
     id: 'flea_pet_prevention', group: 'fleas', label: "Pets on their flea prevention",
     keywords: ["pet", "dog", "cat", "vet", "flea collar"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
-    copy: "Treating the house and yard handles the fleas waiting there, but a pet without its own protection carries new ones back in. Ask your vet which preventive fits your pet and keep it on schedule while we work.",
+    copy: "Treating the house handles the fleas waiting there, but a pet without its own protection carries new ones back in. Ask your vet which preventive fits your pet and keep it on schedule while we work.",
   },
   {
     id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
@@ -410,21 +413,24 @@ const TIPS = Object.freeze([
     copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",
   },
   {
+    // Tick visits only: flea_tick is the flea-only Flea Control Service
+    // (20260704000010), so tick advice never follows a flea treatment (Codex
+    // #5582).
     id: 'tick_mow_edges', group: 'fleas', label: "Mow short, clear the yard edges",
     keywords: ["tall grass", "brush", "leaf litter", "edges", "mow"], lines: ["pest"], season: 'all',
-    services: ["tick_control", "flea_tick"],
+    services: ["tick_control"],
     copy: "Ticks wait on tall grass and brush for something to walk past. Keeping the lawn mowed and the leaf litter raked up along the edges of the yard takes away the places they wait.",
   },
   {
     id: 'tick_wood_line', group: 'fleas', label: "A dry strip at the wood line",
     keywords: ["woods", "wood chips", "gravel", "border", "play set"], lines: ["pest"], season: 'all',
-    services: ["tick_control", "flea_tick"],
+    services: ["tick_control"],
     copy: "Where the lawn meets woods or brush, a 3-foot strip of wood chips or gravel makes a dry border ticks don't like to cross. Keep play sets and seating on the lawn side of it.",
   },
   {
     id: 'tick_check', group: 'fleas', label: "Check for ticks after yard work",
     keywords: ["check", "kids", "pets", "after yard work", "bite"], lines: ["pest"], season: 'all',
-    services: ["tick_control", "flea_tick"],
+    services: ["tick_control"],
     copy: "After time at the edges of the yard, check yourself, the kids, and the pets: behind the knees, the waistband, the hairline, and the ears. Checking soon after you come in finds a tick before it settles in.",
   },
 
@@ -531,9 +537,11 @@ const TIPS = Object.freeze([
 
   // ── Rodent exclusion (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────
   {
+    // Full exclusion only: a mesh or bird-box job seals one opening, not the
+    // house (Codex #5582).
     id: 'rx_garage_door', group: 'rodent', label: "Garage door closed at night",
     keywords: ["garage door", "night", "open", "dusk", "entry"], lines: ["rodent"], season: 'all',
-    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_wire_mesh", "rodent_bird_box", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
+    services: ["rodent_exclusion", "rodent_exclusion_only", "rodent_trapping_exclusion", "rodent_trapping_exclusion_sanitation"],
     copy: "An open garage door at night is the widest way into the house; rats and mice walk right in and climb to the attic from there. Closing it at dusk keeps the sealed house sealed.",
   },
   {
@@ -591,9 +599,11 @@ const TIPS = Object.freeze([
     copy: "Winged termites at a window or a light in spring are swarmers, a mature colony sending out new ones. Save a few in a zip bag or on tape and call me; they show exactly which termite it is and where to look.",
   },
   {
+    // Bait stations only: termite_monitoring is detection-only, no bait
+    // (Codex #5582).
     id: 'tb_no_spray_stations', group: 'termite', label: "No insecticide near the stations",
     keywords: ["spray", "insecticide", "station", "bug spray", "perimeter"], lines: ["termite"], season: 'all',
-    services: ["termite_bait", "termite_active_bait_quarterly", "termite_monitoring", "termite_cartridge_replacement", "pest_termite_bait_quarterly", "termite_installation_setup", "termite_active_annual"],
+    services: ["termite_bait", "termite_active_bait_quarterly", "termite_cartridge_replacement", "pest_termite_bait_quarterly", "termite_installation_setup", "termite_active_annual"],
     copy: "Termites have to keep feeding at a station for the bait to reach the colony. Insecticide sprayed around a station can turn them away, so leave a clear foot around each one.",
   },
 
@@ -694,7 +704,7 @@ function registryLineFor(serviceLine) {
  * 2026-10-02) leads those visits' list in its own group ("For this service")
  * and stays out of every other visit's list.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, date = new Date() } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date() } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
   const inSeason = (tip) => tip.season === 'all' || tip.season === season;
@@ -707,7 +717,10 @@ function tipsForVisit({ serviceLine, serviceKey = null, date = new Date() } = {}
       return { ...group, primary: tips.some((tip) => tip.lines.includes(line)), tips };
     })
     .filter((group) => group.tips.length > 0);
-  const forService = serviceKey ? TIPS.filter((tip) => tip.services?.includes(serviceKey)).sort(bySeason) : [];
+  // Every service on the visit (the primary and its add-on lines) leads with
+  // its own tips (Codex #5582).
+  const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
+  const forService = keys.size ? TIPS.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
   return {
     line,
     season,

@@ -298,6 +298,26 @@ describe('tipsForVisit', () => {
     }
   });
 
+  test('a tip that names work goes only to services that do it (GitHub Codex on #5582)', () => {
+    const lead = (serviceLine, serviceKey) => (tipsForVisit({ serviceLine, serviceKey, date: '2026-10-02' }).groups.find((group) => group.id === 'for_service')?.tips || []).map((tip) => tip.id);
+    // flea_tick is the flea-only Flea Control Service: no tick advice.
+    expect(lead('pest', 'flea_tick').filter((id) => id.startsWith('tick_'))).toEqual([]);
+    expect(lead('pest', 'tick_control')).toEqual(expect.arrayContaining(['tick_mow_edges', 'tick_wood_line', 'tick_check']));
+    // Detection-only monitoring places no bait.
+    expect(lead('termite', 'termite_monitoring')).not.toContain('tb_no_spray_stations');
+    expect(lead('termite', 'termite_bait')).toContain('tb_no_spray_stations');
+    // Native-roach packages get no German-roach advice.
+    for (const serviceKey of ['cockroach_control', 'pest_initial_roach']) {
+      expect(lead('pest', serviceKey).filter((id) => id.startsWith('gr_'))).toEqual([]);
+    }
+    expect(lead('pest', 'german_roach').filter((id) => id.startsWith('gr_'))).toHaveLength(4);
+    // A mesh or bird-box job seals one opening, not the house.
+    for (const serviceKey of ['rodent_wire_mesh', 'rodent_bird_box']) expect(lead('rodent', serviceKey)).not.toContain('rx_garage_door');
+    expect(lead('rodent', 'rodent_exclusion')).toContain('rx_garage_door');
+    // The flea tip claims only the house, which every flea visit treats.
+    expect(TIPS.find((tip) => tip.id === 'flea_pet_prevention').copy).toMatch(/^Treating the house handles/);
+  });
+
   test('a service tip sorts in-season first in its lead group', () => {
     const dry = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bee_wasp_removal', date: '2026-01-20' });
     expect(dry.groups[0].tips.map((tip) => tip.id)).toEqual(['bw_dont_seal_active', 'bw_call_early', 'bw_cover_sweets']);

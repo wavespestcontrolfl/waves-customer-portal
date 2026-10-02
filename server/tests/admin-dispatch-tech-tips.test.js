@@ -88,7 +88,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // A scripted db: scheduled_services → the visit; service_records → optional
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
-function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, calls }) {
+function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], calls }) {
   return (table) => {
     calls.push(table);
     const chain = {};
@@ -112,6 +112,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     };
     chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : null);
     chain.then = (resolve) => {
+      if (table === 'scheduled_service_addons') return Promise.resolve(addons).then(resolve);
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
       // History fixtures are published by default; visibility-negative cases
       // opt out explicitly with report_view_token: null.
@@ -185,6 +186,16 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(fallback.body.available).toBe(true);
   });
 
+  test('an add-on line leads with its own tips beside the primary\'s (Codex #5582)', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'mosquito_monthly' });
+    // The key stamped on the line wins; an older line falls back to its catalog row's.
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [], addons: [{ key_snapshot: 'flea_tick', catalog_key: 'tick_control' }, { key_snapshot: null, catalog_key: 'bora_care' }] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(res.body.groups[0].tips.map((tip) => tip.id).sort())
+      .toEqual(['bc_keep_dry', 'flea_keep_vacuuming', 'flea_pet_prevention', 'flea_shady_spots', 'mq_pool', 'mq_tree_holes']);
+  });
+
   test('both gates off preserve the no-read unavailable response', async () => {
     const calls = [];
     mockDbCurrent = scriptedDb({ service: SERVICE, calls });
@@ -245,7 +256,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.conditions).toEqual({ irrigation_on_file: true });
     expect(res.body).not.toHaveProperty('previousRecommendations');
     // read-only: three reads, no writes
-    expect(calls.sort()).toEqual(['property_preferences', 'scheduled_services', 'service_records']);
+    expect(calls.sort()).toEqual(['property_preferences', 'scheduled_service_addons', 'scheduled_services', 'service_records']);
   });
 
   test('gate on: the irrigation flag alone never counts as settings on file', async () => {
@@ -279,7 +290,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.available).toBe(true);
     expect(res.body.lastSent).toEqual({});
     expect(res.body.conditions).toEqual({ irrigation_on_file: false });
-    expect(calls).toEqual(['scheduled_services']);
+    expect(calls).toEqual(['scheduled_services', 'scheduled_service_addons']);
   });
 
   test('completion choices work with tech tips off and return only three prior same-line visits through the visit date', async () => {
