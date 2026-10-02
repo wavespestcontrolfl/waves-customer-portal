@@ -4861,6 +4861,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       // #5524 r4: the recovered visit is anchored to the cadence for later touches.
       expect(mock.__state.rows.review_sequences[0].service_record_id).toBe('sr-tv-1');
       const touch = mock.__state.rows.review_requests[0];
+      // ...and this touch's own request row carries it, so its send guards see the visit.
+      expect(touch.service_record_id).toBe('sr-tv-1');
       expect(touch.template_key).toBe('day0_ask_tech_voice');
       expect(touch.custom_body).toBe(body);
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toBe(body.replace('{review_url}', `https://portal.test/rate/${touch.token}`));

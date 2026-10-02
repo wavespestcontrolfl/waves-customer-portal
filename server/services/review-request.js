@@ -4685,6 +4685,10 @@ const ReviewService = {
       await db("review_sequences").where({ id: sequenceId }).whereNull("service_record_id")
         .update({ service_record_id: voiceVisit.serviceRecordId })
         .catch((err) => logger.warn(`[review] tech voice: visit anchor failed (sequenceId=${sequenceId}): ${err.message}`));
+      // This touch is about that visit too: its request row carries the id,
+      // so the visit-summary send guards (uncertain summary, packet lock)
+      // apply to it exactly as they do to later touches.
+      serviceRecordId = voiceVisit.serviceRecordId;
     }
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
