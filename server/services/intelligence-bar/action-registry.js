@@ -60,6 +60,7 @@ const MODULES = [
   ['call-research-tools', 'CALL_RESEARCH_TOOLS', 'executeCallResearchTool'],
   ['gap-report-tools', 'GAP_REPORT_TOOLS', 'executeGapReportTool'],
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
+  ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });

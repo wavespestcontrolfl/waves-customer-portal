@@ -1415,6 +1415,22 @@
     "approval": null,
     "scope": "broad"
   },
+  "get_customer_invoices": {
+    "module": "billing-reader-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
+  "get_invoice_detail": {
+    "module": "billing-reader-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
     "domain": "closeout",

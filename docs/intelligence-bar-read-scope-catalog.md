@@ -106,6 +106,28 @@ old list).
   `call_log_id`) are `broad`: unavailable inside a customer-scoped task, open
   otherwise.
 
+- `get_customer_invoices` and `get_invoice_detail` (`billing-reader-tools.js`,
+  W9) are `record` reads and admin-only (technicians get no billing reads; the
+  action registry refuses them for any technician and the route lists them only
+  in the admin-only infra set and `ADMIN_ONLY_TOOL_NAMES`). Both are read-only
+  and in no write-gate set. The list takes `customer_id`, `customer_name` or
+  `phone` through the same task-context selector handling and
+  `comms-tools.resolveCustomer` as the other customer readers (an ambiguous
+  name returns candidates, a name or phone that disagrees with the id is
+  `selector_conflict`); the detail takes `invoice_id`, which `validateRecordTarget`
+  maps to the owning customer so it must belong to a task customer. Balances are
+  not re-derived: amount due is `invoiceAmountDue` (total minus applied credit),
+  collectibility is `INVOICE_UNCOLLECTIBLE_STATUSES`, and the invoice rows, the
+  unpaid and overdue sets and their counts come from `InvoiceService.list`, the
+  Invoices page's own reader. The detail's payments timeline keeps four kinds of
+  evidence apart by `type` (`recorded_payment` and `payment_attempt` from the
+  payments table, `stripe_charge_attempt`, `stripe_unreconciled_charge`,
+  `credit_movement`) and marks `received: true` only for a recorded successful
+  payment or a Stripe state of succeeded; every other state is an attempt with
+  its state, never paid. The live Stripe PaymentIntent state is not stored in the
+  portal and is reported as unknown. Card numbers, full emails and pay-link
+  tokens are never returned.
+
 ## Deferred
 
 - `find_available_slots` is `record`: inside a customer-scoped task the

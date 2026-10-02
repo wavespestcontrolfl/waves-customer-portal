@@ -60,6 +60,7 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
@@ -147,6 +148,7 @@ const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
+const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -163,6 +165,10 @@ const INFRA_TOOLS = [
   // needs_me: read-only list of open admin alerts + standing conditions. Alert text
   // names customers, so it rides the admin-only infra set, not the base tools.
   ...NEEDS_ME_TOOLS,
+  // Customer invoice + payment readers (W9): read-only billing evidence for one
+  // customer. Admin-only (technicians get no billing reads), so they ride the
+  // admin-only infra set like needs_me and load in every admin context.
+  ...BILLING_READER_TOOLS,
   // The sitemap submit is advertised with the other outside-service writes in
   // the global infrastructure prompt, so it rides the global infra set too —
   // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
@@ -202,6 +208,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  // Billing readers show invoices, balances and payment evidence: admin only,
+  // like the requireAdmin invoice routes they mirror.
+  ...BILLING_READER_TOOLS.map(t => t.name),
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
@@ -2455,6 +2464,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
     return executeNeedsMeTool(toolName, input);
+  }
+  if (BILLING_READER_TOOL_NAMES.has(toolName)) {
+    return executeBillingReaderTool(toolName, input, actionContext);
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
