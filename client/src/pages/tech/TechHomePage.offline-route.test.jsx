@@ -162,6 +162,22 @@ it('treats a body that stalls after the headers as offline, not as an empty rout
   expect(JSON.parse(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).data.services.map((s) => s.id)).toEqual(['saved-one', 'saved-two']);
 });
 
+it.each([
+  ['the connection drops mid-body', () => Promise.reject(new TypeError('network error'))],
+  ['a captive portal serves HTML', () => Promise.reject(new SyntaxError('Unexpected token <'))],
+  ['a 200 carries no route at all', () => Promise.resolve({ message: 'ok' })],
+])('keeps the saved route when %s', async (_label, body) => {
+  seedSnapshot();
+  fetchMock.mockImplementation(async (path) => {
+    if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: body };
+    return { ok: true, status: 200, json: async () => ({ line: null }) };
+  });
+  mount();
+  await screen.findByText(/No connection — showing your route as saved at 7:42 AM/);
+  expect(screen.getAllByText(/Fixture saved-one/).length).toBeGreaterThan(0);
+  expect(JSON.parse(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).data.services.map((s) => s.id)).toEqual(['saved-one', 'saved-two']);
+});
+
 it('shows the offline notice in the field layout too', async () => {
   seedSnapshot();
   scheduleMode = 'offline';

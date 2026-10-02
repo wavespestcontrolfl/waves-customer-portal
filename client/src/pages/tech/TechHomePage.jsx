@@ -208,6 +208,12 @@ function getGreeting() {
   return 'Good evening';
 }
 
+// Only a payload that actually carries a route may be rendered as one or
+// saved over the last good snapshot.
+function isSchedulePayload(data) {
+  return Array.isArray(data) || Array.isArray(data?.services) || Array.isArray(data?.schedule);
+}
+
 function scheduleRowsFromResponse(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.services)) return data.services;
@@ -369,12 +375,21 @@ export default function TechHomePage({ section = 'today' }) {
         headers: { Authorization: `Bearer ${token}` },
         ...(abort ? { signal: abort.signal } : {}),
       });
-      // A body that stalls after the headers arrive is still a dead zone:
-      // let the timeout's AbortError reach the offline handler instead of
-      // reading it as an empty (and then saved) route.
-      const data = await res.json().catch((parseErr) => { if (parseErr?.name === 'AbortError') throw parseErr; return {}; });
+      // A body that fails after the headers arrive (timeout abort, the
+      // connection dropping mid-body, a captive portal's HTML on a 200) is
+      // still a dead zone: hand it to the offline handler instead of reading
+      // it as an empty route. A non-JSON body on an error status just keeps
+      // the status message.
+      let data;
+      try {
+        data = await res.json();
+      } catch (bodyErr) {
+        if (res.ok) throw Object.assign(bodyErr instanceof Error ? bodyErr : new Error('Route body unreadable'), { bodyRead: true });
+        data = {};
+      }
       if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      if (!isSchedulePayload(data)) throw Object.assign(new Error('Route payload unreadable'), { bodyRead: true });
       const next = scheduleStateFromResponse(data);
       setScheduleError('');
       setRouteNotice('');
@@ -398,7 +413,7 @@ export default function TechHomePage({ section = 'today' }) {
       // fetch() rejects with a TypeError when the network is unreachable
       // ("Failed to fetch" / "Load failed"); our own non-ok throw above is a
       // plain Error and the timeout aborts with AbortError.
-      const offline = err?.name === 'AbortError' || err instanceof TypeError;
+      const offline = err?.name === 'AbortError' || err instanceof TypeError || err?.bodyRead === true;
       const snapshot = offline ? loadRouteSnapshot({ techId, date: today }) : null;
       if (snapshot) {
         const saved = scheduleStateFromResponse(snapshot.data);

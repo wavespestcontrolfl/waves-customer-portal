@@ -146,9 +146,9 @@ describe('TechLayout staff-session verification', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('Verifying staff access');
     expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith('/api/admin/auth/me', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/auth/me', expect.objectContaining({
       headers: { Authorization: 'Bearer staff-access-token' },
-    });
+    }));
 
     await act(async () => {
       finishRequest(response(200, {
@@ -178,6 +178,26 @@ describe('TechLayout staff-session verification', () => {
     expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
     expect(screen.getByText('River Tech')).toBeInTheDocument();
     expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+  });
+
+  it('falls back to the stored profile when the verification request hangs', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      localStorage.setItem('waves_admin_token', 'staff-access-token');
+      localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+      vi.stubGlobal('fetch', vi.fn((_url, options = {}) => new Promise((_, reject) => {
+        options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      })));
+
+      renderTech();
+      expect(screen.getByRole('status')).toHaveTextContent('Verifying staff access');
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+
+      expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+      expect(screen.getByText('River Tech')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([

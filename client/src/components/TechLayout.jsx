@@ -33,6 +33,8 @@ const NAV_ITEMS = [
   { path: '/tech/pay-growth', icon: <TrendingUp aria-hidden="true" />, label: 'Growth', payGrowth: true },
 ];
 
+export const AUTH_CHECK_TIMEOUT_MS = 15000;
+
 export default function TechLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -60,12 +62,18 @@ export default function TechLayout() {
       localStorage.removeItem('waves_admin_user');
     };
     const loginDestination = `${location.pathname}${location.search}`;
+    // A verification that never answers (dead zone) must not hold the shell
+    // on "Verifying…" forever: cut it off and let the offline fallback below
+    // decide. Headers and body share the one bound.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), AUTH_CHECK_TIMEOUT_MS) : null;
 
     fetch(`${API_BASE}/admin/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
+      ...(abort ? { signal: abort.signal } : {}),
     })
       .then(async (response) => {
-        const profile = await response.json().catch(() => null);
+        const profile = await response.json().catch((bodyErr) => { if (bodyErr?.name === 'AbortError') throw bodyErr; return null; });
         if (!response.ok) {
           const error = new Error(profile?.error || 'Unable to verify staff access');
           error.status = response.status;
@@ -102,8 +110,8 @@ export default function TechLayout() {
           });
           return;
         }
-        // No answer at all (dead zone, DNS, airplane mode): a TypeError with
-        // no HTTP status. The stored profile was written by a previous
+        // No answer at all (dead zone, DNS, airplane mode, or the bound
+        // above firing): a TypeError or AbortError with no HTTP status. The stored profile was written by a previous
         // successful /admin/auth/me, so let the shell render from it — the
         // route page then shows its saved copy. Every API call still carries
         // the token and the server rejects a dead session the moment it is
@@ -117,10 +125,12 @@ export default function TechLayout() {
           return;
         }
         setAuthStatus('error');
-      });
+      })
+      .finally(() => { if (timer) clearTimeout(timer); });
 
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [navigate]);
 
