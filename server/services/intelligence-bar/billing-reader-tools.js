@@ -818,7 +818,18 @@ function groupByAttempt(entries) {
 
 function summarizePayments(entries, invoice, evidenceComplete = true) {
   const recorded = entries.filter((entry) => entry.type === 'recorded_payment' && entry.received);
-  const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
+  // One PaymentIntent is one charge: a succeeded attempt and a confirmed orphan row naming it count once, and
+  // not at all when a recorded payment already carries it.
+  const recordedIntents = new Set(recorded.map((entry) => entry.stripe_payment_intent_id).filter(Boolean));
+  const countedIntents = new Set();
+  const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true)
+    .filter((entry) => {
+      const intent = entry.stripe_payment_intent_id;
+      if (!intent) return true;
+      if (recordedIntents.has(intent) || countedIntents.has(intent)) return false;
+      countedIntents.add(intent);
+      return true;
+    });
   // An accepted-but-unrecorded charge whose PaymentIntent Stripe (or the ledger) already confirms as received
   // is that same charge, not a second unknown outcome.
   const receivedIntents = new Set(entries.filter((entry) => entry.received && ['recorded_payment', 'stripe_charge_attempt'].includes(entry.type) && entry.stripe_payment_intent_id).map((entry) => entry.stripe_payment_intent_id));

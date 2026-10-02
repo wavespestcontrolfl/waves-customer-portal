@@ -216,6 +216,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     W = await customer(`Withdrawn${run}`, `Packet${run}`);
     await invoice('w_self', W, { total: 100 });
     await invoice('w_withdrawn', W, { total: 40, scheduled_send_error: `payer_billed:${funderId}` });
+    // Two successful evidence rows for ONE charge: a succeeded attempt and a webhook orphan naming the same PaymentIntent.
+    const gTwo = await invoice('g_two', G, { total: 48, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_two_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: gTwo.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gtwo-${run}`, status: 'succeeded', amount: 48,
+      stripe_payment_intent_id: `pi_two_${run}`, resolved_at: new Date(), submitted_at: new Date() });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_two_${run}`, customer_id: G, invoice_id: gTwo.id, amount: 48, source: 'invoice_payment_webhook', original_db_error: 'synthetic ledger failure' });
     // More payment rows than the reader keeps: whether a payment was recorded is unknown (unless a retained row proves it).
     const bulkRows = (customerId, invoiceId) => Array.from({ length: 501 }, (_, n) => ({ customer_id: customerId, payment_date: day(-1), amount: 5, status: 'failed', processor: 'stripe',
       description: `Synthetic failed ${n}`, metadata: json({ invoice_id: invoiceId }) }));
@@ -516,6 +521,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.g_both.id });
     expect(detail.payment_summary).toMatchObject({ received: true, stripe_succeeded_not_in_ledger: 1, attempts_unknown_outcome: 0, attempts_in_flight_or_unknown: 0 });
     expect(detail.payment_summary.statement).not.toMatch(/unknown outcome/);
+  });
+
+  test('review: two successful evidence rows for one PaymentIntent are one charge', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_two.id });
+    expect(detail.payment_summary).toMatchObject({ received: true, stripe_succeeded_not_in_ledger: 1 });
+    expect(detail.payment_summary.statement).toMatch(/1 Stripe charge\(s\)/);
+    expect(detail.payment_summary.statement).not.toMatch(/2 Stripe charge/);
   });
 
   test('review: the invoice detail guards the balance of an unreconciled charge the same way the list does', async () => {
