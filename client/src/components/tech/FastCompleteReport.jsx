@@ -15,6 +15,7 @@ import { Chip, ChoiceSection } from './FastCompleteParts';
 import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
 import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
+import { reconcileDependentFindingSelections, specialtyCompletedWorkWithoutAction } from '../../lib/service-completion-presets';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -570,8 +571,149 @@ function withLine(photoCount, traced) {
   return items.length ? `With ${items.join(' and ')}.` : '';
 }
 
+// Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
+// visit's own record, its places and one value per finding group, as the note
+// filled it and the tech confirmed it. A read fills only what is still empty
+// and nobody picked; Change is the tech's own pick and the words it came from
+// no longer show beside it. The report and the completion are written from
+// this record.
+export const EMPTY_LANE_RECORD = Object.freeze({ areas: [], values: {}, heard: { areas: {}, values: {} }, picked: [] });
+const LANE_TITLES = {
+  bed_bug_treatment: 'Bed bug',
+  fire_ant: 'Fire ant',
+  tick_control: 'Tick',
+  bee_wasp_removal: 'Bee & wasp',
+  mud_dauber_removal: 'Mud dauber',
+  mosquito: 'Mosquito',
+};
+
+// The record after a read (the lane reader's answer): the areas while none
+// are set or picked, and a group's value when the group is empty, nobody
+// picked it, and the value sits with what is chosen by the tap's own rule (a
+// value that would drop a chosen one stays unpicked).
+export function mergeLaneRecord(record, facts, preset) {
+  if (facts?.status !== 'read' || !preset) return record;
+  const picked = new Set(record.picked);
+  const fillAreas = !record.areas.length && !picked.has('areas');
+  const areas = fillAreas ? facts.areas.filter((entry) => preset.areas.includes(entry.area)) : [];
+  const values = { ...record.values };
+  const heardValues = { ...record.heard.values };
+  for (const finding of facts.findings) {
+    const group = preset.findingGroups.find((item) => (
+      item.key === finding.group && item.options.some((option) => option.value === finding.value)
+    ));
+    if (!group || values[group.key] || picked.has(group.key)) continue;
+    const chosen = Object.values(values);
+    if (chosen.every((value) => reconcileDependentFindingSelections(preset, chosen, group, finding.value).includes(value))) {
+      values[group.key] = finding.value;
+      heardValues[group.key] = { value: finding.value, quote: finding.quote };
+    }
+  }
+  return {
+    ...record,
+    areas: fillAreas ? areas.map((entry) => entry.area) : record.areas,
+    values,
+    heard: {
+      areas: fillAreas ? Object.fromEntries(areas.map((entry) => [entry.area, entry.quote])) : record.heard.areas,
+      values: heardValues,
+    },
+  };
+}
+
+// The tech's own pick: a place toggled, or a group's value set (or cleared,
+// ''), the tap's rule dropping a value it excludes.
+export function changeLaneRecord(record, key, value, preset) {
+  const picked = [...new Set([...record.picked, key])];
+  if (key === 'areas') {
+    const areas = record.areas.includes(value) ? record.areas.filter((area) => area !== value) : [...record.areas, value];
+    return { ...record, areas, picked };
+  }
+  const group = preset.findingGroups.find((item) => item.key === key);
+  const kept = reconcileDependentFindingSelections(preset, Object.values(record.values), group, value);
+  const values = Object.fromEntries(preset.findingGroups
+    .map((item) => [item.key, item.options.find((option) => kept.includes(option.value))?.value || ''])
+    .filter(([, chosen]) => chosen));
+  return { ...record, values, picked };
+}
+
+// Whether the completion would refuse this record without an action beside
+// it: a lane whose closeout defines its work state takes a completed-work
+// finding only with the work performed (specialtyCompletedWorkWithoutAction,
+// the client mirror of the server's rule), and the sheet records no actions.
+// None of the six voice lanes defines a work state today.
+export const laneRecordNeedsAction = (preset, record) => !!specialtyCompletedWorkWithoutAction(preset, Object.values(record.values), []);
+
+// "<Lane> record heard from you": each field with what was heard and a
+// Change; a group the note left unclear asks to be picked.
+export function LaneRecordCard({ lane, preset, record, unclear = [], readFailed = false, locked, onChange }) {
+  const [open, setOpen] = useState(null);
+  const titleId = useId();
+  const areaQuotes = [...new Set(record.areas.map((area) => record.heard.areas[area]).filter(Boolean))];
+  const rows = [
+    { key: 'areas', label: 'Where', value: record.areas.join(' · '), quotes: areaQuotes, options: preset.areas, multi: true },
+    ...preset.findingGroups.map((group) => {
+      const heard = record.heard.values[group.key];
+      return {
+        key: group.key,
+        label: group.label,
+        value: record.values[group.key] || '',
+        quotes: heard && heard.value === record.values[group.key] ? [heard.quote] : [],
+        options: group.options.map((option) => option.value),
+      };
+    }),
+  ];
+  return (
+    <section className="tech-visit-card tech-lane-record" aria-labelledby={titleId}>
+      <h3 id={titleId} className="tech-visit-section-title">{`${LANE_TITLES[lane] || 'Visit'} record heard from you`}</h3>
+      {readFailed && <p className="tech-visit-muted tech-visit-status--warn" role="status">Couldn’t read your note for this just now. Pick each one, or write the report again.</p>}
+      {rows.map((row) => (
+        <div key={row.key} className="tech-lane-row">
+          <div className="tech-visit-section-head">
+            <span className="tech-lane-label">{row.label}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              className="tech-visit-action"
+              aria-expanded={open === row.key}
+              aria-label={`Change ${row.label}`}
+              disabled={locked}
+              onClick={() => setOpen(open === row.key ? null : row.key)}
+            >
+              Change
+            </Button>
+          </div>
+          {row.value ? <p className="tech-lane-value">{row.value}</p> : (
+            <p className={cn('tech-lane-value tech-lane-value--empty', unclear.includes(row.key) && 'tech-visit-status--warn')}>
+              {unclear.includes(row.key) ? 'Not clear from your note. Pick one.' : (readFailed ? 'Not picked' : 'Not said')}
+            </p>
+          )}
+          {row.quotes.length > 0 && <p className="tech-visit-muted">{row.quotes.map((quote) => `“${quote}”`).join(' · ')}</p>}
+          {open === row.key && (
+            <div className="tech-visit-tile-grid" role="group" aria-label={row.label}>
+              {row.options.map((option) => (
+                <Chip
+                  key={option}
+                  label={option}
+                  disabled={locked}
+                  pressed={row.multi ? record.areas.includes(option) : row.value === option}
+                  onClick={() => {
+                    onChange(row.key, row.multi || row.value !== option ? option : '');
+                    // One value per finding: the pick is the answer. Places
+                    // take several, so their list stays open.
+                    if (!row.multi) setOpen(null);
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export function ReportCard({
-  draft, editing, stale, locked, photoCount, traced, blogPost, onEdit, onDoneEditing, onChangeText, onWriteAgain,
+  draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
   const edited = draft.text.trim() !== draft.base.trim();
@@ -605,7 +747,7 @@ export function ReportCard({
       )}
       {extra && <p className="tech-visit-muted">{extra}</p>}
       {blogPost && <p className="tech-visit-muted">At the bottom, from the Waves blog: {blogPost.title}</p>}
-      <HeardLine facts={draft.facts} />
+      {pestHeard && <HeardLine facts={draft.facts} />}
       <div className="tech-visit-tile-grid">
         <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
         <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
