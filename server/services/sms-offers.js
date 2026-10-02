@@ -200,6 +200,8 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
 // nothing left to match a reply against.
 const BACKFILL_LOOKBACK_HOURS = OFFER_TTL_HOURS;
 const BACKFILL_BATCH = 200;
+// 10 pages = 2,000 decision sends in 48h, far above today's volume (~5 a day).
+const BACKFILL_MAX_PAGES = 10;
 
 /**
  * Re-record offers whose post-send write was lost (a transient database
@@ -212,43 +214,53 @@ const BACKFILL_BATCH = 200;
  * The logged body may carry rewritten links; only offer spans that survived
  * verbatim count, the same rule as a reviewer-edited reply. Never throws.
  */
-async function backfillMissedOffers({ now = new Date(), dbh = db } = {}) {
+async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BACKFILL_BATCH, maxPages = BACKFILL_MAX_PAGES } = {}) {
   if (!offerLedgerLive()) return { scanned: 0, recorded: 0, skipped: 0, reason: 'gate_off' };
-  let rows;
-  try {
-    const since = new Date(new Date(now).getTime() - BACKFILL_LOOKBACK_HOURS * 3600000);
-    rows = await dbh('sms_log as sl')
-      .join('agent_decisions as ad', dbh.raw("ad.id::text = sl.metadata->>'agent_decision_id'"))
-      .where('sl.direction', 'outbound')
-      .whereIn('sl.status', ['queued', 'sent', 'delivered'])
-      .whereRaw("sl.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'")
-      .where('sl.created_at', '>=', since)
-      .whereRaw("ad.input_snapshot->'open_times_snapshot' IS NOT NULL")
-      .whereNotExists(function missing() {
-        this.select(dbh.raw('1')).from('sms_offers as o').whereRaw('o.agent_decision_id = ad.id');
-      })
-      .orderBy('sl.created_at', 'asc')
-      .limit(BACKFILL_BATCH)
-      .select('ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
-  } catch (err) {
-    logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
-    return { scanned: 0, recorded: 0, skipped: 0, reason: 'error' };
-  }
+  const since = new Date(new Date(now).getTime() - BACKFILL_LOOKBACK_HOURS * 3600000);
   let recorded = 0;
   const seen = new Set();
-  for (const r of rows) {
-    // A decision sent as several rows is one offer: its first accepted row.
-    if (seen.has(r.agent_decision_id)) continue;
-    seen.add(r.agent_decision_id);
-    const result = await recordOfferForSend({
-      agentDecisionId: r.agent_decision_id,
-      outgoingBody: r.message_body,
-      providerMessageId: r.twilio_sid,
-      to: r.to_phone,
-      sentAt: new Date(r.created_at),
-      dbh,
-    });
-    if (result.recorded) recorded += 1;
+  // Keyset pages over (created_at, id): a send the writer skips for good (a
+  // reviewer edit that dropped every offered time) stays eligible, so each
+  // tick walks past it instead of re-reading the same oldest batch.
+  let cursor = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    let rows;
+    try {
+      const query = dbh('sms_log as sl')
+        .join('agent_decisions as ad', dbh.raw("ad.id::text = sl.metadata->>'agent_decision_id'"))
+        .where('sl.direction', 'outbound')
+        .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+        .whereRaw("sl.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'")
+        .where('sl.created_at', '>=', since)
+        .whereRaw("ad.input_snapshot->'open_times_snapshot' IS NOT NULL")
+        .whereNotExists(function missing() {
+          this.select(dbh.raw('1')).from('sms_offers as o').whereRaw('o.agent_decision_id = ad.id');
+        });
+      if (cursor) query.whereRaw('(sl.created_at, sl.id) > (?, ?)', [cursor.created_at, cursor.id]);
+      rows = await query
+        .orderBy([{ column: 'sl.created_at', order: 'asc' }, { column: 'sl.id', order: 'asc' }])
+        .limit(batchSize)
+        .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
+    } catch (err) {
+      logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+      return { scanned: seen.size, recorded, skipped: seen.size - recorded, reason: 'error' };
+    }
+    for (const r of rows) {
+      // A decision sent as several rows is one offer: its first accepted row.
+      if (seen.has(r.agent_decision_id)) continue;
+      seen.add(r.agent_decision_id);
+      const result = await recordOfferForSend({
+        agentDecisionId: r.agent_decision_id,
+        outgoingBody: r.message_body,
+        providerMessageId: r.twilio_sid,
+        to: r.to_phone,
+        sentAt: new Date(r.created_at),
+        dbh,
+      });
+      if (result.recorded) recorded += 1;
+    }
+    if (rows.length < batchSize) break;
+    cursor = rows[rows.length - 1];
   }
   return { scanned: seen.size, recorded, skipped: seen.size - recorded };
 }

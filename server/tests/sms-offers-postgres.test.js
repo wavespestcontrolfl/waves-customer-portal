@@ -112,6 +112,22 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     expect(again.scanned).toBe(first.scanned - first.recorded);
   }));
 
+  test('backfill pages past sends it skips for good, so a newer recoverable offer is still recorded', () => inTrx(async (trx) => {
+    const visit = { scheduledServiceId: '11111111-1111-4111-8111-111111111111' };
+    const logSend = async (decisionId, body, minutes, phone) => trx('sms_log').insert({
+      direction: 'outbound', from_phone: '+19415550199', to_phone: phone, message_body: body,
+      twilio_sid: `SM${String(minutes).padStart(32, 'c')}`, status: 'sent',
+      metadata: JSON.stringify({ agent_decision_id: decisionId }), created_at: new Date(SENT_AT.getTime() + minutes * 60000),
+    });
+    // Two sends whose text no longer carries any offered time: skipped every tick.
+    await logSend(await insertDecision(trx, { lookup: visit }), 'Thanks, talk soon.', 1, '+19415550106');
+    await logSend(await insertDecision(trx, { lookup: visit }), 'Thanks, talk soon.', 2, '+19415550107');
+    const recoverable = await insertDecision(trx, { lookup: visit });
+    await logSend(recoverable, BODY, 3, '+19415550108');
+    await offers.backfillMissedOffers({ now: new Date(SENT_AT.getTime() + 3600000), dbh: trx, batchSize: 1 });
+    expect(await trx('sms_offers').where({ agent_decision_id: recoverable }).first('status')).toMatchObject({ status: 'open' });
+  }));
+
   test('the database refuses a second open offer for one phone and kind', () => inTrx(async (trx) => {
     const base = { phone_last10: '9415550103', kind: 'move_visit', slots: '[]', sent_at: SENT_AT, expires_at: SENT_AT, status: 'open' };
     await trx('sms_offers').insert({ ...base, agent_decision_id: await insertDecision(trx) });
