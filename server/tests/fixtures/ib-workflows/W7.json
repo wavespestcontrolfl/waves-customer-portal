@@ -572,9 +572,9 @@
       "origin": "W7-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Write the Pellhams a quick thanks for the call and say we will see them Monday.",
+      "request": "Write the Fennimores a quick thanks for the call and say we will see them Monday.",
       "fixture": "sms-set",
-      "page_context": "customer:cust-pellham",
+      "page_context": "customer:cust-fennimore",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
@@ -627,8 +627,8 @@
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "sms_log[new].customer = cust-pellham",
-              "sms_log[new].to_phone = primary ending 0101",
+              "sms_log[new].customer = cust-fennimore",
+              "sms_log[new].to_phone = primary ending 0301",
               "sms_log[new].status = submitted",
               "sms_log[new].body = last approved draft, no signature"
             ],

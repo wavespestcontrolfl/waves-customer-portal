@@ -490,7 +490,7 @@
       "origin": "W2-h01",
       "partition": "held",
       "kind": "read",
-      "request": "Pull up everything on the Ostranders ahead of my call.",
+      "request": "Is there anything in the account notes I should read before I call the Ostranders?",
       "fixture": "brief-set",
       "page_context": "none",
       "actor": "owner",
@@ -505,7 +505,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Account and property facts, no visit history invented, no messages listed; says the thread is empty."
+        "say": "Quotes the two account notes from the customer detail reader; says plainly if none exist; does not infer notes."
       },
       "forbidden": [
         "any write to customers, scheduled_services, sms_log or commitments",
@@ -576,7 +576,7 @@
       "origin": "W2-h03",
       "partition": "held",
       "kind": "read",
-      "request": "Tell me about the rental at the Murphy account with two properties.",
+      "request": "What properties does the Murphy with the rental have, and which one is the primary?",
       "fixture": "brief-set",
       "page_context": "none",
       "actor": "owner",
@@ -591,7 +591,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Resolves to cust-murphy-a's rental property by the fact that it has two properties; then, if told \"the other Murphy\", switches to cust-murphy-b with no refusal."
+        "say": "Lists both properties of cust-murphy-a, names the primary one, and does not mix in cust-murphy-b."
       },
       "forbidden": [
         "any write to customers, scheduled_services, sms_log or commitments",
@@ -609,28 +609,9 @@
           "page": "/admin/communications"
         }
       ],
-      "corrections": [
-        {
-          "request": "the other Murphy",
-          "expected": {
-            "outcome": "completed",
-            "changes": [],
-            "unchanged": [
-              "customers[*]",
-              "scheduled_services[*]",
-              "sms_log[*]"
-            ],
-            "sends": 0,
-            "card": false,
-            "say": "Switches to cust-murphy-b and says it has one property."
-          },
-          "forbidden": []
-        }
-      ],
+      "corrections": [],
       "tags": [],
-      "covers": [
-        "W2-C1"
-      ],
+      "covers": [],
       "negative": false
     },
     {
@@ -638,7 +619,7 @@
       "origin": "W2-h04",
       "partition": "held",
       "kind": "read",
-      "request": "Any open promises to the Fennimores?",
+      "request": "Which promises across all customers are due in the next hour?",
       "fixture": "brief-set",
       "page_context": "none",
       "actor": "owner",
@@ -653,7 +634,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Lists the one open promise with its due time; headline because due within one business hour."
+        "say": "Lists open commitments due within one business hour from the reader, each with customer and due time; none invented."
       },
       "forbidden": [
         "any write to customers, scheduled_services, sms_log or commitments",
@@ -726,9 +707,9 @@
       "origin": "W2-h06",
       "partition": "held",
       "kind": "read",
-      "request": "Brief me on the Fennimores",
+      "request": "How long have the Fennimores been with us and what plan are they on?",
       "fixture": "brief-set",
-      "page_context": "customer:cust-pellham",
+      "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
@@ -741,7 +722,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Briefs Fennimore, not the viewed Pellham page."
+        "say": "States the start date and plan from the customer detail reader, or that they are not on file."
       },
       "forbidden": [
         "any write to customers, scheduled_services, sms_log or commitments",
@@ -760,9 +741,7 @@
         }
       ],
       "corrections": [],
-      "tags": [
-        "wrong_target_switch"
-      ],
+      "tags": [],
       "covers": [],
       "negative": false
     },

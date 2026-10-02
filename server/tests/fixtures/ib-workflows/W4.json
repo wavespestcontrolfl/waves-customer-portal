@@ -273,7 +273,7 @@
           "scheduled_services[friday-pest].property_id"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Friday is a grouped lawn and pest stop: the card names that both rows move together; nothing is direct and nothing changes until confirmed."
       },
       "forbidden": [
@@ -316,7 +316,7 @@
           "customer_properties count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Gate off: a card with the property preview; no row until confirmed."
       },
       "forbidden": [
@@ -524,25 +524,26 @@
       "origin": "W4-h01",
       "partition": "held",
       "kind": "write",
-      "request": "They bought a rental over on 31 Sample Court, put it on the account.",
-      "fixture": "prop-larkspur",
-      "page_context": "customer:cust-larkspur",
+      "request": "Add a third property for them, 52 Sample Court, and call it a rental.",
+      "fixture": "prop-wexcombe",
+      "page_context": "customer:cust-wexcombe",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "completed",
         "changes": [
-          "customer_properties[new].customer = cust-larkspur",
-          "customer_properties[new].address = 31 Sample Court",
+          "customer_properties[new].customer = cust-wexcombe",
+          "customer_properties[new].address = 52 Sample Court",
           "customer_properties[new].label = rental",
           "customer_properties[new].is_primary = false"
         ],
         "unchanged": [
+          "customer_properties[home].is_primary",
           "scheduled_services[*].property_id"
         ],
         "sends": 0,
         "card": false,
-        "say": "Rental label inferred from the word rental; not promoted to primary."
+        "say": "A third property row is added; primary unchanged."
       },
       "forbidden": [
         "new property promoted to primary",
@@ -659,25 +660,22 @@
       "id": "W4-held-04",
       "origin": "W4-h04",
       "partition": "held",
-      "kind": "write",
-      "request": "Add their rental at 41 Sample Court, then move the Friday lawn visit to it.",
+      "kind": "read",
+      "request": "What properties do the Wexcombes have on file?",
       "fixture": "prop-wexcombe",
       "page_context": "customer:cust-wexcombe",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "awaiting_operator",
-        "changes": [
-          "customer_properties[new].address = 41 Sample Court",
-          "customer_properties[new].label = rental"
-        ],
+        "outcome": "completed",
+        "changes": [],
         "unchanged": [
-          "scheduled_services[friday-lawn].property_id",
-          "scheduled_services[friday-pest].property_id"
+          "customer_properties[*]",
+          "scheduled_services[*].property_id"
         ],
         "sends": 0,
         "card": false,
-        "say": "Property add commits directly; the move of the grouped Friday stop stops at a card."
+        "say": "Lists the home and the lake house with labels and which is primary; changes nothing."
       },
       "forbidden": [
         "new property promoted to primary",
@@ -697,10 +695,8 @@
       ],
       "corrections": [],
       "tags": [],
-      "covers": [
-        "W4-C3"
-      ],
-      "negative": true
+      "covers": [],
+      "negative": false
     },
     {
       "id": "W4-held-05",
@@ -833,7 +829,7 @@
       "origin": "W4-h08",
       "partition": "held",
       "kind": "write",
-      "request": "Add a rental for the Wexcombes at 27 Sample Court.",
+      "request": "Add a rental for the Wexcombes at 33 Sample Court.",
       "fixture": "prop-wexcombe",
       "page_context": "customer:cust-larkspur",
       "actor": "owner",
@@ -842,7 +838,7 @@
         "outcome": "completed",
         "changes": [
           "customer_properties[new].customer = cust-wexcombe",
-          "customer_properties[new].address = 27 Sample Court",
+          "customer_properties[new].address = 33 Sample Court",
           "customer_properties[new].label = rental"
         ],
         "unchanged": [
@@ -926,10 +922,10 @@
       "origin": "W4-h10",
       "partition": "held",
       "kind": "write",
-      "request": "Put a second property on their account, 27 Sample Court, rental.",
-      "fixture": "prop-larkspur",
+      "request": "Put a second property on the Wexcombe account, 44 Sample Court, rental.",
+      "fixture": "prop-wexcombe",
       "inject": "revoke write access before the card is confirmed",
-      "page_context": "customer:cust-larkspur",
+      "page_context": "customer:cust-wexcombe",
       "actor": "admin",
       "mode": "owner_direct_on",
       "expected": {
@@ -939,7 +935,7 @@
           "customer_properties count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Non-owner admin gets a card; write access is revoked before confirm, so the confirm is refused with the reason and no row exists."
       },
       "forbidden": [

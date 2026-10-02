@@ -507,7 +507,7 @@
       "origin": "W1-h01",
       "partition": "held",
       "kind": "read",
-      "request": "Give me the rundown of what is waiting on me this morning.",
+      "request": "Which of the open items are about customers rather than systems?",
       "fixture": "alerts-mixed",
       "page_context": "none",
       "actor": "owner",
@@ -520,7 +520,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Total 14 work items, unsorted 3 stated apart, each item with link and what resolves it."
+        "say": "Groups items by subject type (customer, visit, invoice, estimate, lead, call versus check); the group counts add up to the reader total; unsorted rows stay apart."
       },
       "forbidden": [
         "any admin alert marked done, acknowledged or snoozed",
@@ -587,7 +587,7 @@
       "origin": "W1-h03",
       "partition": "held",
       "kind": "read",
-      "request": "Just the top five please, then the next five.",
+      "request": "Give me the billing ones five at a time.",
       "fixture": "alerts-many",
       "inject": "drop the response to the first page before the operator sees it",
       "page_context": "none",
@@ -601,7 +601,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "First five by urgency with cursor."
+        "say": "First five Billing items with a cursor."
       },
       "forbidden": [
         "any admin alert marked done, acknowledged or snoozed",
@@ -629,7 +629,7 @@
             ],
             "sends": 0,
             "card": false,
-            "say": "Resuming with the same cursor returns items 6 to 10 exactly once; no skip, no repeat."
+            "say": "Resuming with the same cursor returns Billing items 6 to 10 exactly once; no skip, no repeat."
           },
           "forbidden": []
         }
@@ -647,9 +647,9 @@
       "origin": "W1-h04",
       "partition": "held",
       "kind": "read",
-      "request": "What is new since you looked a minute ago?",
+      "request": "Did anything I just handled drop off the list?",
       "fixture": "alerts-mixed",
-      "inject": "between reads: resolve one alert, insert one alert",
+      "inject": "between reads: staff resolve two alerts",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -661,7 +661,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "One alert was resolved by staff and one arrived between reads: second read drops the resolved one and shows the arrival; totals match the reader."
+        "say": "Second read no longer lists the two resolved alerts; totals match the reader; the answer does not claim it resolved anything itself."
       },
       "forbidden": [
         "any admin alert marked done, acknowledged or snoozed",
@@ -682,9 +682,7 @@
       "tags": [
         "plan_drift"
       ],
-      "covers": [
-        "W1-C3"
-      ],
+      "covers": [],
       "negative": false
     },
     {

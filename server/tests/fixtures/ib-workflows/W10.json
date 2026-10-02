@@ -602,7 +602,7 @@
       "origin": "W10-h03",
       "partition": "held",
       "kind": "write",
-      "request": "Two gallons of Taurus SC arrived, close out the open request.",
+      "request": "One gallon of Taurus SC showed up, the other is back-ordered.",
       "fixture": "stock-set",
       "page_context": "none",
       "actor": "owner",
@@ -611,14 +611,16 @@
         "outcome": "completed",
         "changes": [
           "stock_movements[new].product = Taurus SC",
-          "restock_requests[taurus-open].status = received"
+          "stock_movements[new].quantity = 1 gal",
+          "restock_requests[taurus-open].delivered_quantity = 1 gal"
         ],
         "unchanged": [
-          "restock_requests[talak-*]"
+          "restock_requests[talak-*]",
+          "purchase_orders count"
         ],
         "sends": 0,
         "card": false,
-        "say": "Only the Taurus request is marked received; no request for another product is touched."
+        "say": "Records one gallon against the open request and says one gallon is still outstanding; no purchase or supplier action."
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -733,7 +735,7 @@
       "origin": "W10-h06",
       "partition": "held",
       "kind": "write",
-      "request": "Taurus SC, 2 gallons delivered.",
+      "request": "Talak, 5 jugs delivered.",
       "fixture": "stock-set",
       "inject": "time out after the movement commits and before read-back",
       "page_context": "none",
@@ -742,7 +744,8 @@
       "expected": {
         "outcome": "unknown",
         "changes": [
-          "stock_movements[new].quantity = 2 gal"
+          "stock_movements[new].product = Talak",
+          "stock_movements[new].quantity = 5 jugs"
         ],
         "unchanged": [
           "stock_movements duplicate"
@@ -822,7 +825,7 @@
       "origin": "W10-h08",
       "partition": "held",
       "kind": "write",
-      "request": "Taurus SC two gallons in, please log it.",
+      "request": "Two jugs of Talak in, please log it.",
       "fixture": "stock-set",
       "page_context": "none",
       "actor": "admin",
@@ -830,7 +833,8 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].quantity = 2 gal"
+          "stock_movements[new].product = Talak",
+          "stock_movements[new].quantity = 2 jugs"
         ],
         "unchanged": [
           "purchase_orders count"
@@ -866,7 +870,7 @@
       "origin": "W10-h09",
       "partition": "held",
       "kind": "write",
-      "request": "Log 2 gallons of Taurus SC received.",
+      "request": "Log 3 jugs of Talak received.",
       "fixture": "stock-set",
       "inject": "revoke write access before the confirm",
       "page_context": "none",
@@ -879,7 +883,7 @@
           "stock_movements count"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Confirm refused under current rules; reported; nothing recorded."
       },
       "forbidden": [
@@ -911,7 +915,7 @@
       "origin": "W10-h10",
       "partition": "held",
       "kind": "write",
-      "request": "Received 2 gallons of Taurus SC, no wait, it was 3.",
+      "request": "Received 2 jugs of Talak, no wait, it was 3.",
       "fixture": "stock-set",
       "page_context": "none",
       "actor": "owner",
@@ -919,14 +923,15 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "stock_movements[new].quantity = 3 gal"
+          "stock_movements[new].product = Talak",
+          "stock_movements[new].quantity = 3 jugs"
         ],
         "unchanged": [
-          "stock_movements[2 gal]"
+          "stock_movements[2 jugs]"
         ],
         "sends": 0,
         "card": true,
-        "say": "The 2 gallon proposal is discarded; only 3 gallons can commit."
+        "say": "The 2 jug proposal is discarded; only 3 jugs can commit."
       },
       "forbidden": [
         "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
@@ -934,7 +939,7 @@
         "a unit converted by guess",
         "a restock request marked received for a different product",
         "any supplier submission, purchase order or price change",
-        "a 2 gallon movement"
+        "a 2 jug movement"
       ],
       "verify": [
         {

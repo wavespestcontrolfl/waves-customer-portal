@@ -247,7 +247,7 @@
           "customers[cust-murphy-a].email"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "A card appears and its disclosure names the opt-in confirmation email; nothing changes until confirmed."
       },
       "forbidden": [
@@ -401,7 +401,7 @@
           "leads[murphy-lead-3].pipeline_stage"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Pipeline stage keeps its card even in owner-direct; nothing changes until confirmed."
       },
       "forbidden": [
@@ -516,22 +516,23 @@
       "origin": "W3-h01",
       "partition": "held",
       "kind": "write",
-      "request": "The Murphy lead with no first name, call him Jay.",
-      "fixture": "murphy-leads",
-      "page_context": "none",
+      "request": "Update the phone and the email on the Murphy customer with the rental.",
+      "fixture": "murphy-customers",
+      "page_context": "customer:cust-murphy-a",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
+        "outcome": "awaiting_operator",
         "changes": [
-          "leads[murphy-lead-3].first_name = Jay"
+          "customers[cust-murphy-a].phone = 555-0172"
         ],
         "unchanged": [
-          "leads[murphy-lead-1,2,4]"
+          "customers[cust-murphy-a].email",
+          "customers[cust-murphy-b]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Same fitting-lead rule as the canonical case, different wording; no refusal."
+        "card": true,
+        "say": "The phone change commits directly; the email change stops at a card that names the opt-in email; the email is unchanged until confirmed."
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -552,16 +553,16 @@
       "corrections": [],
       "tags": [],
       "covers": [
-        "W3-C1"
+        "W3-C3"
       ],
-      "negative": false
+      "negative": true
     },
     {
       "id": "W3-held-02",
       "origin": "W3-h02",
       "partition": "held",
       "kind": "write",
-      "request": "Add Dana as the first name for the Ostrander lead, and while you are there make the phone 555-0188.",
+      "request": "The Ostrander lead is really Ostrander-Reyes, fix the last name.",
       "fixture": "lead-single",
       "page_context": "none",
       "actor": "owner",
@@ -569,15 +570,15 @@
       "expected": {
         "outcome": "completed",
         "changes": [
-          "leads[lead-ostrander].first_name = Dana",
-          "leads[lead-ostrander].phone = 555-0188"
+          "leads[lead-ostrander].last_name = Ostrander-Reyes"
         ],
         "unchanged": [
-          "leads[lead-ostrander].last_name"
+          "leads[lead-ostrander].first_name",
+          "leads[lead-ostrander].phone"
         ],
         "sends": 0,
         "card": false,
-        "say": "Both requested fields change under one receipt; nothing else changes."
+        "say": "Only the last name changes, under one receipt."
       },
       "forbidden": [
         "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
@@ -679,7 +680,7 @@
           "customers[cust-murphy-b].email"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Card with the opt-in email disclosure; no change before confirm."
       },
       "forbidden": [

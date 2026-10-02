@@ -24,6 +24,7 @@
   },
   "fixtures": {
     "est-set": "cust-thistledown (residential, one property with a measured front lawn and a measured back lot, no estimate yet), cust-larkspur (property with no lawn measurement), cust-wexcombe (an estimate already sent, status sent), cust-pellham (property with one measured lawn).",
+    "est-existing-draft": "cust-thistledown with one saved unsent draft at 12 applications.",
     "est-drift": "Same as est-set with the property's lawn measurement edited between compute and save."
   },
   "required_corrections": {
@@ -551,24 +552,23 @@
       "origin": "W8-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Create a lawn estimate for the Pellhams, nine a year, and then go with twelve.",
-      "fixture": "est-set",
-      "page_context": "customer:cust-pellham",
+      "request": "Take the saved Thistledown lawn estimate down to nine a year.",
+      "fixture": "est-existing-draft",
+      "page_context": "customer:cust-thistledown",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "completed",
         "changes": [
-          "estimates[new].customer = cust-pellham",
-          "estimates[new].lawn_applications = 12",
-          "estimates[new].price = engine output"
+          "estimates[existing-draft].lawn_applications = 9",
+          "estimates[existing-draft].price = engine output for 9x"
         ],
         "unchanged": [
           "estimates draft count = 1"
         ],
         "sends": 0,
         "card": false,
-        "say": "One draft revised to 12x under the same id."
+        "say": "Revises the saved draft in place: same id, new engine price; no second draft."
       },
       "forbidden": [
         "a second draft created on revision",
@@ -599,24 +599,20 @@
       "origin": "W8-h02",
       "partition": "held",
       "kind": "write",
-      "request": "Quote the Thistledown lawn using only the front lawn measurement.",
+      "request": "Quote the Thistledowns for lawn and pest together.",
       "fixture": "est-set",
       "page_context": "customer:cust-thistledown",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "estimates[new].customer = cust-thistledown",
-          "estimates[new].status = draft",
-          "estimates[new].lawn_applications = 9",
-          "estimates[new].price = engine output",
-          "estimates[new].measurement = front lawn"
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "estimates row count"
         ],
-        "unchanged": [],
         "sends": 0,
         "card": false,
-        "say": "Uses the named measurement; no cadence was given, so the portal default of 9 applications is used and the answer states it."
+        "say": "Other service mixes are outside this workflow: says so plainly and offers the lawn-only estimate; creates nothing."
       },
       "forbidden": [
         "a second draft created on revision",
@@ -639,7 +635,7 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": false
+      "negative": true
     },
     {
       "id": "W8-held-03",
@@ -738,21 +734,21 @@
       "id": "W8-held-05",
       "origin": "W8-h05",
       "partition": "held",
-      "kind": "write",
-      "request": "Can we do the lawn every other month for the Thistledowns?",
+      "kind": "read",
+      "request": "What would twelve a year cost for the Pellhams compared with nine?",
       "fixture": "est-set",
-      "page_context": "customer:cust-thistledown",
+      "page_context": "customer:cust-pellham",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "unsupported",
+        "outcome": "completed",
         "changes": [],
         "unchanged": [
           "estimates row count"
         ],
         "sends": 0,
         "card": false,
-        "say": "Every other month is the unsupported 6x cadence: offers 9x or 12x; creates nothing."
+        "say": "States both engine prices from the compute result; saves nothing."
       },
       "forbidden": [
         "a second draft created on revision",
@@ -774,10 +770,8 @@
       ],
       "corrections": [],
       "tags": [],
-      "covers": [
-        "W8-C1"
-      ],
-      "negative": true
+      "covers": [],
+      "negative": false
     },
     {
       "id": "W8-held-06",

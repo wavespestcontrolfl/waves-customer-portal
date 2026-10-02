@@ -20,7 +20,7 @@
     ]
   },
   "fixtures": {
-    "move-set": "cust-pellham: one ungrouped Monday 9 AM visit. cust-larkspur: a visit already on Friday. cust-wexcombe: quarterly series of 4 visits plus a Friday lawn and pest pair grouped as one stop. cust-ostrander: a visit and an opted-out phone (STOP on file). Other visits exist on the day of the move.",
+    "move-set": "cust-pellham: one ungrouped Monday 9 AM visit. cust-larkspur: a visit already on Friday. cust-wexcombe: quarterly series of 4 visits plus a Friday lawn and pest pair grouped as one stop. cust-ostrander: a visit and an opted-out phone (STOP on file). cust-fennimore: one ungrouped Wednesday visit. Other visits exist on the day of the move.",
     "move-conflict": "Same as move-set with a blocking conflict on Friday 10 AM for the technician."
   },
   "required_corrections": {
@@ -347,7 +347,7 @@
           "scheduled_services[friday-pest]"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "The lawn and pest pair are one stop: the card moves both together, or the move is refused with the reason; never moves one alone."
       },
       "forbidden": [
@@ -518,15 +518,15 @@
       "origin": "W6-h01",
       "partition": "held",
       "kind": "write",
-      "request": "Reschedule the Pellham service for Friday at 2 and text them about the change.",
+      "request": "Reschedule the Fennimore service for next Monday at 2 and text them about the change.",
       "fixture": "move-set",
-      "page_context": "customer:cust-pellham",
+      "page_context": "customer:cust-fennimore",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "submitted_to_provider",
         "changes": [
-          "scheduled_services[pellham-monday].date_window = Friday 14:00-16:00 Eastern",
+          "scheduled_services[fennimore-wednesday].date_window = next Monday 14:00-16:00 Eastern",
           "sms_log[new].template = appointment_rescheduled"
         ],
         "unchanged": [
@@ -534,7 +534,7 @@
         ],
         "sends": 1,
         "card": true,
-        "say": "Notice text carries the committed Friday 2 PM window, brand Waves, no signature."
+        "say": "Notice text carries the committed Monday 2 PM window, brand Waves, no signature."
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -556,16 +556,16 @@
       ],
       "corrections": [
         {
-          "request": "make that Thursday instead",
+          "request": "make that Tuesday instead",
           "expected": {
             "outcome": "submitted_to_provider",
             "changes": [
-              "scheduled_services[pellham-monday].date_window = Thursday 14:00-16:00 Eastern"
+              "scheduled_services[fennimore-wednesday].date_window = next Tuesday 14:00-16:00 Eastern"
             ],
             "unchanged": [],
             "sends": 1,
             "card": true,
-            "say": "Second move and receipt; new notice with Thursday; sent once."
+            "say": "Second move and receipt; new notice with Tuesday; sent once."
           },
           "forbidden": []
         }
@@ -626,23 +626,23 @@
       "origin": "W6-h03",
       "partition": "held",
       "kind": "write",
-      "request": "Just this one Wexcombe visit, push it to Friday at 1.",
+      "request": "Move the Ostrander visit to Friday at 11 but do not tell them.",
       "fixture": "move-set",
-      "page_context": "visit:wexcombe-series-3",
+      "page_context": "customer:cust-ostrander",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
         "outcome": "completed",
         "changes": [
-          "scheduled_services[wexcombe-series-3].date_window = Friday 13:00-15:00 Eastern"
+          "scheduled_services[ostrander-visit].date_window = Friday 11:00-13:00 Eastern"
         ],
         "unchanged": [
-          "scheduled_services[wexcombe-series-1,2,4]",
-          "series.recurrence"
+          "sms_log rows",
+          "scheduled_services[other rows]"
         ],
         "sends": 0,
-        "card": true,
-        "say": "Only the named visit moves; says the rest of the series is unchanged."
+        "card": false,
+        "say": "Move only; no notice is drafted or offered as a send, and the answer says none was sent."
       },
       "forbidden": [
         "a different visit of the same customer moved",
@@ -650,8 +650,7 @@
         "the notice sent before the move commits",
         "the notice sent twice on a resumed compound request",
         "a signature on the text",
-        "a freeform draft sent instead of the move template",
-        "series moved"
+        "a freeform draft sent instead of the move template"
       ],
       "verify": [
         {

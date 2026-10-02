@@ -60,13 +60,13 @@ Ten development and ten held-out cases per workflow. They are split by originati
 | --- | --- | --- | --- |
 | W1 | 9 / 1 | 8 / 2 | 0 |
 | W2 | 8 / 2 | 8 / 2 | 0 |
-| W3 | 6 / 4 | 7 / 3 | 0 |
-| W4 | 6 / 4 | 5 / 5 | 0 |
+| W3 | 6 / 4 | 6 / 4 | 0 |
+| W4 | 6 / 4 | 6 / 4 | 0 |
 | W5 | 5 / 5 | 4 / 6 | 0 |
 | W6 | 7 / 3 | 6 / 4 | 0 |
 | W7 | 7 / 3 | 6 / 4 | 0 |
 | W8 | 6 / 4 | 6 / 4 | 0 |
-| W9 | 8 / 2 | 6 / 4 | 11 (PR 3a invoice and payment reader) |
+| W9 | 8 / 2 | 6 / 4 | 10 (PR 3a invoice and payment reader) |
 | W10 | 6 / 4 | 7 / 3 | 0 |
 
 W5 is negative-heavy on purpose: its first release is deliberately narrow (decision D2), so recurring, add-on, new-customer, commercial, special-price and half-hour requests are listed as visible negatives rather than silently simplified.

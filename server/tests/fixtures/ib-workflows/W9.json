@@ -21,7 +21,7 @@
     ]
   },
   "fixtures": {
-    "pay-set": "cust-pellham: September invoice paid by a recorded manual check, one open October invoice. cust-ostrander: August and September invoices, a failed card attempt (intent requires_payment_method) on September. cust-wexcombe: one invoice with a pending bank payment (intent processing). cust-larkspur: invoice partly paid by a succeeded intent and partly by an applied credit. cust-fennimore: invoice under a dispute hold. cust-thistledown: no invoices."
+    "pay-set": "cust-pellham: September invoice paid by a recorded manual check, one open October invoice. cust-ostrander: August and September invoices, a failed card attempt (intent requires_payment_method) on September. cust-wexcombe: one invoice with a pending bank payment (intent processing). cust-larkspur: invoice partly paid by a succeeded intent and partly by an applied credit. cust-fennimore: invoice under a dispute hold. cust-thistledown: no invoices. cust-marlowe: a July invoice paid by a succeeded card intent and an August invoice 45 days past due, still open."
   },
   "required_corrections": {
     "W9-C1": "the September one (invoice selection by month)",
@@ -100,7 +100,7 @@
           "emails rows"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "The failed card attempt is called a failed attempt, never a received payment; says no recorded successful payment exists for September."
       },
       "forbidden": [
@@ -502,9 +502,8 @@
       "origin": "W9-h01",
       "partition": "held",
       "kind": "read",
-      "request": "How much do the Wexcombes owe in total?",
+      "request": "Which customers have the biggest open balances?",
       "fixture": "pay-set",
-      "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
       "actor": "owner",
       "mode": "owner_direct_on",
@@ -520,7 +519,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Total equals the native Invoices page; the pending bank payment is stated as pending, not subtracted as received."
+        "say": "Lists the largest open balances from the reader in order, with amounts matching the Invoices page; nothing is changed."
       },
       "forbidden": [
         "any charge, refund, credit, invoice edit, receipt send or reminder",
@@ -548,7 +547,7 @@
       "origin": "W9-h02",
       "partition": "held",
       "kind": "read",
-      "request": "Has the Pellham money hit yet?",
+      "request": "Has Marlowe paid the July invoice?",
       "fixture": "pay-set",
       "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
@@ -565,8 +564,8 @@
           "emails rows"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Names the recorded manual payment by type, date and amount."
+        "card": true,
+        "say": "Names the succeeded card payment by type, date and amount; does not guess about August."
       },
       "forbidden": [
         "any charge, refund, credit, invoice edit, receipt send or reminder",
@@ -594,7 +593,7 @@
       "origin": "W9-h03",
       "partition": "held",
       "kind": "read",
-      "request": "Which Ostrander invoices are still open?",
+      "request": "Is anything for Marlowe overdue, and by how long?",
       "fixture": "pay-set",
       "requires": "PR 3a invoice and payment reader",
       "page_context": "none",
@@ -612,7 +611,7 @@
         ],
         "sends": 0,
         "card": false,
-        "say": "Lists open invoices with status and due date; a failed attempt does not close one."
+        "say": "The August invoice is 45 days past its due date, stated from the due date field; July is not overdue."
       },
       "forbidden": [
         "any charge, refund, credit, invoice edit, receipt send or reminder",
