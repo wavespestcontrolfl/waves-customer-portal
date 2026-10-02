@@ -11,6 +11,7 @@ describe('agent-gap-reports', () => {
   let belledUpdates;
   let savepointMock;
   let notifyMock;
+  let digestMock;
 
   beforeEach(() => {
     jest.resetModules();
@@ -21,6 +22,7 @@ describe('agent-gap-reports', () => {
     priorRow = undefined;
     belledUpdates = [];
     notifyMock = jest.fn().mockResolvedValue({ id: 'n1' });
+    digestMock = jest.fn().mockResolvedValue({ ok: true, channel: 'in_app', id: 'd1' });
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
     sightings = [];
@@ -64,6 +66,7 @@ describe('agent-gap-reports', () => {
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/logger', () => loggerMock);
     jest.doMock('../services/notification-service', () => ({ notifyAdmin: notifyMock }));
+    jest.doMock('../services/ops-digest', () => ({ deliverOpsDigest: digestMock }));
   });
 
   afterEach(() => {
@@ -221,14 +224,51 @@ describe('agent-gap-reports', () => {
       const { writeGapRows } = load();
       priorRow = { status: 'fixed' };
       returningRows = [{ id: '7', occurrences: 5, status: 'new', domain: 'scheduling', xmax: '12345' }];
-      const [saved] = await writeGapRows([signal({ source: 'intelligence-bar' })]);
+      const [saved] = await writeGapRows([signal({ source: 'texting-ai' })]);
       await flush();
       expect(saved).toMatchObject({ rang: true, reopened: true });
       expect(notifyMock).toHaveBeenCalledTimes(1);
       const [, title, body, opts] = notifyMock.mock.calls[0];
-      expect(title).toBe('Gap #7 is back: bar (scheduling)');
-      expect(body).toBe('A Claude window on the Mac starts building it within 10 min.');
+      expect(title).toBe('Gap #7 is back: texting assistant (scheduling)');
+      expect(body).toBe('Say "build gap #7" in any Claude session to start a PR.');
       expect(opts.metadata).toMatchObject({ gapId: 7, reopened: true });
+    });
+
+    // Owner 2026-10-01: "A Claude window on the Mac starts building it" is Claude
+    // work. It is an engineering row in the Activity feed, never a bell row.
+    test.each(['intelligence-bar', 'tech-bar'])('a %s gap (a Claude window builds it) goes to the Activity feed, never the bell', async (source) => {
+      const { writeGapRows } = load();
+      returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: 'scheduling', xmax: '0' }];
+      const [saved] = await writeGapRows([signal({ source })]);
+      await flush();
+      expect(saved).toMatchObject({ id: 7, rang: true, reopened: false });
+      expect(notifyMock).not.toHaveBeenCalled();
+      expect(digestMock).toHaveBeenCalledTimes(1);
+      const arg = digestMock.mock.calls[0][0];
+      expect(arg).toMatchObject({
+        key: 'agent-gap', audience: 'engineering', link: '/admin/agents',
+        headline: expect.stringMatching(/^Gap #7: (bar|tech bar) \(scheduling\)$/),
+        summary: 'A Claude window on the Mac starts building it within 10 min.',
+        metadata: { gapId: 7, source, reopened: false },
+      });
+      expect(arg.dedupeKey).toMatch(/^agent-gap:7:\d{4}-\d{2}-\d{2}T/);
+      expect(arg.trx).toBeDefined();
+      expect(belledUpdates).toHaveLength(1);
+    });
+
+    test('a Claude-built gap that is back rings the Activity feed as "is back", and a digest row that was not written leaves belled_at unset', async () => {
+      const { writeGapRows } = load();
+      priorRow = { status: 'fixed' };
+      returningRows = [{ id: '7', occurrences: 5, status: 'new', domain: 'scheduling', xmax: '12345' }];
+      await writeGapRows([signal({ source: 'intelligence-bar' })]);
+      expect(digestMock.mock.calls[0][0].headline).toBe('Gap #7 is back: bar (scheduling)');
+      expect(belledUpdates).toHaveLength(1);
+      belledUpdates = [];
+      digestMock.mockResolvedValue({ ok: true, channel: 'email', fallback: true });
+      const [retry] = await writeGapRows([signal({ source: 'intelligence-bar' })]);
+      expect(retry.rang).toBe(false);
+      expect(belledUpdates).toHaveLength(0);
+      expect(notifyMock).not.toHaveBeenCalled();
     });
 
     test('an open gap recorded before the per-gap bell (belled_at NULL) rings on its next sighting and is stamped', async () => {

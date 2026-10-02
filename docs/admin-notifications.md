@@ -66,6 +66,15 @@ customer's message by this rule.
 1. **Ring once per episode.** A refresh of the same subject and class updates the row in
    place and keeps its read state (`refreshOnDedupe` with `ringOnRefresh`). A comeback
    after the row was cleared rings again.
+   A customer who keeps texting is one subject: a known sender's texts share ONE bell row
+   (`dedupeKey` `sms-thread:<customerId>`, `refreshOnDedupe` + `bumpOnRefresh`). Each new
+   text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
+   moved to the top) and still pushes; the count restarts once the row was read or done.
+   The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A standing backlog (overdue promises past five) is a count on its page, never a bell:
+   its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
+   Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
+   as an `ops_digest` row, not the bell.
 2. **Clear yourself.** An emitter that re-raises a stable key closes it when its
    done-when holds (`server/services/admin-alert-episodes.js`). The relevance sweep
    (`server/services/admin-alert-relevance.js`) is the backstop for one-shot classes only.

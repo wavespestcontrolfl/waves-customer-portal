@@ -188,15 +188,27 @@ async function ringGapBell(trx, event) {
   try {
     await trx.transaction(async (sp) => {
       const { title, body } = gapBellText(event);
-      const NotificationService = require('./notification-service');
-      const result = await NotificationService.notifyAdmin('agents', title, body, {
-        link: BELL_LINK,
-        bell: true,
-        trx: sp,
-        dedupeKey: `agent-gap:${event.id}:${event.at.toISOString()}`,
-        metadata: { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) },
-      });
-      if (!result) throw Object.assign(new Error('bell not written'), { code: 'NOT_WRITTEN' });
+      const dedupeKey = `agent-gap:${event.id}:${event.at.toISOString()}`;
+      const metadata = { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) };
+      // A gap a Claude window on the Mac picks up by itself is Claude's work, not
+      // the owner's (owner 2026-10-01): it is an engineering row in the Agents
+      // Activity feed and never the bell. The email path is a no-op: a gap is
+      // not worth an email when the in-app feed is off. A gap that waits for the
+      // owner's "build gap N" (texting AI, phone agent) stays a bell.
+      const result = AUTO_PICKUP_SOURCES.has(event.source)
+        ? await require('./ops-digest').deliverOpsDigest({
+          key: 'agent-gap', subject: title, headline: title, summary: body, text: body,
+          audience: 'engineering', link: BELL_LINK, dedupeKey, metadata, trx: sp,
+          sendEmail: async () => ({ ok: true }),
+        })
+        : await require('./notification-service').notifyAdmin('agents', title, body, {
+          link: BELL_LINK,
+          bell: true,
+          trx: sp,
+          dedupeKey,
+          metadata,
+        });
+      if (!result || result.ok === false || result.fallback) throw Object.assign(new Error('bell not written'), { code: 'NOT_WRITTEN' });
       await sp('agent_gap_reports').where('id', event.id).update({ belled_at: event.at });
     });
     return true;

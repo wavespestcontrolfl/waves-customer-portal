@@ -30,7 +30,7 @@ jest.mock('../models/db', () => {
     return b;
   };
   const fn = jest.fn((table) => builder(table));
-  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); return cb(trx); };
+  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); trx.fn = { now: () => new Date('2026-10-01T15:00:00Z') }; return cb(trx); };
   return fn;
 });
 
@@ -432,5 +432,61 @@ describe('a standing row stored cut, then re-emitted with the body guard killed'
     expect(moved.refreshed).toBe(true);
     expect(mockRows.notifications[0].body).toBe(next);
     expect(mockRows.notifications[0].detail).toBeNull();
+  });
+});
+
+// One bell row per conversation (owner 2026-10-01: ten texts in twelve minutes
+// rang ten rows). The sms_reply thread row refreshes in place and rises to the top.
+describe('bumpOnRefresh (one standing row per thread)', () => {
+  const text = (n, extra = {}) => NotificationService.notifyAdmin('inbound_sms', n === 1 ? 'SMS from Dana Example' : `${n} texts from Dana Example`, `Text ${n}`, {
+    dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, link: `/admin/communications?thread=cust-1&message=SM${n}`,
+    metadata: { triggerKey: 'sms_reply', payload: { twilioSid: `SM${n}`, textCount: n } }, ...extra,
+  });
+
+  test('three texts leave one row: latest text and link, unread, moved to the newest position', async () => {
+    await text(1);
+    mockRows.notifications[0].created_at = new Date('2026-10-01T14:00:00Z');
+    mockRows.notifications[0].read_at = new Date('2026-10-01T14:05:00Z');
+    const second = await text(2, { bumpOnRefresh: true });
+    expect(second).toMatchObject({ deduped: true, refreshed: true, rung: true });
+    const third = await text(3, { bumpOnRefresh: true });
+    expect(third.refreshed).toBe(true);
+    expect(mockRows.notifications).toHaveLength(1);
+    const row = mockRows.notifications[0];
+    expect(row).toMatchObject({ title: '3 texts from Dana Example', body: 'Text 3', link: '/admin/communications?thread=cust-1&message=SM3', read_at: null });
+    expect(row.created_at).toEqual(new Date('2026-10-01T15:00:00Z'));
+    expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: 'sms-thread:cust-1', payload: { twilioSid: 'SM3', textCount: 3 } });
+    // The read-state matchers split the link on &message= and read the payload sid.
+    expect(row.link.split('&message=')[0]).toBe('/admin/communications?thread=cust-1');
+  });
+
+  test('a row marked done comes back open when the next text arrives', async () => {
+    await text(1);
+    Object.assign(mockRows.notifications[0], { read_at: new Date(), done_at: new Date(), done_by: 'tech-1', resolution: 'Handled' });
+    await text(2, { bumpOnRefresh: true });
+    expect(mockRows.notifications[0]).toMatchObject({ read_at: null, done_at: null, done_by: null, resolution: null });
+  });
+
+  test('without bumpOnRefresh a refresh keeps the row where it was', async () => {
+    await text(1);
+    mockRows.notifications[0].created_at = new Date('2026-10-01T14:00:00Z');
+    await text(2);
+    expect(mockRows.notifications[0].created_at).toEqual(new Date('2026-10-01T14:00:00Z'));
+  });
+
+  test('a quiet refresh (ringOnRefresh false) never bumps', async () => {
+    await text(1);
+    mockRows.notifications[0].created_at = new Date('2026-10-01T14:00:00Z');
+    await text(2, { bumpOnRefresh: true, ringOnRefresh: () => false });
+    expect(mockRows.notifications[0].created_at).toEqual(new Date('2026-10-01T14:00:00Z'));
+  });
+
+  test('the same text again is a plain dedupe: no rewrite, no bump', async () => {
+    await text(2);
+    mockRows.notifications[0].created_at = new Date('2026-10-01T14:00:00Z');
+    mockUpdates.length = 0;
+    const again = await text(2, { bumpOnRefresh: true });
+    expect(again.refreshed).toBeUndefined();
+    expect(mockUpdates).toEqual([]);
   });
 });

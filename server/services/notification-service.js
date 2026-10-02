@@ -555,7 +555,11 @@ const NotificationService = {
     // inside the SAME transaction as the insert (the caller's own `trx`
     // when given, else one this call opens) so the lookup a gate performs
     // and the row it gates can never observe each other's in-between state.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
+    // moves the row's created_at to now, so a standing row that keeps getting
+    // newer news (one row per customer thread: "3 texts") rises to the top of
+    // the newest-first bell instead of staying where its first text put it.
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -621,10 +625,11 @@ const NotificationService = {
             const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
+            const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
-            await trx('notifications').where({ id: existing.id }).update(refreshed);
-            return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
+            await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
+            return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
           return { notification: existing, deduped: true };
         }

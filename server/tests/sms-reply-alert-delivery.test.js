@@ -17,6 +17,7 @@ beforeEach(() => {
     rows: sql.startsWith('INSERT INTO sms_reply_alert_claims') && !claimHeld ? [{ phone: bindings[0] }] : [] }));
   db.mockImplementation(table => {
     const query = { filter: null, prior: false };
+    query.orderBy = () => query;
     for (const method of ['whereRaw', 'whereNot', 'where']) {
       query[method] = (...args) => {
         if (method === 'where' && typeof args[0] === 'object') query.filter = args[0];
@@ -222,4 +223,56 @@ test('failed claims have no ownership token; stale owners mutate only their own 
   await delivery.confirmUnknownSenderAlertWindow(input.From, token);
   await delivery.releaseUnknownSenderAlertClaim(input.From, token);
   expect(mutations.map(m => m.filter)).toEqual([{ phone: input.From, expires_at: token }, { phone: input.From, expires_at: token }]);
+});
+
+// One bell row per conversation (owner 2026-10-01): a known sender's texts share
+// one keyed row that notifyAdmin rewrites, instead of one row per text.
+describe('known-sender thread bell', () => {
+  const customer = { id: 'cust-1', first_name: 'Dana', last_name: 'Example' };
+  const ring = (MessageSid = 'SM-2', message = 'Second text') => delivery.ringSmsReplyBell({ customer, From: input.From, MessageSid, message });
+  const lastCall = () => triggerNotification.mock.calls.at(-1);
+  const openRow = (over = {}) => ({ read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-1', textCount: 1 }, dedupeKey: 'sms-thread:cust-1' }, ...over });
+
+  test('keys the row on the customer and asks for an in-place refresh that bumps it', async () => {
+    await ring();
+    const [key, payload, options] = lastCall();
+    expect(key).toBe('sms_reply');
+    expect(options).toMatchObject({ dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(payload).toMatchObject({ threadId: 'cust-1', twilioSid: 'SM-2', message: 'Second text', textCount: 1 });
+  });
+
+  test('a second text on a still-open row counts 2, a third counts 3', async () => {
+    bell = openRow();
+    await ring('SM-2');
+    expect(lastCall()[1].textCount).toBe(2);
+    bell = openRow({ metadata: { payload: { twilioSid: 'SM-2', textCount: 2 } } });
+    await ring('SM-3');
+    expect(lastCall()[1].textCount).toBe(3);
+  });
+
+  test.each([['read', { read_at: new Date() }], ['done', { done_at: new Date() }]])('a text after the row was %s starts the count over', async (_n, over) => {
+    bell = openRow({ metadata: { payload: { twilioSid: 'SM-1', textCount: 4 } }, ...over });
+    await ring('SM-2');
+    expect(lastCall()[1].textCount).toBe(1);
+  });
+
+  test('a replay of the text already on the row does not count it twice', async () => {
+    bell = openRow({ metadata: { payload: { twilioSid: 'SM-2', textCount: 2 } } });
+    await ring('SM-2');
+    expect(lastCall()[1].textCount).toBe(2);
+  });
+
+  test('a failed count lookup still rings the row (count 1) rather than losing the alert', async () => {
+    bell = openRow({ metadata: '{not json' });
+    await ring();
+    expect(lastCall()[1].textCount).toBe(1);
+  });
+
+  test('an unknown sender keeps one bell per message and never refreshes', async () => {
+    await dispatch();
+    const [, payload, options] = lastCall();
+    expect(options.dedupeKey).toBe(`sms-reply:${input.MessageSid}`);
+    expect(options.refreshOnDedupe).toBeUndefined();
+    expect(payload.textCount).toBeUndefined();
+  });
 });
