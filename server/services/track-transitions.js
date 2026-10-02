@@ -921,7 +921,7 @@ function classifyArrivalSend(result) {
  * not funnel a suppressed signal here — the flip leaves the guard NULL so a
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
-async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
+async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null, expectTechnicianId = null) {
   if (svc.arrival_sms_sent_at) return 'already_handled';
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
@@ -941,6 +941,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       scheduled_date: svc.scheduled_date ?? null,
     })
     .whereNull('arrival_sms_sent_at');
+  // A technician's own start claims only while the visit is still theirs: a
+  // miss leaves the guard NULL for the newly assigned technician's arrival
+  // (codex #5568 r9 pre-push P1).
+  if (expectTechnicianId) claimQuery.where('technician_id', expectTechnicianId);
   // ms-truncated on both sides: claimArrivedAt can be a row-read value
   // (pg returns Dates at ms precision) compared against a column that
   // may carry microseconds from a SQL now() write.
@@ -1176,6 +1180,12 @@ async function markOnProperty(serviceId, opts = {}) {
       if (fresh?.track_state !== 'on_property') {
         return { ok: false, reason: 'concurrent_update' };
       }
+      // The miss may be the technician predicate: another signal already put
+      // a reassigned visit on property. Never funnel the former technician
+      // into the arrival send (codex #5568 r9 pre-push P1).
+      if (opts.expectTechnicianId && String(fresh.technician_id || '') !== String(opts.expectTechnicianId)) {
+        return { ok: false, reason: 'technician_changed' };
+      }
       if (fresh?.technician_id && fresh.track_state === 'on_property') {
         try {
           await setTechJobStatus({
@@ -1234,7 +1244,7 @@ async function markOnProperty(serviceId, opts = {}) {
     if (visitClaim === 'owner' && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'on_site', claimToken))) {
       arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
     } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
-      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt, opts.expectTechnicianId || null);
     } else if (visitClaim === 'taken') {
       arrivalSms = 'covered';
       try {

@@ -56,3 +56,13 @@ describe('AI draft', () => {
     expect(guard).toMatch(/for \(const row of sharing\) \{\s*if \(!\(await technicianServicesCustomer\(req, row\.id\)\)\) return res\.status\(404\)/);
   });
 });
+
+describe('arrival after a CAS miss', () => {
+  test('a reassigned visit already on property is refused, and the SMS claim carries the technician', () => {
+    const src = read('services/track-transitions.js');
+    const miss = src.slice(src.indexOf("if (fresh?.track_state !== 'on_property') {\n        return { ok: false, reason: 'concurrent_update' };"));
+    expect(miss.slice(0, 600)).toMatch(/opts\.expectTechnicianId && String\(fresh\.technician_id \|\| ''\) !== String\(opts\.expectTechnicianId\)\) \{\s*return \{ ok: false, reason: 'technician_changed' \};/);
+    expect(src).toMatch(/if \(expectTechnicianId\) claimQuery\.where\('technician_id', expectTechnicianId\);/);
+    expect(src).toMatch(/maybeSendArrivalSms\(arrivalRow, serviceId, opts\.actingTechId, claimArrivedAt, opts\.expectTechnicianId \|\| null\)/);
+  });
+});
