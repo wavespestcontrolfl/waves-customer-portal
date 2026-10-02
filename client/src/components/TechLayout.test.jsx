@@ -443,4 +443,30 @@ describe('TechLayout staff-session verification', () => {
     expect(screen.queryByText(/Fixture A/)).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('/admin/auth/me') && init?.headers?.Authorization === 'Bearer fixture-login-b')).toBe(true);
   });
+
+  it('drops the verified identity and re-verifies when another tab switches accounts', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-login-a');
+    let answerB;
+    const fetchMock = vi.fn((url, init) => {
+      if (!String(url).includes('/admin/auth/me')) return Promise.resolve(response(200, {}));
+      if (init?.headers?.Authorization === 'Bearer fixture-login-a') return Promise.resolve(response(200, { id: 'tech-a', name: 'Fixture A', role: 'technician' }));
+      return new Promise((resolve) => { answerB = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderTech();
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+
+    // Tab 2 signs in as B: the storage event reaches this tab.
+    localStorage.setItem('waves_admin_token', 'fixture-login-b');
+    await act(async () => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token', newValue: 'fixture-login-b' })); });
+    // A's identity is gone and nothing protected renders until B verifies.
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(answerB).toBeTypeOf('function'));
+    await act(async () => { answerB(response(200, { id: 'tech-b', name: 'Fixture B', role: 'technician' })); });
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves_admin_user')).id).toBe('tech-b');
+    expect(screen.queryByText(/Fixture A/)).not.toBeInTheDocument();
+  });
 });

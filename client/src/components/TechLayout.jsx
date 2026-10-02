@@ -174,6 +174,23 @@ export default function TechLayout() {
     };
   }, [navigate, verifyRun]);
 
+  // Another tab signing in or out changes the stored token under this shell.
+  // Drop the identity verified for the old token at once — the outlet (and
+  // the route page with it) unmounts while 'checking' — and verify the new
+  // one, so no read or save runs under one login's id with another's token.
+  // (A switch in this tab goes through /admin/login, which unmounts the shell.)
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== 'waves_admin_token') return;
+      setStaffProfile(null);
+      setTechRole(null);
+      setAuthStatus(getAdminAuthToken() ? 'checking' : 'unauthenticated');
+      setVerifyRun((n) => n + 1);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // Any staff API call on these screens that the server answers with 401
   // for the current token ends the session here, whichever handler made it:
   // token, stored profile and saved route go, so an offline reopen cannot
