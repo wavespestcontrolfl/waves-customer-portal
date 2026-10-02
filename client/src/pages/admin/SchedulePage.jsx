@@ -43,6 +43,7 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -13784,6 +13785,15 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
+  // flag): the visit's photos and their descriptions sit inside the notes
+  // box and the separate photo section goes away. Never on lawn or tree,
+  // shrub & palm: another lane owns those completions and their photo steps.
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
+    && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
+  const setPhotoCaption = (index, caption) => setServicePhotos((prev) => prev.map((photo, i) => (i === index
+    ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+    : photo)));
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
@@ -19928,8 +19938,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label={noteBoxPhotos ? "Notes and photos" : "Technician notes"}>
               {" "}
+              <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
@@ -19953,6 +19964,7 @@ export function CompletionPanel({
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
                     opacity: generating ? 0.6 : 1,
+                    ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
                   }}
                 />{" "}
                 {dictation.supported && (
@@ -19994,6 +20006,33 @@ export function CompletionPanel({
                     {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
+              </div>
+              {noteBoxPhotos && (
+                <>
+                  <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+                  <NoteBoxPhotos
+                    photos={servicePhotos}
+                    max={5}
+                    disabled={generating}
+                    palette={{ text: M.ink, muted: M.ink3, border: M.hairline, card: M.card, danger: M.err, onDanger: M.actionFg }}
+                    dictationServiceId={service.id}
+                    onAdd={() => photoInputRef.current?.click()}
+                    onRemove={removePhoto}
+                    onCaption={setPhotoCaption}
+                    onDescribeWithAi={handlePhotoAnalyze}
+                    describing={photoAnalyzing}
+                    describeError={photoAiError}
+                    summary={typedPhotoSummary}
+                    summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                    onSummary={setTypedPhotoSummary}
+                    onAddSummaryToNotes={isTypedFindings ? null : () => {
+                      const summary = typedPhotoSummary.trim();
+                      if (!summary) return;
+                      setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                    }}
+                  />
+                </>
+              )}
               </div>
             </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
@@ -20386,7 +20425,7 @@ export function CompletionPanel({
                 </span>
               </Field>
             )}
-            {!quickComplete && !hideServicePhotos && (
+            {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -22376,7 +22415,8 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
-          <label style={labelStyle}>Technician Notes</label>{" "}
+          <label style={labelStyle}>{noteBoxPhotos ? "Notes and photos" : "Technician Notes"}</label>{" "}
+          <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
@@ -22400,6 +22440,7 @@ export function CompletionPanel({
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
                 opacity: generating ? 0.6 : 1,
+                ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
               }}
               placeholder={
                 dictation.listening
@@ -22447,6 +22488,33 @@ export function CompletionPanel({
                 {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
+          </div>
+          {noteBoxPhotos && (
+            <>
+              <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+              <NoteBoxPhotos
+                photos={servicePhotos}
+                max={5}
+                disabled={generating}
+                palette={{ text: D.text, muted: D.muted, border: D.border, card: D.input, danger: D.red, onDanger: D.white }}
+                dictationServiceId={service.id}
+                onAdd={() => photoInputRef.current?.click()}
+                onRemove={removePhoto}
+                onCaption={setPhotoCaption}
+                onDescribeWithAi={handlePhotoAnalyze}
+                describing={photoAnalyzing}
+                describeError={photoAiError}
+                summary={typedPhotoSummary}
+                summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                onSummary={setTypedPhotoSummary}
+                onAddSummaryToNotes={isTypedFindings ? null : () => {
+                  const summary = typedPhotoSummary.trim();
+                  if (!summary) return;
+                  setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                }}
+              />
+            </>
+          )}
           </div>
           </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
@@ -22793,7 +22861,7 @@ export function CompletionPanel({
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
               Combined visits keep it (companions have their own photo gates). */}
-          {!quickComplete && !hideServicePhotos && (
+          {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
