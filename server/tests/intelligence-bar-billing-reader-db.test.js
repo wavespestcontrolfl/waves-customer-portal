@@ -191,6 +191,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       description: 'Saved bank payment', metadata: json({ invoice_id: gBank.id }) });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: gBank.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gbank-${run}`, status: 'claimed', amount: 55,
       stripe_payment_intent_id: `pi_gb_${run}`, submitted_at: new Date() });
+    // A saved-card DB failure: a succeeded attempt and an invoice_card_on_file orphan for the SAME PaymentIntent are one charge.
+    const gBoth = await invoice('g_both', G, { total: 45, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_both_${run}` });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: gBoth.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gboth-${run}`, status: 'succeeded', amount: 45,
+      stripe_payment_intent_id: `pi_both_${run}`, resolved_at: new Date(), submitted_at: new Date() });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_both_${run}`, customer_id: G, invoice_id: gBoth.id, amount: 45, source: 'invoice_card_on_file', original_db_error: 'synthetic ledger failure' });
     // More payment rows than the reader keeps: whether a payment was recorded is unknown.
     P = await customer(`Bulk${run}`, `Payments${run}`);
     const bulk = await invoice('p_bulk', P, { total: 90 });
@@ -475,6 +480,21 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.payment_summary).toMatchObject({ received: false, attempts_in_flight_or_unknown: 1, payments_pending: 1, attempts_unknown_outcome: 0 });
     expect(detail.payment_summary.statement).toMatch(/1 payment\(s\) still processing/);
     expect(detail.payment_summary.statement).not.toMatch(/unknown outcome/);
+  });
+
+  test('review: a succeeded attempt and an orphan row for one PaymentIntent are one charge, not a second unknown outcome', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_both.id });
+    expect(detail.payment_summary).toMatchObject({ received: true, stripe_succeeded_not_in_ledger: 1, attempts_unknown_outcome: 0, attempts_in_flight_or_unknown: 0 });
+    expect(detail.payment_summary.statement).not.toMatch(/unknown outcome/);
+  });
+
+  test('review: the invoice detail guards the balance of an unreconciled charge the same way the list does', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.orphan.id });
+    expect(detail.invoice).toMatchObject({ balance_due: null, portal_recorded_balance_due: 60 });
+    expect(detail.unknowns.join(' ')).toMatch(/not money owed/);
+    const plain = await read('get_invoice_detail', { invoice_id: inv.open.id });
+    expect(plain.invoice.balance_due).toBe(200);
+    expect(plain.invoice).not.toHaveProperty('portal_recorded_balance_due');
   });
 
   test('review: a failed per-invoice hold lookup is unknown (null), never false', async () => {

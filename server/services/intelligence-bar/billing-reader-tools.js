@@ -755,7 +755,11 @@ function groupByAttempt(entries) {
 function summarizePayments(entries, invoice, evidenceComplete = true) {
   const recorded = entries.filter((entry) => entry.type === 'recorded_payment' && entry.received);
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
-  const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received);
+  // An accepted-but-unrecorded charge whose PaymentIntent Stripe (or the ledger) already confirms as received
+  // is that same charge, not a second unknown outcome.
+  const receivedIntents = new Set(entries.filter((entry) => entry.received && ['recorded_payment', 'stripe_charge_attempt'].includes(entry.type) && entry.stripe_payment_intent_id).map((entry) => entry.stripe_payment_intent_id));
+  const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received
+    && !(entry.type === 'stripe_unreconciled_charge' && receivedIntents.has(entry.stripe_payment_intent_id)));
   const disputed = entries.filter((entry) => entry.status === 'disputed');
   const payerFunded = entries.filter((entry) => entry.type === 'payer_payment');
   const payerNames = [...new Set(payerFunded.map((entry) => entry.funded_by.name).filter(Boolean))];
@@ -904,6 +908,11 @@ async function getInvoiceDetail(input, actionContext) {
     unknowns.push('A timeline source has more rows than were read (the newest are shown, older ones are omitted): do not say a payment was not received or not attempted.');
   }
   if (hold.unknown) unknowns.push(hold.unknown);
+  // Stripe accepted a charge the portal never recorded: the portal's balance is stale, not money owed.
+  const unreconciledOwed = orphans.length > 0 && isCollectible(invoice);
+  if (unreconciledOwed) {
+    unknowns.push('An unresolved Stripe charge for this invoice is not recorded in the portal: portal_recorded_balance_due is the stale ledger balance, not money owed. Do not collect or retry the charge; the ledger needs reconciling.');
+  }
 
   return {
     invoice: {
@@ -926,7 +935,8 @@ async function getInvoiceDetail(input, actionContext) {
       total: money(invoice.total),
       credit_applied: money(invoice.credit_applied) || 0,
       amount_due_after_credit: invoiceAmountDue(invoice),
-      balance_due: balanceDue(invoice),
+      balance_due: unreconciledOwed ? null : balanceDue(invoice),
+      ...(unreconciledOwed ? { portal_recorded_balance_due: balanceDue(invoice) } : {}),
       overdue: isOverdue(invoice, today),
       payer_billed: payerBilled,
       archived: Boolean(invoice.archived_at),
