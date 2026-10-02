@@ -315,7 +315,11 @@ async function replayRow(row, deps, opts = {}) {
   out.audit = summarizeAudit(audit, auditDiag.errors);
 
   // Step 2: parcel at the stored point, then the live guards.
-  const countyHint = row.county || (audit && audit.county) || null;
+  // The audit's county is evidence only when the street was FOUND there: a
+  // negative audit reports counties[0] as a placeholder, and hinting the
+  // point query with it would skip the county the point is really in
+  // (a Sarasota-side Longboat Key row with a typo would read Manatee).
+  const countyHint = row.county || (audit && audit.streetExists === true ? audit.county : null) || null;
   out.countyUsed = countyHint;
   if (geo.lat === null || geo.lng === null) {
     out.point = { status: 'skipped', reason: 'no_coordinates', errors: [] };

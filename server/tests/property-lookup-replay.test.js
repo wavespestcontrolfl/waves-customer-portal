@@ -209,6 +209,14 @@ describe('replayRow', () => {
   });
   const row = { normalized_address: '9117 SR 99, BRADENTON, FL 34203', lat: '27.40000', lng: '-82.40000', county: null, parcel_id: null, last_attempt_status: 'no_parcel', snapshot: { isCommercial: true, unitScopedLookup: false } };
 
+  test('a negative audit does not pick the point-query county', async () => {
+    const deps = makeDeps({
+      auditAddressHouseNumber: jest.fn().mockResolvedValue({ county: 'Manatee', streetExists: false, hasExactMatch: false, nearestNumbers: [] }),
+    });
+    await replay.replayRow({ ...row, county: null }, deps, {});
+    expect(deps.lookupCountyParcelByPoint.mock.calls[0][2].county).toBeUndefined();
+  });
+
   test('plaza-storefront shape: roll has the number elsewhere, the point parcel is a different situs and is dropped', async () => {
     const deps = makeDeps();
     const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
