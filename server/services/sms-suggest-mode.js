@@ -656,7 +656,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -786,6 +786,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle
+            // fact was built for, so a send-time recheck can re-run
+            // isZelleTransferEligible against that SAME invoice's CURRENT
+            // state — never the customer's open invoice as it stands at
+            // send time, which the fact may no longer describe (paid off,
+            // a saved-card charge or PI started since). null when the
+            // draft was never Zelle-eligible.
+            ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
+            // the payment-status sentences the reply copies (null = none), re-rendered and rechecked at every send seam
+            ...(paymentStatusSnapshot ? { payment_status_snapshot: paymentStatusSnapshot } : {}),
             // Independent review finding (PR #5334): the visit(s) this
             // draft's LIVE ETA fact was drawn from, carried through so the
             // send-time choke point (verifyAgentDecisionForSend /
@@ -1043,7 +1053,8 @@ async function reserveHumanReply({
     // a later kill-switch flip while the activation stamp is set.
     // The same predicate publishes the reservation below, so a claim made by an
     // older instance during a rolling disable always observes this reply.
-    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible();
+    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible()
+      || require('./sms-unanswered-reply').unansweredClaimsPossible();
     if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };

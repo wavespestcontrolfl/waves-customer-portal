@@ -500,6 +500,19 @@ function annualPrepayPretaxBase(term) {
 // term, so its pre-tax invoice subtotal is the correct default base).
 const ANNUAL_PREPAY_CURRENT_STATUSES = ["active", "renewal_pending"];
 
+// A current term's renewal default: the successor amount the annual rate
+// review told the customer when it set one (the renewal must charge exactly
+// that), else the term's own pre-tax base. The noticed amount is on the
+// term's tax-inclusive basis and the field is pre-tax, so it is the default
+// only for an untaxed term (pre-tax base equal to the term amount); a taxed
+// term keeps its pre-tax base and the server's noticed-amount check decides.
+function annualPrepayRenewalDefault(term) {
+  const base = annualPrepayPretaxBase(term);
+  const noticed = Number(term?.nextTermPrepayAmount);
+  const untaxed = Math.round(base * 100) === Math.round(Number(term?.prepayAmount) * 100);
+  return noticed > 0 && untaxed ? noticed : base;
+}
+
 function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
   const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
@@ -507,7 +520,7 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   )
     ? activeTerm
     : null;
-  const matchingActiveBase = annualPrepayPretaxBase(matchingActiveTerm);
+  const matchingActiveBase = annualPrepayRenewalDefault(matchingActiveTerm);
   if (matchingActiveBase > 0) return matchingActiveBase;
 
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
@@ -516,7 +529,7 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
       return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
     })
     : null;
-  const activeTermMatchBase = annualPrepayPretaxBase(activeTermMatch);
+  const activeTermMatchBase = annualPrepayRenewalDefault(activeTermMatch);
   if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
@@ -5396,7 +5409,7 @@ function CustomerWorkspaceHeader({
             <Button
               variant="secondary"
               className="c360-contact-action"
-              onClick={() => callViaBridge(c.phone, name)}
+              onClick={() => callViaBridge(c.phone, name, undefined, c.id)}
             >
               <Phone size={16} />
               Call
@@ -5443,6 +5456,7 @@ function CustomerWorkspaceHeader({
                 <CallBridgeLink
                   phone={contact.phone}
                   customerName={contact.name || name}
+                  customerIdHint={c.id}
                 >
                   {contact.phone}
                 </CallBridgeLink>
@@ -5468,6 +5482,7 @@ function CustomerContactLinks({
   phone,
   email,
   customerName,
+  customerIdHint,
   phoneClassName,
   emailClassName,
 }) {
@@ -5477,6 +5492,7 @@ function CustomerContactLinks({
         <CallBridgeLink
           phone={phone}
           customerName={customerName}
+          customerIdHint={customerIdHint}
           className={phoneClassName}
         >
           {phone}
@@ -5664,6 +5680,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
+                customerIdHint={c.id}
                 phoneClassName="u-nums text-zinc-900 hover:underline"
                 emailClassName="text-zinc-900 hover:underline"
               />
@@ -5704,6 +5721,7 @@ function CustomerOverlayHeader({
                   phone={slot.phone}
                   email={slot.email}
                   customerName={slot.name || customerName}
+                  customerIdHint={c.id}
                   phoneClassName="u-nums text-zinc-900 hover:underline mr-3"
                   emailClassName="text-zinc-900 hover:underline"
                 />
@@ -5736,6 +5754,8 @@ function CustomerOverlayHeader({
                     callViaBridge(
                       c.phone,
                       `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+                      undefined,
+                      c.id,
                     )
                   }
                   className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
@@ -5805,6 +5825,7 @@ function CustomerOverlayHeader({
                 phone={c.phone}
                 email={c.email}
                 customerName={customerName}
+                customerIdHint={c.id}
                 phoneClassName="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
                 emailClassName="text-ink-secondary hover:text-zinc-900 no-underline truncate"
               />
@@ -7826,6 +7847,7 @@ function CustomerProfileMobileActions({
             <CallBridgeLink
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+              customerIdHint={c.id}
               styledButton
               className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >

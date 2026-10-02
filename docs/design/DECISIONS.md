@@ -3091,3 +3091,45 @@ lawn and tree, shrub & palm (another lane owns those completions), and never
 a visit that completes through a project (`blogPostAllowedFor`, the one rule
 the search and the completion share). Off, the search answers unavailable, a
 pick is ignored and no report shows a post.
+
+## 2026-10-02 — Lane voice fill, server reader (dark)
+
+Owner "ok go" on the Fast Complete mockup v8, step 2: a specialty visit's own
+record (bed bug, fire ant, tick, bee & wasp, mud dauber, recurring mosquito)
+is filled from the technician's note, on the office Complete Service form
+and the tech's sheet, through one reader on the server. This first slice is
+that reader: `POST /admin/dispatch/:id/lane-facts` (services/visit-lane-facts.js,
+`TEXT_POLICIES.fastStructured`, lane `visit_lane_facts`), behind
+`GATE_LANE_VOICE_FILL` (dark; off answers 404). The places come from the
+lane's own list and each finding group gets at most one value, each with the
+note's own words; the lane is the visit's completion profile (a typed form
+or a visit with no lane answers `available: false`), never one the client
+names. The model judges what the note means; the code keeps only a value the
+lane's closeout offers, standing on words the note holds word for word, and
+never a pair the completion refuses (the lane's exclusions leave both groups
+for a person to pick), following the 2026-09-30 direction on the call
+reader (the extraction judges, the code verifies). It writes nothing: the
+office form (slice 2) fills only fields nobody picked and the tech's sheet
+(slice 3) shows each field with its words and a Change, so a person confirms
+every value before anything is sent. The gate stays off until both land.
+Bora-Care has no lane yet; its places and findings wait for an owner ruling.
+
+## 2026-10-02 — Lane voice fill, the office form (dark)
+
+Slice 2 of the Fast Complete step 2 lane voice fill (the server reader
+landed in #5625). With the schedule payload's per-visit
+`laneVoiceFillEnabled` (`GATE_LANE_VOICE_FILL` and a lane the reader reads,
+resolved as the completion resolves it through `voiceLaneFor`), Generate AI
+report on the office Complete Service form (computer and phone) first reads
+the notes for the visit's own record, the notes as the report writer gets
+them (without the marker lines a tap writes), and fills only what nobody
+picked, the way a tap does: an empty group gets the `[Found]` marker and the
+label; the areas fill only while none are picked. A value that clashes with
+a pick (the lane's exclusions, or the selected protocol actions) is left for
+a person, with "The notes didn't make this clear. Pick one." under the
+group. Each filled field shows the words it came from ("Heard: ...") while
+it still holds the filled value. The report is written on the next render,
+from the record as the fill left it, so the report and the record agree; the
+form stays locked through both steps. A failed read fills nothing and the
+report is written anyway. The two Generate buttons (computer and phone) now
+share one handler. Off, Generate is exactly as before.

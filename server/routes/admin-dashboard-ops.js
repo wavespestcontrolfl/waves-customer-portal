@@ -5,7 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { etDateString } = require('../utils/datetime-et');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -106,7 +106,8 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
       || (await db('customers').where({ id: original.customer_id }).first())?.phone;
     if (!replyTo) return res.status(400).json({ error: 'No reply destination on this thread' });
 
-    const result = await sendCustomerMessage({
+    // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
+    const result = await sendManualCustomerSms({
       to: replyTo,
       body: body.trim(),
       channel: 'sms',

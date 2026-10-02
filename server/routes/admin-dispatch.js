@@ -770,6 +770,99 @@ router.post('/:serviceId/voice-facts', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/lane-facts — lane voice fill (Fast
+// Complete step 2, GATE_LANE_VOICE_FILL): a specialty visit's own record
+// (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) read from the
+// note, the places from the lane's own list and at most one value per
+// finding group, each with the note's own words (services/visit-lane-facts.js).
+// The lane is the completion's own: the visit's completion profile, never a
+// typed form, never one the client names. Writes nothing: the form shows
+// each field with its words for a person to confirm. A visit with no lane
+// answers { available: false }; a failed read answers { available: true,
+// status: 'failed' } with nothing filled, never an error. Off = 404.
+router.post('/:serviceId/lane-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').laneVoiceFillLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (the voice fill's
+    // rule above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readLaneFacts, voiceLaneFor } = require('../services/visit-lane-facts');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    const laneKey = voiceLaneFor({ profile, serviceType: svc.service_type });
+    if (!laneKey) return res.json({ available: false });
+    const facts = await readLaneFacts({ note, laneKey });
+    res.json({ available: true, ...facts });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
+// Complete step 3, GATE_TYPED_VOICE_FILL): a typed visit's own findings read
+// from the note, each pick field's values from the form's own options, each
+// with the note's own words (services/visit-typed-facts.js). The form is the
+// completion's own: the visit's completion profile findingsType, never one
+// the client names. Writes nothing: the form shows each field with its words
+// for a person to confirm. A visit whose form this step does not read
+// answers { available: false }; a failed read answers { available: true,
+// status: 'failed' } with nothing filled, never an error, and a form that
+// already holds every field the note could fill answers status
+// 'nothing_to_fill' with no model call. Off = 404.
+router.post('/:serviceId/typed-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').typedVoiceFillLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (the lane fill's
+    // rule above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readTypedFacts, voiceTypeFor } = require('../services/visit-typed-facts');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    const findingsType = voiceTypeFor(profile);
+    if (!findingsType) return res.json({ available: false });
+    // The form's present values judge the fill (never stored): a field
+    // already set is never filled, and a fill that clashes with one is left
+    // for a person.
+    // The form as served for the visit's own service key; a score the
+    // client already holds (scoreSet) leaves nothing to read for when every
+    // field is set too.
+    const facts = await readTypedFacts({
+      note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+    });
+    res.json({ available: true, ...facts });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/completion-profile
 router.get('/:serviceId/completion-profile', async (req, res, next) => {
   try {

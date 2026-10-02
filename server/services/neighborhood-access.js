@@ -570,7 +570,8 @@ async function closeResolvedConflictBells() {
     if (!(await neighborhoodHasCodeConflict(db, key.slice(CONFLICT_KEY_PREFIX.length)))) resolved.push(key);
   }
   return closeAdminAlertKeys(db, resolved, 'gate_code_confirmed', {
-    resolution: 'Cleared: the neighborhood has one gate code on file again',
+    // Not "one code again": two confirmed codes can be two real gates.
+    resolution: "Cleared: the neighborhood's gate codes no longer conflict",
   });
 }
 
@@ -641,6 +642,73 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
 }
 
+// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
+// The neighborhood's gate entries for each visit, keyed by visit id, so the
+// office's day feed can show "Gate: …" for a customer with no gate code of
+// their own. The visit's own property (scheduled_services.property_id), else
+// the customer's ONE active property — and then only when the visit carries no
+// stamped service address, or one on that property's street and ZIP (a visit
+// can be stamped at another address with no property link); none or several
+// = no fallback. Shown:
+// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
+// (a conflict shows every code, flagged) — never an unconfirmed instruction,
+// which may be meant for one house only. Raw codes: staff surfaces only, never
+// an LLM prompt or a customer page.
+async function neighborhoodGateEntriesForVisits(conn, visits) {
+  const out = new Map();
+  if (!visits?.length) return out;
+  const withProperty = visits.filter((v) => v.property_id);
+  const withoutProperty = visits.filter((v) => !v.property_id && v.customer_id);
+  const propertyNeighborhood = new Map();
+  if (withProperty.length) {
+    const rows = await conn('customer_properties')
+      .whereIn('id', [...new Set(withProperty.map((v) => v.property_id))])
+      .select('id', 'neighborhood_id');
+    for (const r of rows) propertyNeighborhood.set(r.id, r.neighborhood_id);
+  }
+  const customerNeighborhood = new Map();
+  if (withoutProperty.length) {
+    const rows = await conn('customer_properties')
+      .whereIn('customer_id', [...new Set(withoutProperty.map((v) => v.customer_id))])
+      .where({ active: true })
+      .select('customer_id', 'neighborhood_id', 'address_line1', 'zip');
+    const byCustomer = new Map();
+    for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r]);
+    for (const [customerId, props] of byCustomer) if (props.length === 1) customerNeighborhood.set(customerId, props[0]);
+  }
+  // A real five-digit ZIP or nothing: two blank or malformed ZIPs never
+  // "match" (the street alone does not establish the town).
+  const zip5 = (z) => { const m = /^(\d{5})(?:-?\d{4})?$/.exec(String(z || '').trim()); return m ? m[1] : null; };
+  const visitNeighborhood = new Map();
+  for (const v of visits) {
+    let n = null;
+    if (v.property_id) n = propertyNeighborhood.get(v.property_id);
+    else {
+      const p = customerNeighborhood.get(v.customer_id);
+      const stamped = String(v.service_address_line1 || '').trim();
+      const atProperty = !stamped
+        || (sameStreetLine(stamped, p?.address_line1) && zip5(v.service_address_zip) !== null
+          && zip5(v.service_address_zip) === zip5(p?.zip));
+      n = p && atProperty ? p.neighborhood_id : null;
+    }
+    if (n) visitNeighborhood.set(v.id, n);
+  }
+  if (!visitNeighborhood.size) return out;
+  const entries = await conn('neighborhood_access')
+    .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    .where((w) => w.where('status', 'active')
+      .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
+    .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
+    .select('neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status');
+  const byNeighborhood = new Map();
+  for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
+  for (const [visitId, n] of visitNeighborhood) {
+    const list = byNeighborhood.get(n);
+    if (list?.length) out.set(visitId, list);
+  }
+  return out;
+}
+
 module.exports = {
   sweepSavedGateCodes,
   sameStreetLine,
@@ -651,6 +719,8 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  closeResolvedConflictBells,
   countyHint,
   VALUE_HASH_SQL,
+  neighborhoodGateEntriesForVisits,
 };

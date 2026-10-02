@@ -69,13 +69,13 @@ jest.setTimeout(60000);
       database: withEditAfterRead(() => database('customers').where({ id: moving }).update({ latitude: 27.52, longitude: -82.39 })),
     });
 
-    expect(result).toEqual({ stamped: 1, unchanged: 0, lostRace: 1 });
+    expect(result).toEqual({ stamped: 1, unchanged: 0, noOffice: 0, lostRace: 1 });
     expect(await database('customers').where({ id: steady }).first('home_line_location_id', 'home_line_source'))
       .toEqual({ home_line_location_id: 'venice', home_line_source: 'derived' });
     expect((await database('customers').where({ id: moving }).first('home_line_location_id')).home_line_location_id).toBeNull();
 
     // The next run derives from the new geocode.
-    expect(await stampHomeLines({ database })).toEqual({ stamped: 1, unchanged: 1, lostRace: 0 });
+    expect(await stampHomeLines({ database })).toEqual({ stamped: 1, unchanged: 1, noOffice: 0, lostRace: 0 });
     expect((await database('customers').where({ id: moving }).first('home_line_location_id')).home_line_location_id).not.toBe('venice');
   });
 });

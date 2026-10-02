@@ -2,14 +2,14 @@
 // every lead-losing terminal disposition counts as drift.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false), typedDecisionsClefLive: jest.fn(() => false) }));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
 jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
-const { typedDecisionsLive } = require('../config/feature-gates');
+const { typedDecisionsLive, typedDecisionsClefLive } = require('../config/feature-gates');
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
@@ -252,3 +252,55 @@ describe('Jev shadow', () => {
     expect(res.jev).toEqual(jev);
   });
 });
+
+describe('Clef shadow leg (second provider)', () => {
+  const OK_DEEP = async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"ok"}' }] });
+  const JEV = { ok: true, provider: 'typesafe', answers: { is_lead: { p: 0.9, yes: true, confident: true }, is_spam: { p: 0.1, yes: false, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+  const CLEF = { ok: true, provider: 'cloudflare', answers: { is_lead: { p: 0.2, yes: false, confident: true }, is_spam: { p: 0.1, yes: false, confident: true } }, packageHash: 'h', servedModel: 'clef-flash' };
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(true);
+    typedDecisionsClefLive.mockReturnValue(true);
+    askPackage.mockReset();
+    recordDecisions.mockReset();
+    recordDecisions.mockResolvedValue({ recorded: 6 });
+  });
+  afterAll(() => { typedDecisionsLive.mockReturnValue(false); typedDecisionsClefLive.mockReturnValue(false); });
+
+  test('both providers are asked the same package and state; each row carries the other\'s answers as siblings', async () => {
+    askPackage.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? CLEF : JEV));
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(askPackage).toHaveBeenCalledTimes(2);
+    expect(askPackage.mock.calls[0][0]).toBe('call_judge.v2');
+    expect(askPackage.mock.calls[0][1]).toEqual(askPackage.mock.calls[1][1]); // identical state
+    expect(askPackage.mock.calls[1][2]).toEqual({ provider: 'cloudflare' });
+    expect(recordDecisions).toHaveBeenCalledTimes(2);
+    const byProvider = Object.fromEntries(recordDecisions.mock.calls.map(([a]) => [a.provider, a]));
+    expect(byProvider.typesafe.siblingAnswers).toEqual({ is_lead: [CLEF.answers.is_lead], is_spam: [CLEF.answers.is_spam] });
+    expect(byProvider.cloudflare.siblingAnswers).toEqual({ is_lead: [JEV.answers.is_lead], is_spam: [JEV.answers.is_spam] });
+    expect(byProvider.cloudflare.baselines).toEqual(byProvider.typesafe.baselines);
+    expect(byProvider.cloudflare.subjectHash).toBe(byProvider.typesafe.subjectHash);
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0, clef: { asked: 1, recorded: 1, failed: 0 } });
+  });
+
+  test('the Clef leg failing leaves the Jev row recorded without siblings and is tallied on its own', async () => {
+    askPackage.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? { ok: false, reason: 'cloudflare_timeout' } : JEV));
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(recordDecisions).toHaveBeenCalledTimes(1);
+    expect(recordDecisions.mock.calls[0][0]).toMatchObject({ provider: 'typesafe', siblingAnswers: {} });
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0, clef: { asked: 1, recorded: 0, failed: 1 } });
+  });
+
+  test('Clef gate off: a single Jev leg, no provider option, no clef tally (unchanged shape)', async () => {
+    typedDecisionsClefLive.mockReturnValue(false);
+    askPackage.mockResolvedValue(JEV);
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: OK_DEEP });
+    expect(askPackage).toHaveBeenCalledTimes(1);
+    expect(askPackage.mock.calls[0][2]).toBeUndefined();
+    expect(recordDecisions.mock.calls[0][0]).toMatchObject({ provider: 'typesafe', siblingAnswers: {} });
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+});
+

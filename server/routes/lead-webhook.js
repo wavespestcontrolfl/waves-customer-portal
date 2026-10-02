@@ -697,7 +697,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
           // Internal alert leg to Adam: dedicated caller ID (see config), NOT the
-          // main line. The customer-facing bridge leg below keeps the main line.
+          // main line. The customer-facing bridge leg below presents the lead's
+          // home line under GATE_HOME_LINE when their address names an office,
+          // else the main line.
           const fromNumber = TWILIO_NUMBERS.internalAlertCallerId();
           attemptedLeadCallFrom = fromNumber;
           const autoBridge = isEnabled('leadAutoBridge');
@@ -706,7 +708,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             // Press-1-to-connect auto-bridge. Create call_log row FIRST so
             // outbound-admin-prompt / outbound-connect can update it without
             // racing Twilio's webhook fire (2–5s after create()).
-            const bridgeCallerId = TWILIO_NUMBERS.mainLine.number;
+            const bridgeCallerId = require('../services/home-line').homeLineCallerId(customer);
             const [callLogRow] = await db('call_log')
               .insert({
                 customer_id: customer.id,

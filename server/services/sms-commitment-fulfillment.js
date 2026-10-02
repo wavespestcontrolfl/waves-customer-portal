@@ -228,11 +228,10 @@ const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).
 // close.
 const TENDERS = { cash: 'cash', check: 'check', zelle: 'Zelle', venmo: 'Venmo', paypal: 'PayPal', card: 'card', card_present: 'card',
   ach: 'bank account (ACH)', us_bank_account: 'bank account (ACH)', apple_pay: 'Apple Pay', google_pay: 'Google Pay', link: 'Link' };
-const CARD_BRANDS = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', american_express: 'American Express',
-  discover: 'Discover', diners: 'Diners Club', jcb: 'JCB', unionpay: 'UnionPay' };
+const { canonicalCardBrand, cardBrandDisplayName } = require('./card-brands'); // the ONE shared brand table (Codex round-42 P1)
 function tenderText(row) {
   const kind = TENDERS[String(row.method_type || row.method || '').toLowerCase()];
-  const brand = CARD_BRANDS[String(row.card_brand || '').toLowerCase()];
+  const brand = canonicalCardBrand(row.card_brand) ? cardBrandDisplayName(row.card_brand) : '';
   const lastFour = /^\d{4}$/.test(String(row.last_four || '')) ? ` ending ${row.last_four}` : '';
   if (kind === TENDERS.ach) return ` by ${kind}${lastFour}`;
   if (brand) return ` by ${brand}${lastFour}`;

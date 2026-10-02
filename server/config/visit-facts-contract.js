@@ -186,6 +186,15 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
 const COMPLETE_SERVICE = 'server/services/complete-scheduled-service.js';
 const SCHEDULE_PAGE = 'client/src/pages/admin/SchedulePage.jsx'; // full Complete Service form (CompletionPanel)
 const FAST_COMPLETE_SHEET = 'client/src/components/tech/FastCompleteSheet.jsx';
+// The typed forms the Fast Complete sheet records (GATE_TYPED_VOICE_FILL;
+// services/visit-typed-facts.js VOICE_TYPES, pinned equal by
+// visit-facts-contract.test.js): the fields on its record card go out in
+// structuredFindings, and a score the tech sets in activityScore.
+const FAST_COMPLETE_TYPED_FORMS = Object.freeze([
+  'cockroach', 'german_roach_knockdown', 'palmetto_roach_knockdown', 'flea', 'pest_inspection',
+  'mosquito_event', 'wildlife_trapping', 'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection',
+  'rodent_trapping', 'rodent_bait_station', 'termite_bait_station',
+]);
 const SERVICE_PHOTOS = 'server/services/service-photos.js';
 const TURF_HEIGHT_SERVICE = 'server/services/turf-height-service.js';
 const LAWN_ASSESSMENT_ROUTE = 'server/routes/admin-lawn-assessment.js';
@@ -408,12 +417,13 @@ function productFacts(opts = {}) {
  * termite-bait primary and palm. All land in service_records.structured_notes
  * (the object built ~5755 in complete-scheduled-service.js) except
  * technician_notes, a service_records column.
- * @param {{ extraReaders?: Record<string, VisitFactReader[]> }} [opts]
+ * @param {{ extraReaders?: Record<string, VisitFactReader[]>, extraWriters?: Record<string, VisitFactWriter[]> }} [opts]
  * @returns {VisitFact[]}
  */
 function genericCompletionFacts(opts = {}) {
   const extra = opts.extraReaders || {};
   const withExtra = (key, base) => base.concat(extra[key] || []);
+  const writersFor = (key, base) => base.concat((opts.extraWriters || {})[key] || []);
   return [
     {
       key: 'areas_treated',
@@ -440,7 +450,7 @@ function genericCompletionFacts(opts = {}) {
       label: 'Observations — form provenance only (no protocol defaults)',
       capture: ['voice', 'tap'],
       storage: 'structured_notes.formObservations',
-      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')],
+      writers: writersFor('form_observations', [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')]),
       readers: withExtra('form_observations', [{ file: REPORT_DATA, section: 'Findings (form-sourced, structuredObservations)' }]),
       whenMissing: 'hidden',
     },
@@ -902,7 +912,7 @@ function typedFormFacts(typedForm, overrides = {}) {
   return typedFactFields(typedForm).map((field) => {
     const readers = typedFieldReaders(field, builder, extraReaders);
     const notes = typedFieldNotes(field, extraNotes, required);
-    const placement = typedFieldPlacement(field, required, requiredCompanion);
+    const placement = typedFieldPlacement(field, required, requiredCompanion, typedForm);
     return {
       key: field.key,
       label: field.label,
@@ -1017,8 +1027,11 @@ function typedFieldNotes(field, extraNotes, required) {
  * when it actually differs from the primary value, so the common case (same
  * requiredness either way) stays a single field.
  */
-function typedFieldPlacement(field, required, requiredCompanion) {
+function typedFieldPlacement(field, required, requiredCompanion, typedForm) {
   const isCompanionOnly = field.companionOnly;
+  // The sheet's card shows the form's own fields, never one filled from the
+  // products or a pesticide compliance one.
+  const onSheet = FAST_COMPLETE_TYPED_FORMS.includes(typedForm) && !field.autoFilled && !field.pesticideOnly;
   const companionPath = `service_data.companionReportSnapshots[].values.${field.key}`;
   const storage = isCompanionOnly ? companionPath : `service_data.typedReportSnapshot.values.${field.key}`;
   const writers = isCompanionOnly
@@ -1027,6 +1040,7 @@ function typedFieldPlacement(field, required, requiredCompanion) {
       PROJECT_TYPES_FILE,
       via(COMPLETE_SERVICE, 'typedReportSnapshot'),
       via(SCHEDULE_PAGE, 'typedFindings'),
+      ...(onSheet ? [via(FAST_COMPLETE_SHEET, 'structuredFindings')] : []),
       via(COMPLETE_SERVICE, 'companionReportSnapshots'),
       via(SCHEDULE_PAGE, 'companionFindings'),
     ];
@@ -1112,6 +1126,8 @@ function typedActivityScoreFacts(typedForm) {
     writers: [
       via(COMPLETE_SERVICE, 'service_activity_scores'),
       via(SCHEDULE_PAGE, 'activityScore'),
+      // The sheet sends the score only where the tech sets it.
+      ...(FAST_COMPLETE_TYPED_FORMS.includes(typedForm) && !indicator.derive ? [via(FAST_COMPLETE_SHEET, 'activityScore')] : []),
       via(COMPLETE_SERVICE, 'companionReportSnapshots'),
       via(SCHEDULE_PAGE, 'companionFindings'),
       // A derive-mapped companion (ACTIVITY_INDICATORS.derive, e.g. flea,
@@ -1244,7 +1260,9 @@ const VISIT_FACTS_CONTRACT = {
     catalogKeys: ['one_time_pest_control', 'fire_ant', 'tick_control', 'bee_wasp_removal', 'mud_dauber_removal', 'pest_initial_cleanout', 'bed_bug_treatment'],
     voiceFill: true,
     facts: [
-      ...genericCompletionFacts(),
+      // The lane visits' findings also come from the tech's Fast Complete
+      // sheet (GATE_LANE_VOICE_FILL: its record card, read from the note).
+      ...genericCompletionFacts({ extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] } }),
       pestActivityRatingFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1348,6 +1366,9 @@ const VISIT_FACTS_CONTRACT = {
         extraReaders: {
           finding_rows: [{ file: MOSQUITO_REPORT_V2, section: 'Habitat watch card (standing water / foliage / lanai)' }],
         },
+        // The mosquito lane's findings also come from the tech's Fast
+        // Complete sheet (GATE_LANE_VOICE_FILL).
+        extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] },
       }),
       ...productFacts(),
       ...photoFacts(),
@@ -1710,5 +1731,6 @@ module.exports = {
   UNREGISTERED_INTERNAL_KEYS,
   TYPED_REPORT_BUILDERS,
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
+  FAST_COMPLETE_TYPED_FORMS,
   typedFactFields,
 };

@@ -83,6 +83,8 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 // these route tests only need the hooks to succeed quietly.
 jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  // bodyNeedsPaymentRecheck (the send seam's gate) asks this; an absent export reads as "unknowable => recheck" (fail closed)
+  hasPriceQuote: jest.fn(() => false),
   // GATE_SMS_SCHEDULING_SUGGEST rollback filter: a pass-through here; its SQL
   // is covered in sms-scheduling-suggest.test.js.
   excludeGatedSchedulingSuggestions: jest.fn((query) => query),
@@ -164,6 +166,7 @@ const mockGates = { smsAutoSend: false, smsGratitudeReplies: false };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (gate) => (Object.hasOwn(mockGates, gate) ? mockGates[gate] : true),
   gateEnvTimestamp: () => mockGates.gratitudeActivatedAt || null,
+  homeLineLive: () => mockGates.homeLine === true,
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -2229,6 +2232,61 @@ describe('admin communications SMS route', () => {
       customerId: 'cust-A', providerHandoffReservation: null,
       metadata: expect.objectContaining({ fromNumber: undefined }),
     }));
+  });
+
+  test('GATE_HOME_LINE: a send with no picked line leaves on the staff sender (conversation > home line > main)', async () => {
+    mockGates.smsGratitudeReplies = false;
+    mockGates.homeLine = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    const sender = jest.spyOn(require('../services/home-line'), 'staffTextSender')
+      .mockResolvedValue({ fromNumber: '+19412972817', reason: 'home_line' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-home-line' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Home line send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+      expect(sender).toHaveBeenCalledWith({ phone: '+15551234567', customerId: 'cust-A' });
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-A',
+        metadata: expect.objectContaining({ fromNumber: '+19412972817' }),
+      }));
+    } finally {
+      bearer.mockRestore();
+      sender.mockRestore();
+      delete mockGates.homeLine;
+    }
+  });
+
+  test('GATE_HOME_LINE: a line the composer picked is never overridden', async () => {
+    mockGates.smsGratitudeReplies = false;
+    mockGates.homeLine = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const sender = jest.spyOn(require('../services/home-line'), 'staffTextSender');
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-picked' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Picked line', messageType: 'manual', fromNumber: '+19412972606' }),
+        });
+        expect(response.status).toBe(200);
+      });
+      expect(sender).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ fromNumber: '+19412972606' }),
+      }));
+    } finally {
+      sender.mockRestore();
+      delete mockGates.homeLine;
+    }
   });
 
   test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {

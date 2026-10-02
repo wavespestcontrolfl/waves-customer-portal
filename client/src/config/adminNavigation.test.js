@@ -29,7 +29,7 @@ describe("grouped workspaces", () => {
     const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));
     expect(groups).toHaveLength(12);
     expect(ids).toHaveLength(new Set(ids).size);
-    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates']));
+    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates', 'gateCodes']));
   });
 
   it("applies leaf roles and gates even beneath accessible parents", () => {
@@ -39,6 +39,15 @@ describe("grouped workspaces", () => {
     const adminIds = getAdminWorkspaceGroups('admin').flatMap(({ items }) => items.map(({ id }) => id));
     expect(adminIds).not.toContain('agentEstimate');
     expect(techIds).not.toEqual(expect.arrayContaining(['contracts', 'toolHealth', 'estimates']));
+    // The gate-code directory is a view of Customers but admin only on its own.
+    expect(techIds).not.toContain('gateCodes');
+    expect(adminIds).toContain('gateCodes');
+    // The nested route is Gate codes' alone: Customers is not active there too.
+    const gatePath = '/admin/customers/gate-codes';
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.gateCodes, gatePath)).toBe(true);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, gatePath)).toBe(false);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, '/admin/customers/abc')).toBe(true);
+    expect(getAdminWorkspaceSelection({ pathname: gatePath }).itemId).toBe('gateCodes');
   });
 
   it("resolves actual rendered tabs, proposal links, and redirected Schedule", () => {
@@ -66,7 +75,7 @@ describe("admin navigation registry", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
       { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
       { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
@@ -294,6 +303,7 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/not-a-page")).toBe(true);
     // Owner-only pages nested under technician-allowed prefixes (codex P1).
     expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
+    expect(isPathAdminOnly("/admin/customers/gate-codes")).toBe(true);
     expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);

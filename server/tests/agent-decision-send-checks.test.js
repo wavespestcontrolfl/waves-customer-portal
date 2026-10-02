@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sms-shadow-drafter', () => ({
   planOpenTimesRecheck: jest.fn(),
   openTimesStillOffered: jest.fn(),
+  // the amount pattern sms-amount-recheck reads off the drafter (bodyAmountCents); without it the pattern is
+  // undefined and every body looks like it carries an amount
+  AMOUNT_MASK_RE: /\$\s?\d[\d,]*(?:\.\d{1,2})?/g,
   reservicePromiseStillEligible: jest.fn(),
 }));
 // slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
@@ -16,7 +19,18 @@ jest.mock('../services/sms-followup-sla', () => ({
   ...jest.requireActual('../services/sms-followup-sla'),
   followupPromiseBlockReason: jest.fn(() => null),
 }));
-jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
+// The pre-screens (bodyNeedsPaymentRecheck, ...) and liveZelleFacts are kept REAL (only outgoingAmountsStale is mocked) so this suite
+// exercises the actual detection that gates whether the amounts / Zelle recheck runs at all (any Zelle word, a figure, price grammar;
+// independent-review P1, round 6, PR #5331; owner 2026-10-01 ~23:58Z), not a stand-in.
+jest.mock('../services/sms-amount-recheck', () => ({
+  ...jest.requireActual('../services/sms-amount-recheck'),
+  outgoingAmountsStale: jest.fn(async () => ({ stale: false })),
+}));
+// bodyNeedsPaymentRecheck (the scheduler's gate, now this seam's too) asks the real sms-suggest-mode for price grammar;
+// that module cannot load under this file's stubbed drafter (it fails closed => "needs recheck"), so give it a stand-in.
+jest.mock('../services/sms-suggest-mode', () => ({
+  hasPriceQuote: jest.fn((text) => /\$\s*\d|\b\d[\d,]*(?:\.\d+)?\s*dollars?\b/i.test(String(text || ''))),
+}));
 jest.mock('../services/sms-label-facts', () => ({ labelFactsSendBlockReason: jest.fn(async () => null) }));
 jest.mock('../services/sms-eta-freshness', () => ({
   etaClaimBlockReason: jest.fn(async () => null),
@@ -59,7 +73,18 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers' });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, humanEditedBody: false, trustOwedAmounts: false });
+});
+
+// Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
+// built for rides the same input_snapshot as facts_generated_at, and this
+// seam must read it back and thread it into the recheck.
+test('a decision carrying zelle_invoice_id threads it into the amount recheck', async () => {
+  await agentDecisionSendBlockReason({
+    decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, zelle_invoice_id: 'inv-42' }) }),
+    outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+  });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ zelleInvoiceId: 'inv-42' }));
 });
 
 test('a scheduler-minted snapshot forwards its scheduledServiceId to the recheck (GATE_SMS_OFFERS_SCHEDULER)', async () => {
@@ -134,10 +159,152 @@ test('a gone slot, a stale/edited follow-up promise, or a stale amount each refu
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('amount no longer authorized (amount_no_longer_authorized)');
 });
 
-test('no snapshot → no availability call; an older-prompt decision skips the amount recheck', async () => {
-  await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
+test('no snapshot → no availability call; an older-prompt decision skips the recheck for a body that needs none', async () => {
+  await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// ANY mention of Zelle is rechecked for every decision (an edited pre-v12 body too); a payment-status assertion or a figure
+// is rechecked only for a real-answers (v12) decision - an older-prompt decision keeps main's behavior (gate off byte-identical).
+describe('the recheck gate (PR #5331)', () => {
+  const v11 = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', ...over });
+  test.each(["Zelle isn't available right now.", "We don't take Zelle.", 'Zelle is not available for this account right now, so use your pay link.'])(
+    'a pre-v12 edited Zelle DENIAL runs the recheck: %s', async (body) => {
+      outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'zelle_now_available' });
+      await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: body })).resolves.toBe('amount no longer authorized (zelle_now_available)');
+      expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', body, promptVersion: 'house_voice_v11', trustOwedAmounts: true }));
+    },
+  );
+  test('a still-true denial goes out; a denial on a decision with no customer cannot be verified and FAILS CLOSED (round 28)', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: "Zelle isn't available right now." })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: v11({ customer_id: null }), outgoingBody: "Zelle isn't available right now." })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+  });
+  test('a pre-v12 body that names a figure or a payment status is NOT rechecked (main\'s behavior); a Zelle offer is', async () => {
+    for (const body of ['You owe $5.', 'Your payment was received.']) {
+      outgoingAmountsStale.mockClear();
+      await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: body })).resolves.toBeNull();
+      expect(outgoingAmountsStale).not.toHaveBeenCalled();
+    }
+    await agentDecisionSendBlockReason({ decision: v11(), outgoingBody: 'You can Zelle us.' });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ body: 'You can Zelle us.', trustOwedAmounts: true }));
+  });
+  test('a v12 decision always runs the recheck and carries its payment_status_snapshot to it', async () => {
+    const snap = { customer_id: 'c1', sentences: ['Your account has no balance due.'] };
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ payment_status_snapshot: snap }) }),
+      outgoingBody: 'Your account has no balance due.',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ paymentStatusSnapshot: snap, trustOwedAmounts: false }));
+  });
+});
+
+// Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
+// eligibility recheck must run for ANY outgoing body with an affirmative
+// Zelle offer, whatever prompt version drafted it, and fail CLOSED when the
+// decision carries no customer_id — an unverifiable Zelle offer must never
+// go out unchecked.
+describe('Zelle offers recheck regardless of prompt version (round 6)', () => {
+  test('an older-prompt decision with a Zelle offer still runs the recheck', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', promptVersion: 'house_voice_v11',
+    }));
+  });
+
+  test('an older-prompt decision never widens to the pooled amount rule (only its Zelle offer is rechecked)', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ trustOwedAmounts: true }));
+  });
+
+  test('a Zelle offer with NO customer_id on the decision fails closed without calling the recheck (unverifiable)', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ customer_id: null, input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+
+  test('an older-prompt decision with NO Zelle offer and NO customer_id still skips the recheck entirely (unchanged scope)', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ customer_id: null, input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'See you Tuesday!',
+    })).resolves.toBeNull();
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+});
+
+// Independent-review P1 (round 6, PR #5331): the customer's own inbound
+// wording threads through to the amount/tender binder — from the joined
+// sms_log row (decision.inbound_message) or, failing that, the drafted
+// input_snapshot's own sms.body.
+describe('inbound message threading (round 6)', () => {
+  test('decision.inbound_message (the joined sms_log body) is passed through', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ inbound_message: 'Did you get my $120 Zelle payment?' }),
+      outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Did you get my $120 Zelle payment?' }));
+  });
+
+  test('falls back to input_snapshot.sms.body when the decision carries no inbound_message', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, sms: { body: 'Did you get my $120 Zelle payment?' } }) }),
+      outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Did you get my $120 Zelle payment?' }));
+  });
+
+  test('neither present → inboundMessage is null', async () => {
+    await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: null }));
+  });
+});
+
+// A customerless decision cannot be verified against billing: it fails CLOSED for every body the recheck would judge - a Zelle
+// claim for any decision, a figure / payment-status assertion for a real-answers one.
+describe('customerless decisions (round 28)', () => {
+  const noCustomer = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', customer_id: null, ...over });
+  const v12 = (over = {}) => noCustomer({ prompt_version: 'house_voice_v12_real_answers5_cflvp', ...over });
+  test.each(["Zelle isn't available right now.", 'You can use Zelle.'])('pre-v12 blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+  test.each([
+    'Your payment was received.', "Zelle isn't available right now.", 'You can use Zelle.', 'You owe $95.', 'Your balance is zero.', 'Your payment settled.',
+    'Your invoice is settled.', 'Your card was declined.',
+  ])('v12 blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: v12({ suggested_message: body }), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+  test.each([
+    'Your invoice is attached.', 'We updated your account details.', 'Your invoice is ready below.', 'See you Tuesday!', 'Your card on file is a Visa ending 4242.', 'You can pay online with the link.',
+  ])('v12 benign copy is NOT blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: v12(), outgoingBody: body })).resolves.toBeNull();
+  });
+  test('a pre-v12 customerless status / figure body is not selected (main\'s behavior)', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: 'Your payment was received.' })).resolves.toBeNull();
+  });
+});
+
+// The decision's own inbound scopes the detector: a bare pronoun clause is a payment status only in a payment conversation.
+describe('customerless decisions carry their inbound into the detector', () => {
+  const withInbound = (inbound, over = {}) => decision({
+    input_snapshot: JSON.stringify({ sms: { body: inbound } }), prompt_version: 'house_voice_v12_real_answers5_cflvp', customer_id: null, ...over,
+  });
+  test.each(['It settled.', 'It failed.', 'That cleared out.', "They're sorted."])('%s after a payment question is blocked (cannot verify, no customer)', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: withInbound('Did my payment go through?', { suggested_message: body }), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+  });
+  test('...but "It settled." after an unrelated inbound is not a payment status', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: withInbound('What time is my visit Tuesday?'), outgoingBody: 'It settled.' })).resolves.toBeNull();
+  });
 });
 
 // LABEL FACTS (exact-sentence contract, D): a draft that copied a label
@@ -479,6 +646,119 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
   });
 });
 
+
+// Owner ruling 2026-10-01: STAFF EDITS. A body that differs from the AI draft stored on the decision is the staff member's own wording; the
+// payment-status contract does not judge it. Unedited AI bodies keep the full contract; Zelle and amount rules apply to both.
+describe('staff-edited bodies (owner ruling 2026-10-01)', () => {
+  const { bodyIsStaffEdited } = require('../services/agent-decision-send-checks');
+  const AI = 'Your account has no balance due.';
+  const v12 = (over = {}) => decision({ prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: AI, input_snapshot: JSON.stringify({ payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
+
+  test('bodyIsStaffEdited: whitespace-normalized compare; a missing stored draft is NOT an edit (strict)', () => {
+    expect(bodyIsStaffEdited(AI, `  ${AI.replace(' ', '   ')}\n`)).toBe(false);
+    expect(bodyIsStaffEdited(AI, 'We got your payment, thanks!')).toBe(true);
+    expect(bodyIsStaffEdited(null, 'We got your payment, thanks!')).toBe(false);
+    expect(bodyIsStaffEdited('', 'We got your payment, thanks!')).toBe(false);
+    expect(bodyIsStaffEdited(undefined, AI)).toBe(false);
+  });
+  test('an edited v12 body tells the recheck it is a staff edit; an unedited one does not', async () => {
+    await agentDecisionSendBlockReason({ decision: v12(), outgoingBody: 'Yes - we got your payment, thanks Dana!' });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: true }));
+    await agentDecisionSendBlockReason({ decision: v12(), outgoingBody: `  ${AI} ` });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: false }));
+    await agentDecisionSendBlockReason({ decision: v12({ suggested_message: null }), outgoingBody: 'Yes - we got your payment, thanks Dana!' });
+    expect(outgoingAmountsStale).toHaveBeenLastCalledWith(expect.objectContaining({ humanEditedBody: false })); // no stored draft => strict
+  });
+  test('a customerless v12 decision: an edited status body is not blocked for lack of billing; the unedited one still is', async () => {
+    const noCust = (over = {}) => v12({ customer_id: null, input_snapshot: JSON.stringify({}), ...over });
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'Yes - we got your payment, thanks Dana!' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: AI })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    // ...but an edited body with a Zelle claim or a figure still needs the customer (main's rules are not loosened)
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'You can use Zelle.' })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    await expect(agentDecisionSendBlockReason({ decision: noCust(), outgoingBody: 'You owe $95.' })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+  });
+});
+
+// Codex round-48/49 P1: the TRUE provider boundary of the immediate Agent Review send - a billing fingerprint taken BEFORE the full
+// recheck, re-read in one query on the handoff connection (no second pool slot)
+describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unchanged at the provider boundary', () => {
+  const { amountsProviderPreSendCheck, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+  const db = require('../models/db');
+  const decision = { id: 'd1', customer_id: 'c1', prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: 'Your account balance is $100.00.', input_snapshot: null, inbound_message: 'what do I owe?' };
+  const dbiWith = (fp) => ({ raw: jest.fn(async () => (fp instanceof Error ? Promise.reject(fp) : { rows: [{ fingerprint: fp }] })) });
+  afterEach(() => { delete db.raw; });
+  test('a body the recheck cannot judge takes no fingerprint and registers nothing', async () => {
+    db.raw = jest.fn();
+    expect(await billingFingerprintForSend({ decision, outgoingBody: 'See you Tuesday!' })).toBeUndefined();
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(amountsProviderPreSendCheck({ decision, getBody: () => 'See you Tuesday!' })).toBeUndefined();
+    expect(amountsProviderPreSendCheck({ decision: null, getBody: () => decision.suggested_message })).toBeUndefined();
+  });
+  test('a judged body: fingerprint before the recheck; unchanged at the boundary => ok, on the HANDOFF connection, repeatable', async () => {
+    db.raw = jest.fn(async () => ({ rows: [{ fingerprint: 'fp-1' }] }));
+    const fp = await billingFingerprintForSend({ decision, outgoingBody: decision.suggested_message });
+    expect(fp).toBe(`fp-1@${require('../utils/datetime-et').etDateString()}`);
+    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: fp }, getBody: () => decision.suggested_message });
+    expect(typeof check.afterMarker).toBe('function');
+    const dbi = dbiWith('fp-1');
+    await expect(check({ dbi })).resolves.toEqual({ ok: true });
+    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(12).fill('c1'));
+  });
+  test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
+    const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}` }, getBody: () => decision.suggested_message });
+    await expect(check.afterMarker({ dbi: dbiWith('fp-2') })).resolves.toMatchObject({ ok: false, code: 'BILLING_CHANGED_AT_BOUNDARY', retryable: true });
+    await expect(check({ dbi: dbiWith(new Error('db down')) })).resolves.toMatchObject({ ok: false, retryable: true });
+    const none = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: null }, getBody: () => decision.suggested_message });
+    await expect(none({ dbi: dbiWith('fp-1') })).resolves.toMatchObject({ ok: false, retryable: true });
+  });
+  test('a Zelle offer on a pre-v12 decision is judged too', () => {
+    expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, prompt_version: 'house_voice_v11', billing_fingerprint: 'x' }, getBody: () => 'You can Zelle us at pay@example.com.' })).toBe('function');
+  });
+  // Owner 2026-10-01 ~23:58Z: the live Zelle facts the verdict stood on ride the decision to the boundary, which re-reads them
+  test('the Zelle facts the recheck stood on are recorded on the decision, and re-read at the boundary: unchanged => ok; changed => ZELLE_CHANGED_AT_BOUNDARY', async () => {
+    const recheck = require('../services/sms-amount-recheck');
+    const facts = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' };
+    const d = { ...decision, suggested_message: 'You can pay invoice WPC-2026-0001 by Zelle to pay@example.com, with your name or the invoice number in the Zelle memo.' };
+    outgoingAmountsStale.mockResolvedValue({ stale: false, zelle: facts });
+    await expect(agentDecisionSendBlockReason({ decision: d, outgoingBody: d.suggested_message })).resolves.toBeNull();
+    expect(d.zelle_boundary).toEqual(facts);
+    // a verdict that stood on no Zelle facts clears it
+    outgoingAmountsStale.mockResolvedValue({ stale: false });
+    await agentDecisionSendBlockReason({ decision: d, outgoingBody: d.suggested_message });
+    expect(d.zelle_boundary).toBeNull();
+    // the boundary check gets { customerId, fingerprint, zelle } and re-reads the SAME invoice
+    const live = jest.spyOn(recheck, 'liveZelleFacts').mockResolvedValue({ ...facts });
+    try {
+      const fp = `fp-1@${require('../utils/datetime-et').etDateString()}`;
+      const check = amountsProviderPreSendCheck({ decision: { ...d, billing_fingerprint: fp, zelle_boundary: facts }, getBody: () => d.suggested_message });
+      const dbi = dbiWith('fp-1');
+      await expect(check({ dbi })).resolves.toEqual({ ok: true });
+      expect(live).toHaveBeenCalledWith({ customerId: 'c1', invoiceId: 'inv-1', dbh: dbi });
+      live.mockResolvedValue({ ...facts, recipient: 'rotated@example.com' });
+      await expect(check({ dbi })).resolves.toMatchObject({ ok: false, code: 'ZELLE_CHANGED_AT_BOUNDARY', retryable: true });
+      // no Zelle facts on the decision: no Zelle read at all
+      live.mockClear();
+      await expect(amountsProviderPreSendCheck({ decision: { ...d, billing_fingerprint: fp }, getBody: () => d.suggested_message })({ dbi })).resolves.toEqual({ ok: true });
+      expect(live).not.toHaveBeenCalled();
+    } finally { live.mockRestore(); }
+  });
+  test('the Agent Review route takes the fingerprint BEFORE the full recheck and composes the boundary check with the ETA one', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-communications'), 'utf8');
+    const fpAt = src.indexOf('decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });');
+    expect(fpAt).toBeGreaterThan(-1);
+    expect(fpAt).toBeLessThan(src.indexOf('const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });'));
+    expect(src).toContain('checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody })');
+  });
+});
+
+// Local Codex review pass 1 (P2): a staff edit's own status wording takes no boundary check either - a customerless one could never send
+test('a staff-edited status body registers no billing boundary check; the unedited AI body does', () => {
+  const { amountsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+  const decision = { id: 'd1', customer_id: null, prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: 'Thanks for reaching out!', input_snapshot: null, inbound_message: 'did you get my payment?' };
+  expect(amountsProviderPreSendCheck({ decision, getBody: () => 'We got your payment, thank you!' })).toBeUndefined();
+  expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, suggested_message: 'We got your payment, thank you!' }, getBody: () => 'We got your payment, thank you!' })).toBe('function');
+});
+
 describe('LABEL FACTS at the provider boundary (Codex #5416 P1)', () => {
   const trxFor = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
   const SNAP = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r1'], sentences: ['S1'] };
@@ -545,6 +825,16 @@ describe('follow-up (#5416 r31 P2): an unreadable label recheck keeps the decisi
     expect(read('../routes/admin-communications.js')).toContain("blockReasonIsRecheckInfrastructure(blockReason)) {\n        await require('../services/sms-suggest-mode').supersedeStaleDecision");
     expect(read('../services/scheduler.js')).toContain("if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {");
   });
+});
+
+// Codex round-64 P2: a billing recheck that could not read billing / Stripe keeps the Agent Review card (retryable)
+test('billing recheck outages are infrastructure; billing verdicts are not', () => {
+  for (const r of ['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed']) {
+    expect(blockReasonIsRecheckInfrastructure(`amount no longer authorized (${r})`)).toBe(true);
+  }
+  for (const r of ['payment_status_changed', 'payment_status_unauthorized', 'zelle_recipient_stale', 'amount_no_longer_authorized', 'amount_recheck_no_customer']) {
+    expect(blockReasonIsRecheckInfrastructure(`amount no longer authorized (${r})`)).toBe(false);
+  }
 });
 
 // PR #5499 r1: a reviewed reply grounded on an open promise is refused once that

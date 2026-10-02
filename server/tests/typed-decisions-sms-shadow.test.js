@@ -114,3 +114,51 @@ describe('twilio-webhook wiring', () => {
     expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
   });
 });
+
+describe('second provider (Cloudflare Clef) leg', () => {
+  const clefBefore = process.env.GATE_TYPED_DECISIONS_CLEF;
+  afterAll(() => { if (clefBefore === undefined) delete process.env.GATE_TYPED_DECISIONS_CLEF; else process.env.GATE_TYPED_DECISIONS_CLEF = clefBefore; });
+  const jevAnswers = { is_courtesy_only: { p: 0.9, yes: true, confident: true }, wants_visit_change: { p: 0.1, yes: false, confident: true } };
+  const clefAnswers = { is_courtesy_only: { p: 0.2, yes: false, confident: true }, wants_visit_change: { p: 0.15, yes: false, confident: true } };
+  const askBy = (provider) => mockAsk.mock.calls.filter(([, , opts]) => (opts && opts.provider) === provider || (!provider && !(opts && opts.provider)));
+
+  test('Clef gate off: only Jev is asked and recorded, exactly as before (no provider option, no siblings)', async () => {
+    delete process.env.GATE_TYPED_DECISIONS_CLEF;
+    const out = await shadowInboundSms(base);
+    expect(out).toEqual({ asked: 2, recorded: 2, failed: 0 });
+    expect(mockAsk.mock.calls.every(([, , opts]) => opts === undefined)).toBe(true);
+    expect(mockRecord.mock.calls.every(([a]) => a.provider === 'typesafe' && Object.keys(a.siblingAnswers || {}).length === 0)).toBe(true);
+  });
+
+  test('Clef gate on: both providers are asked per package and each row carries the other provider\'s answer as its sibling', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_pkg, _state, opts) => ({ ok: true, packageHash: 'h', provider: opts?.provider || 'typesafe', answers: opts?.provider === 'cloudflare' ? clefAnswers : jevAnswers }));
+    const out = await shadowInboundSms(base);
+    expect(out).toEqual({ asked: 4, recorded: 4, failed: 0 });
+    expect(askBy(undefined)).toHaveLength(2);
+    expect(askBy('cloudflare')).toHaveLength(2);
+    const courtesy = mockRecord.mock.calls.map(([a]) => a).filter((a) => a.pkg.id === 'sms_courtesy.v1');
+    const jev = courtesy.find((a) => a.provider === 'typesafe');
+    const clef = courtesy.find((a) => a.provider === 'cloudflare');
+    expect(jev.siblingAnswers).toEqual({ is_courtesy_only: [clefAnswers.is_courtesy_only] });
+    expect(clef.siblingAnswers).toEqual({ is_courtesy_only: [jevAnswers.is_courtesy_only] });
+    expect(clef.baselines).toEqual({ is_courtesy_only: { rules: true } }); // the same rule baseline for both
+    expect(clef.subjectHash).toBe(jev.subjectHash);
+  });
+
+  test('the Clef leg failing never blocks the Jev row: it is recorded with no siblings, and the failure is counted', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_pkg, _state, opts) => (opts?.provider === 'cloudflare' ? { ok: false, reason: 'cloudflare_429' } : { ok: true, packageHash: 'h', answers: jevAnswers }));
+    const out = await shadowInboundSms(base);
+    expect(out).toEqual({ asked: 4, recorded: 2, failed: 2 });
+    expect(mockRecord.mock.calls.every(([a]) => a.provider === 'typesafe' && Object.keys(a.siblingAnswers).length === 0)).toBe(true);
+  });
+
+  test('a Clef throw is contained the same way', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_pkg, _state, opts) => { if (opts?.provider === 'cloudflare') throw new Error('boom'); return { ok: true, packageHash: 'h', answers: jevAnswers }; });
+    const out = await shadowInboundSms(base);
+    expect(out).toEqual({ asked: 4, recorded: 2, failed: 2 });
+  });
+});
+
