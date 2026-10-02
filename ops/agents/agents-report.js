@@ -42,18 +42,27 @@ if (!process.env.DATABASE_PUBLIC_URL) {
 }
 process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
-// The app's module-load warnings (push providers not configured, …) are noise here.
+// The app's module-load warnings (push providers not configured, …) are noise
+// here, so modules load at `error`; the level goes back to `warn` before the
+// reads below, because hub-read / ops-queue report an unreadable attention
+// source only as a warning and that warning is the report's own signal.
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error';
 for (const gate of ['GATE_LLM_COST_TRACKING', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY']) process.env[gate] ??= 'true';
 const RECORDER_GATES = ['GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
 const recorderState = Object.fromEntries(RECORDER_GATES.map((g) => [g, process.env[g] == null ? null : ['1', 'true', 'on'].includes(String(process.env[g]).toLowerCase())]));
-// hub-read reads chain rows only under the dispatch-metrics gate; with the
-// portal's value unknown, read what is stored and say so in the output.
-process.env.GATE_LLM_DISPATCH_METRICS ??= 'true';
+// hub-read reads chain rows only under the dispatch-metrics gate: the portal's
+// value is captured above for display, then the gate is forced on for this
+// read-only process so stored chain rows are read whatever the recorder does.
+process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+// The typed-decisions review surface is dark without its gate (the routes 404,
+// no review item is raised), so its queue is reported only when the portal's
+// gate was passed through and is on.
+const typedDecisionsGate = process.env.GATE_TYPED_DECISIONS == null ? null : ['1', 'true', 'on'].includes(String(process.env.GATE_TYPED_DECISIONS).toLowerCase());
 
 const path = require('path');
 const SERVER = path.join(__dirname, '..', '..', 'server');
 const db = require(path.join(SERVER, 'models', 'db'));
+const logger = require(path.join(SERVER, 'services', 'logger'));
 const { readAreas, readLanes } = require(path.join(SERVER, 'services', 'agent-control', 'hub-read'));
 const { REVIEW_WINDOW_DAYS } = require(path.join(SERVER, 'services', 'typed-decisions', 'daily-review-item'));
 const { etDateString, addETDays, parseETDateTime } = require(path.join(SERVER, 'utils', 'datetime-et'));
@@ -82,7 +91,7 @@ async function waitingOnYou(now) {
   // days back — so this count and the owner's review queue agree on the boundary day.
   const since = parseETDateTime(`${etDateString(addETDays(now, -REVIEW_WINDOW_DAYS))}T00:00:00`);
   const [typed, approvals] = await Promise.all([
-    db('decision_reviews').where({ label_status: 'unreviewed' }).whereIn('sampled_for', ['disagreement', 'random_audit'])
+    typedDecisionsGate !== true ? Promise.resolve(typedDecisionsGate) : db('decision_reviews').where({ label_status: 'unreviewed' }).whereIn('sampled_for', ['disagreement', 'random_audit'])
       .where('created_at', '>=', since).count({ n: '*' }).first().then((r) => Number(r?.n || 0)).catch(() => null),
     // Only approvals whose email actually went out (email_sent_at is stamped
     // after SMTP confirms): an in-flight or failed send is machinery's, not yours.
@@ -92,7 +101,14 @@ async function waitingOnYou(now) {
   return { typedDecisionLabels: typed, contentEmailApprovals: approvals };
 }
 
+// Integrations the reads load lazily announce themselves as warnings too
+// (push providers, GBP); those are not about a source this report reads.
+const STARTUP_NOISE = /^\[(apns|fcm|push|gbp)\]/;
+const rawWarn = logger.warn.bind(logger);
+logger.warn = (msg, ...rest) => (typeof msg === 'string' && STARTUP_NOISE.test(msg) ? logger : rawWarn(msg, ...rest));
+
 async function main() {
+  logger.level = 'warn';
   const now = new Date();
   const [areas, lanes, waiting] = await Promise.all([readAreas({ window: WINDOW, now }), readLanes({ window: WINDOW, now }), waitingOnYou(now)]);
   if (JSON_OUT) {
@@ -122,18 +138,22 @@ async function main() {
     // Shown as the ledger's own counters, never summed: cached input is inside
     // the input count for OpenAI / Gemini and beside it for Anthropic, cache
     // writes and reasoning / thought tokens are recorded apart (llm-cost.js).
-    `${k(l.tokens.input)}/${k(l.tokens.cachedInput)}/${k(l.tokens.cacheWrite)}/${k(l.tokens.output)}/${k(l.tokens.reasoning)}`,
+    // "+N?" = rows whose usage could not be read; the sums are partial.
+    `${k(l.tokens.input)}/${k(l.tokens.cachedInput)}/${k(l.tokens.cacheWrite)}/${k(l.tokens.output)}/${k(l.tokens.reasoning)}${l.tokens.unknownRows > 0 ? ` +${l.tokens.unknownRows}?` : ''}`,
     usd(l.estCostUsd), l.unpricedCalls == null ? '—' : l.unpricedCalls,
     l.attentionReasons.map((r) => r.detail || r.kind).join('; '),
   ]);
   console.log(`\n${table(['', 'lane', 'area', 'calls', 'ok', 'fb', 'p50', 'p95', 'tok in/cached/cw/out/think', 'est $', 'unpriced', 'why'], laneRows, new Set([3, 4, 5, 6, 7, 8, 9, 10]))}`);
 
+  const noUsage = lanes.lanes.filter((l) => l.tokens.unknownRows > 0);
+  if (noUsage.length) console.log(`\ntoken sums are partial (+N? = calls whose usage could not be read): ${noUsage.map((l) => `${l.id} ${l.tokens.unknownRows}`).join(', ')}`);
   const unpriced = lanes.lanes.filter((l) => (l.unpricedCalls || 0) > 0);
   if (unpriced.length) console.log(`\nunpriced calls (model-name matching to check): ${unpriced.map((l) => `${l.id} ${l.unpricedCalls}`).join(', ')}`);
 
   const w = waiting;
   const items = [];
-  if (w.typedDecisionLabels == null) items.push('typed-decision labels: unreadable');
+  if (w.typedDecisionLabels === false) items.push('typed decisions: review surface off (gate off)');
+  else if (w.typedDecisionLabels == null) items.push(typedDecisionsGate == null ? 'typed decisions: gate not passed (run via the wrapper)' : 'typed-decision labels: unreadable');
   else if (w.typedDecisionLabels > 0) items.push(`${w.typedDecisionLabels} typed-decision review${w.typedDecisionLabels === 1 ? '' : 's'} unlabeled (last ${REVIEW_WINDOW_DAYS} days)`);
   if (w.contentEmailApprovals == null) items.push('content email approvals: unreadable');
   else if (w.contentEmailApprovals > 0) items.push(`${w.contentEmailApprovals} content email approval${w.contentEmailApprovals === 1 ? '' : 's'} awaiting your reply`);
