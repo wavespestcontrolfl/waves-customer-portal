@@ -36,7 +36,6 @@ const POINTS = Object.freeze([
 
 // A capability gap that changes what a tool requires, by gap key then tool: the inputs it no longer needs. A reschedule
 // notice is rendered by the server from the move, so send_sms carries no freeform message.
-const GAP_RELAXES_REQUIRED = { reschedule_notice_send: { send_sms: ['message'] } };
 
 const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
 const answer = (text) => ({ content: [{ type: 'text', text }], usage: {} });
@@ -145,7 +144,7 @@ class CaseContext {
     const gaps = asList(spec.requires).map((k) => CAPABILITY_GAPS[k]).filter(Boolean);
     const addsTool = (tool) => gaps.some((g) => g.adds && g.adds.tools && g.adds.tools[tool]);
     const addedProps = (tool) => new Set(gaps.flatMap((g) => Object.keys((g.adds && g.adds.properties && g.adds.properties[tool]) || {})));
-    const relaxed = (tool) => new Set(asList(spec.requires).flatMap((key) => (GAP_RELAXES_REQUIRED[key] && GAP_RELAXES_REQUIRED[key][tool]) || []));
+    const relaxed = (tool) => new Set(gaps.flatMap((g) => (g.relaxes_required && g.relaxes_required[tool]) || []));
     const subset = (actual, want) => {
       if (want && typeof want === 'object' && !Array.isArray(want)) return actual && typeof actual === 'object' && Object.entries(want).every(([k, v]) => subset(actual[k], v));
       return JSON.stringify(actual) === JSON.stringify(want);

@@ -546,7 +546,9 @@ describe('write calls', () => {
   });
 
   test('the schema check catches what it exists to catch', () => {
-    const check = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys);
+    // the probes below leave out required inputs on purpose; required is checked on its own at the end
+    const check = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys).filter((p) => !/omits the required input/.test(p));
+    const checkAll = (call, keys = []) => matrix.schemaProblems(call, registry, Object.keys(UPDATABLE_FIELDS), keys);
     // a template message type and a booking property pin: not on main
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } })).toHaveLength(1);
     expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } })).toHaveLength(1);
@@ -561,6 +563,11 @@ describe('write calls', () => {
     expect(check({ tool: 'create_appointment', input: { customer_id: 'c', property_id: 'p' } }, ['reschedule_notice_send'])).toHaveLength(1);
     // and plain main calls are clean
     expect(check({ tool: 'send_sms', input: { customer_id: 'c', message: 'hi', message_type: 'manual' } })).toEqual([]);
+    // a required input that is left out is caught, and a gap that renders the text relaxes it
+    const smsRequired = registry.actions.get('send_sms').schema.required || [];
+    expect(smsRequired).toContain('message');
+    expect(checkAll({ tool: 'send_sms', input: { customer_id: 'c' } }).some((p) => /omits the required input message/.test(p))).toBe(true);
+    expect(checkAll({ tool: 'send_sms', input: { customer_id: 'c', message_type: 'appointment_rescheduled' } }, ['reschedule_notice_send']).some((p) => /required input message/.test(p))).toBe(false);
   });
 
   test('a declared gap is used by the case that declares it', () => {

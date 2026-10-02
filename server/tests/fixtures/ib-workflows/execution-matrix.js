@@ -186,6 +186,8 @@ const CAPABILITY_GAPS = {
     what: 'A server-rendered reschedule notice: the move\'s own template text (appointment_rescheduled / appointment_series_rescheduled) on one card, built from the committed row. send_sms takes message_type manual, reminder, follow_up or billing_reminder and records freeform text.',
     owner_pr: 'PR 3c (move + notice, decision D1)',
     adds: { properties: { send_sms: { appointment_id: {}, message_type: { enum: ['appointment_rescheduled', 'appointment_series_rescheduled'] } } } },
+    // the server renders the notice, so the caller passes no message text
+    relaxes_required: { send_sms: ['message'] },
   },
   create_appointment_property_pin: {
     what: 'A property pin on booking. create_appointment has no property_id and stores soleActivePropertyId(customer), which is null for a customer with two active properties.',
@@ -241,6 +243,13 @@ function schemaProblems(call, registry, updatableCustomerFields, gapKeys) {
     }
   }
   const problems = [];
+  // required inputs, unless the gap adds the tool itself, or a declared gap adds or relaxes the key
+  if (action && !addedTool) {
+    const relaxed = new Set(gaps.flatMap((g) => (g.relaxes_required && g.relaxes_required[call.tool]) || []));
+    for (const key of action.schema.required || []) {
+      if (!(key in (call.input || {})) && !relaxed.has(key)) problems.push(`${call.tool} omits the required input ${key}`);
+    }
+  }
   for (const [key, value] of Object.entries(call.input || {})) {
     const spec = properties[key];
     if (!spec) { problems.push(`${call.tool}.${key} is not an input of the tool`); continue; }
