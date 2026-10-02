@@ -87,13 +87,13 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 // again each time the manager closes. Their captions go to the report
 // writer, so the report waits for the first read (`loaded`); a failed read
 // counts as no photos, never a hold.
-// With the photos in the note's box (`keepOnFailure`), a failed read after
-// one that landed keeps the photos last read on screen, so a dropped
-// connection never empties the box under an open description (codex local
-// r1 on #5624), but it is no confirmed answer: `failed` holds the report
-// until a read lands (codex local r2: a photo the manager added must reach
-// the report). The sheet mounts once per visit, so the photos kept are
-// always this visit's. `update` applies a change the server already took (a
+// With the photos in the note's box (`keepOnFailure`), a failed read is no
+// confirmed answer: `failed` holds the report until a read lands, the first
+// read too (codex local r2 and the pre-push P1 after it on #5624: a photo
+// the manager added, or one already on the visit, must reach the report),
+// and the photos last read stay on screen, so a dropped connection never
+// empties the box under an open description (codex local r1). The sheet
+// mounts once per visit, so the photos kept are always this visit's. `update` applies a change the server already took (a
 // description saved, a photo removed) to the photos at once (pre-push P1).
 export function useVisitPhotos({ serviceId, request, version, keepOnFailure = false }) {
   const [state, setState] = useState({ photos: [], loaded: false, failed: false, read: false });
@@ -114,7 +114,7 @@ export function useVisitPhotos({ serviceId, request, version, keepOnFailure = fa
       // The photo manager reports its own errors.
       .catch(() => {
         if (sequence !== readSequence.current) return;
-        setState((prev) => (keepOnFailure && prev.read
+        setState((prev) => (keepOnFailure
           ? { ...prev, loaded: true, failed: true }
           : { photos: [], loaded: true, failed: false, read: prev.read }));
       });

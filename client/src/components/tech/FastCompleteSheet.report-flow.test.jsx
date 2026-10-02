@@ -1201,6 +1201,25 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     expect(await screen.findByRole('button', { name: 'Write it again' })).toBeTruthy();
   });
 
+  test('a first read that fails holds the report too, with a way to read again (pre-push P1 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let online = false;
+    const request = makeRequest({
+      photos: () => { if (!online) throw Object.assign(new Error('Failed to fetch'), { status: 0 }); return staged.photos(); },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    expect(await screen.findByText('Couldn’t read the visit’s photos. Check the connection.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+    online = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Read the photos again' }));
+    expect(await screen.findByText('Counter edge')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
+  });
+
   test('Add photo waits while a description is open: the manager never covers its mic (codex local r2 on #5624)', async () => {
     const staged = stagedPhotos();
     await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);
