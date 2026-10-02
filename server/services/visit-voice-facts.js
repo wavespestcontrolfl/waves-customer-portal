@@ -41,7 +41,6 @@ const VOICE_FACTS_VERSION = 'visit-voice-facts-v6';
 // for a shorter note.
 const MAX_NOTE_CHARS = 8000;
 const MIN_QUOTE_CHARS = 4;
-const MAX_PESTS = 6;
 const MAX_PEST_WORDS = 4;
 const MAX_PEST_CHARS = 40;
 // The technician waits on this beside the report writer; a stalled primary
@@ -247,11 +246,23 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
 // "No sign of roaches", "no evidence of any ants": the pest is denied too.
 const PEST_DENIED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+(?:signs?|evidence|traces?|activity)\s+(?:of\s+)?(?:any\s+)?$/;
+// An exclusion turns its clause around: "treated for everything except
+// spiders" left the spiders out, while "no activity except ants" found the
+// ants. A pest excepted from a clause that denies nothing is denied (GitHub
+// Codex on #5538).
+const PEST_EXCLUSION_RE = /\b(?:except(?:\s+for)?|excluding|other\s+than)\s+(?:the\s+|any\s+)?$/;
+function excludedPest(before) {
+  const exclusion = before.match(PEST_EXCLUSION_RE);
+  if (!exclusion) return false;
+  const { from } = clauseBounds(before, exclusion.index);
+  return !DENIAL_IN_RE.test(before.slice(from, exclusion.index));
+}
 // The ways a mention's own words deny the pest, read from the words before
 // and after it: "no roaches", "no sign of roaches", "roaches: none".
 const MENTION_DENIALS = [
   (before) => DENIAL_RIGHT_BEFORE_RE.test(before),
   (before) => PEST_DENIED_BEFORE_RE.test(before),
+  excludedPest,
   (before, after) => TRAILING_DENIAL.pest.test(after),
 ];
 // Between two treatment words of one phrase ("applied bait", "placed bait
@@ -582,7 +593,9 @@ function validateVoiceFacts(json, note) {
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
-    pests: targets.slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
+    // Every target the note holds up, never a silent cut (GitHub Codex on
+    // #5538): each one is grounded and tied to a treatment.
+    pests: targets.map(([name, quote]) => ({ name, quote })),
     // Pests the note treats for that the reading left out (Codex #5538).
     unclearPests: pestsLeftOut(grounding, heardNames),
     ...readSpray(answer.spray || {}, grounding),
@@ -664,10 +677,18 @@ function sprayInNote(note) {
 function readSpray(spray, grounding) {
   const said = sprayInNote(grounding);
   if (spray.method === 'none') {
-    // Heard but not in the note's words: unclear, so the sheet asks rather than
-    // record the house mix as sprayed.
-    const grounded = !!groundedQuote(spray.quote, grounding);
-    return { spray: null, unclearSpray: !grounded, noSpray: grounded };
+    // "Didn't spray" stands only on a grounded quote that denies spraying
+    // ("didn't spray today", "held off on spraying"); anything else, words the
+    // note does not hold or a quote that says it sprayed, is unclear, so the
+    // sheet asks rather than hold every spray product (GitHub Codex on
+    // #5538).
+    const grounded = groundedQuote(spray.quote, grounding) || '';
+    const sprays = [...grounded.matchAll(new RegExp(SPRAY_WORD_RE.source, 'g'))];
+    const denies = (m) => DENIAL_RIGHT_BEFORE_RE.test(grounded.slice(0, m.index));
+    // Every spray word in it denied or not today ("didn't spray today, will
+    // spray next visit"), and no spray around the house elsewhere in the note.
+    const deniesSpray = sprays.some(denies) && sprays.every((m) => denies(m) || notToday(grounded, m.index)) && !said.perimeter;
+    return { spray: null, unclearSpray: !deniesSpray, noSpray: deniesSpray };
   }
   // Not said, or not a method: a note that says how (around the house) or
   // that it did not spray holds the sheet rather than record a spot spray.

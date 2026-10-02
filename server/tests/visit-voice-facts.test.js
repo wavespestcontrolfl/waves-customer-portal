@@ -581,6 +581,42 @@ describe('validateVoiceFacts', () => {
       'Applied granular bait in the yard.'), 'Outside')).toBe('heard');
   });
 
+  test('a place the prompt files under another area is never this area\'s (GitHub Codex on #5538)', () => {
+    const facts = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'Treated the patio' }], pests: [], spray: { method: 'not_said', quote: '' } },
+      'Treated the patio for ants.');
+    expect(placeIn(facts, 'Inside')).toBe('unclear');
+  });
+
+  test('a pest excepted from a treatment is left out; one excepted from a denial was found (GitHub Codex on #5538)', () => {
+    const excepted = validateVoiceFacts({
+      areas: [], pests: [{ name: 'spiders', quote: 'Treated for everything except spiders' }], spray: { method: 'not_said', quote: '' },
+    }, 'Treated for everything except spiders.');
+    expect(excepted).toMatchObject({ pests: [], unclearPests: [] });
+    const found = validateVoiceFacts({
+      areas: [], pests: [{ name: 'ants', quote: 'No activity except ants in the kitchen' }], spray: { method: 'not_said', quote: '' },
+    }, 'No activity except ants in the kitchen. Baited the kitchen for them.');
+    expect(found.pests.map((pest) => pest.name)).toEqual(['ants']);
+  });
+
+  test('"didn\'t spray" stands only on a quote that denies spraying (GitHub Codex on #5538)', () => {
+    const read = (quote, note) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'none', quote } }, note);
+    expect(read('Sprayed outside for ants', 'Sprayed outside for ants.')).toMatchObject({ noSpray: false, unclearSpray: true });
+    expect(read('Baited the kitchen', 'Baited the kitchen.')).toMatchObject({ noSpray: false, unclearSpray: true });
+    expect(read("Didn't spray today, will spray next visit", "Didn't spray today, will spray next visit. Baited the kitchen."))
+      .toMatchObject({ noSpray: true, unclearSpray: false });
+    expect(read('Held off on spraying', 'Held off on spraying, rain coming.')).toMatchObject({ noSpray: true, unclearSpray: false });
+    // A spray around the house elsewhere in the note contradicts it.
+    expect(read("Didn't spray inside", "Didn't spray inside. Sprayed around the house for ants.")).toMatchObject({ noSpray: false, unclearSpray: true });
+  });
+
+  test('every pest the note treats for is kept, never cut at six (GitHub Codex on #5538)', () => {
+    const names = ['ants', 'roaches', 'spiders', 'silverfish', 'earwigs', 'crickets', 'wasps'];
+    const note = 'Treated for ants, roaches, spiders, silverfish, earwigs, crickets and wasps.';
+    const facts = validateVoiceFacts({ areas: [], pests: names.map((name) => ({ name, quote: note.slice(0, -1) })), spray: { method: 'not_said', quote: '' } }, note);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(names);
+    expect(facts.unclearPests).toEqual([]);
+  });
+
   test('a spray reading needs its own grounded quote that says it sprayed (pre-push P1 on #5538)', () => {
     const note = 'Did not spray today; placed bait inside for ants.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
