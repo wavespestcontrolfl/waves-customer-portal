@@ -940,7 +940,7 @@
       "expected": {
         "products": [],
         "visit": {
-          "pests": [],
+          "pests": ["Ants"],
           "otherPest": "",
           "areas": [
             "Outside"
@@ -948,7 +948,7 @@
           "method": "",
           "linearFt": null,
           "activity": "",
-          "heard": "I sprayed around that window on the outside"
+          "heard": "Customer said the ants were coming in through the kitchen window ... I sprayed around that window on the outside"
         },
         "customerNote": {
           "present": true
@@ -1154,7 +1154,9 @@
             "Ants"
           ],
           "otherPest": "",
-          "areas": [],
+          "areas": [
+            "Outside"
+          ],
           "method": "perimeter_spray",
           "linearFt": null,
           "activity": "",
@@ -1200,10 +1202,10 @@
           "areas": [
             "Outside"
           ],
-          "method": "",
+          "method": "perimeter_spray",
           "linearFt": null,
           "activity": "",
-          "heard": "Spiders outside"
+          "heard": "Taurus four ounces on the perimeter ... Spiders outside"
         },
         "customerNote": {
           "present": true
@@ -1367,6 +1369,7 @@
           ],
           "otherPest": "",
           "areas": [
+            "Inside",
             "Garage"
           ],
           "method": "",
