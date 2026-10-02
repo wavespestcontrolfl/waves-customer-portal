@@ -178,18 +178,23 @@ async function offerRescheduleLink(customerId, actions) {
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
     .whereIn('status', ['pending', 'confirmed'])
-    .select('id', 'visit_id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
+    .select('id', 'scheduled_date', 'service_type', 'window_start', 'reschedule_token')
     .orderBy('scheduled_date')
     .limit(3);
 
-  // Same verdict the portal's own Reschedule button uses (routes/schedule.js):
-  // a token, and not a grouped or frozen visit (the page refuses those). An
-  // unreadable membership fails closed — no button.
-  const { groupedVisit } = require('../../routes/reschedule-public');
+  // A button only for a visit the reschedule page itself will accept: its own
+  // loader and GET verdict (account state, status, dispatch review, grouped or
+  // frozen visit, the self-serve move notice window), never a mirror of it.
+  // Any failure fails closed — no button.
+  const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const visits = [];
   for (const row of rows) {
     if (!row.reschedule_token) continue;
-    if ((await groupedVisit(row)) !== false) continue;
+    const verdict = await loadById(row.id).then((svc) => pageEligibility(svc)).catch((err) => {
+      logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
+      return null;
+    });
+    if (!verdict?.ok) continue;
     const dateKey = dateKeyOf(row.scheduled_date);
     const type = String(row.service_type || 'visit');
     addAction(actions, {

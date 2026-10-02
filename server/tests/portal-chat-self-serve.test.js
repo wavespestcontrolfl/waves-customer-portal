@@ -5,11 +5,13 @@
 // chats escalated, 49 escalation rows never claimed).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../routes/reschedule-public', () => ({ groupedVisit: jest.fn() }));
+jest.mock('../routes/reschedule-public', () => ({
+  _internals: { loadById: jest.fn(async (id) => ({ id })), pageEligibility: jest.fn() },
+}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const db = require('../models/db');
-const { groupedVisit } = require('../routes/reschedule-public');
+const { loadById, pageEligibility } = require('../routes/reschedule-public')._internals;
 const NotificationService = require('../services/notification-service');
 const { TOOLS, PORTAL_TOOLS, executeToolCall } = require('../services/ai-assistant/tools');
 const assistant = require('../services/ai-assistant/assistant');
@@ -42,18 +44,28 @@ describe('portal tools', () => {
     ]);
   });
 
-  test('offer_reschedule_link builds a button only for a visit the self-serve page will accept', async () => {
+  test('offer_reschedule_link builds a button only for a visit the reschedule page itself accepts', async () => {
     const query = mockUpcoming([
-      { id: 1, visit_id: 'v1', scheduled_date: new Date('2026-10-09T00:00:00Z'), service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' },
-      { id: 2, visit_id: 'v2', scheduled_date: '2026-10-20', service_type: 'Lawn Care', window_start: '13:00', reschedule_token: 'tok_two' },
-      { id: 3, visit_id: null, scheduled_date: '2026-11-01', service_type: 'Mosquito', window_start: '09:00', reschedule_token: null },
+      { id: 1, scheduled_date: new Date('2026-10-09T00:00:00Z'), service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' },
+      { id: 2, scheduled_date: '2026-10-20', service_type: 'Lawn Care', window_start: '13:00', reschedule_token: 'tok_two' },
+      { id: 3, scheduled_date: '2026-10-21', service_type: 'Termite', window_start: '08:00', reschedule_token: 'tok_three' },
+      { id: 4, scheduled_date: '2026-10-22', service_type: 'Rodent', window_start: '08:00', reschedule_token: 'tok_four' },
+      { id: 5, scheduled_date: '2026-11-01', service_type: 'Mosquito', window_start: '09:00', reschedule_token: null },
     ]);
-    groupedVisit.mockImplementation(async (row) => (row.id === 2 ? 'unknown' : false));
+    // The page's own verdicts: inside the move notice window, awaiting
+    // dispatch review, and an unreadable check all mean no button.
+    pageEligibility.mockImplementation(async (svc) => {
+      if (svc.id === 2) return { ok: false, reason: 'self_serve_notice' };
+      if (svc.id === 3) return { ok: false, reason: 'pending_review' };
+      if (svc.id === 4) throw new Error('lookup failed');
+      return { ok: true };
+    });
     const actions = [];
 
     const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
 
     expect(query.where).toHaveBeenCalledWith('customer_id', 'cust-1');
+    expect(loadById.mock.calls.map(([id]) => id)).toEqual([1, 2, 3, 4]);
     expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' }]);
     expect(result.available).toBe(true);
     expect(result.visits).toEqual([expect.objectContaining({ date: '2026-10-09', type: 'Pest Control' })]);
@@ -62,8 +74,8 @@ describe('portal tools', () => {
   });
 
   test('no movable visit tells the model to hand off, and shows no button', async () => {
-    mockUpcoming([{ id: 1, visit_id: 'v1', scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' }]);
-    groupedVisit.mockResolvedValue(true);
+    mockUpcoming([{ id: 1, scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' }]);
+    pageEligibility.mockResolvedValue({ ok: false, reason: 'grouped' });
     const actions = [];
 
     const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
