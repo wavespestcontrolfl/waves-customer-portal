@@ -854,13 +854,17 @@ async function resolveCustomerSelector(params, input, context, schema) {
   // owner-direct fallback never bypasses (Codex r3 on #5563), because the
   // readers resolve customer_id before customer_name and would answer about
   // the id while the owner asked about the name.
-  const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
-  const conflict = { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
-  if (suppliedId && matches.length && !matches.some(customer => customer.id === suppliedId)) return conflict;
-  // The same for a name plus a phone: judged on the name's matches before
-  // task authority narrows them, so an empty or unrelated task scope cannot
+  // Every supplied selector must fit ONE matched row (a shared name with
+  // customer A's id and customer B's phone fits none), judged before task
+  // authority narrows the matches so an empty or unrelated task scope cannot
   // turn the conflict into a bypassable scope refusal (pre-push on r3).
-  if (named && params.phone && matches.length && !matches.some(customer => digits(customer.phone) === digits(params.phone))) return conflict;
+  const suppliedId = params.customer_id ? String(params.customer_id).toLowerCase() : null;
+  const fitsEverySelector = customer => (!suppliedId || customer.id === suppliedId)
+    && (!params.phone || digits(customer.phone) === digits(params.phone));
+  if ((suppliedId || (named && params.phone)) && matches.length && !matches.some(fitsEverySelector)) {
+    return { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
+  }
+  const conflict = { error: 'The customer name, phone and customer id on this lookup do not name the same customer', code: 'selector_conflict' };
   const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
   const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
   if (customer && selectorMismatch(customer, params, digits)) return conflict;

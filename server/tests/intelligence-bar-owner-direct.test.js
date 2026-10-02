@@ -295,6 +295,14 @@ describe('reads for the owner login', () => {
     expect(await Context.prepareReadInput(phoneConflict, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
     const phoneAgrees = await Context.prepareReadInput({ customer_name: 'Synthetic Person', phone: '941-555-0001' }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
     expect(phoneAgrees.input.customer_id).toBe(A);
+    // Two customers share the name: A's id with B's phone fits neither row.
+    rows.customers[1].first_name = 'Synthetic'; rows.customers[1].last_name = 'Person';
+    const split = { customer_name: 'Synthetic Person', customer_id: A, phone: '9415550002' };
+    expect(await Context.prepareReadInput(split, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput(split, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    const whole = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A, phone: '9415550001' }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
+    expect(whole.input.customer_id).toBe(A);
+    rows.customers[1].first_name = 'Other';
     // The same name with its own id is fine.
     const agree = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
     expect(agree.input.customer_id).toBe(A);
