@@ -578,7 +578,7 @@ function splitClauses(sentence) {
 // Negations that clear a claim clause — after the idioms that merely
 // contain a negation word are struck out.
 const NEGATION_IDIOMS = /\b(?:no\s+doubt|no\s+question|no\s+wonder|no\s+joke|not\s+only|not\s+just|never\s+fails?\s+to|no\s+second-?guessing|no\s+matter|not\s+to\s+mention|no\s+surprise|not\s+least)\b/gi;
-const NEGATION = /\b(?:no|not|never|nor|don't|doesn't|didn't|won't|wouldn't|cannot|can't|couldn't|isn't|aren't|wasn't|weren't|hasn't|haven't|without|unrelated|independent|nothing\s+to\s+do|myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
+const NEGATION = /\b(?:idiomneg\d+|no|not|never|nor|don't|doesn't|didn't|won't|wouldn't|cannot|can't|couldn't|isn't|aren't|wasn't|weren't|hasn't|haven't|without|unrelated|independent|nothing\s+to\s+do|myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
 // "It's a myth that termites DON'T swarm again" asserts the claim.
 const MYTH_THAT_NEGATED = /\bmyth\s+that\b[^]*?\b(?:no|not|never|don't|doesn't|won't|cannot|can't)\b/i;
 // A bare "Myth" label as the clause before the claim ("Myth: ...",
@@ -767,7 +767,10 @@ const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:abou
 // same cap as "a maximum of 80°F".
 // It must end the clause: "90°F maximum damage" is not a ceiling.
 const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
-const TEMP_CONTEXT_BEFORE = /\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|it(?:\s+is|['’]s)|hits?|reach(?:es)?|degrees?)\b|°/i;
+// Temperature wording within the three words before the figure: "highs are
+// 85 or more", "temperatures climb to 85 or higher". "it is estimated that
+// large patch damaged 85 or more properties" has none (codex #5561 round 1).
+const TEMP_CONTEXT_BEFORE = /(?:\b(?:temp(?:erature)?s?|highs?|lows?|readings?|thermometer|mercury|heat\s+index|degrees?)\b|°)\s*(?:\S+\s+){0,3}$/i;
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -788,7 +791,7 @@ function foldTemperatures(sentence) {
     // No unit: "85 or more" is a temperature only when temperature wording
     // leads into it ("temperatures are 85 or higher"). "damaged 85 or more
     // properties" is a count, whatever the noun (codex #5414 round 7).
-    if (!unit && !TEMP_CONTEXT_BEFORE.test(whole.slice(Math.max(0, offset - 60), offset))) return match;
+    if (!unit && !TEMP_CONTEXT_BEFORE.test(whole.slice(Math.max(0, offset - 80), offset))) return match;
     const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValueF(figure, unit));
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
@@ -799,8 +802,11 @@ function foldTemperatures(sentence) {
   text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
   // "anything but" holds a conjunction the clause splitter would cut on;
   // it travels as one token so the idiom stays on its activity word.
+  // An outer negation composes with it: "never anything but active" is
+  // "always active", an affirmative token (codex #5561 round 1 P1).
+  text = text.replace(/\b(?:not|never|no\s+longer|\w+n['’]t)\s+anything\s+but\b/gi, (match) => token('idiompos', match));
   text = text.replace(/\banything\s+but\b/gi, (match) => token('idiomneg', match));
-  const restore = (clause) => String(clause).replace(/\b(?:hottemp|cooltemp|idiomneg)(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
+  const restore = (clause) => String(clause).replace(/\b(?:hottemp|cooltemp|idiomneg|idiompos)(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
   return { text, restore };
 }
 
@@ -837,10 +843,11 @@ const PATCH_TRIGGER = new RegExp(
 const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:ever\\s+)?(?:(?:a|an|much\\s+of\\s+a)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
-const NEGATED_RECEDE = new RegExp(`\\b(?:idiomneg\\d+|far\\s+from|not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
-// "anything but active", "far from common": an idiom that negates the
-// activity word it sits directly before.
-const PATCH_IDIOM_NEGATION = new RegExp(`\\b(?:idiomneg\\d+|anything\\s+but|far\\s+from|nowhere\\s+near|the\\s+opposite\\s+of)\\s+(?:being\\s+)?${PATCH_ACTIVE.source.replace(/^\\b/, '')}`, 'i');
+const NEGATED_RECEDE = new RegExp(`\\b(?:idiomneg\\d+|not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+// "anything but active" denies the activity word: the idiom is one token
+// (see foldTemperatures) that NEGATION and NEGATED_RECEDE both read, so it
+// carries the same scope as "not". "far from" is not read as a negation:
+// "large patch far from homes" is a place (codex #5561 round 1).
 const MYTH_WORD = /\b(?:myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
 
 // The clause is the fact that large patch recedes: a receding verb, not
@@ -934,7 +941,7 @@ function patchClaimInSentence(sentence, previousSentence = '') {
       if (MYTH_WORD.test(judged)) continue;
       return folded.restore(clause);
     }
-    if (patchRecedes(judged) || clauseDenies(judged, PATCH_IDIOM_NEGATION) || PATCH_CONTRAST.test(span)) continue;
+    if (patchRecedes(judged) || clauseDenies(judged) || PATCH_CONTRAST.test(span)) continue;
     return folded.restore(clause);
   }
   return null;

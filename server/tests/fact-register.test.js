@@ -666,7 +666,9 @@ describe('findUnverifiedClaims', () => {
       'Large patch thrives when temperatures are 30 centigrade or higher.',
       // the idiom on a receding word is the claim
       'Large patch is anything but dormant when temperatures are 85°F.',
-      'Large patch is far from dormant in summer.',
+      'Large patch is never anything but active in summer.',
+      'Large patch isn\u2019t anything but active when temperatures are 85°F.',
+      'Large patch thrives in summer despite being far from common in winter.',
       // the idiom must sit on the activity word
       'Large patch thrives when temperatures are 85°F, far from the coast.',
       // unitless trailing bounds with temperature wording are still temperatures
@@ -789,7 +791,11 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active at an 80°F maximum air temperature.',
       // an idiom that negates the activity word
       'Large patch is anything but active when temperatures are 85°F.',
-      'Large patch is far from common when temperatures are 90 degrees.',
+      'Large patch is anything but common when temperatures are 90 degrees.',
+      'Large patch is never anything but dormant in summer.',
+      'Large patch far from homes remains dormant in summer.',
+      'It is estimated that large patch damaged 85 or more properties.',
+      'Large patch was found on 85 or more lawns last year.',
       // a unitless trailing bound with no temperature wording is a count
       'Large patch damaged 85 or more properties last year.',
       'Large patch showed up in 90 or more neighborhoods this fall.',
