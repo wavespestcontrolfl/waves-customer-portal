@@ -783,6 +783,38 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
   });
 
+  test('every press that reaches a schedule is on the customer\'s activity log: who, which button, what happened (owner 10-01)', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    const ADMIN = '7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f';
+    const logRows = () => writes().filter((w) => w.table === 'activity_log' && w.write === 'insert').map((w) => w.args[0]);
+    mockDb.results.customer_dunning_schedules = 1;
+    await Wiring.controlCustomerSchedule(CUST, 'pause', { adminId: ADMIN, reason: 'customer called', now: NOW });
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'in_flight' });
+    await Wiring.controlCustomerSchedule(CUST, 'release', { adminId: ADMIN, now: NOW });
+    await Wiring.controlCustomerSchedule(CUST, 'send-now', { adminId: 'not-a-uuid', now: NOW }); // dark: refused
+    const [pause, release, send] = logRows();
+    expect(pause).toMatchObject({ customer_id: CUST, admin_user_id: ADMIN, action: 'combined_reminders_pause' });
+    expect(pause.description).toBe('Combined overdue reminders: Pause pressed — done. Reason: customer called');
+    expect(JSON.parse(pause.metadata)).toMatchObject({ control: 'pause', via: 'customer', scheduleId: 'sched-1', httpStatus: 200 });
+    expect(release).toMatchObject({ action: 'combined_reminders_release', admin_user_id: ADMIN });
+    // a refusal is recorded too, with the office's own words (one full stop)
+    expect(release.description).toMatch(/^Combined overdue reminders: Release pressed — not done: [^.].*[^.]\.$/);
+    expect(JSON.parse(release.metadata)).toMatchObject({ control: 'release', httpStatus: 409 });
+    expect(send).toMatchObject({ action: 'combined_reminders_send_now', admin_user_id: null }); // a non-uuid staff id is never written to the FK
+    expect(JSON.parse(send.metadata)).toMatchObject({ code: 'SCHEDULE_NOT_LIVE' });
+  });
+
+  test('no record without a schedule; a failed record never fails the press', async () => {
+    const openFor = jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(undefined);
+    await Wiring.controlCustomerSchedule(CUST, 'pause', { now: NOW });
+    expect(writes().filter((w) => w.table === 'activity_log')).toHaveLength(0);
+    openFor.mockResolvedValue(openRow);
+    mockDb.results.customer_dunning_schedules = 1;
+    mockDb.throwOn.activity_log = new Error('log table down');
+    expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { now: NOW })).toMatchObject({ status: 200, body: { ok: true } });
+    delete mockDb.throwOn.activity_log;
+  });
+
   test('200 with what happened: pause / resume / release / a send that went out', async () => {
     jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
     mockDb.results.customer_dunning_schedules = 1;

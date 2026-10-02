@@ -98,6 +98,7 @@ const CODES = Object.freeze({
   GEO_STATEWIDE: 'TOPIC_GEO_STATEWIDE',
   CANNIBALIZES_EXISTING: 'TOPIC_CANNIBALIZES_EXISTING',
   SLUG_COLLIDES_LIVE: 'TOPIC_SLUG_COLLIDES_LIVE',
+  RETIRED_TOPIC: 'TOPIC_RETIRED',
 });
 
 // Regional phrasings that anchor a topic to the footprint without naming a
@@ -601,13 +602,13 @@ function evaluateDraftFraming(draft = {}) {
 }
 
 /**
- * evaluateDraftTargeting(draft, { index, category, service }) — the full
+ * evaluateDraftTargeting(draft, { index, category, service, targetSites }) — the full
  * post-draft check: framing on the writer's own title/slug, THEN entity
  * ownership on the writer's own primary_keyword (emit_draft does not require
  * it to equal the brief keyword, so a clean brief can still emit an owned
  * entity). `stage` tells the caller which check failed.
  */
-function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null } = {}) {
+function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null, targetSites = null } = {}) {
   const framing = evaluateDraftFraming(draft);
   const fm = draft?.frontmatter || {};
   if (!framing.ok) {
@@ -617,10 +618,10 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
     let extra = [];
     try {
       const own = evaluate(
-        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targetSites: targetSites || fm.domains, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
         { index, requireCorpus: false, ownershipOnly: true }
       );
-      extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE);
+      extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE || f.code === CODES.RETIRED_TOPIC);
     } catch { extra = []; }
     // Semantic-city failures too: the single retry must hear about a bad
     // brief / emitted city as well as the framing.
@@ -631,7 +632,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targetSites: targetSites || fm.domains, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -684,8 +685,19 @@ function isLiveRow(post = {}) {
  * BEFORE the corpus is loaded, so a corpus outage never blocks a refresh.
  */
 async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLiveIndex, category = null } = {}) {
-  if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
+  // A legacy row can still look live (status='published', astro_status
+  // 'merged', astro_live_url) after its post was retired: republishing it
+  // would recreate the deleted file at a URL that now 301s. The exact
+  // retired URL is refused before the refresh exemption.
+  // The legacy publisher writes hub-only frontmatter whatever the row's
+  // target_sites, so no spoke exemption applies on this path.
+  if (slug) {
+    const leafWrite = normalizeSlug(slug).split('/').filter(Boolean).length === 1;
+    const retiredUrl = retiredTopicFindings({ slug, category, leafOnly: leafWrite, urlOnly: true });
+    if (retiredUrl.length) return { ok: false, applicable: true, findings: retiredUrl, skipped: null };
+  }
+  if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   // flatWrite: publishAstro commits src/content/blog/<leaf>.md for a
   // leaf-only slug whatever the category — the same-leaf collision applies.
   const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
@@ -990,9 +1002,15 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     const named = findings.flatMap((f) => f.cities || []).map((c) => String(c).toLowerCase());
     findings.push(...semanticCityFindings(cities.filter((c) => !named.some((n) => new RegExp(`(?:^|\\W)${escapeRe(n)}(?:\\W|$)`, 'i').test(c)))));
   }
+  // Ownership is judged WITHIN a category: a chemical or species name can
+  // legitimately anchor a termite post and a mosquito post. Unknown category
+  // → compare against all (conservative).
+  const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
+  // Retired topics need no corpus: judged in every mode, before any fetch.
+  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
   const idx = index || (corpus ? indexCorpus(corpus) : null);
   if (!idx) {
-    // Pre-spend: a geo verdict needs no corpus and stands on its own.
+    // Pre-spend: a geo or retired-topic verdict needs no corpus and stands on its own.
     if (findings.length) return { ...base, ok: false, findings, geo };
     if (requireCorpus) throw new Error('topic-targeting-gate: blog corpus required for entity-ownership check');
     return { ...base, geo, skipped: 'no_corpus' };
@@ -1002,10 +1020,6 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // the runner grants one feedback retry, and a redraft that fixes the city
   // but keeps the owned entity would otherwise spend it on a finding it was
   // never told about.
-  // Ownership is judged WITHIN a category: a chemical or species name can
-  // legitimately anchor a termite post and a mosquito post. Unknown category
-  // → compare against all (conservative).
-  const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   const selfUrl = normalizeSlug(slug);
   const selfLeaf = slugLeaf(selfUrl);
   // The publisher commits the CATEGORY route (categoryRouteSlug: <category>/
@@ -1082,6 +1096,139 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   return { ...base, ok: findings.length === 0, findings, geo, entity_owners, category, corpus_size: idx.posts.length };
 }
 
+// ── retired topics ─────────────────────────────────────────────────────
+// Owner 2026-10-01 (blog prune, D1): thin posts were merged into a stronger
+// page and 301'd there. The live corpus no longer holds them, so nothing
+// else stops the publisher from writing the same topic again. A NEW blog on
+// a retired URL, or whose keyword / title / slug reduces to the same topic
+// words as a retired post, is refused; grow merged_into as a refresh.
+// Static data (no fetch): the check can never fail open on an outage.
+const RETIRED_POSTS = require('../../data/retired-blog-topics-v1.json').posts;
+
+// Words that frame a "get rid of" post without naming its topic. Dropped
+// from both sides, with GENERIC_TOKENS, so "paper wasp pest control tips"
+// still reduces to the retired "paper wasp".
+const RETIRED_FILLER = new Set([
+  'rid', 'getting', 'remove', 'removal', 'removing', 'kill', 'killing', 'control', 'treatment',
+  'eliminate', 'eliminating', 'elimination', 'eliminated', 'eradicate', 'eradicating', 'eradicated',
+  'deal', 'dealing', 'treat', 'treating', 'treated', 'removed', 'killed', 'controlling', 'controlled',
+  'service', 'company', 'best', 'guide', 'near', 'lawn',
+]);
+
+const EXTERMINATION_WORDS = new Set(['exterminator', 'extermination', 'exterminate', 'exterminating']);
+
+// The registry retires HUB posts. A candidate published only to spoke
+// domains (spoke seeds carry target_sites; a draft carries frontmatter
+// `domains`) is a different page on a different site, so it is not judged
+// against it. No sites listed = the hub.
+function spokeOnly(targetSites) {
+  const raw = Array.isArray(targetSites) ? targetSites : asStringList(targetSites);
+  const hosts = raw.map((x) => (x && typeof x === 'object' ? x.domain : x))
+    .map((x) => String(x || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
+    .filter(Boolean);
+  const { HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
+  return hosts.length > 0 && hosts.every((h) => !HUB_SITE_KEYS.includes(h));
+}
+
+function stem(w) {
+  if (w.length > 4 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  if (/(?:ch|sh|x|ss)es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 5 && w.endsWith('oes')) return w.slice(0, -2); // mosquitoes, tomatoes
+  if (w.length > 3 && w.endsWith('s') && !/(?:ss|us|is)$/.test(w)) return w.slice(0, -1); // fungus, analysis stay
+  return w;
+}
+
+// Alternate names and closed compounds of the same pest reduce alike on
+// both sides: "cockroaches" / "roaches", "bedbugs" / "bed bugs".
+const PEST_NAME_ALIASES = [
+  [/\bcockroach(es)?\b/gi, 'roach$1'],
+  [/\bbed-?bugs\b/gi, 'bed bugs'],
+  [/\bbed-?bug\b/gi, 'bed bug'],
+  [/\byellow-?jackets\b/gi, 'yellow jackets'],
+  [/\byellow-?jacket\b/gi, 'yellow jacket'],
+  [/\bbox[- ]?elder\b/gi, 'boxelder'],
+  [/\bwhite-?footed\b/gi, 'white footed'],
+  [/\bmice\b/gi, 'mouse'],
+];
+function canonicalPestNames(text) {
+  return PEST_NAME_ALIASES.reduce((t, [re, to]) => t.replace(re, to), text);
+}
+
+// The topic of a keyword / title / slug: its content words, singular, with
+// served cities, geo qualifiers and framing words dropped — so "how to get
+// rid of paper wasps in Sarasota" and /pest-control/get-rid-of-paper-wasps/
+// both reduce to "paper wasp".
+function topicKey(text) {
+  const cities = cityTokens();
+  // Footprint regions ("Manatee County", "Southwest Fla.") and a bare
+  // statewide qualifier are geo too: changing only the geo must not
+  // resurrect a retired topic.
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  const words = tokenize(geoFree)
+    .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
+    .map(stem)
+    .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));
+  // "Exterminator" / "extermination" frame a pest ("paper wasp exterminator")
+  // but ARE the topic when nothing else is left ("what do exterminators get
+  // rid of").
+  const named = words.filter((w) => !EXTERMINATION_WORDS.has(w));
+  return [...new Set(named.length ? named : words)].sort().join(' ');
+}
+
+let retiredIndexCache = null;
+function retiredIndex() {
+  if (retiredIndexCache) return retiredIndexCache;
+  const byUrl = new Map();
+  const byLeaf = new Map();
+  const byTopic = new Map();
+  for (const post of RETIRED_POSTS) {
+    const url = normalizeSlug(post.url);
+    byUrl.set(url, post);
+    byLeaf.set(slugLeaf(url), post);
+    // Keys come from the row's canonical `topics` and its slug leaf (a
+    // decorative slug like skip-the-guesswork-… alone would miss "diy pest
+    // control vs pro"). A post made only of generic words (get-rid-of-pests)
+    // has no key: matching it would block every "pest control <city>" idea,
+    // so it keeps URL protection only.
+    for (const phrase of [...(post.topics || []), slugWords(url)]) {
+      const key = topicKey(phrase);
+      if (key && !byTopic.has(key)) byTopic.set(key, post);
+    }
+  }
+  retiredIndexCache = { byUrl, byLeaf, byTopic };
+  return retiredIndexCache;
+}
+
+function retiredTopicFindings({ query = '', title = '', slug = '', category = null, leafOnly = false, urlOnly = false } = {}) {
+  const idx = retiredIndex();
+  const url = normalizeSlug(slug);
+  const leaf = slugLeaf(url);
+  const routes = [url, category && leaf ? `/${category}/${leaf}/` : ''].filter(Boolean);
+  let hit = routes.map((r) => idx.byUrl.get(r)).find(Boolean) || (leafOnly && leaf ? idx.byLeaf.get(leaf) : null);
+  let where = hit ? 'slug' : null;
+  if (!hit && !urlOnly) {
+    for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
+      const key = text ? topicKey(text) : '';
+      const post = key ? idx.byTopic.get(key) : null;
+      // Scoped to the categories the topic was retired from (the post's own
+      // and its merge target's): category nouns and framing drop out of the
+      // key, so a lawn "rainy season" guide would otherwise read as the
+      // retired pest-control rainy-season post. Unknown category: all.
+      if (post && (!category || [post.url, post.merged_into].some((u) => categoryFromSlug(u) === category))) { hit = post; where = label; break; }
+    }
+  }
+  if (!hit) return [];
+  return [{
+    severity: 'P0',
+    code: CODES.RETIRED_TOPIC,
+    url: hit.url,
+    merged_into: hit.merged_into,
+    message: hit.redirected === false
+      ? `The ${where} matches the retired post ${hit.url}, deleted with no redirect (no page fit it). A new blog may not bring a retired topic back; if it is worth covering, grow the closest live page, ${hit.merged_into}, as a refresh.`
+      : `The ${where} matches the retired post ${hit.url}, merged into ${hit.merged_into} and redirected there. A new blog may not bring a retired topic back; grow ${hit.merged_into} as a refresh instead.`,
+  }];
+}
+
 module.exports = {
   evaluate,
   withTopicMergeLock,
@@ -1100,4 +1247,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

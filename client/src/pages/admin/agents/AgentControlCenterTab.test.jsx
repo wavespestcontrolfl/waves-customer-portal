@@ -258,4 +258,16 @@ describe("metricCells", () => {
     expect(unknown[0].sub).toBe("2 without usage");
     expect(unknown[3].reason).toBe("no outcome recorded");
   });
+
+  it("shows the estimated cost only once the cost phase sends one, and says what it could not price", () => {
+    // no cost phase: the phase reason, as before
+    expect(metricCells(lane(), {})[1]).toEqual({ label: "Cost", reason: "arrives with cost tracking" });
+    const priced = { cost: { source: "openrouter_list_prices", estimate: true, priced: true, pricesFetchedAt: "2026-09-01T11:40:00.000Z" } };
+    expect(metricCells(lane({ estCostUsd: 3.4567, unpricedCalls: 0 }), priced)[1]).toEqual({ label: "Cost", value: "$3.46", sub: "estimate" });
+    expect(metricCells(lane({ estCostUsd: 0.004, unpricedCalls: 2 }), priced)[1]).toEqual({ label: "Cost", value: "< $0.01", sub: "est. · 2 unpriced" });
+    expect(metricCells(lane({ estCostUsd: 0, unpricedCalls: 0 }), priced)[1].value).toBe("$0.00");
+    // phase on but nothing to show: the reason names why
+    expect(metricCells(lane({ ledger: "unrecordable", unrecordableReason: "audio" }), priced)[1].reason).toBe("not in the ledger");
+    expect(metricCells(lane(), { cost: { ...priced.cost, priced: false } })[1].reason).toBe("waiting for the first price pull");
+  });
 });

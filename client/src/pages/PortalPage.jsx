@@ -13110,6 +13110,23 @@ function ReferTab({ customer, onSwitchTab }) {
     );
   }
 
+  // Server says this profile can't be enrolled yet: its phone already
+  // belongs to another account's referral record (a staff data question,
+  // not an outage — GET /api/referrals answers 200 with enrolled:false).
+  // Plain copy, no share link: a code the server never issued must not be
+  // built from customer.referralCode here.
+  if (data?.enrolled === false) {
+    return (
+      <PortalStatePanel
+        icon="waves"
+        eyebrow="Referrals"
+        titleAs="h1"
+        title="Referral sharing isn't connected yet"
+        message="This account's phone number is already linked to another referral record. Text or call us and we'll connect it, then your share link will be ready here."
+      />
+    );
+  }
+
   const referralCode = data?.referralCode || customer?.referralCode || '';
   const shareLink = data?.referralLink || data?.shareLink || (referralCode ? `https://portal.wavespestcontrol.com/r/${referralCode}` : 'https://portal.wavespestcontrol.com');
   const stats = data?.stats || { totalReferrals: 0, converted: 0, totalEarned: 0 };

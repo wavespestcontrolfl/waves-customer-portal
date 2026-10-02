@@ -25,7 +25,8 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/noteRenderedRecurringConsent\(renderedTender\);/);
     expect(src).toMatch(/noteRenderedRecurringConsent\(cardResult\.methodType\);/);
     // r7: every after-visit cohort attests, the held ones included.
-    expect(src).toMatch(/!\(pol\?\.afterVisitConsent === true \|\| pol\?\.afterVisitPaused === true \|\| pol\?\.afterVisitAutopayOff === true\)\) return \{\};/);
+    // ...and a capture that rendered the setup-fee promise (GATE_PAF_SETUP_FEE).
+    expect(src).toMatch(/!\(pol\?\.afterVisitConsent === true \|\| pol\?\.afterVisitPaused === true \|\| pol\?\.afterVisitAutopayOff === true\s*\|\| setupFeeAfterVisitShownRef\.current\)\) return \{\};/);
     expect(src).toMatch(/recurringCardConsentVariant: afterVisit \? 'after_visit_card' : undefined,/);
     expect(src).toMatch(/recurringCardConsentVersion: \(afterVisit \|\| recurringCardSetupIntentIdRef\.current\) \? version : undefined,/);
     // r5: the base card / ACH text's version is attested too, and a newer
@@ -39,8 +40,9 @@ describe('EstimateViewPage accept consent attestation', () => {
   });
 
   it('ONE timing answer (owner 2026-10-01): every surface and the attestation read resolvePaymentTiming, never flags of their own', () => {
-    expect(src).toMatch(/const paymentTiming = resolvePaymentTiming\(\{\s*policy: data\?\.recurringCardPolicy,\s*paymentPreference,\s*serviceMode,\s*invoiceShape: afterVisitInvoiceShape,\s*selectionKey: afterVisitSelectionKey,\s*timingAnswer,\s*\}\);/);
-    expect(src).toMatch(/const captureTiming = captureTimingProps\(paymentTiming\);\s*const afterVisitRendered = captureTiming\.afterVisit;\s*afterVisitTimingShownRef\.current = paymentTiming\?\.attestTiming === true;/);
+    // A setup fee stamped on the first visit (GATE_PAF_SETUP_FEE) is not "at confirm".
+    expect(src).toMatch(/const paymentTiming = resolvePaymentTiming\(\{\s*policy: data\?\.recurringCardPolicy,\s*paymentPreference,\s*serviceMode,[\s\S]{0,200}invoiceShape: setupFeeAfterVisitCopy \? \{ \.\.\.afterVisitInvoiceShape, setupOnly: false \} : afterVisitInvoiceShape,\s*selectionKey: afterVisitSelectionKey,\s*timingAnswer,\s*\}\);/);
+    expect(src).toMatch(/const captureTiming = \{ \.\.\.captureTimingProps\(paymentTiming\), afterVisitSetup: !!setupFeeAfterVisitCopy \};[\s\S]{0,120}const afterVisitRendered = captureTiming\.afterVisit \|\| captureTiming\.afterVisitSetup;\s*afterVisitTimingShownRef\.current = paymentTiming\?\.attestTiming === true;/);
     // Both payment-option renders and both capture surfaces take the one answer.
     // Both payment-option renders and the review confirm summary.
     expect(src.match(/paymentTiming=\{paymentTiming\}/g)).toHaveLength(3);

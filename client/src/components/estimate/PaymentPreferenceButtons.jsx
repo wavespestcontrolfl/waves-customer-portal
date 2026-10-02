@@ -91,6 +91,30 @@ function firstVisitAmount(frequency = {}) {
   return null;
 }
 
+// GATE_PAF_SETUP_FEE (pay-after-first-visit): does THIS selection resolve to
+// the setup-only shape whose fee the accept stamps on the first visit rather
+// than invoicing it (monthly-tier plan: a WaveGuard setup row, no first-visit
+// amount, no bait-station setup row)? `enabled` is the server's
+// recurringCardPolicy.setupFeeAfterFirstVisit (gate + card rail). Shared with
+// EstimateViewPage so the capture consent text and this preview never drift.
+export function setupFeeBilledWithFirstVisit({
+  enabled = false,
+  serviceMode,
+  invoiceMode = false,
+  siteConfirmationHold = false,
+  setupFee = null,
+  extraInvoiceRows = [],
+  selectedFrequency = null,
+} = {}) {
+  if (!enabled || serviceMode === 'one_time' || invoiceMode || siteConfirmationHold) return false;
+  const setupAmount = Number(setupFee?.amount);
+  if (!(Number.isFinite(setupAmount) && setupAmount > 0)) return false;
+  const hasExtraRows = (Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
+    .some((row) => Number(row?.amount) > 0);
+  if (hasExtraRows) return false;
+  return !firstVisitAmount(selectedFrequency || {});
+}
+
 // The standard setup / first-application invoice shape for the selected plan,
 // from the SAME rows the invoice box above the CTA renders. The after-visit
 // card promise ("billed after your first visit") holds only when a first-
@@ -145,6 +169,8 @@ export default function PaymentPreferenceButtons({
   // out when the customer confirms) or 'none'; `held` 'paused' | 'off' (the
   // method is kept but never auto-charged; a pay link follows the visit).
   paymentTiming = null,
+  // Server recurringCardPolicy.setupFeeAfterFirstVisit (GATE_PAF_SETUP_FEE).
+  setupFeeAfterFirstVisit = false,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const oneTimeBooking = isOneTime && !invoiceOnly;
@@ -200,6 +226,12 @@ export default function PaymentPreferenceButtons({
     ...(firstVisit ? [{ label: 'Per application', amount: firstVisit }] : []),
   ];
   const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
+  // Setup-only shape on the card rail: no invoice is minted at accept — the
+  // fee is billed with the first visit — so no "Invoice total" row and no
+  // "we send the invoice" fine print.
+  const setupBilledWithFirstVisit = !heldRecurring && setupFeeBilledWithFirstVisit({
+    enabled: setupFeeAfterFirstVisit, serviceMode, invoiceMode, siteConfirmationHold, setupFee, extraInvoiceRows, selectedFrequency,
+  });
   // Prepay preview mirrors the per-application invoice box, but shows only
   // the plan's LIST annual — never a "total" row: the invoiced amount is
   // resolved server-side (prepay discount, margin floor, commercial tax) and
@@ -266,6 +298,8 @@ export default function PaymentPreferenceButtons({
         ? 'This books a single visit. We do not charge you now.'
         : heldRecurring
           ? 'No payment now — we confirm your exact price on a quick site visit, then bill each application after service.'
+          : setupBilledWithFirstVisit
+            ? 'Choose pay per application. Nothing is charged today — your setup fee is billed with your first visit.'
           : invoiceRows.length > 0
             ? (paymentTiming?.firstInvoice === 'after_visit'
               // Only a first-application invoice rides the card rail: a
@@ -286,7 +320,10 @@ export default function PaymentPreferenceButtons({
   // card capture is billed after the first application, and a first invoice
   // that goes out at confirm gets no "nothing due" claim. Outside the cohort
   // the new-customer card lane keeps its line exactly.
-  const invoiceBoxNote = paymentTiming
+  // A setup fee stamped on the first visit (GATE_PAF_SETUP_FEE) says so first.
+  const invoiceBoxNote = setupBilledWithFirstVisit
+    ? 'Nothing due today — your setup fee is billed with your first visit.'
+    : paymentTiming
     ? (paymentTiming.firstInvoice !== 'after_visit'
       ? ''
       : (paymentTiming.held === 'paused'
@@ -299,6 +336,8 @@ export default function PaymentPreferenceButtons({
     : (prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
+    : setupBilledWithFirstVisit
+      ? 'Approve now — nothing is charged today. Your setup fee is billed with your first visit.'
     : invoiceRows.length > 0
       ? 'Approve now — invoice and secure payment after you approve.'
       : 'Approve now — your first application is billed after completion.';
@@ -385,7 +424,7 @@ export default function PaymentPreferenceButtons({
                   <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(row.amount)}</strong>
                 </div>
               ))}
-              {invoiceTotal > 0 ? (
+              {invoiceTotal > 0 && !setupBilledWithFirstVisit ? (
                 <div style={invoiceTotalStyle}>
                   <span>Invoice total</span>
                   <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>

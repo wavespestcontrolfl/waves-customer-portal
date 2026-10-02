@@ -65,8 +65,9 @@ const PROMPT_VERSION = 'photo-id-v2-plant-1';
 // Gemini's reasoning shares this budget with the JSON answer, and the plant
 // prompts (three identity slots, a condition index) run longer than the pest
 // ones: at 2048 a lawn read came back cut off in the 2026-09-28 photo eval,
-// which the ladder can only treat as a miss.
-const MAX_OUTPUT_TOKENS = 4096;
+// which the ladder can only treat as a miss. 8192 matches the pest engine
+// after its own 2048 cap cut off a live read (2026-10-01).
+const MAX_OUTPUT_TOKENS = 8192;
 const PRETTY_SURE_MIN = 0.80;
 const LIKELY_MIN = 0.55;
 const LINEAGE_CLIMB_MIN = 0.60;
@@ -699,8 +700,8 @@ function plantSafetyFields(entry) {
 // entry to carry a safety line, so it shows only these fixed clauses —
 // never a group's own prose — each chosen when ANY plant under the answered
 // node, reviewed or not, carries that hazard: the node is triaged for its
-// worst member, the pest engine's `unnamedSafetyLineFor` rule (Codex #5186
-// r6 P1). The skin/eye and pet clauses are the pest engine's own wording.
+// worst member, the pest engine's original `unnamedSafetyLineFor` rule
+// (Codex #5186 r6 P1; the pest engine narrowed to named reads 2026-10-01). The skin/eye and pet clauses are the pest engine's own wording.
 const UNNAMED_PLANT_SAFETY_CLAUSES = Object.freeze({
   base: "Until we know exactly which plant this is, don't eat any part of it, and keep kids and pets from chewing on it.",
   swallowed: 'If anyone swallows part of it, call Poison Control at 1-800-222-1222 right away.',
