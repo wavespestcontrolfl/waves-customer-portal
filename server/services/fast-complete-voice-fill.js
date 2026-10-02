@@ -276,7 +276,7 @@ const SYSTEM_PROMPT = `You turn what a pest-control technician said out loud abo
 Rules, in priority order:
 1. Map ONLY onto the listed product ids and the listed option strings. Copy a product id exactly as listed. A product counts only if the tech's words match its listed name or one of its "also called" names clearly and uniquely. A fuzzy, mumbled, partial or ambiguous mention (two products fit, or none do) is NOT a product: put it in "unclear" with reason ambiguous_product or unknown_product. Never invent a product and never guess.
 2. Amounts: set "amount" ONLY when the tech spoke a number for that product, in the same breath as the product, and use exactly that number (a quarter is 0.25, half is 0.5, one and a half is 1.5). If no number was spoken, amount is 0 and unit is "not_said". "Same as last time", "the usual" or "like before" is NOT a number: set sameAsLast true and amount 0. One "same as last time" said for a list of products in the same sentence ("same mix as last time, Taurus, Talstar and the surfactant") applies to every product in that list. Never calculate, convert, estimate or fill in a typical amount. Pick the unit only from the units listed for that product; if the tech spoke a unit that is not listed for it (tablespoons, quarts, cups), set amount 0, unit "not_said" and add an unclear item with reason unclear_unit. Ounces of a liquid are fl_oz.
-3. "heard" on every product and on the visit: copy the tech's own words from the transcript, exact and short (a few words, never more than one sentence), including the number and unit if one was spoken. Never paraphrase.
+3. "heard" on every product and on the visit: copy the tech's own words from the transcript, exact and short (a few words, never more than one sentence), including the number and unit if one was spoken. Never paraphrase. A product's heard must contain the name the tech used for that product together with its number and unit word ("Taurus, four ounces"). The visit's heard must contain the words that place every pest, area, method and activity level you pick ("spot treated the garage for roaches, light activity"); a value the words do not support is dropped.
 4. Visit fields: pests, areas, how it was applied (method), activity seen and linear feet, only when the tech said them. Pests: the pests the tech says they found or treated for, including a pest the customer reported that the tech then treated. Pests must be one of the listed pests; a pest not on the list goes in "Other" with its name in otherPest. Areas: set an area when the tech's words place the treatment there. Outside means anything treated outdoors: the perimeter, foundation, yard, eaves, the outside of a door or window, "out front", "around the back door". Inside means inside the home: kitchen, bathroom, baseboards, "inside". Garage means the garage. If something was not said, leave it empty ([], "", "not_said", 0). Do not infer areas or pests from products.
 5. Notes: customerNote is what belongs on the customer's service report: what was found and done, in the tech's words, lightly cleaned up, nothing added, no amounts or products the tech did not state. officeNote is ONLY what the tech marked as internal ("note for the office", "tell the office", "office:") plus plain internal matters such as gate codes, access problems, dog or lock issues and billing remarks. Never put internal matters in customerNote. Empty string when there is nothing.
 6. unclear: each thing the tech said that you could not map with confidence, with the words heard. Prefer unclear over a guess, always.
@@ -320,30 +320,130 @@ function heardInTranscript(heard, normTranscript) {
   return pieces.length > 0 && pieces.every((piece) => ` ${normTranscript} `.includes(` ${piece} `));
 }
 
+// ── Spoken quantities ────────────────────────────────────────────────────
+// What the tech SAID, as { value, unit, ambiguous } mentions: digits, vulgar
+// fractions, number words ("four", "twenty five", "a hundred and eighty", "a
+// quarter", "one and a half", "three quarters", "point two five") and the unit
+// word right after ("ounces", "gallon", "grams", "teaspoons", "can"). "an
+// ounce" is one ounce. A number joined to another by "or" ("three or four") is
+// ambiguous and authorizes nothing.
 const VULGAR = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125 };
-// Numbers written as digits: 4, 0.25, .25, 1/2, 1 1/2, 1½, ¼.
-function digitValues(text) {
-  const values = [];
-  const re = /(\d+)\s*([½¼¾⅓⅔⅛])|([½¼¾⅓⅔⅛])|(\d+)\s+(\d+)\/(\d+)|(\d+)\/(\d+)|(\d*\.\d+|\d+)/g;
-  let m;
-  while ((m = re.exec(String(text || ''))) !== null) {
-    if (m[2]) values.push(Number(m[1]) + VULGAR[m[2]]);
-    else if (m[3]) values.push(VULGAR[m[3]]);
-    else if (m[4] && Number(m[6]) > 0) values.push(Number(m[4]) + Number(m[5]) / Number(m[6]));
-    else if (m[7] && Number(m[8]) > 0) values.push(Number(m[7]) / Number(m[8]));
-    else if (m[9]) values.push(Number(m[9]));
-  }
-  return values;
-}
-const NUMBER_WORD_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|half|quarter|quarters|third|thirds|point|dozen|an?\s+(?:ounce|gallon|teaspoon|pound|gram))\b/i;
+const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const FRACTION_WORDS = { half: 0.5, halves: 0.5, quarter: 0.25, quarters: 0.25, third: 1 / 3, thirds: 1 / 3 };
+const UNIT_WORDS = {
+  ounce: 'oz', ounces: 'oz', oz: 'oz', floz: 'fl_oz',
+  gallon: 'gal', gallons: 'gal', gal: 'gal', gals: 'gal',
+  gram: 'g', grams: 'g', g: 'g', gm: 'g',
+  pound: 'lb', pounds: 'lb', lb: 'lb', lbs: 'lb',
+  teaspoon: 'tsp', teaspoons: 'tsp', tsp: 'tsp', tsps: 'tsp',
+  each: 'each', bait: 'each', baits: 'each', station: 'each', stations: 'each', tube: 'each', tubes: 'each', placement: 'each', placements: 'each', can: 'each', cans: 'each',
+  // spoken, but not units the sheet offers
+  tablespoon: 'unsupported', tablespoons: 'unsupported', tbsp: 'unsupported', tbs: 'unsupported', cup: 'unsupported', cups: 'unsupported',
+  quart: 'unsupported', quarts: 'unsupported', pint: 'unsupported', pints: 'unsupported', liter: 'unsupported', liters: 'unsupported', ml: 'unsupported',
+};
+const DIGITS_RE = /^(\d*\.\d+|\d+)$/;
+const FRACTION_TOKEN_RE = /^(\d+)\/(\d+)$/;
+const TOKEN_RE = /\d*\.\d+|\d+\/\d+|\d+|[½¼¾⅓⅔⅛]|[a-z]+/g;
+const tokensOf = (text) => String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛])/g, '$1 $2').match(TOKEN_RE) || [];
+// Own-property lookup: a transcript word like "constructor" is never a table hit.
+const own = (table, key) => (Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined);
+const isArticle = (token) => token === 'a' || token === 'an';
 
-// A number was spoken in this snippet and the amount is one of them (digits are
-// checked against the value; words, which cannot be parsed reliably here, only
-// have to be present).
-function amountSpoken(heard, amount) {
-  if (digitValues(heard).some((value) => Math.abs(value - amount) < 1e-6)) return true;
-  return NUMBER_WORD_RE.test(String(heard || ''));
+// A whole number at tokens[i]: digits, or words ("sixty", "twenty five", "a
+// hundred and eighty", "one hundred eighty five").
+function readWholeWords(tokens, i) {
+  let j = i + 1;
+  let value = own(TENS, tokens[i]) ?? own(ONES, tokens[i]);
+  if (isArticle(tokens[i]) && tokens[j] === 'hundred') value = 1;
+  if (value === undefined) return null;
+  if (tokens[j] === 'hundred') {
+    value *= 100;
+    j += tokens[j + 1] === 'and' ? 2 : 1;
+  }
+  const tens = value >= 100 ? own(TENS, tokens[j]) : undefined;
+  if (tens !== undefined) { value += tens; j += 1; }
+  const ones = own(ONES, tokens[j]);
+  if (ones > 0 && ones < 10 && value % 10 === 0 && value > 0) { value += ones; j += 1; }
+  return { value, next: j };
 }
+
+function readWhole(tokens, i) {
+  if (DIGITS_RE.test(tokens[i] || '')) return { value: Number(tokens[i]), next: i + 1 };
+  return readWholeWords(tokens, i);
+}
+
+// A fraction at tokens[i]: "1/2", "½", "half", "a half", "a quarter".
+function readFraction(tokens, i) {
+  const ratio = FRACTION_TOKEN_RE.exec(tokens[i] || '');
+  if (ratio && Number(ratio[2]) > 0) return { value: Number(ratio[1]) / Number(ratio[2]), next: i + 1 };
+  const vulgar = own(VULGAR, tokens[i]);
+  if (vulgar !== undefined) return { value: vulgar, next: i + 1 };
+  const word = own(FRACTION_WORDS, tokens[i + (isArticle(tokens[i]) ? 1 : 0)]);
+  return word === undefined ? null : { value: word, next: i + (isArticle(tokens[i]) ? 2 : 1) };
+}
+
+// "point two five": decimal digits spoken one by one after "point".
+function readPointDigits(tokens, i) {
+  if (tokens[i] !== 'point') return null;
+  let digits = '';
+  let j = i + 1;
+  for (let digit = own(ONES, tokens[j]); digit < 10; digit = own(ONES, tokens[j])) { digits += digit; j += 1; }
+  return digits ? { value: Number(`0.${digits}`), next: j } : null;
+}
+
+// The number at tokens[i] with whatever fraction rides on it, or null.
+function readNumber(tokens, i) {
+  const whole = readWhole(tokens, i);
+  if (!whole) return readPointDigits(tokens, i) || readFraction(tokens, i);
+  const point = readPointDigits(tokens, whole.next);
+  if (point) return { value: whole.value + point.value, next: point.next };
+  const joined = tokens[whole.next] === 'and' ? whole.next + 1 : whole.next;
+  const fraction = readFraction(tokens, joined);
+  if (!fraction) return whole;
+  // "three quarters" multiplies; "one and a half" / "1 1/2" / "1½" adds
+  const multiplies = joined === whole.next && own(FRACTION_WORDS, tokens[whole.next]) !== undefined;
+  return { value: multiplies ? whole.value * fraction.value : whole.value + fraction.value, next: fraction.next };
+}
+
+// The unit word at tokens[i] and how many tokens it takes ("fl oz", "fluid ounces").
+function readUnit(tokens, i) {
+  if ((tokens[i] === 'fl' || tokens[i] === 'fluid') && own(UNIT_WORDS, tokens[i + 1]) === 'oz') return { unit: 'fl_oz', length: 2 };
+  const unit = own(UNIT_WORDS, tokens[i]);
+  return unit ? { unit, length: 1 } : { unit: null, length: 0 };
+}
+
+// A spoken number, or "an ounce" / "a gallon" (one), at tokens[i].
+function readSpokenNumber(tokens, i) {
+  if (isArticle(tokens[i]) && readUnit(tokens, i + 1).unit) return { value: 1, next: i + 1 };
+  return readNumber(tokens, i);
+}
+
+// The unit said with a number: right after it ("four ounces"), or past "of"
+// and/or "a" / "an" ("a quarter of an ounce", "half an ounce").
+function readUnitAfter(tokens, i) {
+  const direct = readUnit(tokens, i);
+  if (direct.unit) return { ...direct, skipped: 0 };
+  const skipped = (tokens[i] === 'of' ? 1 : 0) + (isArticle(tokens[i + (tokens[i] === 'of' ? 1 : 0)]) ? 1 : 0);
+  const unit = skipped ? readUnit(tokens, i + skipped) : direct;
+  return unit.unit ? { ...unit, skipped } : { unit: null, length: 0, skipped: 0 };
+}
+
+function quantitiesIn(text) {
+  const tokens = tokensOf(text);
+  const found = [];
+  for (let i = 0; i < tokens.length;) {
+    const number = readSpokenNumber(tokens, i);
+    if (!number) { i += 1; continue; }
+    const { unit, length, skipped } = readUnitAfter(tokens, number.next);
+    const after = number.next + skipped + length;
+    found.push({ value: number.value, unit, orNext: tokens[after] === 'or' && readSpokenNumber(tokens, after + 1) !== null });
+    i = Math.max(after, i + 1);
+  }
+  // "three or four": neither number is the one that was meant
+  return found.map((q, k) => ({ value: q.value, unit: q.unit, ambiguous: q.orNext || found[k - 1]?.orNext === true }));
+}
+
 const SAME_AS_LAST_RE = /\b(same|last time|the usual|usual|as before|like before|as always|as last)\b/i;
 
 function pushUnclear(unclear, heard, reason) {
@@ -364,32 +464,99 @@ function sentenceOf(transcript, heard) {
 }
 
 // A spoken number as the schema carries it: 0 / '' / missing is "not spoken"
-// (nothing to flag); otherwise { value } when it is positive, finite and was
-// said in `heard`, or { reason } for the one thing wrong with it.
+// (nothing to flag); otherwise { value, matches } when it is positive, finite and
+// EQUAL to a number said in `heard` (matches: the mentions it equals, each with
+// the unit word spoken after it), or { reason } for the one thing wrong with it.
 function spokenNumber(raw, heard) {
   if (raw === 0 || raw === '' || raw == null) return {};
   const value = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(value) || value <= 0) return { reason: 'amount_invalid' };
-  return amountSpoken(heard, value) ? { value } : { reason: 'amount_not_spoken' };
+  const matches = quantitiesIn(heard).filter((q) => !q.ambiguous && Math.abs(q.value - value) < 1e-6);
+  return matches.length ? { value, matches } : { reason: 'amount_not_spoken' };
+}
+
+// ── Evidence for the SELECTED product ────────────────────────────────────
+// A quote that exists is not proof it names this product: the heard words must
+// carry the product's own name or one of its aliases. Matched on normalized
+// words. A name counts when its whole phrase is said, or one distinctive word of
+// it ("taurus", "talstar", "surfactant"), or two of its letter words; words that
+// name only a kind of product ("gel", "dust", "plus") are not distinctive.
+const GENERIC_NAME_WORDS = new Set([
+  'nonionic', 'plus', 'gel', 'bait', 'dust', 'spray', 'insecticide', 'granular', 'liquid', 'concentrate', 'control',
+  'professional', 'solution', 'powder', 'wasp', 'ant', 'cockroach', 'roach', 'pest', 'wsg', 'pro',
+]);
+const isDistinctiveWord = (word) => word.length >= 4 && /^[a-z]+$/.test(word) && !GENERIC_NAME_WORDS.has(word);
+
+// { qualifies, words } for one product against the heard words: `words` is every
+// word of its names that was said (used to tell two products apart).
+function nameEvidence(product, heardWords, heardNorm) {
+  const words = new Set();
+  let qualifies = false;
+  for (const name of [product.name, product.fullName, ...product.aliases]) {
+    const tokens = norm(name).split(' ').filter(Boolean);
+    const said = tokens.filter((t) => heardWords.has(t));
+    const letters = said.filter((t) => /[a-z]/.test(t));
+    if (tokens.length && (` ${heardNorm} `.includes(` ${tokens.join(' ')} `) || said.some(isDistinctiveWord) || letters.length >= 2)) qualifies = true;
+    said.forEach((t) => words.add(t));
+  }
+  return { qualifies, words };
+}
+
+// Why the heard words do not back this product, as a refusal reason, or null:
+// product_not_heard when its name is not there, ambiguous_product when another
+// product is named by at least all the same words (the tech said "the Alpine").
+function productEvidenceVerdict(product, ctx, heard) {
+  const heardNorm = norm(heard);
+  const heardWords = new Set(heardNorm.split(' ').filter(Boolean));
+  const mine = nameEvidence(product, heardWords, heardNorm);
+  if (!mine.qualifies) return 'product_not_heard';
+  const tied = ctx.products.some((other) => {
+    if (other.id === product.id) return false;
+    const theirs = nameEvidence(other, heardWords, heardNorm);
+    return theirs.qualifies && [...mine.words].every((w) => theirs.words.has(w));
+  });
+  return tied ? 'ambiguous_product' : null;
 }
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen) {
+function productRefusal(raw, product, heard, normTranscript, seen, ctx) {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
   if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
-  return seen.has(product.id) ? { reason: 'duplicate_product', text: heard } : null;
+  if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
+  const reason = productEvidenceVerdict(product, ctx, heard);
+  return reason ? { reason, text: heard } : null;
 }
 
-// The amount and unit that survive the checks: a spoken number in a unit the
-// sheet offers for this product, else none (and a Check for what was wrong).
+// Why a spoken unit word does not back the model's unit (null when it does).
+// No unit word: only a product that offers exactly one unit can be read as that
+// unit. A unit word the sheet does not offer ("tablespoons") is unclear_unit; a
+// different unit than the model chose is unit_not_heard. A bare ounce on a
+// liquid is a fluid ounce, as the sheet reads it.
+function unitVerdict(spoken, unit, product) {
+  if (spoken === null) return product.units.length === 1 && product.units[0] === unit ? null : 'unclear_unit';
+  if (spoken === 'unsupported') return 'unclear_unit';
+  const heardUnit = spoken === 'oz' && product.measure === 'liquid' ? 'fl_oz' : spoken;
+  return heardUnit === unit ? null : 'unit_not_heard';
+}
+
+// The amount and unit that survive the checks: a number said for this product,
+// in the unit word said next to it, in a unit the sheet offers for the product;
+// else none (and a Check for what was wrong, the product tap stays).
 function productAmount(raw, product, heard, unclear) {
+  const none = { amount: null, unit: '' };
   const spoken = spokenNumber(raw.amount, heard);
   if (spoken.reason) pushUnclear(unclear, heard, spoken.reason);
-  if (spoken.value === undefined) return { amount: null, unit: '' };
+  if (spoken.value === undefined) return none;
   const unit = sheetUnit(raw.unit, product.measure);
-  if (!unit) pushUnclear(unclear, heard, 'bad_unit');
-  return unit ? { amount: spoken.value, unit } : { amount: null, unit: '' };
+  if (!unit) {
+    pushUnclear(unclear, heard, 'bad_unit');
+    return none;
+  }
+  const verdicts = spoken.matches.map((q) => unitVerdict(q.unit, unit, product));
+  if (verdicts.includes(null)) return { amount: spoken.value, unit };
+  pushUnclear(unclear, heard, verdicts[0]);
+  return none;
 }
 
 function productSameAsLast(raw, amount, heard, transcript, unclear) {
@@ -408,7 +575,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = cleanText(raw.heard, CAPS.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen);
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, ctx);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
@@ -443,8 +610,68 @@ function pickVisitField(value, allowed, dropped, isList) {
   return picked;
 }
 
-// pests / areas / method / activity / otherPest, checked against the sheet's lists.
-function pickVisitFields(visit, ctx, heard, unclear) {
+// ── Evidence for the SELECTED visit values ──────────────────────────────
+// Each value the model picked must be backed by words in the visit's heard text
+// or in the transcript sentence that text sits in. One lexicon per field, keyed
+// by the sheet's own value; a value with no lexicon entry has no evidence (fails
+// closed). Matched against normalized text (punctuation and hyphens are spaces).
+const VISIT_LEXICON = {
+  pests: {
+    Ants: /\bants?\b/,
+    Roaches: /\b(roach(es)?|cockroach(es)?|palmetto bugs?|german roaches?)\b/,
+    Spiders: /\b(spiders?|spider webs?|webs?)\b/,
+    Silverfish: /\bsilverfish\b/,
+    Wasps: /\b(wasps?|hornets?|yellow ?jackets?|mud daubers?|paper wasps?)\b/,
+    Earwigs: /\bearwigs?\b/,
+    Fleas: /\bfleas?\b/,
+    Crickets: /\bcrickets?\b/,
+    Centipedes: /\bcentipedes?\b/,
+  },
+  areas: {
+    Outside: /\b(outside|outdoors?|exterior|perimeter|foundation|yard|eaves?|soffits?|lanai|out front|out back|front door|back door|front|porch|patio|fence|entry|entryway|window outside|around the house)\b/,
+    Inside: /\b(inside|interior|indoors?|kitchen|bath(room)?s?|baseboards?|attic|bedrooms?|laundry|living room|pantry|closets?|cabinets?|under the sink|fridge|dishwasher)\b/,
+    Garage: /\bgarage\b/,
+  },
+  activity: {
+    none: /\b(no activity|none|nothing live|nothing|zero activity|no pests?|no bugs?)\b/,
+    light: /\b(light|a little|few|a few|minimal|slight|low)\b/,
+    moderate: /\b(moderate|some|medium|average)\b/,
+    heavy: /\b(heavy|lots?|a lot|bad|severe|infested|swarming)\b/,
+  },
+  method: {
+    perimeter_spray: /\bperimeter\b/,
+    spot_treatment: /\bspot\b/,
+  },
+};
+
+// The text a visit value must be found in: the visit's heard words plus the
+// transcript sentence each piece of them sits in.
+function visitEvidenceText(heard, transcript) {
+  const pieces = String(heard).split(/\.{3}|…/);
+  return norm([heard, ...pieces.map((piece) => sentenceOf(transcript, piece))].join(' '));
+}
+
+function valueHeard(field, value, evidence, otherPest) {
+  if (field === 'pests' && value === 'Other') return evidence.includes(norm(otherPest));
+  return Boolean(VISIT_LEXICON[field]?.[value]?.test(evidence));
+}
+
+// Keep the picked values that have evidence; each other becomes a Check naming it.
+function keepHeardValues(picked, evidence, otherPest, unclear) {
+  const kept = {};
+  for (const rule of VISIT_FIELD_RULES) {
+    const field = rule.key;
+    const values = rule.cap === undefined ? [picked[field]].filter(Boolean) : picked[field];
+    const heardValues = values.filter((value) => valueHeard(field, value, evidence, otherPest));
+    for (const value of values.filter((v) => !heardValues.includes(v))) pushUnclear(unclear, value, 'value_not_heard');
+    kept[field] = rule.cap === undefined ? (heardValues[0] || '') : heardValues;
+  }
+  return kept;
+}
+
+// pests / areas / method / activity / otherPest, checked against the sheet's lists
+// and then against what was said.
+function pickVisitFields(visit, ctx, heard, unclear, transcript) {
   const dropped = [];
   const picked = {};
   for (const rule of VISIT_FIELD_RULES) picked[rule.key] = pickVisitField(visit[rule.key], ctx[rule.allowed], dropped, rule.cap !== undefined);
@@ -456,15 +683,16 @@ function pickVisitFields(visit, ctx, heard, unclear) {
     picked.pests.splice(picked.pests.indexOf('Other'), 1);
     pushUnclear(unclear, heard, 'other_pest_unnamed');
   }
-  return { ...picked, otherPest };
+  const kept = keepHeardValues(picked, visitEvidenceText(heard, transcript), otherPest, unclear);
+  return { ...kept, otherPest: kept.pests.includes('Other') ? otherPest : '' };
 }
 
 const EMPTY_VISIT = Object.freeze({ pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' });
 
-function validateVisit(rawVisit, ctx, normTranscript, unclear) {
+function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '') {
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
   const heard = cleanText(visit.heard, CAPS.heard);
-  const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear);
+  const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear, transcript);
   const feet = spokenNumber(visit.linearFt, heard);
   if (feet.reason) pushUnclear(unclear, heard, feet.reason);
   const linearFt = feet.value ?? null;
@@ -495,7 +723,7 @@ function validateFill(raw, ctx, transcript) {
   const normTranscript = norm(transcript);
   const unclear = [];
   const products = validateProducts(input.products, ctx, normTranscript, unclear, transcript);
-  const visit = validateVisit(input.visit, ctx, normTranscript, unclear);
+  const visit = validateVisit(input.visit, ctx, normTranscript, unclear, transcript);
   for (const item of Array.isArray(input.unclear) ? input.unclear : []) {
     if (item && typeof item === 'object') pushUnclear(unclear, item.heard, item.reason || 'unclear_other');
   }

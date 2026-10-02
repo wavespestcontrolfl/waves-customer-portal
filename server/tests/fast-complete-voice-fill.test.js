@@ -364,3 +364,192 @@ describe('call ledger lane', () => {
     expect(require('../config/models')[VoiceFill.VOICE_FILL_TIER]).toEqual(expect.any(String));
   });
 });
+
+// ── Evidence for the SELECTED value (pre-push audit P1s) ─────────────────
+describe('quantity and unit are checked together against what was said', () => {
+  const one = (productRow, transcript) => validateFill(answer({ products: [productRow] }), ctx, transcript);
+
+  test('"four ounces of Taurus" never authorizes 900 gal (the audit reproduction)', () => {
+    const out = one(product({ amount: 900, unit: 'gal', heard: 'four ounces of Taurus' }), 'four ounces of Taurus');
+    expect(out.products).toHaveLength(1);
+    expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
+    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus', reason: 'amount_not_spoken' }]);
+  });
+
+  test('the right number in the wrong unit is dropped, the product tap stays', () => {
+    const out = one(product({ amount: 4, unit: 'gal', heard: 'four ounces of Taurus' }), 'four ounces of Taurus');
+    expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
+    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus', reason: 'unit_not_heard' }]);
+  });
+
+  test.each([
+    ['teaspoons said, fl_oz chosen', 'two teaspoons of surfactant', 2, 'fl_oz'],
+    ['ounces said, tsp chosen', '2 ounces of surfactant', 2, 'tsp'],
+    ['grams said, oz chosen on a weighed product', '5 grams of ant gel', 5, 'oz'],
+    ['pounds said, g chosen', '5 pounds of ant gel', 5, 'g'],
+  ])('substituted unit: %s', (_name, heard, amount, unit) => {
+    const productId = /gel/.test(heard) ? 'p-bait' : 'p-surf';
+    const out = one(product({ productId, amount, unit, heard }), heard);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear).toEqual([{ heard, reason: 'unit_not_heard' }]);
+  });
+
+  test.each([
+    ['four', 5], ['four', 40], ['a quarter', 0.5], ['one and a half', 2], ['twenty five', 20], ['three quarters', 0.25],
+  ])('word amount "%s ounces" does not authorize %p', (words, amount) => {
+    const heard = `${words} ounces of Taurus`;
+    const out = one(product({ amount, unit: 'fl_oz', heard }), heard);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear[0].reason).toBe('amount_not_spoken');
+  });
+
+  test.each([
+    ['four ounces of Taurus', 4], ['an ounce of Taurus', 1], ['twenty five ounces of Taurus', 25], ['a hundred and eighty ounces of Taurus', 180],
+    ['one and a half ounces of Taurus', 1.5], ['two and a half ounces of Taurus', 2.5], ['three quarters of an ounce of Taurus', 0.75],
+    ['a quarter of an ounce of Taurus', 0.25], ['point two five ounces of Taurus', 0.25], ['half an ounce of Taurus', 0.5],
+    ['1½ ounces of Taurus', 1.5], ['1 1/2 ounces of Taurus', 1.5], ['4 fl oz of Taurus', 4], ['0.25 fluid ounces of Taurus', 0.25],
+  ])('"%s" authorizes exactly %p fl oz', (heard, amount) => {
+    const out = one(product({ amount, unit: 'fl_oz', heard }), heard);
+    expect(out.products[0]).toMatchObject({ amount, unit: 'fl_oz' });
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('"three or four ounces" authorizes neither number', () => {
+    for (const amount of [3, 4]) {
+      const out = one(product({ amount, unit: 'fl_oz', heard: 'Taurus, three or four ounces' }), 'Taurus, three or four ounces');
+      expect(out.products[0].amount).toBeNull();
+      expect(out.unclear[0].reason).toBe('amount_not_spoken');
+    }
+  });
+
+  test('a number with no unit word is kept only when the product offers exactly one unit', () => {
+    const counted = { ...ctx, products: [...ctx.products, { id: 'p-can', name: 'PT Wasp Freeze', fullName: 'PT Wasp Freeze', aliases: [], measure: 'count', units: ['each'] }] };
+    const ok = validateFill(answer({ products: [product({ productId: 'p-can', amount: 2, unit: 'each', heard: 'two Wasp Freeze' })] }), counted, 'two Wasp Freeze');
+    expect(ok.products[0]).toMatchObject({ amount: 2, unit: 'each' });
+    const many = one(product({ amount: 4, unit: 'fl_oz', heard: 'Taurus, four' }), 'Taurus, four');
+    expect(many.products[0].amount).toBeNull();
+    expect(many.unclear).toEqual([{ heard: 'Taurus, four', reason: 'unclear_unit' }]);
+  });
+
+  test('a spoken unit the sheet does not offer is unclear_unit, whatever the model chose', () => {
+    const out = one(product({ productId: 'p-surf', amount: 2, unit: 'tsp', heard: 'two tablespoons of surfactant' }), 'two tablespoons of surfactant');
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear).toEqual([{ heard: 'two tablespoons of surfactant', reason: 'unclear_unit' }]);
+  });
+
+  test('a transcript word like "constructor" is never a number or a unit', () => {
+    const out = one(product({ amount: 4, unit: 'fl_oz', heard: 'Taurus constructor four' }), 'Taurus constructor four');
+    expect(out.products[0].amount).toBeNull();
+  });
+});
+
+describe('the selected product must be named in its heard words', () => {
+  const alpine = {
+    ...ctx,
+    products: [
+      ...ctx.products,
+      { id: 'p-alpine-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: ['Alpine'], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      { id: 'p-alpine-dust', name: 'Alpine Dust', fullName: 'Alpine Dust', aliases: ['Alpine dust'], measure: 'weight', units: ['g', 'oz', 'lb'] },
+    ],
+  };
+
+  test('a valid-looking quote for ANOTHER product swaps nothing in', () => {
+    const heard = 'Taurus, four ounces';
+    const out = validateFill(answer({ products: [product({ productId: 'p-talak', amount: 4, unit: 'fl_oz', heard })] }), ctx, heard);
+    expect(out.products).toEqual([]);
+    expect(out.unclear).toEqual([{ heard, reason: 'product_not_heard' }]);
+  });
+
+  test('a quote that names no product at all (just an amount) does not pick one', () => {
+    const out = validateFill(answer({ products: [product({ amount: 4, unit: 'fl_oz', heard: 'four ounces' })] }), ctx, 'used four ounces on the lanai');
+    expect(out.products).toEqual([]);
+    expect(out.unclear[0].reason).toBe('product_not_heard');
+  });
+
+  test('a generic number in the quote is not a name ("7 ounces" is not Atticus Talak 7.9 F)', () => {
+    const out = validateFill(answer({ products: [product({ productId: 'p-talak', amount: 7, unit: 'fl_oz', heard: '7 ounces of the stuff' })] }), ctx, '7 ounces of the stuff');
+    expect(out.products).toEqual([]);
+  });
+
+  test('an alias counts: "Talstar" names Atticus Talak', () => {
+    const out = validateFill(answer({ products: [product({ productId: 'p-talak', amount: 4, unit: 'fl_oz', heard: 'Talstar, four ounces' })] }), ctx, 'Talstar, four ounces');
+    expect(out.products[0].productId).toBe('p-talak');
+  });
+
+  test('"the Alpine" names two products equally: not picked either way', () => {
+    const heard = 'the Alpine, three ounces';
+    for (const productId of ['p-alpine-wsg', 'p-alpine-dust']) {
+      const out = validateFill(answer({ products: [product({ productId, amount: 3, unit: 'oz', heard })] }), alpine, heard);
+      expect(out.products).toEqual([]);
+      expect(out.unclear).toEqual([{ heard, reason: 'ambiguous_product' }]);
+    }
+  });
+
+  test('"Alpine dust" is Alpine Dust, and only that', () => {
+    const heard = 'Alpine dust, two ounces';
+    const dust = validateFill(answer({ products: [product({ productId: 'p-alpine-dust', amount: 2, unit: 'oz', heard })] }), alpine, heard);
+    expect(dust.products[0].productId).toBe('p-alpine-dust');
+    const wsg = validateFill(answer({ products: [product({ productId: 'p-alpine-wsg', amount: 2, unit: 'oz', heard })] }), alpine, heard);
+    expect(wsg.products).toEqual([]);
+  });
+
+  test('one quote naming several products backs each of them', () => {
+    const heard = 'Same mix as last time, Taurus, Talstar and the surfactant';
+    const out = validateFill(answer({ products: ['p-taurus', 'p-talak', 'p-surf'].map((productId) => product({ productId, sameAsLast: true, heard })) }), ctx, heard);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-taurus', 'p-talak', 'p-surf']);
+  });
+});
+
+describe('every selected visit value needs words that support it', () => {
+  const run = (v, transcript) => validateFill(answer({ visit: visit(v) }), ctx, transcript);
+
+  test.each([
+    ['pest', { pests: ['Roaches'], heard: 'ants out back' }, 'ants out back', 'Roaches'],
+    ['area', { areas: ['Garage'], heard: 'ants out back' }, 'ants out back', 'Garage'],
+    ['area (inside)', { areas: ['Inside'], heard: 'ants out back' }, 'ants out back', 'Inside'],
+    ['method', { method: 'perimeter_spray', heard: 'ants out back' }, 'ants out back', 'perimeter_spray'],
+    ['activity', { activity: 'heavy', heard: 'ants out back' }, 'ants out back', 'heavy'],
+  ])('%s with no support is dropped as value_not_heard', (_name, v, transcript, value) => {
+    const out = run(v, transcript);
+    expect(out.visit).toMatchObject({ pests: [], areas: [], method: '', activity: '' });
+    expect(out.unclear).toEqual([{ heard: value, reason: 'value_not_heard' }]);
+  });
+
+  test('values with support stay; the unsupported one beside them goes', () => {
+    const out = run({ pests: ['Ants', 'Spiders'], areas: ['Outside'], heard: 'ants along the foundation' }, 'ants along the foundation');
+    expect(out.visit.pests).toEqual(['Ants']);
+    expect(out.visit.areas).toEqual(['Outside']);
+    expect(out.unclear).toEqual([{ heard: 'Spiders', reason: 'value_not_heard' }]);
+  });
+
+  test('support may sit in the transcript sentence the heard words are in', () => {
+    const transcript = 'Ants in the kitchen. Did the perimeter outside, light activity. Gate was locked.';
+    const out = run({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard: 'Did the perimeter outside' }, transcript);
+    expect(out.visit).toMatchObject({ areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
+    // the pest was said in a DIFFERENT sentence: not supported
+    expect(out.visit.pests).toEqual([]);
+    expect(out.unclear).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
+  });
+
+  test('"Other" needs its named pest in the words', () => {
+    const named = run({ pests: ['Other'], otherPest: 'millipedes', heard: 'millipedes in the garage' }, 'millipedes in the garage');
+    expect(named.visit.pests).toEqual(['Other']);
+    const unsupported = run({ pests: ['Other'], otherPest: 'millipedes', heard: 'some bugs in the garage' }, 'some bugs in the garage');
+    expect(unsupported.visit.pests).toEqual([]);
+    expect(unsupported.visit.otherPest).toBe('');
+    expect(unsupported.unclear).toEqual([{ heard: 'Other', reason: 'value_not_heard' }]);
+  });
+
+  test.each([
+    ['pests', 'Roaches', 'cockroaches by the stove'], ['pests', 'Roaches', 'palmetto bugs'], ['pests', 'Ants', 'an ant trail'], ['pests', 'Wasps', 'a mud dauber nest'],
+    ['areas', 'Outside', 'around the eaves'], ['areas', 'Outside', 'out front by the entry'], ['areas', 'Inside', 'under the sink'], ['areas', 'Garage', 'the garage door track'],
+    ['activity', 'none', 'no activity today'], ['activity', 'light', 'a few ants'], ['activity', 'moderate', 'some activity'], ['activity', 'heavy', 'a lot of them'],
+    ['method', 'perimeter_spray', 'ran the perimeter'], ['method', 'spot_treatment', 'spot-treated the corners'],
+  ])('lexicon: %s %s is backed by "%s"', (field, value, words) => {
+    const key = field === 'pests' || field === 'areas' ? field : field;
+    const v = field === 'pests' || field === 'areas' ? { [key]: [value], heard: words } : { [key]: value, heard: words };
+    const out = run(v, words);
+    expect(out.unclear).toEqual([]);
+    expect(out.visit[field]).toEqual(field === 'pests' || field === 'areas' ? [value] : value);
+  });
+});

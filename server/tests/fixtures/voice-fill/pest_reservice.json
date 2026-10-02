@@ -673,7 +673,7 @@
           "method": "",
           "linearFt": null,
           "activity": "heavy",
-          "heard": "Roaches. Heavy activity"
+          "heard": "in the cabinets under the sink and behind the fridge. Roaches. Heavy activity"
         },
         "customerNote": {
           "present": true
@@ -940,7 +940,9 @@
       "expected": {
         "products": [],
         "visit": {
-          "pests": ["Ants"],
+          "pests": [
+            "Ants"
+          ],
           "otherPest": "",
           "areas": [
             "Outside"
