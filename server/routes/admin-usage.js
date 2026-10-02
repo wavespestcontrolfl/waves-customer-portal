@@ -83,7 +83,7 @@ const KNOWN_PAGE_KEYS = new Set([
   'ppc', 'price-change', 'price-match', 'pricing', 'pricing-logic',
   'pricing-reality-check', 'projects', 'recruiting', 'referrals', 'revenue', 'reviews',
   'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
-  'timetracking', 'tool-health', 'turf-height',
+  'timetracking', 'today', 'tool-health', 'turf-height',
 ]);
 
 // Deep path segments that are real route structure (the route table's

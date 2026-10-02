@@ -12,7 +12,8 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlag: (key) => key === 'pest-recap-v1',
   useFeatureFlagReady: (key) => { flags.shellReads.push(key); return { enabled: flags.shellEnabled, ready: true }; },
 }));
-vi.mock('../../hooks/useStaffDocumentsAvailable', () => ({ default: () => true }));
+const docs = vi.hoisted(() => ({ available: true }));
+vi.mock('../../hooks/useStaffDocumentsAvailable', () => ({ default: () => docs.available }));
 vi.mock('../../hooks/usePayGrowthAvailable', () => ({ default: () => true }));
 vi.mock('../../components/tech/AddToHomeScreenHint', () => ({ default: () => null }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
@@ -44,6 +45,7 @@ function mount(path = '/admin/today') {
         <Route path="tools" element={<TechHomePage section="tools" />} />
         <Route path="more" element={<TechHomePage section="more" />} />
         <Route path="protocols" element={<div>Protocols page</div>} />
+        <Route path="documents" element={<div>Staff document library</div>} />
       </Route>
       <Route path="more" element={<div>Admin menu page</div>} />
     </Route>
@@ -53,6 +55,7 @@ function mount(path = '/admin/today') {
 
 beforeEach(() => {
   flags.shellEnabled = true;
+  docs.available = true;
   flags.shellReads.length = 0;
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     let data = {};
@@ -86,6 +89,13 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
     expect(flags.shellReads).toContain('tech-field-workspace');
     expect(document.querySelector('[data-legacy-field-shell]')).not.toBeNull();
+  });
+
+  it('flag off + documents unavailable: /admin/today/documents shows the unavailable notice, not the library', async () => {
+    flags.shellEnabled = false;
+    docs.available = false;
+    mount('/admin/today/documents');
+    expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
   });
 
   it('Menu leaves the workspace for the admin menu', async () => {

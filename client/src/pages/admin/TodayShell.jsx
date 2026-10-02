@@ -1,4 +1,4 @@
-import { Outlet, useOutletContext } from 'react-router-dom';
+import { Outlet, matchPath, useLocation, useOutletContext } from 'react-router-dom';
 import TechFieldShell from '../../components/tech/TechFieldShell';
 import { useTechNavigationLock } from '../../components/tech/TechNavigationLock';
 import { TechBasePathContext } from '../../components/tech/techBasePath';
@@ -19,6 +19,11 @@ export default function TodayShell() {
   const documentsAvailable = useStaffDocumentsAvailable(true);
   const payGrowthAvailable = usePayGrowthAvailable(true);
   const lock = useTechNavigationLock();
+  const { pathname } = useLocation();
+  // Same document gate the field shell applies (and the retired /tech shell
+  // applied) when the flag is off: a bookmarked /admin/today/documents must
+  // not mount the library against dark-gated endpoints.
+  const documentsGated = Boolean(matchPath('/admin/today/documents', pathname)) && !documentsAvailable;
   // The tech-field-workspace flag keeps its meaning here (pre-push Codex P1):
   // on → the field workspace; off → the legacy route UI, exactly as the /tech
   // shell rendered it, as this shell's children.
@@ -27,13 +32,13 @@ export default function TodayShell() {
   // readable inside the light admin surface.
   const legacy = (
     <div style={{ minHeight: '100%', margin: '-24px -28px', padding: 16, background: '#0f1923', color: '#e2e8f0', fontFamily: "'Nunito Sans', sans-serif" }} data-legacy-field-shell>
-      <Outlet context={{
+      {documentsGated ? <p>Staff documents are unavailable.</p> : <Outlet context={{
         fieldWorkspace: false,
         techRole: user?.role,
         documentsAvailable,
         payGrowthAvailable,
         setNavigationBusy: lock?.setNavigationBusy,
-      }} />
+      }} />}
     </div>
   );
   return (

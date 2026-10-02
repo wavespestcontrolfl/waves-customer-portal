@@ -63,11 +63,10 @@
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
 }
 
-/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container.
-   The shell fills it as a flex column so the field nav sits at the bottom of
-   the visible area on a short page and stays pinned there (sticky inside the
-   scroll container) on a long one; the header stays pinned at the top. */
-.tech-field.tf-embedded { display: flex; flex-direction: column; min-height: 100%; }
-.tech-field.tf-embedded .tf-header { position: sticky; top: 0; }
-.tech-field.tf-embedded .tf-main { flex: 1; padding-bottom: 24px; }
-.tech-field.tf-embedded .tf-nav { position: sticky; bottom: 0; left: auto; right: auto; }
+/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container
+   and has a fixed height, so the shell fills it exactly and the main scrolls
+   on its own; the header and the field nav stay in view at any page length. */
+.tech-field.tf-embedded { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.tech-field.tf-embedded .tf-header { position: static; flex: none; }
+.tech-field.tf-embedded .tf-main { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 24px; }
+.tech-field.tf-embedded .tf-nav { position: static; flex: none; }

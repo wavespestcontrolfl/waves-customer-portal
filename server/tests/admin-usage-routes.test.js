@@ -430,17 +430,30 @@ describe('admin usage: page-key registry tracks the App.jsx route table', () => 
     // beacon — don't match.
     const start = src.indexOf('path="/admin" ');
     expect(start).toBeGreaterThan(-1);
-    const end = src.indexOf('</Route>', start);
-    expect(end).toBeGreaterThan(start);
-    const block = src.slice(start, end);
+    // Nesting-aware: /admin/today is a layout route with its own children
+    // (tools, more, protocols, …), which beacon as pageKey "today" — only the
+    // layout's DIRECT children are page keys.
     const fromRoutes = new Set(['dashboard']); // the bare /admin index
-    for (const match of block.matchAll(/<Route path="([^"]+)"/g)) {
-      // The admin catch-all (path="*") redirects to the dashboard; it is
-      // not a page and never beacons on its own.
-      if (match[1] === '*') continue;
-      const first = match[1].split('/')[0];
-      fromRoutes.add(first === '_design-system' ? 'design-system' : first);
+    const tagRe = /<Route\b([^>]*?)(\/?)>|<\/Route>/g;
+    tagRe.lastIndex = start;
+    let depth = 0;
+    let end = -1;
+    for (let m = tagRe.exec(src); m; m = tagRe.exec(src)) {
+      if (m[0] === '</Route>') {
+        depth -= 1;
+        if (depth === 0) { end = m.index; break; }
+        continue;
+      }
+      const selfClosing = m[2] === '/';
+      const pathMatch = /path="([^"]+)"/.exec(m[1]);
+      // depth 1 = a direct child of the /admin layout route.
+      if (depth === 1 && pathMatch && pathMatch[1] !== '*') {
+        const first = pathMatch[1].split('/')[0];
+        fromRoutes.add(first === '_design-system' ? 'design-system' : first);
+      }
+      if (!selfClosing) depth += 1;
     }
+    expect(end).toBeGreaterThan(start);
     expect([...fromRoutes].sort()).toEqual(
       [...adminUsageRouter.KNOWN_PAGE_KEYS].sort(),
     );
