@@ -238,13 +238,15 @@ const TABS = [
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "email", label: "Email", Icon: Mail, adminOnly: true },
-  { key: "calls", label: "Calls", Icon: PhoneCall },
+  // Calls are owner-only (2026-10-02): a technician login gets no customer
+  // calls — no call list, audio or transcript. The server refuses the reads.
+  { key: "calls", label: "Calls", Icon: PhoneCall, adminOnly: true },
   { key: "triage", label: "Triage", Icon: Inbox },
-  // Open promises across calls (call_commitments) — staff-wide like Calls.
+  // Open promises across calls (call_commitments) — staff-wide.
   { key: "owed", label: "Promises", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
-  // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
+  // not day-to-day comms work. Events/SMS/Triage/Promises stay staff-wide.
   {
     key: "templates",
     label: "Templates",
@@ -3783,7 +3785,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               setActiveThread(null);
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
-            onMarkSpam={handleMarkSpam}
+            // Blocking a number is owner-only (2026-10-02); the server
+            // refuses a technician, so the button is not offered.
+            onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>

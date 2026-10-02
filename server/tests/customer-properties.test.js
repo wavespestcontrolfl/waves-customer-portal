@@ -108,6 +108,54 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([], { address_line1: '12398 Amber Creek Cir' })).toBe(true);
     expect(isNewAddress(null, { address_line1: '1 Main St' })).toBe(true);
   });
+
+  test('isNewAddress — one house spelled two ways in the same ZIP is not a new property', () => {
+    // A call re-recording the signup address with a different suffix spelling
+    // or mailing city must not mint a second property (ops 2026-10-01).
+    expect(isNewAddress([{ address_line1: '200 Example Gln', city: 'Parrish', zip: '34219' }], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toBe(false);
+    expect(isNewAddress([{ address_line1: '300 Sample Cv', city: 'Parrish', zip: '34219' }], { address_line1: '300 Sample Cove', city: 'Parrish', zip: '34219' })).toBe(false);
+    expect(isNewAddress([{ address_line1: '400 Test Creek Ct', city: 'Duette', zip: '34219' }], { address_line1: '400 Test Creek Court', city: 'Parrish', zip: '34219-1234' })).toBe(false);
+    // a different unit, house number, suffix or ZIP is still a new property
+    expect(isNewAddress([{ address_line1: '100 Main Gln', address_line2: 'Unit A', zip: '34219' }], { address_line1: '100 Main Glen', address_line2: 'Unit B', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '200 Example Gln', zip: '34219' }], { address_line1: '202 Example Glen', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '100 Main Cv', zip: '34219' }], { address_line1: '100 Main Ct', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '100 Main St', city: 'Parrish', zip: '34219' }], { address_line1: '100 Main St', city: 'Bradenton', zip: '34211' })).toBe(true);
+  });
+
+  test('addressKey: ZIP is the locality when present, else the city; unit ids are never suffix-mapped', () => {
+    // one ZIP, two mailing names → one key; no ZIP → the city decides
+    expect(addressKey({ address_line1: '400 Test Creek Ct', city: 'Duette', zip: '34219' }))
+      .toBe(addressKey({ address_line1: '400 Test Creek Court', city: 'Parrish', zip: '34219-1234' }));
+    expect(addressKey({ address_line1: '100 Main St', city: 'Bradenton' }))
+      .not.toBe(addressKey({ address_line1: '100 Main St', city: 'Sarasota' }));
+    // "Pt" is a street suffix (Point), not a unit: units PT and POINT stay distinct
+    expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit PT', zip: '34219' }], { address_line1: '700 Demo Glen', address_line2: 'Unit Point', zip: '34219' })).toBe(true);
+    expect(isNewAddress([{ address_line1: '700 Demo Gln', address_line2: 'Unit 4', zip: '34219' }], { address_line1: '700 Demo Glen Apt 4', zip: '34219' })).toBe(false);
+    expect(addressKey({ address_line1: '700 Demo Pt', zip: '34219' })).toBe(addressKey({ address_line1: '700 Demo Point', zip: '34219' }));
+    // a unit typed inline keys like the split form, whatever the punctuation
+    const split = addressKey({ address_line1: '100 Main St', address_line2: 'Apt 4', zip: '34219' });
+    for (const line1 of ['100 Main St Apt 4', '100 Main St Apt 4.', '100 Main St#4', '100 Main St, #4', '100 Main St. Apt. 4']) {
+      expect(addressKey({ address_line1: line1, zip: '34219' })).toBe(split);
+    }
+    // a unit in line 1 AND something in line 2: both count, duplicates once
+    const inBuilding = (line1) => addressKey({ address_line1: line1, address_line2: 'Building A', zip: '34219' });
+    expect(inBuilding('100 Main St Apt 4')).not.toBe(inBuilding('100 Main St Apt 5'));
+    expect(addressKey({ address_line1: '100 Main St Apt 4', address_line2: 'Unit 4', zip: '34219' })).toBe(split);
+    // a multi-word unit tail typed inline keys like the split form
+    expect(addressKey({ address_line1: '100 Main St Apt 4 Building A', zip: '34219' }))
+      .toBe(addressKey({ address_line1: '100 Main St', address_line2: 'Apt 4 Building A', zip: '34219' }));
+    expect(addressKey({ address_line1: '100 Main St Suite B', zip: '34219' }))
+      .toBe(addressKey({ address_line1: '100 Main St', address_line2: 'Ste B', zip: '34219' }));
+    // a multi-letter unit is never dropped
+    const keys = ['700 Demo Gln', '700 Demo Gln Unit PT', '700 Demo Gln Unit AB'].map((l) => addressKey({ address_line1: l, zip: '34219' }));
+    expect(new Set(keys).size).toBe(3);
+    expect(addressKey({ address_line1: '700 Demo Gln Unit PT', zip: '34219' })).toBe(addressKey({ address_line1: '700 Demo Gln', address_line2: 'Unit PT', zip: '34219' }));
+    // a multi-letter unit followed by more words keys like the split form, never suffix-mapped
+    expect(addressKey({ address_line1: '700 Demo Gln Unit PT Building A', zip: '34219' }))
+      .toBe(addressKey({ address_line1: '700 Demo Gln', address_line2: 'Unit PT Building A', zip: '34219' }));
+    expect(addressKey({ address_line1: '700 Demo Gln Unit PT Building A', zip: '34219' }))
+      .not.toBe(addressKey({ address_line1: '700 Demo Gln Unit Point Building A', zip: '34219' }));
+  });
 });
 
 describe('syncPrimaryAddress explicit line 2 intent', () => {

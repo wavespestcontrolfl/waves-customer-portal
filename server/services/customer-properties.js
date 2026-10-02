@@ -12,6 +12,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { sameStreetLine } = require('./neighborhood-access');
 
 // 'family_occupied' (owner ruling 2026-09-08): a home the customer owns or
 // pays for that a FAMILY MEMBER lives in — neither owner-occupied nor a
@@ -51,8 +52,7 @@ function defaultRelationshipForContactRole(contactRole) {
 }
 
 const {
-  normStreet, canonicalizeAddress, normalizeZip, streetKey, stripUnitDesignators,
-  addressKey, unitKey, streetEmbeddedUnitKey,
+  normStreet, canonicalizeAddress, normalizeZip, stripTrailingUnit, streetKey, stripUnitDesignators, addressKey, unitKey, streetEmbeddedUnitKey,
 } = require('./customer-property-address-keys');
 
 /** Coerce to a known occupancy enum value (pure). */
@@ -450,6 +450,25 @@ async function completePrimaryCore(customerId, call, conn) {
  * occupancy_type, label, or the property-grained attributes. No-op when the
  * primary already matches.
  */
+// The neighborhood columns to clear when the address moves to a different
+// street, city, state or ZIP — compared canonically (the neighborhood
+// directory's own street normalizer: USPS suffix and directional spellings,
+// unit tails; city/state case and ZIP+4 ignored), so a unit-only or
+// format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
+function neighborhoodResetOnMove(from, to) {
+  const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  // sameStreetLine compares the street only, so the house number is its own test.
+  const houseNumber = (line) => (String(line || '').match(/^\s*(\d+)/) || [])[1] || '';
+  const moved = houseNumber(from.address_line1) !== houseNumber(to.address_line1)
+    || !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
+    || !same(from.city, to.city)
+    || !same(from.state, to.state)
+    || normalizeZip(from.zip) !== normalizeZip(to.zip);
+  return moved
+    ? { neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null }
+    : {};
+}
+
 async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
@@ -492,6 +511,10 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
     next.latitude = null;
     next.longitude = null;
   }
+  // A street/locality move takes the property out of its neighborhood (and
+  // the shared gate code) — an office pick included — so clear it for a later
+  // relink, whatever the caller does with coords.
+  Object.assign(next, neighborhoodResetOnMove(primary, next));
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

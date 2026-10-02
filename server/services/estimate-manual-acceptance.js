@@ -738,6 +738,13 @@ async function markEstimateManuallyAccepted({
     let proposalCustomer = null;
 
     const now = trx.fn.now();
+    // Served-disclosure evidence rides a manual (verbal) acceptance too
+    // (codex local max-effort review on #5434): a customer who downloaded
+    // the plan document (or viewed the legacy page) while it was open was
+    // shown the annual rate review line, and that marker is only ever
+    // written for a document that printed it — so this freeze promotes it
+    // to the frozen-document stamp exactly as the public accept does.
+    const promoteRateReviewEvidence = require('./estimate-proposal-billing').rateReviewTermsServedIsCurrent(estimate.estimate_data);
     const updates = {
       status: 'accepted',
       accepted_at: estimate.accepted_at || now,
@@ -753,7 +760,9 @@ async function markEstimateManuallyAccepted({
       // Durable at-lock evidence for the pricing-authority gate (#3750):
       // the authority the price carried when locked, stamped from the
       // column in this same UPDATE.
-      estimate_data: trx.raw("jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
+      estimate_data: trx.raw(promoteRateReviewEvidence
+        ? "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL')))), '{rateReviewDisclosedAtAccept}', 'true'::jsonb)"
+        : "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{pricingAuthorityAtLock}', to_jsonb(UPPER(COALESCE(pricing_authority, 'NULL'))))"),
     };
     if (!estimate.sent_at) updates.sent_at = now;
 

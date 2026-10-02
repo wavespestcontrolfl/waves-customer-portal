@@ -9,6 +9,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
     where() { return qb; },
     whereNot() { return qb; },
     whereIn(_c, list) { paths = list; return qb; },
+    whereRaw() { return qb; }, // active IS NOT FALSE (admin off switch), see wiki-qa.js
     select() { return qb; },
     orderBy() { return Promise.resolve(table === 'knowledge_base' ? [{ path: 'pests/ants.md', title: 'Ants', summary: 's', category: 'pests' }] : []); },
     insert: jest.fn(async (row) => { mockInserts.push(row); }),

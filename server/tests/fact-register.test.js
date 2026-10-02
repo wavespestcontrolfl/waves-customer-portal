@@ -303,6 +303,12 @@ describe('planFactSync (pure)', () => {
     expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'hold', reason: 'deactivated_by_person' });
   });
 
+  test('active IS NULL is not a deactivation — only active === false is a person\'s', () => {
+    expect(planFactSync(fact, syncedRow({ active: null }), { today: TODAY })).toEqual(expect.objectContaining({ action: 'update' }));
+    expect(planFactSync({ ...fact, expiresOn: '2026-09-01' }, syncedRow({ active: null }), { today: TODAY }))
+      .toEqual({ action: 'retire', reason: 'expired', keepDeactivation: false });
+  });
+
   test('an expired fact still archives a person-deactivated row (shared search reads status), remembering the deactivation', () => {
     const expired = { ...fact, expiresOn: '2026-09-01' };
     expect(planFactSync(expired, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired', keepDeactivation: true });
@@ -323,6 +329,10 @@ describe('planStraySync (pure) — a register row whose slug left the register',
     expect(planStraySync(rowFor(fact))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
     expect(planStraySync(withMeta(fact, { register_hash: undefined }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
     expect(planStraySync(rowFor(fact, { content: 'edited by a person' }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
+  });
+
+  test('a withdrawn row with active NULL is not remembered as a person\'s deactivation', () => {
+    expect(planStraySync(rowFor(fact, { active: null }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
   });
 
   test('a withdrawn fact a person had deactivated still archives (shared search reads status), keeping the deactivation', () => {
@@ -621,6 +631,194 @@ describe('findUnverifiedClaims', () => {
       'Large patch is common when temps climb to eighty-five.',
     ])('a rewrite of the 80°F threshold or the heat is still the claim: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    // Copular forms of the threshold (codex #5187 follow-up): no preposition
+    // before the figure, so the old degree branch missed them.
+    test.each([
+      'Large patch thrives when temperatures are 85°F.',
+      'Large patch thrives when temperatures are 80°F or higher.',
+      'Large patch is worst when temperatures are 90 degrees.',
+      'Large patch takes off when it is 95 degrees out.',
+      "Large patch flares up when it's 90°F.",
+      'Large patch spreads when temperatures are 85 or higher.',
+      'Large patch thrives when the temperature is about 88°F.',
+      'Large patch thrives when temperatures are ninety degrees.',
+    ])('a copular hot-temperature claim is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    // "rarely" / "seldom" before a receding word is a negation of the
+    // receding, so the summer-disease claim stands (codex #5414 round 3 P1).
+    test.each([
+      'Large patch is rarely absent in summer.',
+      'Large patch is seldom quiet in summer.',
+      'Large patch rarely lets up in summer.',
+      'Large patch is rarely dormant in summer.',
+      'Large patch is hardly ever inactive in summer.',
+      'Large patch rarely slows down once temperatures are above 85°F.',
+      // a double negative is the claim: nothing may sit between the adverb and its predicate
+      'Large patch rarely fails to thrive in summer.',
+      'Large patch seldom fails to spread in summer.',
+      'Large patch rarely stops short of spreading in summer.',
+      // decimal temperatures are read numerically
+      'Large patch thrives at 85.5°F.',
+      'Large patch thrives at 26.7°C.',
+      'Large patch thrives when temperatures are above 80.5 degrees.',
+      // a figure followed by "maximum <noun>" is not a ceiling
+      'Large patch does 90°F maximum damage.',
+      // Celsius is converted before the 80°F line is applied (codex #5414 round 4)
+      'Large patch thrives at 30°C.',
+      'Large patch thrives when temperatures are 30 degrees Celsius or higher.',
+      'Large patch thrives when temperatures are between 29 and 35°C.',
+      'Large patch spreads when temperatures are above 30°C.',
+      'Large patch thrives between 85°F and 35°C.',
+      'Large patch is worst when it is 32 Celsius out.',
+      // a degree figure with real temperature context is still hot, even near a geometry word
+      'Large patch thrives when temperatures are 90 degrees, forming arcs around sprinkler heads.',
+    ])('a negated receding word is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch is active when temperatures are 75°F.',
+      'Large patch is active when temperatures are 80°F or lower.',
+      'Large patch is active when temperatures are 80°F or below.',
+      'Large patch is most likely when temperatures are 60 to 75 degrees.',
+      'Large patch is active when the soil is 65°F.',
+      'Large patch can cover an area that is 80 square feet.',
+      'Large patch can cover patches that are 90 or more square feet across.',
+      'Large patch is more likely in yards that are 85 or more years old.',
+    ])('a copular cool-side temperature passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
+
+    // Round-2 follow-ups: temperatures are folded at SENTENCE level before the
+    // clause split, so "and"/dash inside a phrase cannot cut it in half.
+    test.each([
+      // hot ranges: the LOW end decides
+      'Large patch thrives when temperatures are 85 to 95 degrees.',
+      'Large patch thrives when temperatures are between 85 and 95 degrees.',
+      'Large patch thrives when temperatures are 85–95°F.',
+      'Large patch thrives when temperatures are 85-95°F.',
+      'Large patch thrives when temperatures are between 85°F and 95°F.',
+      'Large patch thrives when temperatures are between eighty and ninety degrees.',
+      // "and" on the hot side
+      'Large patch thrives when temperatures are 85 and up.',
+      'Large patch thrives when temperatures are 85 and higher.',
+      'Large patch thrives when temperatures are 90 and above.',
+      'Large patch thrives when temperatures are 85°F and higher.',
+      // adverbs between the copula and the figure
+      'Large patch thrives when temperatures are consistently 85 degrees or higher.',
+      'Large patch thrives when temperatures are still 90°F.',
+      'Large patch thrives when temperatures are already 90 degrees.',
+      'Large patch thrives when temperatures are regularly 85°F or higher.',
+      'Large patch thrives when temperatures are typically 85 degrees Fahrenheit or higher.',
+      // spelled-out units on the hot side
+      'Large patch spreads when temperatures are 90 degrees Fahrenheit or higher.',
+      'Large patch thrives when temperatures are 85 degrees Fahrenheit.',
+      // a hot range in a sentence that also has a cool phrase
+      'Large patch thrives when temperatures are 85 to 95 degrees, and it is not active when temperatures are 80°F and below.',
+      // a figure that is a FLOOR or a peak, not a cap, stays hot
+      'Large patch is active when temperatures have a minimum of 85°F.',
+      'Large patch is active when temperatures have a minimum of 85 degrees.',
+      'Large patch is active when temperatures have a minimum temperature of 85°F.',
+      'Large patch is active when temperatures peak at 90°F.',
+      'Large patch is active when temperatures have a high of 90°F.',
+      'Large patch is active when temperatures are at least 85°F.',
+    ])('a hot range, "and up", or adverb-fronted figure is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      // spelled-out units on the cool side
+      'Large patch is active when temperatures are 80 degrees Fahrenheit or lower.',
+      'Large patch is active when temperatures are 75 degrees Fahrenheit and lower.',
+      // "and" on the cool side
+      'Large patch is active when temperatures are 80°F and below.',
+      'Large patch is active when temperatures are 80 degrees and lower.',
+      'Large patch is active when temperatures are 80°F and cooler.',
+      'Large patch is active when temperatures are 80 degrees Fahrenheit and cooler.',
+      'Large patch is active when temperatures are 80°F and below, and stays quiet above that.',
+      // the prepositional form agrees with the copular one
+      'Large patch is active at 80°F or lower.',
+      'Large patch is active at 80°F and below.',
+      'Large patch is active at 80 degrees or lower.',
+      // cool ranges (low end under 80)
+      'Large patch is most likely when temperatures are 60 to 75 degrees.',
+      'Large patch is most likely when temperatures are 70 to 85 degrees.',
+      'Large patch is most likely when temperatures are between 60 and 75 degrees.',
+      'Large patch is active when temperatures are between 50 and 80 degrees Fahrenheit.',
+      'Large patch is most likely when temperatures are 70-85°F.',
+      'Large patch is active when temperatures are 55–75°F.',
+      // adverbs on the cool side
+      'Large patch is active when temperatures are still 70°F.',
+      'Large patch is active when temperatures are consistently 70 degrees or lower.',
+      // count nouns and other units are not temperatures
+      'Large patch can cover patches that are 90 or more square feet across.',
+      'Large patch can cover 85 homes in a subdivision.',
+      'Large patch can affect 90 to 100 lawns.',
+      'Large patch is active when temperatures are 80 to 90 lawns.',
+      'Large patch rings can be 85 inches across.',
+      'Large patch rings can be 90 cm across.',
+      'Large patch rings can reach 90 meters across.',
+      // "rarely" / "seldom" recede only when they modify an uncommon or activity predicate
+      'Large patch is rarely a problem in summer.',
+      'Large patch is seldom an issue in summer.',
+      'Large patch rarely spreads in summer.',
+      'Large patch is hardly ever seen in summer.',
+      'Large patch is absent in summer.',
+      'Large patch goes quiet in summer.',
+      // compound downward comparators cap the temperature
+      'Large patch is active when temperatures are less than or equal to 80°F.',
+      'Large patch is active when temperatures are lower than or equal to 80 degrees.',
+      'Large patch is active when temperatures are at or below 80°F.',
+      'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
+      // a ceiling named after the figure caps it
+      'Large patch is active at 80°F max.',
+      'Large patch is active at 80 degrees maximum.',
+      'Large patch is active when temperatures are 80°F at most.',
+      'Large patch is active at 80°F max, and it slows after that.',
+      // cool decimals stay cool
+      'Large patch is active when temperatures are 75.5°F.',
+      'Large patch is active when temperatures are below 80.5°F.',
+      'Large patch is active when temperatures are 24.5°C.',
+      // cool Celsius figures stay cool once converted
+      'Large patch is active between 70°F and 30°C.',
+      'Large patch is active between 20°C and 85°F.',
+      'Large patch is active when temperatures are 20°C.',
+      'Large patch is most likely when temperatures are 15 to 25 degrees Celsius.',
+      'Large patch is active when temperatures are below 30°C.',
+      'Large patch is active when temperatures are 24°C or lower.',
+      // angular degrees are not temperatures
+      'Large patch often appears as a 90-degree arc around a sprinkler head.',
+      'Large patch rings can meet at a 90° angle along a sidewalk.',
+      'Large patch can follow a 90 degree turn in the irrigation line.',
+      // ceiling-style downward bounds cap the temperature (one shared DOWNWARD_BOUND list)
+      'Large patch is active when temperatures have a maximum of 80°F.',
+      'Large patch is active when temperatures have a max of 80 degrees.',
+      'Large patch is active when temperatures have a maximum of about 80°F.',
+      'Large patch is active when temperatures have a max temperature of 80°F.',
+      'Large patch is active when temperatures have a maximum temperature of 75 degrees Fahrenheit.',
+      'Large patch is active when temperatures have a ceiling of 80°F.',
+      'Large patch is active when temperatures have a high of 80°F or less.',
+      'Large patch is active when temperatures are no higher than 80°F.',
+      'Large patch is active when temperatures are no warmer than 80 degrees.',
+      'Large patch is active when temperatures are not above 80°F.',
+      'Large patch is active when temperatures are not over 80 degrees.',
+      'Large patch is active when temperatures are not exceeding 80°F.',
+      'Large patch is active when temperatures never exceed 80°F.',
+      'Large patch is active when temperatures never go above 80°F.',
+      "Large patch is active when temperatures don't exceed 80°F.",
+      'Large patch is active when temperatures doesn\u2019t exceed 80°F.',
+      'Large patch is active when temperatures are capped at 80°F.',
+      'Large patch is active when temperatures top out at 80°F.',
+      'Large patch is active when temperatures max out at 80°F.',
+      'Large patch is active when the maximum temperature is 80°F.',
+      'Large patch is active when temperatures are at most 80°F.',
+      'Large patch is active when temperatures have an upper limit of 80°F.',
+    ])('a cool-side or non-temperature phrase passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });
 
     test.each([

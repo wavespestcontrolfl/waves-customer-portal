@@ -45,6 +45,7 @@ jest.mock('../services/job-costing', () => ({
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
+jest.mock('../services/completion-product-defaults', () => ({ resolveCompletionProductDefaults: jest.fn(async () => ({ products: [], holds: [] })) }));
 
 const fs = require('fs');
 const path = require('path');
@@ -58,8 +59,8 @@ function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }) {
-  const layer = routeLayer('get', '/:serviceId/tech-tips');
+function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }, routePath = '/:serviceId/tech-tips') {
+  const layer = routeLayer('get', routePath);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
     statusCode: 200,
@@ -793,5 +794,68 @@ describe('route wiring contracts', () => {
     expect(block).toContain(".leftJoin('scheduled_services as history_visit'");
     expect(block).toContain(".leftJoin('customer_properties as history_property'");
     expect(block).not.toContain('technician_notes');
+  });
+});
+
+describe('default-product reads keep the current technician assignment boundary', () => {
+  const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  test.each([
+    ['own current', 'technician', 'tech-7', 'confirmed', 0, 200],
+    ['another technician', 'technician', 'tech-9', 'confirmed', 0, 404],
+    ['unassigned', 'technician', null, 'confirmed', 0, 404],
+    ['cancelled', 'technician', 'tech-7', 'cancelled', 0, 404],
+    ['stale', 'technician', 'tech-7', 'confirmed', -8, 404],
+    ['recent completed', 'technician', 'tech-7', 'completed', -1, 200],
+    ['office', 'admin', 'tech-9', 'cancelled', -8, 200],
+  ])('%s', async (_, techRole, technician_id, status, dayOffset, expected) => {
+    resolveCompletionProductDefaults.mockClear();
+    mockDbCurrent = table => {
+      expect(table).toBe('scheduled_services');
+      let rows = [{ id: 'svc-1', technician_id, status, scheduled_date: etDateString(addETDays(new Date(), dayOffset)) }];
+      const q = {
+        where(column, op, value) {
+          if (typeof column === 'object') rows = rows.filter(row => Object.entries(column).every(([key, target]) => row[key] === target));
+          else {
+            const key = column.split('.').pop();
+            rows = rows.filter(row => value === undefined ? row[key] === op : row[key] >= value);
+          }
+          return q;
+        },
+        whereNotIn(column, values) { rows = rows.filter(row => !values.includes(row[column.split('.').pop()])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const result = await invoke({ serviceId: 'svc-1' }, { techRole, technicianId: 'tech-7' }, '/:serviceId/default-products');
+    expect(result.statusCode).toBe(expected);
+    expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(expected === 200 ? 1 : 0);
+    if (expected === 404) expect(result.body).toEqual({ error: 'Service not found' });
+  });
+
+  test('a visit reassigned while defaults resolve is not returned to the former technician', async () => {
+    let assigned = 'tech-7';
+    resolveCompletionProductDefaults.mockClear();
+    resolveCompletionProductDefaults.mockImplementationOnce(async () => { assigned = 'tech-9'; return { products: [{ id: 'p1' }] }; });
+    mockDbCurrent = () => {
+      let rows = [{ id: 'svc-1', technician_id: assigned, status: 'confirmed', scheduled_date: etDateString(new Date()) }];
+      const q = {
+        where(column, op, value) {
+          if (typeof column === 'object') rows = rows.filter(row => Object.entries(column).every(([key, target]) => row[key] === target));
+          else {
+            const key = column.split('.').pop();
+            rows = rows.filter(row => value === undefined ? row[key] === op : row[key] >= value);
+          }
+          return q;
+        },
+        whereNotIn(column, values) { rows = rows.filter(row => !values.includes(row[column.split('.').pop()])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const result = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-7' }, '/:serviceId/default-products');
+    expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(1);
+    expect(result.statusCode).toBe(404);
+    expect(result.body).toEqual({ error: 'Service not found' });
   });
 });

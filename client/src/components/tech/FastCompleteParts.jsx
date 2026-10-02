@@ -210,7 +210,7 @@ export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expa
 // list loaded it opens the full completion screen, as it always did.
 // `commonProducts` is the picker's "Used most" list, already without the
 // products the sheet starts with; `rows` are the products on the sheet.
-export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick }) {
+export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line }) {
   const buttonRef = useRef(null);
   const [open, setOpen] = useState(false);
   const hasCatalog = products.length > 0;
@@ -220,6 +220,7 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
   const picker = shown ? (
     <FastCompleteProductPicker
       variant={isMobile ? 'sheet' : 'popover'}
+      {...(line ? { line } : {})}
       products={products}
       commonProducts={commonProducts}
       onSheetIds={onSheetIds}

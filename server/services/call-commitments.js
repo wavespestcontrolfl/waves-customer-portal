@@ -1479,6 +1479,23 @@ function whereEstimateCustomerOwnership(query, customerId) {
         ))`, [customerId, customerId, customerId, customerId, customerId]);
 }
 
+// whereEstimateCustomerOwnership for MANY customers in ONE query: each
+// customer's own fence (same lead-ownership, conflict and deleted-lead arms,
+// unchanged) OR'd together, so a batch caller never loops a query per
+// customer. Pair it with ESTIMATE_OWNER_SQL to learn which customer a row
+// matched: the fence admits an unowned estimate only when every live lead
+// claiming it belongs to that one customer, so the owner is unambiguous.
+function whereEstimateOwnedByAny(query, customerIds) {
+  const ids = [...new Set((customerIds || []).map(String))];
+  if (!ids.length) return query.whereRaw("false");
+  return query.where(function anyOwner() {
+    for (const id of ids) this.orWhere(function owner() { whereEstimateCustomerOwnership(this, id); });
+  });
+}
+const ESTIMATE_OWNER_SQL = `COALESCE(estimates.customer_id, (SELECT l.customer_id FROM leads l
+  WHERE l.deleted_at IS NULL AND l.customer_id IS NOT NULL
+    AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id') LIMIT 1))`;
+
 // The basis of a scheduling promise kept by a booking for its promised slot
 // (resolveFulfillment). The visit is found through the call's CUSTOMER and
 // the slot through inputs a reprocess rewrites, so every refresh judges it
@@ -3524,6 +3541,8 @@ module.exports = {
   phoneDigits,
   phoneWhereAny,
   whereEstimateCustomerOwnership,
+  whereEstimateOwnedByAny,
+  ESTIMATE_OWNER_SQL,
   handedOffWithin,
   handoffOrder,
   HANDOFF_COLS,

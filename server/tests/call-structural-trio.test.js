@@ -365,6 +365,31 @@ describe('resolveCallBookingPropertyLinkage', () => {
     expect(out.address.line1).toBe('456 Pine Ave');
   });
 
+  test('a saved address restated with another suffix spelling or mailing city links the saved row the dedupe matched', async () => {
+    const saved = [
+      { id: 'prop-home', address_line1: '200 Example Gln', address_line2: null, city: 'Duette', zip: '34219', latitude: 27.5, longitude: -82.3 },
+      { id: 'prop-rental', address_line1: '456 Pine Ave', address_line2: null, city: 'Venice', zip: '34285' },
+    ];
+    const call = { address_line1: '200 Example Glen', city: 'Parrish', state: 'FL', zip: '34219' };
+    // recordCallProperty declines the insert for this address ...
+    expect(require('../services/customer-properties').isNewAddress(saved, call)).toBe(false);
+    // ... so booking must link the row it matched, with its geocode.
+    const out = await resolveCallBookingPropertyLinkage('cust-1', call, mockProps(saved));
+    expect(out.propertyId).toBe('prop-home');
+    expect([out.lat, out.lng]).toEqual([27.5, -82.3]);
+  });
+
+  test('a same-house fallback that matches two saved rows stays unlinked', async () => {
+    const trx = mockProps([
+      { id: 'p1', address_line1: '200 Example Gln', address_line2: null, city: 'Duette', zip: '34219' },
+      { id: 'p2', address_line1: '200 Example Glen', address_line2: null, city: 'Myakka City', zip: '34219' },
+    ]);
+    const out = await resolveCallBookingPropertyLinkage('cust-1', {
+      address_line1: '200 Example Glen', city: 'Parrish', state: 'FL', zip: '34219',
+    }, trx);
+    expect(out.propertyId).toBeNull();
+  });
+
   test('no call address + on-file address matching an active property → linked with geocode (codex P2)', async () => {
     const cust = { address_line1: '123 Oak Street', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' };
     const props = [{ id: 'prop-home', address_line1: '123 Oak St', address_line2: null, city: 'Venice', zip: '34285', latitude: 27.1, longitude: -82.4 }];
