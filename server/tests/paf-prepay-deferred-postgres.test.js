@@ -441,6 +441,14 @@ postgres('annual prepay charged after the first visit', () => {
       send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
     });
 
+    it('a fresh capture (job carries only the Stripe id) still announces once enrolled (GitHub Codex #5640 pre-push)', async () => {
+      const f = await deferredAccept({ jobPatch: { payment_method_row_id: null } });
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toMatchObject({ amount: '$480.00', methodLine: 'card on file' });
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });

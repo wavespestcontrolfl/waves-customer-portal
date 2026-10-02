@@ -541,7 +541,7 @@ async function awaitingDeferredJobForVisit(svc, conn) {
 // and the customer hears about the pay link instead (GitHub Codex #5640 r1).
 async function autoChargeMethod(job, customerId, conn) {
   if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
-  if (job.authentication_required === true || job.charge_returned === true || !job.payment_method_row_id) return null;
+  if (job.authentication_required === true || job.charge_returned === true) return null;
   const Eligibility = require('./autopay-eligibility');
   const customer = await conn('customers').where({ id: customerId }).first();
   if (!customer || customer.deleted_at || Eligibility.isPaused(customer)) return null;
@@ -552,8 +552,16 @@ async function autoChargeMethod(job, customerId, conn) {
     .first('id');
   if (optedOut) return null;
   if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(customerId, conn)) return null;
+  // The bound row: by id, or for a fresh capture (the job stores only the
+  // Stripe id until enrollment) the customer's row for that Stripe id, the
+  // same fallback the sweep charges by (GitHub Codex #5640 pre-push).
+  const boundId = job.payment_method_row_id
+    || (job.stripe_payment_method_id
+      ? (await conn('payment_methods').where({ customer_id: customerId, stripe_payment_method_id: job.stripe_payment_method_id }).first('id'))?.id
+      : null);
+  if (!boundId) return null;
   const method = await Eligibility.getChargeableAutopayMethod(customer, conn, { rethrow: true });
-  return method && String(method.id) === String(job.payment_method_row_id) ? method : null;
+  return method && String(method.id) === String(boundId) ? method : null;
 }
 
 // The amount to announce: the acknowledged total, a CEILING (owner R1), so
