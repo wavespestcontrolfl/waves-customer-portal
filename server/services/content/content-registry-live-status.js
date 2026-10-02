@@ -218,12 +218,37 @@ function inertEnd(lower, find, name, lt, gt) {
     }
     if (hit === Infinity) return Infinity;
     if (needle === open) {
-      at = hit + needle.length;
-      if (name === 'template' || !selfClosing(lower, find('>', at))) depth += 1;
+      const end = tagClose(lower, hit + needle.length); // skip the whole nested tag, so no stretch is read twice
+      if (name === 'template' || !selfClosing(lower, end)) depth += 1;
+      at = end + 1;
     } else if (needle === close) { depth -= 1; at = hit + needle.length; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
     else at = tagAt(lower, find, `</${needle.slice(1)}`, hit + needle.length) + 1;
   }
   return at === Infinity ? at : find('>', at) + 1; // past the whole closing tag
+}
+
+// The '>' that ends a tag whose name ends just before `from`, as the tokenizer finds it: a
+// quoted attribute value ("if (n > 0) show('<h1>…')") is skipped whole. Infinity when the tag
+// never closes. Each call reads only that tag, and tags never overlap in the forward pass.
+function tagClose(src, from) {
+  let j = from;
+  while (j < src.length) {
+    const c = src[j];
+    if (c === '>') return j;
+    if (c === '=') {
+      j += 1;
+      while (j < src.length && /\s/.test(src[j])) j += 1;
+      if (src[j] === '"' || src[j] === "'") {
+        const q = src.indexOf(src[j], j + 1);
+        if (q === -1) return Infinity;
+        j = q + 1;
+        continue;
+      }
+    } else {
+      j += 1;
+    }
+  }
+  return Infinity;
 }
 
 // Text of every <title>/<h1> in one forward pass, so malformed or unclosed tags in a 600 KB
@@ -242,7 +267,7 @@ function headingTexts(html) {
     const tag = lt === Infinity ? null : TAG_RE.exec(lower);
     if (!tag) { i = lt + 1; continue; }
     const [, closing, name] = tag;
-    const gt = name === '!--' ? lt + 3 : find('>', lt);
+    const gt = name === '!--' ? lt + 3 : tagClose(src, lt + 1 + closing.length + name.length);
     if (!closing && INERT_TAGS.has(name)) {
       const end = inertEnd(lower, find, name, lt, gt);
       if (open) { open.parts.push(src.slice(open.from, lt)); open.from = end; }

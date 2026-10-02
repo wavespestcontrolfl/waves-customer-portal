@@ -600,6 +600,12 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
       notFoundHeading(html);
       expect(Date.now() - t0).toBeLessThan(1500);
     }
+    for (const html of [`<div a="${'>'.repeat(300000)}`, `${'<a b=">" '.repeat(60000)}`, `${'<a b=c '.repeat(80000)}`,
+      `<svg>${'<svg a=">"'.repeat(60000)}`, `<template>${'<template a=">"'.repeat(60000)}`]) {
+      const t0 = Date.now();
+      notFoundHeading(html);
+      expect(Date.now() - t0).toBeLessThan(1500);
+    }
     // deep nesting, then the matching closes (the exhausted-search case)
     const started = Date.now();
     notFoundHeading(`${'<template>'.repeat(30000)}${'</template>'.repeat(30000)}`);
@@ -625,6 +631,10 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<svg><svg><title>x</title></svg><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<svg class="i"/><h1>Page not found</h1>')).toBe(true); // a self-closing svg is empty
     expect(notFoundHeading('<math><title>Not found</title></math><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<button onclick="if (n > 0) show(\'<h1>Not Found</h1>\')">Go</button><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div data-template="><h1>Page not found</h1>"></div><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<h1 class="a>b">Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<svg data-x="/>"><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>x</script\t><h1>Page not found</h1>')).toBe(true);

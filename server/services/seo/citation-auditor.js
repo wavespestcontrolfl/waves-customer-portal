@@ -207,8 +207,12 @@ function unwrapLd(input) {
 }
 
 // A node that only points at another ({"@id": "_:address"}), as flattened JSON-LD writes links.
-const isLdRef = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v) && typeof v['@id'] === 'string'
-  && Object.keys(v).every((k) => k === '@id' || k === '@type');
+// Stops at the first other key, so a large node is never enumerated whole.
+const isLdRef = (v) => {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || typeof v['@id'] !== 'string') return false;
+  for (const k in v) if (k !== '@id' && k !== '@type') return false;
+  return true;
+};
 
 // Every named/phoned/addressed schema.org node in the page's JSON-LD (arrays, @graph, mainEntity).
 // Flattened JSON-LD puts the postal address in a sibling node and links it by @id: an address
@@ -258,7 +262,10 @@ function wavesEntity(html, candidates = []) {
       (phones.includes(c.phoneKey) ? 100 : 0) + (addr && addr.street === c.street ? 10 : 0) + (addr && addr.city && c.cities.includes(addr.city) ? 1 : 0)), 0);
     return best + (node.address ? 0.5 : 0);
   };
-  return mine.reduce((top, n) => (top === null || score(n) > score(top) ? n : top), null);
+  let top = null;
+  let topScore = -Infinity;
+  for (const n of mine) { const sc = score(n); if (sc > topScore) { top = n; topScore = sc; } } // each node scored once
+  return top;
 }
 
 // An `address` given as an array lists several: judge the entry matching the expected office(s)
@@ -367,6 +374,12 @@ const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${
 const COUNT_NOUNS = 'reviews?|ratings?|photos?|pictures?|videos?|years?|yrs?|stars?|followers?|likes?|jobs?|hires?|views?|answers?|questions?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|miles?|mi|employees?|projects?|results?|listings?|customers?|clients?';
 const ID_LABELS = 'listing|order|account|acct|member|customer|client|ref|reference|user|business|profile|case|ticket|invoice|tax|employer|record|vendor|license|licence|transaction|tracking|item|product|ad|company|provider|location|store|claim|policy|confirmation|booking|job|lead|quote';
 const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?(?<!\\b(?:${ID_LABELS}))\\s(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
+// Some directories show no ZIP ("99 Palm Terrace, Atlanta, GA"): a house number, then a comma
+// and a state ending the address, still means an address is shown. Codes that are also words
+// ("…, or", "…, in") count only in upper case here; other codes and names in any case.
+const caseFree = (w) => w.replace(/[a-z]/gi, (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`);
+const NO_ZIP_STATE_ALTS = [...BARE_STATE_CODES.map(caseFree), ...AMBIGUOUS_STATE_CODES, ...US_STATE_NAMES.map((n) => caseFree(n).replace(/ /g, '\\s+'))].join('|');
+const NUMBERED_STATE_NO_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s(?![\\s.(-]*\\d)(?!(?:${COUNT_NOUNS})\\b)[^;!?]{1,120}?,\\s*(?:${NO_ZIP_STATE_ALTS})(?![\\w-])(?!\\.?,?\\s*\\d)`);
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|${US_STATE_NAMES.map((n) => n.replace(/ /g, '\\s+')).join('|')})${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
@@ -408,7 +421,7 @@ function judgeTextAddress(nap, office, entityAddress) {
   // Phones are blanked to a ';' (which the house-number span cannot cross) padded to the same
   // length, so a phone is never a house number and match indexes still point into nap.text.
   const noPhones = nap.text.replace(PHONE_RE, (m) => ';'.padEnd(m.length, ' '));
-  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || NUMBERED_STATE_ZIP_RE.exec(noPhones);
+  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || (NUMBERED_STATE_ZIP_RE.exec(noPhones) || NUMBERED_STATE_NO_ZIP_RE.exec(noPhones));
   const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
   // An entity address we could not read (a link to a node not on the page) is stated but
   // unknown: never let it pass as "no address shown".

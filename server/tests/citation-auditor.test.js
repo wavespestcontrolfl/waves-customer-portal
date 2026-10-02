@@ -84,6 +84,16 @@ describe('classifyListing', () => {
     expect(Date.now() - started).toBeLessThan(250);
   });
 
+  test('many Waves entities after a large address node are scored in linear time', () => {
+    const addr = { '@id': '_:a', streetAddress: '99 Old Rd' };
+    for (let i = 0; i < 6000; i += 1) addr[`p${i}`] = 'x';
+    const nodes = [{ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: addr }];
+    for (let i = 0; i < 3000; i += 1) nodes.push({ '@type': 'LocalBusiness', name: 'Waves Pest Control' });
+    const started = Date.now();
+    classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(nodes)}`), expected);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');
@@ -448,6 +458,11 @@ describe('classifyListing', () => {
       expect(text('<p>5 reviews</p><p>Listing ID 98765</p>').status).toBe('verified'); // nor a count
       expect(text('<p>Open 7 days a week</p><p>order id 12345</p>').status).toBe('verified'); // an ID label is no state
       expect(text('<p>(941) 318-7612 · 12 photos · Listing ID 98765</p>').status).toBe('verified');
+      expect(text('<p>99 Palm Terrace, Atlanta, GA</p>').status).toBe('unverified'); // no ZIP shown
+      expect(text('<p>99 palm terrace, boise, ID · open now</p>').status).toBe('unverified');
+      expect(text('<p>99 Palm Terrace, Atlanta, Georgia</p>').status).toBe('unverified');
+      expect(text('<p>Open 7 days, or call us</p>').status).toBe('verified'); // a count, and lowercase "or" is a word
+      expect(text('<p>Serving 3 counties, in Manatee and Sarasota</p>').status).toBe('verified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');
     });
 
