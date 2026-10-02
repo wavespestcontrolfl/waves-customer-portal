@@ -399,7 +399,15 @@ function undoneInQuote(quote, { assertion, subject }) {
 // garage", "treated everything except inside") is not heard there: the
 // place's plain words, after a denial, "except", "but not", "other than" or
 // "instead of".
-const AREA_WORDS = { inside: 'inside|interior|indoors', outside: 'outside|exterior|outdoors|perimeter', garage: 'garage' };
+// The words for each place: its plain names and the places the prompt itself
+// lists under it (kitchen, bathrooms, baseboards… inside; foundation, eaves,
+// lanai… outside), so the note's own checks know the same places the reading
+// does (pre-push P1 on #5538: "baited the kitchen counter" is inside).
+const AREA_WORDS = {
+  inside: String.raw`inside|interior|indoors|kitchens?|bath(?:room)?s?|baseboards?|cabinets?|sinks?|door\s+tracks?|attic|(?:bed|living|laundry|utility|dining|family)\s*rooms?|closets?|pantry`,
+  outside: String.raw`outside|exterior|outdoors|perimeter|foundation|eaves|lanai|patio|yard|mulch(?:\s+beds?)?|door\s+frames?`,
+  garage: 'garage',
+};
 const AREA_PLACE_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [area, new RegExp(String.raw`\b(?:${words})\b`)]));
 
 // What a place is governed by at a mention: the action or observation word

@@ -666,6 +666,22 @@ describe('validateVoiceFacts', () => {
     expect(planned).toMatchObject({ spray: null, unclearSpray: true });
   });
 
+  test('the note\'s own checks know the places the prompt lists, kitchen to eaves (pre-push P1 on #5538)', () => {
+    const facts = validateVoiceFacts({
+      areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }],
+      pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }, { name: 'roaches', quote: 'Baited the kitchen counter for roaches' }],
+      spray: { method: 'not_said', quote: '' },
+    }, 'Sprayed outside for ants. Baited the kitchen counter for roaches.');
+    expect(facts.unclearAreas).toEqual(['Inside']);
+    // A quote naming only another area's place is that area's; a place only
+    // looked at is no treatment there.
+    const note = 'Dusted the eaves for wasps. Checked the attic, nothing there.';
+    const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(placeIn(read('inside', 'Dusted the eaves for wasps'), 'Inside')).toBe('unclear');
+    expect(placeIn(read('outside', 'Dusted the eaves for wasps'), 'Outside')).toBe('heard');
+    expect(read('outside', 'Dusted the eaves for wasps').unclearAreas).toEqual([]);
+  });
+
   test('a place only looked at, or a quote naming only another place, is unclear (GitHub Codex on #5538)', () => {
     const note = 'Checked the bait stations inside; treated outside for ants.';
     const read = (area, quote) => validateVoiceFacts({ areas: [{ area, quote }, { area: 'outside', quote: 'treated outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
