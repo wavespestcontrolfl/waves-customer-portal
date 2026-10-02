@@ -854,7 +854,7 @@ router.post(
       });
       if (result.created) {
         const appointmentPublic = require('./appointment-public');
-        Promise.resolve()
+        void Promise.resolve()
           .then(() => appointmentPublic.notifyOfficeVisitPrepSubmission(result.svc, topic))
           .catch((err) => logger.error(`[reservice-public] visit-prep office item failed for ${result.svc?.id}: ${err.message}`));
       }
