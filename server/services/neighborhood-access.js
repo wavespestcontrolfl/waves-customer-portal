@@ -496,17 +496,50 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   });
 }
 
-// Every neighborhood that has a code conflict right now, with the customer
-// behind its newest unconfirmed code (the bell opens that record).
+// Every neighborhood that has a code conflict right now.
 async function conflictedNeighborhoods(conn) {
-  const rows = await conn('neighborhood_access as a')
+  return conn('neighborhood_access as a')
     .whereNotNull('a.code').whereNot('a.status', 'retired')
     .groupBy('a.neighborhood_id')
     .havingRaw('count(*) > 1')
     .havingRaw("bool_or(a.status = 'needs_confirm')")
-    .select('a.neighborhood_id',
-      conn.raw("(array_agg(a.source_customer_id ORDER BY a.created_at DESC) FILTER (WHERE a.status = 'needs_confirm' AND a.source_customer_id IS NOT NULL))[1] AS customer_id"));
-  return rows;
+    .pluck('a.neighborhood_id');
+}
+
+// The customer the conflict bell opens: of the customers whose CURRENT code is
+// filed in this neighborhood and matches one of its unconfirmed codes, the one
+// whose preferences changed last (the newest update, whatever order the pass
+// filed them in). Else the newest unconfirmed row's own source customer. Null
+// when no customer record backs the conflict (the office tab, PR 3, lists it).
+async function conflictCustomer(conn, neighborhoodId) {
+  const [filed] = (await conn.raw(`SELECT f.customer_id, c.first_name
+    FROM neighborhood_access_filings f
+    JOIN property_preferences pp ON pp.customer_id = f.customer_id
+    JOIN customers c ON c.id = f.customer_id AND c.deleted_at IS NULL
+    WHERE f.neighborhood_id = ? AND f.value_hash = ${VALUE_HASH_SQL}
+      AND EXISTS (SELECT 1 FROM neighborhood_access a
+        WHERE a.neighborhood_id = f.neighborhood_id AND a.status = 'needs_confirm'
+          AND a.code IS NOT NULL AND lower(a.code) = lower(${CANONICAL_VALUE_SQL}))
+    ORDER BY pp.updated_at DESC NULLS LAST, f.filed_at DESC, f.customer_id
+    LIMIT 1`, [neighborhoodId])).rows;
+  if (filed) return { customerId: filed.customer_id, firstName: filed.first_name || null };
+  const row = await conn('neighborhood_access as a')
+    .join('customers as c', 'c.id', 'a.source_customer_id')
+    .whereNull('c.deleted_at')
+    .where({ 'a.neighborhood_id': neighborhoodId, 'a.status': 'needs_confirm' })
+    .whereNotNull('a.code')
+    .orderBy('a.updated_at', 'desc')
+    .first('a.source_customer_id as customer_id', 'c.first_name');
+  return row ? { customerId: row.customer_id, firstName: row.first_name || null } : null;
+}
+
+// Ring (or refresh) the bell for one conflicted neighborhood; false when no
+// customer backs it.
+async function ringForConflict(neighborhoodId) {
+  const who = await conflictCustomer(db, neighborhoodId);
+  if (!who) return false;
+  await raiseConflictBell(neighborhoodId, who.customerId, who.firstName);
+  return true;
 }
 
 // Raise the bell for a standing conflict that has none open (the raise after
@@ -516,12 +549,9 @@ async function reconcileConflictBells(alreadyRaised) {
   const { openAdminAlertKeys } = require('./admin-alert-episodes');
   const open = new Set(await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX));
   let raised = 0;
-  for (const row of await conflictedNeighborhoods(db)) {
-    if (alreadyRaised.has(row.neighborhood_id) || open.has(`${CONFLICT_KEY_PREFIX}${row.neighborhood_id}`)) continue;
-    if (!row.customer_id) continue; // no customer record to open; the office tab (PR 3) lists it
-    const c = await db('customers').where({ id: row.customer_id }).first('first_name');
-    await raiseConflictBell(row.neighborhood_id, row.customer_id, c?.first_name || null);
-    raised += 1;
+  for (const neighborhoodId of await conflictedNeighborhoods(db)) {
+    if (alreadyRaised.has(neighborhoodId) || open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`)) continue;
+    if (await ringForConflict(neighborhoodId)) raised += 1;
   }
   return raised;
 }
@@ -540,16 +570,19 @@ async function closeResolvedConflictBells() {
   });
 }
 
-// The bell side of a pass: ring for this pass's new conflicts, raise any
-// standing conflict whose bell never landed, and close the resolved ones.
-// Returns how many bell steps failed, so the pass reports them to job health.
-async function settleConflictBells(conflicts, logger) {
+// The bell side of a pass: ring for the neighborhoods this pass touched that
+// now conflict, raise any standing conflict whose bell never landed, and close
+// the resolved ones. Returns how many touched neighborhoods conflict, and how
+// many bell steps failed so the pass reports them to job health.
+async function settleConflictBells(touched, logger) {
   const raisedNow = new Set();
   let failed = 0;
-  for (const [neighborhoodId, { customerId, firstName }] of conflicts) {
+  let conflicts = 0;
+  for (const neighborhoodId of touched) {
     try {
-      await raiseConflictBell(neighborhoodId, customerId, firstName);
-      raisedNow.add(neighborhoodId);
+      if (!(await neighborhoodHasCodeConflict(db, neighborhoodId))) continue;
+      conflicts += 1;
+      if (await ringForConflict(neighborhoodId)) raisedNow.add(neighborhoodId);
     } catch (err) {
       failed += 1;
       logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
@@ -568,30 +601,37 @@ async function settleConflictBells(conflicts, logger) {
     failed += 1;
     logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
   }
-  return failed;
+  return { failed, conflicts };
 }
 
 async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) {
   const { neighborhoodAccessLive } = require('../config/feature-gates');
   if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
+  // A cleared code clears its filing: restoring the same code later is new
+  // evidence (A → blank → A files again, like A → B → A).
+  await db.raw(`DELETE FROM neighborhood_access_filings f WHERE NOT EXISTS (
+    SELECT 1 FROM property_preferences pp
+    WHERE pp.customer_id = f.customer_id AND btrim(coalesce(pp.neighborhood_gate_code, '')) <> '')`);
   const customerIds = await unfiledGateCodeCustomers(db);
   const tally = {};
   let failed = 0;
-  const conflicts = new Map(); // neighborhoodId → { customerId, firstName } of the newest update
+  // Neighborhoods where this pass filed a new code or flagged an existing one
+  // (a duplicate that demoted an active copy can create a conflict too).
+  const touched = new Set();
   for (const customerId of customerIds) {
     try {
       const r = await fileOneSavedCode(customerId, lookup);
       tally[r.status] = (tally[r.status] || 0) + 1;
-      if (r.status === 'filed_conflict') conflicts.set(r.neighborhoodId, { customerId, firstName: r.firstName });
+      if (r.status === 'filed_conflict' || (r.status === 'duplicate' && r.flagged?.length)) touched.add(r.neighborhoodId);
     } catch (err) {
       failed += 1;
       // Never the message: a knex error carries its bindings, which can hold a code.
       logger.warn(`[neighborhood-access] filing failed for customer ${customerId} (${err.code || err.name || 'error'})`);
     }
   }
-  const bellsFailed = await settleConflictBells(conflicts, logger);
-  return { customers: customerIds.length, tally, failed, bellsFailed, conflicts: conflicts.size };
+  const bells = await settleConflictBells(touched, logger);
+  return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
 }
 
 module.exports = {

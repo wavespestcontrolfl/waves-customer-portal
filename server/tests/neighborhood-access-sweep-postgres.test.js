@@ -315,6 +315,46 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(r.bellsFailed).toBeGreaterThanOrEqual(1);
   });
 
+  test('a code cleared and later restored files again (A → blank → A)', async () => {
+    const n = await neighborhood('Cleared Grove');
+    const customerId = await customerWithCode('4141', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('neighborhood_access').where({ neighborhood_id: n }).update({ status: 'retired' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: '' });
+    await sweepSavedGateCodes();
+    expect(await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).toBeUndefined();
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: '4141' });
+    expect((await sweepSavedGateCodes()).customers).toBe(1);
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual(expect.arrayContaining([['4141', 'active'], ['4141', 'retired']]));
+  });
+
+  test('a duplicate that demotes an office code into a conflict rings the bell for that customer', async () => {
+    const n = await neighborhood('Office Pair');
+    await trx('neighborhood_access').insert([
+      { neighborhood_id: n, access_type: 'keypad', code: '5151', status: 'active', source: 'office' },
+      { neighborhood_id: n, access_type: 'keypad', code: '5252', status: 'active', source: 'office' },
+    ]);
+    const customerId = await customerWithCode('5151', { neighborhoodId: n, notes: 'Gate code 5151 is unconfirmed: confirm on site.' });
+    const r = await sweepSavedGateCodes();
+    expect(r).toMatchObject({ tally: { duplicate: 1 }, conflicts: 1 });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${customerId}` });
+  });
+
+  test('the conflict bell opens the customer who updated last, not the last one filed', async () => {
+    const n = await neighborhood('Two Saves');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '6060', status: 'active', source: 'backfill' });
+    const a = await customerWithCode('6161', { neighborhoodId: n });
+    const b = await customerWithCode('6262', { neighborhoodId: n });
+    // The pass files in id order; make the id-last customer the OLDER update.
+    const [first, last] = [a, b].sort();
+    await trx('property_preferences').where({ customer_id: last }).update({ updated_at: trx.raw("now() - interval '1 hour'") });
+    await trx('property_preferences').where({ customer_id: first }).update({ updated_at: trx.raw('now()') });
+    await sweepSavedGateCodes();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${first}` });
+  });
+
   test('free text files for the office to confirm, with no bell', async () => {
     const n = await neighborhood('Pinebrook Village');
     await customerWithCode('Text the owner on arrival; north gate only', { neighborhoodId: n });
