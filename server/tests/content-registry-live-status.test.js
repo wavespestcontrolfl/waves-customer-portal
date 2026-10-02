@@ -602,7 +602,8 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     }
     for (const html of [`<div a="${'>'.repeat(300000)}`, `${'<a b=">" '.repeat(60000)}`, `${'<a b=c '.repeat(80000)}`,
       `<svg>${'<svg a=">"'.repeat(60000)}`, `<template>${'<template a=">"'.repeat(60000)}`,
-      `${'<title>'.repeat(80000)}`, `${'</x'.repeat(150000)}`, `<script>${'</scriptx'.repeat(60000)}`, `${'<svg>'.repeat(100000)}`]) {
+      `${'<title>'.repeat(80000)}`, `${'</x'.repeat(150000)}`, `<script>${'</scriptx'.repeat(60000)}`, `${'<svg>'.repeat(100000)}`,
+      `${'<svg>'.repeat(60000)}${'</x>'.repeat(60000)}`, `${'<template>'.repeat(60000)}${'</svg>'.repeat(60000)}`]) {
       const t0 = Date.now();
       notFoundHeading(html);
       expect(Date.now() - t0).toBeLessThan(1500);

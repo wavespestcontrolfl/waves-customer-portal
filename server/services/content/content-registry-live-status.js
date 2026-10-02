@@ -213,6 +213,7 @@ function headingTexts(html) {
   const lower = src.toLowerCase();
   const out = [];
   const inert = []; // open inert containers, innermost last
+  const openInert = new Map(); // name -> how many of `inert` it is
   let heading = null; // { name, parts }
   const text = (from, to) => { if (heading && !inert.length && to > from) heading.parts.push(src.slice(from, to)); };
   let i = 0;
@@ -242,9 +243,10 @@ function headingTexts(html) {
     if (gt === -1) break; // the rest of the document is inside this tag
     i = gt + 1;
     if (closing) {
-      const k = inert.lastIndexOf(name);
-      if (k !== -1) inert.length = k;
-      else if (!inert.length && heading && heading.name === name) { out.push(heading.parts.join(' ')); heading = null; }
+      if (openInert.get(name)) { // pop back to it; each push pops at most once, so this stays linear
+        let top;
+        do { top = inert.pop(); openInert.set(top, openInert.get(top) - 1); } while (top !== name);
+      } else if (!inert.length && heading && heading.name === name) { out.push(heading.parts.join(' ')); heading = null; }
       continue;
     }
     if (RAW_TEXT_TAGS.has(name)) {
@@ -252,7 +254,7 @@ function headingTexts(html) {
       if (e === -1) break;
       i = e;
     } else if (INERT_CONTAINERS.has(name)) {
-      if (name === 'template' || lower[gt - 1] !== '/') inert.push(name);
+      if (name === 'template' || lower[gt - 1] !== '/') { inert.push(name); openInert.set(name, (openInert.get(name) || 0) + 1); }
     } else if (!inert.length && !heading && name === 'title') {
       const e = rawTextEnd(lower, 'title', i);
       out.push(src.slice(i, e === -1 ? src.length : lower.lastIndexOf('</title', e)));
