@@ -82,8 +82,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // routes a technician has no business calling at all: the compliance
   // export, outbound calls from the business line, auto-reply and link
   // library configuration.)
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|stats|unread-count|link-library|ai-auto-reply-status|customer-link)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|schedule-sms|rewrite-sms|ai-draft|agent-draft|customer-link)$/ },
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|stats|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|schedule-sms|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts(\/.*)?$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/.*)?$/ },

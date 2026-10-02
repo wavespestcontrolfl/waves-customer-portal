@@ -71,6 +71,7 @@ describe('matcher', () => {
     ['GET', '/api/admin/communications/compliance-export', false],
     ['POST', '/api/admin/communications/call', false],
     ['POST', '/api/admin/communications/sms', true],
+    ['GET', '/api/admin/communications/agent-draft', true],
     ['GET', '/api/admin/equipment-systems/calibrations', true],
     ['PUT', '/api/admin/equipment-systems/calibrations/1/verify', false],
     ['GET', '/api/admin/inventory', true],
