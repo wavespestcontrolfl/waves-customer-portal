@@ -41,6 +41,7 @@
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { useFieldPortalClass } from '../../components/tech/fieldPortal';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
@@ -307,6 +308,7 @@ const QUICK_ACTIONS = [
 ];
 
 export default function TechHomePage({ section = 'today' }) {
+  const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
   const base = useTechBasePath();
   const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
@@ -1228,6 +1230,7 @@ export default function TechHomePage({ section = 'today' }) {
 
       {continueProjectId && createPortal(
         <div
+          className={fieldPortalClass || undefined}
           /* Portaled to document.body at zIndex 50 so the stack lands right
              (Codex P2): the overlay mounts AFTER #root, so it paints above
              the shell bottom nav (also z-50, inside #root) — and

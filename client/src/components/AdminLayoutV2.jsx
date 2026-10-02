@@ -295,7 +295,14 @@ export default function AdminLayoutV2() {
     // load already started the bounded one; Codex #5573 r10). A still-pending
     // non-field check has no time bound: restart it as the field check too.
     const entered = onFieldNow && !wasOnField.current;
+    const left = !onFieldNow && wasOnField.current;
     wasOnField.current = onFieldNow;
+    // Leaving Today while its bounded check is still pending restarts it as
+    // the unbounded non-field check (Codex #5573 r12).
+    if (left && authStatus === "checking") {
+      setVerifyRun((n) => n + 1);
+      return;
+    }
     if (!entered || authStatus === "ready") return;
     setAuthStatus("checking");
     setVerifyRun((n) => n + 1);

@@ -18,6 +18,7 @@
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState, useId } from 'react';
+import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -35,6 +36,7 @@ const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
+  const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -172,7 +174,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   return createPortal(
     <UiSurface
       density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen', fieldPortalClass)}
       style={{ '--tech-vh': `1${DVH}` }}
       onClick={(event) => {
         event.stopPropagation();

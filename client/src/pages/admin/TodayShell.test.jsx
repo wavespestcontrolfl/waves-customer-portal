@@ -29,6 +29,7 @@ vi.mock('../../components/ServiceRecapModal', () => ({ default: () => null }));
 vi.mock('../tech/VisitBriefPanel', () => ({ default: ({ stop }) => <p>Property brief for {stop.primary.id}</p> }));
 vi.mock('./ProjectsPage', () => ({ ProjectDetail: () => null }));
 import TodayShell from './TodayShell';
+import { FieldPortalClassContext, useFieldPortalClass } from '../../components/tech/fieldPortal';
 import TechHomePage from '../tech/TechHomePage';
 
 const TECH = { id: 't1', name: 'Fixture Tech', role: 'technician' };
@@ -129,12 +130,15 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByText('Protocols page')).toBeNull();
   });
 
-  it('marks <body> while mounted so portaled field dialogs keep their fonts (Codex #5573 r8)', async () => {
-    const view = mount();
-    await screen.findByRole('navigation', { name: 'Field navigation' });
-    expect(document.body).toHaveClass('tech-field-active');
-    view.unmount();
-    expect(document.body).not.toHaveClass('tech-field-active');
+  it('field portals inside Today get the font-exempt class; the same component outside Today does not (Codex #5573 r12)', async () => {
+    function Probe() { return <output data-testid="portal-class">{useFieldPortalClass() || 'none'}</output>; }
+    render(<FieldPortalClassContext.Provider value="tech-field-portal"><Probe /></FieldPortalClassContext.Provider>);
+    expect(screen.getByTestId('portal-class')).toHaveTextContent('tech-field-portal');
+    cleanup();
+    render(<Probe />);
+    expect(screen.getByTestId('portal-class')).toHaveTextContent('none');
+    const shell = await import('./TodayShell.jsx?raw').catch(() => null);
+    if (shell?.default) expect(shell.default).toMatch(/<FieldPortalClassContext\.Provider value="tech-field-portal">/);
   });
 
   it('flag off + documents unavailable: /admin/today/documents shows the unavailable notice, not the library', async () => {

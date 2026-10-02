@@ -63,21 +63,22 @@ async function loadFlags() {
 // so the default applies.
 // refreshKey: see useFeatureFlagReady (a long-lived shell re-reads per account).
 export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined) {
-  const [enabled, setEnabled] = useState(defaultValue);
+  const [state, setState] = useState(() => ({ key, refreshKey, enabled: defaultValue, resolved: false }));
   useEffect(() => {
     let mounted = true;
-    // Unloaded (e.g. refetched for a new account): fail closed to the default
-    // until this read answers, never the previous value (Codex #5573 r10).
-    if (cache === null) setEnabled(defaultValue);
     loadFlags().then((flags) => {
       if (!mounted) return;
-      setEnabled(Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue);
+      setState({ key, refreshKey, enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue, resolved: true });
     });
     return () => {
       mounted = false;
     };
   }, [key, defaultValue, refreshKey]);
-  return enabled;
+  // Derived in render (Codex #5573 r10, r12): a value resolved for another
+  // key/account, or while the cache is unloaded (refetched for a new
+  // account), never shows; the default does until this read answers.
+  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || cache === null) return defaultValue;
+  return state.enabled;
 }
 
 // Same as useFeatureFlag but also exposes `ready` — `false` until the flag
@@ -87,26 +88,24 @@ export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined
 // refreshKey (optional): re-read when it changes, e.g. the verified staff
 // account, so a long-lived shell follows refetchFlags() after a login switch.
 export function useFeatureFlagReady(key, defaultValue = false, refreshKey = undefined) {
+  const fromCache = () => (Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue);
   const [state, setState] = useState(() => ({
-    enabled: cache
-      ? (Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue)
-      : defaultValue,
+    key,
+    refreshKey,
+    enabled: cache ? fromCache() : defaultValue,
     ready: cache !== null,
   }));
   useEffect(() => {
     let mounted = true;
     if (cache !== null) {
-      setState({
-        enabled: Object.prototype.hasOwnProperty.call(cache, key) ? !!cache[key] : defaultValue,
-        ready: true,
-      });
+      setState({ key, refreshKey, enabled: fromCache(), ready: true });
       return undefined;
     }
-    // Unloaded: back to the default and not ready until this read answers.
-    setState({ enabled: defaultValue, ready: false });
     loadFlags().then((flags) => {
       if (!mounted) return;
       setState({
+        key,
+        refreshKey,
         enabled: Object.prototype.hasOwnProperty.call(flags, key) ? !!flags[key] : defaultValue,
         ready: true,
       });
@@ -115,7 +114,13 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
       mounted = false;
     };
   }, [key, defaultValue, refreshKey]);
-  return state;
+  // Derived in render: a value resolved for another key/account, or while the
+  // cache is unloaded (refetched for a new account), is never returned; the
+  // default and not-ready are, until this read answers (Codex #5573 r12).
+  if (state.key !== key || state.refreshKey !== refreshKey || cache === null) {
+    return { enabled: defaultValue, ready: false };
+  }
+  return { enabled: state.enabled, ready: state.ready };
 }
 
 // Call after a toggle UI mutation so the operator's own view reflects

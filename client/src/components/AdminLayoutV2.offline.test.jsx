@@ -258,6 +258,37 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
   });
 
+  it("leaving Today while its bounded check is pending restarts it unbounded, so a slow answer still verifies (Codex #5573 r12)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    const pending = [];
+    vi.stubGlobal("fetch", vi.fn((_url, options = {}) => new Promise((resolve, reject) => {
+      pending.push({ resolve, signal: options.signal });
+      options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })));
+    function Today() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/schedule")}>to schedule</button>; }
+    function Go() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/schedule")}>leave</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Go />
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<Today />} />
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await act(async () => { screen.getByRole("button", { name: "leave" }).click(); });
+    const unbounded = pending[pending.length - 1];
+    expect(unbounded.signal).toBeUndefined();
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTH_CHECK_TIMEOUT_MS + 100); });
+    await act(async () => { unbounded.resolve(response(200, TECH)); });
+    expect(await screen.findByText("Schedule content")).toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);
