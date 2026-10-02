@@ -952,8 +952,10 @@ function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
   onCompleted, onFullForm, isMobile,
 }) {
-  const base = `/admin/dispatch/${service?.id}`;
-  const products = useProductRows(ctx, service?.serviceType);
+  // Only opened for a visit in the report flow (service.reportFlow), so the
+  // service is always there.
+  const base = `/admin/dispatch/${service.id}`;
+  const products = useProductRows(ctx, service.serviceType);
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
@@ -969,14 +971,14 @@ function ReportFlowForm({
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
-  const visitPhotos = useVisitPhotos({ serviceId: service?.id, request, version: photos.version });
-  const trace = useVisitTrace({ serviceId: service?.id, request });
+  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version });
+  const trace = useVisitTrace({ serviceId: service.id, request });
   const report = useReportDraft({ request, base });
   const { draft, writing } = report;
   const [step, setStep] = useState('visit');
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
-  const traceAvailable = trace.enabled && service?.traceEligible !== false;
+  const traceAvailable = trace.enabled && service.traceEligible !== false;
   // The property this sheet loaded: a trace saved or removed here is refused
   // if the office has moved the visit to another one since.
   const loadedPropertyId = ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined;
@@ -1033,12 +1035,12 @@ function ReportFlowForm({
   // The tracer opens over the sheet, the way the photo manager does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
-      serviceId={service?.id}
+      serviceId={service.id}
       expectedPropertyId={loadedPropertyId}
       customerName={customerNameOf(ctx.visit, service) || 'Customer'}
-      address={service?.routedAddress || service?.address || ''}
-      lat={service?.lat}
-      lng={service?.lng}
+      address={service.routedAddress || service.address || ''}
+      lat={service.lat}
+      lng={service.lng}
       onClose={() => onOverlay(null)}
       onSaved={trace.saved}
     />,
