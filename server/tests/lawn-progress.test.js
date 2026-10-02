@@ -596,3 +596,17 @@ describe('codex pre-push P1s', () => {
     expect(out).toMatchObject({ eligible: false, reason: 'prior_mismatch', items: [] });
   });
 });
+
+describe('band direction (why the replay never says "widen")', () => {
+  it('a gain-mode row with +9 after 30 days is on_track at band 8 and behind at band 10', () => {
+    const input = {
+      current: { date: '2026-09-30', scores: { weed_suppression: 79, overall: 70 }, confidence: 'high' },
+      prior: { date: '2026-08-31', scores: { weed_suppression: 70, overall: 70 } },
+      sinceLast: { priorDate: '2026-08-31', applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }], checks: [] },
+    };
+    const at = (band) => buildLawnProgress({ ...input, band }).items.find((i) => i.metric === 'weed_suppression').state;
+    expect(at(8)).toBe('on_track');
+    expect(at(10)).toBe('behind');
+  });
+});
+

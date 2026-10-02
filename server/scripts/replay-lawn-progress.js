@@ -6,8 +6,10 @@
  * lawn assessment that has an earlier confirmed assessment at the same customer
  * and property, and prints the distribution of states plus anything odd. W5's
  * sign-off rule: if "behind" is more than about a quarter of the judged items,
- * widen the dead-band before the engine's words reach a customer. The band
- * sweep shows what each band would have said.
+ * the calibration needs another look before the engine's words reach a
+ * customer. The band sweep shows what each band would have said. Widening is
+ * NOT a fix by itself: in gain mode a wider band demands a bigger gain, so it
+ * turns more items behind, not fewer (10-02 prod replay: 22% at 8, 71% at 12).
  *
  * Read only. The query runs in a READ ONLY transaction on a connection this
  * script builds itself (never models/db.js), exactly like
@@ -34,7 +36,7 @@ const {
 } = require('../services/service-report/lawn-progress');
 const { createAuditKnex } = require('./audit-lawn-expectation-products');
 
-const BEHIND_WARN_SHARE = 0.25; // W5: widen the dead-band above about 25 percent
+const BEHIND_WARN_SHARE = 0.25; // W5: re-check calibration above about 25 percent
 const BAND_SWEEP = [4, 6, 8, 10, 12];
 const SHORT_GAP_DAYS = 5;
 const LONG_GAP_DAYS = 120;
@@ -148,7 +150,7 @@ function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_
     behindShare: 0,
     behindPairs: 0,
     pairsWithItems: 0,
-    widenBand: false,
+    behindAboveLine: false,
   };
 
   for (const r of eligible) {
@@ -167,7 +169,7 @@ function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_
   const stats = behindStats(eligible);
   summary.judgedItems = stats.judged;
   summary.behindShare = Math.round(stats.behindShare * 1000) / 1000;
-  summary.widenBand = stats.behindShare > BEHIND_WARN_SHARE;
+  summary.behindAboveLine = stats.behindShare > BEHIND_WARN_SHARE;
 
   const bandSweep = BAND_SWEEP.map((b) => {
     const swept = pairs.map((pair) => ({ ...pair, progress: progressFor(pair, { band: b, overallBand }) })).filter((r) => r.progress.eligible);
@@ -241,7 +243,7 @@ function formatReport(result) {
   lines.push(`Item states (${total} items):`);
   for (const state of STATES) lines.push(`  ${state.padEnd(15)} ${String(s.itemStates[state]).padStart(4)}  ${pct(s.itemStates[state], total)}%`);
   lines.push(`Behind: ${(s.behindShare * 100).toFixed(1)}% of ${s.judgedItems} judged items (improving + on_track + behind); ${s.behindPairs} pairs have a behind item`);
-  if (s.widenBand) lines.push(`WARNING: behind is above ${BEHIND_WARN_SHARE * 100}% of judged items. W5: widen the dead-band before sign-off.`);
+  if (s.behindAboveLine) lines.push(`WARNING: behind is above ${BEHIND_WARN_SHARE * 100}% of judged items. Review the band sweep and the per-row counts before sign-off; a wider band makes gain-mode rows MORE likely to be behind.`);
   lines.push('Gates that fired: ' + (Object.entries(s.gates).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'));
   lines.push('By row and metric:');
   for (const [key, counts] of Object.entries(s.byRowMetric)) {

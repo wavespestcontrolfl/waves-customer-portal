@@ -117,11 +117,13 @@ describe('replayLawnProgress over the fixture', () => {
   it('reports the behind share of judged items and warns above a quarter', () => {
     expect(s.judgedItems).toBeGreaterThan(0);
     expect(s.behindShare).toBeGreaterThan(0.25);
-    expect(s.widenBand).toBe(true);
+    expect(s.behindAboveLine).toBe(true);
     expect(formatReport(result)).toMatch(/WARNING: behind is above 25% of judged items/);
+    expect(formatReport(result)).not.toMatch(/widen the dead-band/);
+    expect(formatReport(result)).toMatch(/wider band makes gain-mode rows MORE likely to be behind/);
   });
 
-  it('the band sweep widens the band, and the share never grows with it', () => {
+  it('the band sweep reports each band, and the default band matches the summary', () => {
     expect(result.bandSweep.map((b) => b.band)).toEqual([4, 6, 8, 10, 12]);
     for (const b of result.bandSweep) expect(b.behindShare).toBeGreaterThanOrEqual(0);
     expect(result.bandSweep.find((b) => b.band === 8).behindShare).toBe(s.behindShare);
@@ -140,7 +142,7 @@ describe('replayLawnProgress over the fixture', () => {
 
   it('an empty list is a clean empty report', () => {
     const empty = replayLawnProgress([]);
-    expect(empty.summary).toMatchObject({ assessments: 0, pairs: 0, judgedItems: 0, behindShare: 0, widenBand: false });
+    expect(empty.summary).toMatchObject({ assessments: 0, pairs: 0, judgedItems: 0, behindShare: 0, behindAboveLine: false });
     expect(formatReport(empty)).toMatch(/Assessments 0/);
   });
 
