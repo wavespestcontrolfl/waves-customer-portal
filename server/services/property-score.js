@@ -304,7 +304,11 @@ async function treeShrubComponent(customerId, knex, activeLines) {
   const frozenByRecord = tsFindings.techFindingsCopyLive()
     ? await tsFindings.loadFrozenTechFindingsByRecord(rows, knex)
     : null;
+  // A failed read (null, not an empty Map) means the hides are unknown: no
+  // overall is trusted, so the component is simply not scored.
+  const decisionsUnavailable = tsFindings.techFindingsCopyLive() && frozenByRecord === null;
   const overallOf = (r) => {
+    if (decisionsUnavailable) return null;
     const formatted = formatAssessmentScores ? formatAssessmentScores(r) : null;
     if (!formatted) return r?.overall_score ?? null;
     return (frozenByRecord

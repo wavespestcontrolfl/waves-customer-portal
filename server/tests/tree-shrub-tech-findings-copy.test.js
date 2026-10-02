@@ -644,3 +644,99 @@ describe('photo observations block in the report prompt', () => {
     expect(src).toContain('const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);');
   });
 });
+
+describe('a confirmed or edited finding on a clean photo read gets its own card', () => {
+  const CLEAN = { foliageFullness: 95, leafColorVigor: 95, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 95, overallScore: 95 };
+  const cleanAssessment = () => assessment({ scores: { ...CLEAN }, observations: '', trend: [] });
+
+  test('all scores 95 + pest confirmed: a technician card, no "all look healthy" reassurance, and a matching headline', () => {
+    gateOn();
+    const out = build(cleanAssessment(), [decide('pest_activity', 'confirmed')]);
+    const card = insightOf(out, 'pest_pressure');
+    expect(card.whatWeSaw).toBe('Your technician confirmed visible pest activity on some foliage during the visit.');
+    expect(card.confidence).toBe('tech_confirmed');
+    expect(card.wavesAction).toBeTruthy();
+    expect(card.nextVisitPlan).toBeTruthy();
+    expect(insightOf(out, 'overall')).toBeUndefined();
+    expect(JSON.stringify(out)).not.toMatch(/all look healthy|in good shape/i);
+    expect(out.snapshot.statusHeadline).toMatch(/monitoring pest pressure/i);
+    expect(out.snapshot.statusHeadline).not.toMatch(/looking great/i);
+  });
+
+  test('an edit gets a card in the technician\'s words; monitor / no decision keeps the reassurance', () => {
+    gateOn();
+    const out = build(cleanAssessment(), [decide('disease_leaf_spot', 'edit', 'Early leaf spot on the viburnum.')]);
+    expect(insightOf(out, 'disease_leaf_spot').whatWeSaw).toBe('Early leaf spot on the viburnum.');
+    expect(insightOf(out, 'overall')).toBeUndefined();
+    const quiet = build(cleanAssessment(), [decide('pest_activity', 'monitor')]);
+    expect(insightOf(quiet, 'overall')).toBeDefined();
+    expect(insightOf(build(cleanAssessment(), []), 'overall')).toBeDefined();
+  });
+
+  test('a hidden finding builds no card; gate off (no techFindings) is unchanged', () => {
+    gateOn();
+    expect(insightOf(build(cleanAssessment(), [decide('pest_activity', 'hidden')]), 'pest_pressure')).toBeUndefined();
+    expect(build(cleanAssessment())).toEqual(build(cleanAssessment(), null));
+  });
+});
+
+describe('unavailable frozen decisions are explicit, never "no hides"', () => {
+  const { loadFrozenTechFindingsByRecord, withholdScores } = require('../services/service-report/tree-shrub-tech-findings');
+  const { buildTreeShrubAssessmentReportData } = require('../services/tree-shrub-assessment');
+  const { _test } = require('../services/property-score');
+  const failingRead = () => ({ whereIn: () => ({ select: () => Promise.reject(new Error('db down')) }) });
+
+  test('the loader returns null on a failed read, a Map when read, an empty Map for no ids', async () => {
+    expect(await loadFrozenTechFindingsByRecord([{ service_record_id: 'r1' }], () => failingRead())).toBeNull();
+    const ok = await loadFrozenTechFindingsByRecord([{ service_record_id: 'r1' }], () => ({
+      whereIn: () => ({ select: async () => [{ id: 'r1', structured_notes: { treeShrubTechFindings: [{ key: 'pest_activity', action: 'hidden' }] } }] }),
+    }));
+    expect(ok.get('r1')).toEqual([expect.objectContaining({ key: 'pest_activity', action: 'hidden' })]);
+    expect((await loadFrozenTechFindingsByRecord([], () => { throw new Error('no read'); })).size).toBe(0);
+    expect(withholdScores({ overallScore: 70, pestActivity: 60, foliageFullness: 50, other: 'x' }))
+      .toMatchObject({ overallScore: null, pestActivity: null, foliageFullness: null, other: 'x' });
+  });
+
+  const rows = [
+    { id: 'a1', customer_id: 'c1', service_record_id: 'r1', service_date: '2026-08-01', confirmed_by_tech: true, foliage_fullness: 80, leaf_color_vigor: 80, pest_activity: 30, disease_leaf_spot: 80, water_heat_stress: 80, overall_score: 78, observations: '', plant_groups: [], composite_scores: null },
+    { id: 'a2', customer_id: 'c1', service_record_id: 'r2', service_date: '2026-09-01', confirmed_by_tech: true, foliage_fullness: 80, leaf_color_vigor: 80, pest_activity: 70, disease_leaf_spot: 80, water_heat_stress: 80, overall_score: 78, observations: '', plant_groups: [], composite_scores: null },
+  ];
+  const knexWithFailingRecords = (table) => {
+    if (table === 'service_records') return failingRead();
+    const data = table === 'tree_shrub_assessments' ? rows : [];
+    const q = { where: () => q, whereIn: () => q, select: () => q, orderBy: () => q, limit: () => q, first: async () => rows[1], then: (r) => Promise.resolve(data).then(r), catch: async () => data };
+    return q;
+  };
+
+  test('report history: earlier visits\' scores are withheld, the current visit is kept, and the payload is flagged', async () => {
+    gateOn();
+    const out = await buildTreeShrubAssessmentReportData({ id: 'r2', customer_id: 'c1', service_date: '2026-09-01' }, 'tree_shrub', knexWithFailingRecords);
+    expect(out.techFindingsUnavailable).toBe(true);
+    expect(out.trend[0]).toMatchObject({ overallScore: null, pestActivity: null, foliageFullness: null });
+    expect(out.trend[1]).toMatchObject({ pestActivity: 70, overallScore: 78 });
+    expect(out.scores).toMatchObject({ pestActivity: 70 });
+  });
+
+  test('gate off: no read, no flag, history as before', async () => {
+    gateOff();
+    const out = await buildTreeShrubAssessmentReportData({ id: 'r2', customer_id: 'c1', service_date: '2026-09-01' }, 'tree_shrub', knexWithFailingRecords);
+    expect(out.techFindingsUnavailable).toBeUndefined();
+    expect(out.trend[0]).toMatchObject({ pestActivity: 30, overallScore: 78 });
+  });
+
+  test('the payload flag counts as an uncacheable artifact (the image-failure signal the PDF stores already honor)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(src).toContain('if (treeShrubAssessment.techFindingsUnavailable) imageResolutionFailures += 1;');
+    const store = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+    expect(store).toContain('renderedData?.imageResolutionFailures');
+  });
+
+  test('property score: no T&S score is trusted when the decisions could not be read; gate off reads as before', async () => {
+    gateOn();
+    const out = await _test.treeShrubComponent('c1', knexWithFailingRecords, new Set(['tree_shrub']));
+    expect(out.status).not.toBe('scored');
+    gateOff();
+    const off = await _test.treeShrubComponent('c1', knexWithFailingRecords, new Set(['tree_shrub']));
+    expect(off.status).toBe('scored');
+  });
+});

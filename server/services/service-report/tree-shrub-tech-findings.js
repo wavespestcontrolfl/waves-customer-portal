@@ -299,14 +299,27 @@ function hideFrozenFindingsInScores(scores, findings) {
   return next;
 }
 
+// Every score of a visit whose decisions could not be loaded: withheld, because
+// a hide we cannot see must not be republished as a healthy read.
+function withholdScores(scores) {
+  if (!scores) return scores;
+  const next = { ...scores };
+  for (const field of ['overallScore', ...Object.values(KEY_TO_SCORE)]) next[field] = null;
+  return next;
+}
+
 // Frozen decisions for a set of assessment rows, keyed by service_record_id.
-// One read; a failed read means no extra hiding (never a throw into the report).
+// One read. Returns null when the read FAILED (decisions unavailable — callers
+// withhold the affected scores and refuse to cache); an empty Map means the
+// decisions were read and there are none.
 async function loadFrozenTechFindingsByRecord(rows, knex) {
   const ids = [...new Set((Array.isArray(rows) ? rows : []).map((r) => r && r.service_record_id).filter(Boolean))];
   const byRecord = new Map();
   if (!ids.length) return byRecord;
-  const records = await knex('service_records').whereIn('id', ids).select('id', 'structured_notes').catch(() => []);
-  for (const rec of Array.isArray(records) ? records : []) {
+  const records = await Promise.resolve(knex('service_records').whereIn('id', ids).select('id', 'structured_notes'))
+    .catch(() => null);
+  if (!Array.isArray(records)) return null;
+  for (const rec of records) {
     let notes = rec.structured_notes;
     if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
     const findings = normalizeTechFindings(notes && notes.treeShrubTechFindings);
@@ -460,6 +473,7 @@ function hasTechFindingLines(findings) {
 }
 
 module.exports = {
+  withholdScores,
   summaryForCustomer,
   filterCaptionsForCustomer,
   captionTiedToReplacedFinding,

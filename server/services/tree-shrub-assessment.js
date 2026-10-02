@@ -26,7 +26,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { anthropicText, geminiText } = require('./llm/call');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
-  hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord,
+  hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
 } = require('./service-report/tree-shrub-tech-findings');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
@@ -991,12 +991,18 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
   // GATE_TS_TECH_FINDINGS_COPY: a visit whose preview was rejected and re-scored
   // keeps its hide decisions only in the service record's frozen findings, so
   // history applies each visit's own (one read, current visit included).
-  const frozenByRecord = techFindingsCopyLive()
-    ? await loadFrozenTechFindingsByRecord(historyRows, knex)
-    : null;
-  const withFrozenHides = (row, formatted) => (frozenByRecord
-    ? hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(row.service_record_id)))
-    : formatted);
+  const gateOn = techFindingsCopyLive();
+  const frozenByRecord = gateOn ? await loadFrozenTechFindingsByRecord(historyRows, knex) : null;
+  // The read FAILED (not "no decisions"): an earlier visit's hides are unknown,
+  // so its scores are withheld rather than republished, and the artifact is
+  // flagged so no PDF caches it. The current visit's own decisions are in the
+  // service record the report builder already holds.
+  const techFindingsUnavailable = gateOn && frozenByRecord === null;
+  const withFrozenHides = (row, formatted) => {
+    if (!gateOn) return formatted;
+    if (techFindingsUnavailable) return String(row.id) === String(assessment.id) ? formatted : withholdScores(formatted);
+    return hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(row.service_record_id)));
+  };
   const scores = withFrozenHides(assessment, formatAssessmentScores(assessment));
   const trend = historyRows.map((r) => {
     const s = withFrozenHides(r, formatAssessmentScores(r));
@@ -1025,6 +1031,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     aiSummary: assessment.ai_summary || null,
     photos: visiblePhotos,
     droppedPhotoCount,
+    ...(techFindingsUnavailable ? { techFindingsUnavailable: true } : {}),
     plantGroups,
     trend,
     techConfirmedPest: !!assessment.tech_confirmed_pest,

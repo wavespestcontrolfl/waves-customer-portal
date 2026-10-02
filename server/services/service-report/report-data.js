@@ -5600,6 +5600,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // Assessment photos the builder dropped for a failed signing are
         // expected images the artifact silently omits (codex P2 #3176 r22).
         imageResolutionFailures += Number(treeShrubAssessment.droppedPhotoCount) || 0;
+        // GATE_TS_TECH_FINDINGS_COPY: earlier visits' hide decisions could not be
+        // loaded, so their scores were withheld. Counted like a dropped image: the
+        // report is served but no PDF stores it as the healthy object.
+        if (treeShrubAssessment.techFindingsUnavailable) imageResolutionFailures += 1;
         reportV2 = buildTreeShrubReportV2({
           treeShrubAssessment,
           applications,

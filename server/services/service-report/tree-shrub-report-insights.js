@@ -19,6 +19,34 @@
 
 const { insightOverride, insightHidden } = require('./tree-shrub-tech-findings');
 
+// Card copy for a finding only the technician raised (no photo signal behind it).
+const TECH_CARD_COPY = {
+  pest_pressure: {
+    headline: 'Pest activity your technician noted',
+    whyItMatters: 'Catching pest pressure early keeps it from spreading across the planting.',
+    wavesAction: 'Documented it and built follow-up monitoring into the plan.',
+    nextVisitPlan: 'Recheck it next visit.',
+  },
+  disease_leaf_spot: {
+    headline: 'Leaf-spot signals your technician noted',
+    whyItMatters: 'Tracking leaf-spot signals early lets us confirm the cause before it spreads.',
+    wavesAction: 'Documented the areas for comparison next visit.',
+    nextVisitPlan: 'Recheck these leaves next visit.',
+  },
+  water_stress: {
+    headline: 'Water or heat stress your technician noted',
+    whyItMatters: 'Stress signals tell us where the planting needs a little extra support.',
+    wavesAction: 'Documented the stressed areas and will monitor them on future visits.',
+    nextVisitPlan: 'Recheck the stressed plants next visit.',
+  },
+  color_vigor: {
+    headline: 'Foliage your technician noted',
+    whyItMatters: 'Plants weaken when they can’t recover between stresses.',
+    wavesAction: 'Documented it and adjusted the program as needed.',
+    nextVisitPlan: 'Recheck fullness and color next visit.',
+  },
+};
+
 // Worst first. Card statuses use the tree-shrub spec vocabulary.
 const STATUS_RANK = { urgent: 0, needs_attention: 1, watch: 2, stable: 3, good: 4 };
 
@@ -197,6 +225,25 @@ function buildTreeShrubInsightCards({
       wavesAction: 'Noted it on this visit and built any follow-up into the plan.',
       nextVisitPlan: 'Follow up on it next visit.',
     });
+  }
+
+  // ── Technician-confirmed / edited findings with no card of their own ──────────
+  // A confirmed or edited finding on a category the photo read scored clean has
+  // no signal card, but it is a real finding: it gets a card in the technician's
+  // words, and with it the whole-landscape reassurance below cannot appear.
+  if (Array.isArray(techFindings) && techFindings.length) {
+    for (const category of Object.keys(TECH_CARD_COPY)) {
+      if (cards.some((card) => card.category === category)) continue;
+      const said = insightOverride(category, techFindings);
+      if (!said) continue;
+      cards.push({
+        category,
+        status: 'watch',
+        confidence: 'tech_confirmed',
+        ...TECH_CARD_COPY[category],
+        whatWeSaw: said,
+      });
+    }
   }
 
   // ── Reassurance when nothing needs attention ───────────────────────────────────
