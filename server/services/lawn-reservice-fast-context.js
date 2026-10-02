@@ -161,9 +161,13 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = ne
 }
 
 // The property's lawn size from the customer's turf profile (the typed form's
-// own prefill source, GET /admin/customers/:id/turf-profile), or null.
+// own prefill source, GET /admin/customers/:id/turf-profile), or null. The
+// profile is keyed by customer, not property: with more than one property on
+// file it may describe another address, so it prefills nothing then.
 async function loadLawnSqft(svc, knex) {
   try {
+    const properties = await knex('customer_properties').where({ customer_id: svc.customer_id }).count('* as n').first();
+    if (Number(properties?.n || 0) > 1) return null;
     const profile = await knex('customer_turf_profiles').where({ customer_id: svc.customer_id }).first('lawn_sqft');
     return positiveOrNull(profile?.lawn_sqft);
   } catch (err) {

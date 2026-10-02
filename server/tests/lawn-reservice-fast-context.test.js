@@ -40,7 +40,7 @@ function fakeKnex(tables, calls = {}) {
     const log = (calls[table] = calls[table] || []);
     let offsetValue = 0;
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'limit', 'select', 'count']) {
       chain[m] = (...args) => { log.push([m, ...args]); return chain; };
     }
     chain.offset = (value) => { offsetValue = value; return chain; };
@@ -337,5 +337,10 @@ describe('methods, areas and lawn size', () => {
     expect((await build({ customer_turf_profiles: { lawn_sqft: 0 } })).lawnSqft).toBeNull();
     const failed = await build({ customer_turf_profiles: new Error('boom') });
     expect(failed).toMatchObject({ eligible: true, lawnSqft: null });
+  });
+
+  test('a customer with more than one property: the per-customer lawn size prefills nothing', async () => {
+    expect((await build({ customer_turf_profiles: { lawn_sqft: 6400 }, customer_properties: { n: '2' } })).lawnSqft).toBeNull();
+    expect((await build({ customer_turf_profiles: { lawn_sqft: 6400 }, customer_properties: { n: '1' } })).lawnSqft).toBe(6400);
   });
 });
