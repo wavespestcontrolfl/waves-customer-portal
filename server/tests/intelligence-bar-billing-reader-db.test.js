@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2;
   const inv = {};
   const tokens = [];
 
@@ -107,6 +107,22 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('y_ach', Y, { total: 90, status: 'processing' });
     const parked = await invoice('y_parked', Y, { total: 35, status: 'processing' });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: parked.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-parked-${run}`, status: 'claimed', amount: 35, submitted_at: new Date() });
+    // An ordinary ACH debit in flight: its attempt stays unresolved while the PaymentIntent is processing, and a
+    // `processing` payments row records it. A received deposit not yet applied to its invoice (the third pay-path fence).
+    X = await customer(`Bank${run}`, `Debit${run}`);
+    for (const [key, status] of [['x_ach_sent', 'sent'], ['x_ach_proc', 'processing']]) {
+      const row = await invoice(key, X, { total: 60, status, stripe_payment_intent_id: `pi_ach_${key}_${run}` });
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 60,
+        stripe_payment_intent_id: `pi_ach_${key}_${run}`, submitted_at: new Date() });
+      await db('payments').insert({ customer_id: X, payment_date: day(0), amount: 60, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_ach_${key}_${run}`,
+        description: 'ACH in flight', metadata: json({ invoice_id: row.id }) });
+    }
+    D2 = await customer(`Deposit${run}`, `Pending${run}`);
+    const [estimate] = await db('estimates').insert({ customer_id: D2 }).returning('id');
+    const estimateId = estimate.id || estimate;
+    await db('estimate_deposits').insert({ estimate_id: estimateId, amount: 50, status: 'received', stripe_payment_intent_id: `pi_dep_${run}` });
+    await invoice('d2_pending', D2, { total: 200, notes: `Auto-generated from accepted estimate #${estimateId}` });
+    await invoice('d2_plain', D2, { total: 30 });
     // Same-surname neighbour with loud sentinels, and a dispute-hold customer.
     await invoice('b_open', B, { total: 999.99, title: `SENTINEL-B-${run}`, status: 'overdue', due_date: day(-40) });
     await invoice('b_paid', B, { total: 55.55, status: 'paid', title: `SENTINEL-B-PAID-${run}` });
@@ -136,6 +152,15 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('payments').insert([
       { customer_id: G, payment_date: day(-5), amount: 150, status: 'disputed', processor: 'stripe', card_brand: 'visa', description: 'Stripe card payment', metadata: json({ dispute_invoice_id: gAlias.id }) },
       { customer_id: G, payment_date: day(-4), amount: 10, status: 'paid', processor: 'stripe', description: 'Stripe card payment', metadata: json({ waves_invoice_id: gAlias.id }) },
+    ]);
+    // The tender: live payment_methods join, then the payment's own snapshot, then metadata.payment_method, then the processor.
+    const [liveMethod] = await db('payment_methods').insert({ customer_id: G, method_type: 'us_bank_account', card_brand: null, stripe_payment_method_id: `pm_live_${run}` }).returning('id');
+    const gMethod = await invoice('g_method', G, { total: 10, status: 'paid', paid_at: new Date() });
+    await db('payments').insert([
+      { customer_id: G, payment_date: day(-6), amount: 1, status: 'paid', processor: 'stripe', payment_method_id: liveMethod.id || liveMethod, payment_method_type: 'card', description: 'live join', metadata: json({ invoice_id: gMethod.id, payment_method: 'check' }) },
+      { customer_id: G, payment_date: day(-6), amount: 2, status: 'paid', processor: 'stripe', payment_method_type: 'ach_snapshot', description: 'snapshot', metadata: json({ invoice_id: gMethod.id, payment_method: 'check' }) },
+      { customer_id: G, payment_date: day(-6), amount: 3, status: 'paid', processor: 'stripe', description: 'metadata tender', metadata: json({ invoice_id: gMethod.id, payment_method: 'zelle' }) },
+      { customer_id: G, payment_date: day(-6), amount: 4, status: 'paid', processor: 'stripe', description: 'processor only', metadata: json({ invoice_id: gMethod.id }) },
     ]);
     // Legacy / card-on-file rows carry no invoice metadata: linked by the invoice's PaymentIntent or charge id. A combined sibling's row (explicit other invoice_id, same PaymentIntent) is not this invoice's.
     await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
@@ -216,7 +241,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const stripeDown = jest.spyOn(stripe, 'assertNoInvoiceChargeReconciliationPending').mockRejectedValue(Object.assign(new Error('Invoice has an unresolved Stripe charge pi_secret123'), { code: 'STRIPE_CHARGED_DB_FAILED', reconciliationRequired: true }));
     try {
       const held = await read('get_invoice_detail', { invoice_id: inv.credited.id });
-      expect(held.invoice.reason).toMatch(/unresolved Stripe charge \[payment\] — needs reconciliation — check the Invoices page/);
+      expect(held.invoice.reason).toMatch(/Stripe charged this invoice and the portal has not recorded it — needs reconciliation — check the Invoices page/);
       expect(json(held)).not.toContain('pi_secret123');
     } finally { stripeDown.mockRestore(); }
   });
@@ -239,7 +264,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const list = await read('get_customer_invoices', { customer_id: Y, limit: 50 });
     expect(by(list, 'y_ach')).toMatchObject({ collectible: false, needs_reconciliation: false, balance_due: null, amount_due_after_credit: null, reason: expect.stringMatching(/already processing/) });
     expect(by(list, 'y_parked')).toMatchObject({ collectible: false, needs_reconciliation: true, balance_due: null, amount_due_after_credit: null });
-    expect(by(list, 'y_parked').reason).toMatch(/saved-card charge in progress or awaiting reconciliation — needs reconciliation — check the Invoices page/);
+    expect(by(list, 'y_parked').reason).toMatch(/saved-card charge is in progress or awaiting reconciliation — needs reconciliation — check the Invoices page/);
     expect(list.account_summary.processing).toMatchObject({ count: 2, bank_payment_in_flight: 1, needs_reconciliation: 1 });
     expect(list.account_summary.needs_reconciliation_count).toBe(1);
     expect(list.account_summary.unknown).toMatch(/1 invoice\(s\) \(unpaid or processing\) need reconciliation/);
@@ -251,15 +276,41 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(a.account_summary.processing).toMatchObject({ count: 1, bank_payment_in_flight: 1, needs_reconciliation: 0 });
   });
 
-  test('overlapping subsets: the presented personal balance excludes the union; a withdrawn Bill-To is payer-billed, held back and not in total_due', async () => {
+  test('payer-billed and withdrawn invoices are not collectible from the customer (the payment paths\' own predicate), held back and not in total_due', async () => {
     const result = await read('get_customer_invoices', { customer_id: E, limit: 50 });
-    // self 100 + draft 40 + payer draft 30 + payer sent 20; the withdrawn 25 is not collectible from the customer.
-    expect(result.account_summary).toMatchObject({ total_due: 190, not_yet_sent_due: 70, payer_billed_due: 50, presented_self_pay_due: 100, needs_reconciliation_count: 0 });
-    expect(result.account_summary.unknown).toMatch(/1 unpaid invoice\(s\) are not collectible from this customer/);
+    // Only the self-pay invoices count: self 100 + draft 40. A payer-billed draft, a sent payer invoice and a withdrawn Bill-To are held back.
+    expect(result.account_summary).toMatchObject({ total_due: 140, not_yet_sent_due: 40, presented_self_pay_due: 100, needs_reconciliation_count: 0 });
+    expect(result.account_summary).not.toHaveProperty('payer_billed_due');
+    expect(result.account_summary.unknown).toMatch(/3 unpaid invoice\(s\) are not collectible from this customer/);
     expect(by(result, 'e_withdrawn')).toMatchObject({ payer_billed: true, collectible: false, balance_due: null, needs_reconciliation: false });
-    expect(by(result, 'e_withdrawn').reason).toMatch(/third-party payer|payer/i);
-    expect(by(result, 'e_payer_sent')).toMatchObject({ payer_billed: true, collectible: true });
-    expect(by(result, 'e_self')).toMatchObject({ payer_billed: false });
+    expect(by(result, 'e_withdrawn').reason).toMatch(/billed to a third-party payer and is no longer payable here/);
+    expect(by(result, 'e_payer_sent')).toMatchObject({ payer_billed: true, collectible: false, balance_due: null, amount_due_after_credit: null });
+    expect(by(result, 'e_payer_sent').reason).toMatch(/billed to a third-party payer/);
+    expect(by(result, 'e_self')).toMatchObject({ payer_billed: false, collectible: true, balance_due: 100 });
+  });
+
+  test('a received estimate deposit not yet applied to its invoice holds the balance (the pay paths\' deposit-settlement fence)', async () => {
+    const list = await read('get_customer_invoices', { customer_id: D2, limit: 50 });
+    expect(by(list, 'd2_pending')).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: true });
+    expect(by(list, 'd2_pending').reason).toMatch(/estimate deposit has been received and is not yet applied to this invoice — needs reconciliation — check the Invoices page/);
+    expect(by(list, 'd2_plain')).toMatchObject({ collectible: true, balance_due: 30 });
+    expect(list.account_summary).toMatchObject({ total_due: 30, needs_reconciliation_count: 1 });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.d2_pending.id });
+    expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
+  });
+
+  test('an ordinary ACH debit in flight (unresolved attempt + a processing payments row) is a bank payment processing, not a reconciliation defect', async () => {
+    const list = await read('get_customer_invoices', { customer_id: X, limit: 50 });
+    for (const key of ['x_ach_sent', 'x_ach_proc']) {
+      expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: false, bank_payment_processing: true });
+      expect(by(list, key).reason).toMatch(/bank payment is processing on this invoice \(an ACH debit in flight\)/);
+    }
+    // Counted under bank_payment_in_flight (the sent one is not even in the processing status), never as needing reconciliation.
+    expect(list.account_summary.processing).toMatchObject({ count: 1, bank_payment_in_flight: 2, needs_reconciliation: 0 });
+    expect(list.account_summary.needs_reconciliation_count).toBe(0);
+    // The parked card ambiguity (an attempt with no PaymentIntent) is still a reconciliation defect.
+    const parked = await read('get_invoice_detail', { invoice_id: inv.y_parked.id });
+    expect(parked.invoice).toMatchObject({ needs_reconciliation: true, bank_payment_processing: false });
   });
 
   test('a summary that cannot be complete is null with a warning, never a partial number', async () => {
@@ -274,7 +325,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     let spy = fake(5000);
     try {
       const { account_summary: summary } = await read('get_customer_invoices', { customer_id: E, limit: 5 });
-      for (const field of ['total_due', 'not_yet_sent_due', 'payer_billed_due', 'presented_self_pay_due', 'needs_reconciliation_count']) expect(summary[field]).toBeNull();
+      for (const field of ['total_due', 'not_yet_sent_due', 'presented_self_pay_due', 'needs_reconciliation_count']) expect(summary[field]).toBeNull();
       expect(summary.outstanding_count).toBe(5000);
       expect(summary.unknown).toMatch(/null \(unknown\), not zero/);
     } finally { spy.mockRestore(); }
@@ -335,6 +386,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const legacy = await read('get_invoice_detail', { invoice_id: inv.g_legacy.id });
     expect(legacy.recorded_payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([5, 70]);
     expect(legacy.recorded_payments.find((p) => p.amount === 70)).toMatchObject({ status: 'refunded', refunded_amount: 20, refund_status: 'succeeded' });
+    const methods = (await read('get_invoice_detail', { invoice_id: inv.g_method.id })).recorded_payments;
+    const methodOf = (amount) => methods.find((p) => p.amount === amount).method;
+    expect([1, 2, 3, 4].map(methodOf)).toEqual(['us_bank_account', 'ach_snapshot', 'zelle', 'stripe']);
     const bulk = await read('get_invoice_detail', { invoice_id: inv.g_bulk.id });
     expect(bulk.recorded_payments).toHaveLength(50);
     expect(bulk.unknowns.join(' ')).toMatch(/More payment rows are tied to this invoice than were read/);
@@ -351,6 +405,17 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
     expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
     expect(json(detail)).not.toContain(`pi_attached_${run}`);
+  });
+
+  test('a failed credit read keeps its own reason: the invoice warnings are appended, never overwrite it', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    const spy = jest.spyOn(CustomerCredit, 'getBalance').mockRejectedValue(new Error('credit lookup failed'));
+    try {
+      const { account_summary: summary } = await read('get_customer_invoices', { customer_id: D2, limit: 5 });
+      expect(summary).toMatchObject({ credit_balance: null, credit_ledger_sum: null, credit_matches_ledger: null });
+      expect(summary.unknown).toMatch(/account credit balance could not be read; say it is unknown/);
+      expect(summary.unknown).toMatch(/1 invoice\(s\) \(unpaid or processing\) need reconciliation/);
+    } finally { spy.mockRestore(); }
   });
 
   test('credit_matches_ledger compares one snapshot: a ledger write committing between the reads cannot cause a false mismatch', async () => {

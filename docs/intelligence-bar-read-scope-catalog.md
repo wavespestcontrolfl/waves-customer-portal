@@ -118,10 +118,17 @@ old list).
   `selector_conflict`); the detail takes `invoice_id`, which `validateRecordTarget`
   maps to the owning customer so it must belong to a task customer. The readers
   derive no money state of their own: an invoice's balance is stated only when
-  both payment-path fences pass, `assertInvoiceCollectible` (invoice-helpers.js)
-  and the read-only `assertNoInvoiceChargeReconciliationPending` (stripe.js: no
-  writes, no locks). Otherwise `balance_due` is null with `collectible: false`,
-  the fence's reason and "needs reconciliation — check the Invoices page". Amount
+  `invoiceCollectibility` (billing-reader-tools.js) says it is collectible. That
+  function applies, read-only (no writes, no locks), the checks the collection
+  entry points run, by calling pay-combined.js `memberCollectionPending` (status,
+  amount due, payer billed with a live payer lookup, Bill-To withdrawn, estimate
+  deposit settlement via `assertInvoiceDepositSettlementReady`, and the saved-card
+  charge fence `assertNoInvoiceChargeReconciliationPending` readOnly), plus
+  `assertInvoiceCollectible`'s own reasons, a processing invoice's charge-fence
+  check, an ACH-in-flight classification from a `processing` payments row, and a
+  hold on any attached PaymentIntent (the reader never calls Stripe). Otherwise
+  every due-style amount is null with `collectible: false`, the reason and
+  "needs reconciliation — check the Invoices page" (or `bank_payment_processing`). Amount
   due is `invoiceAmountDue`; the invoice rows and the unpaid and overdue counts
   come from `InvoiceService.list`. `account_summary.total_due` sums only invoices
   whose fences passed, counts the ones needing reconciliation separately, and is
