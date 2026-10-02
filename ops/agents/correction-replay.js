@@ -107,19 +107,28 @@ function assertOutsideRepo(dir) {
   return resolved;
 }
 
+// The commit the prompts are rendered from. A checkout with uncommitted
+// changes to tracked files renders prompts HEAD does not describe, so its
+// code_ref would vouch for the wrong candidate: refused.
 function gitHead() {
   const { execFileSync } = require('child_process');
+  const dirty = execFileSync('git', ['-C', REPO_ROOT, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim();
+  if (dirty) throw usageError('the checkout has uncommitted changes: commit the candidate first, so code_ref names exactly what is replayed');
   return execFileSync('git', ['-C', REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 }
 
-async function runExport({ dbi, args, log, drafter }) {
+const EXPORT_MARKER = '.correction-replay-export.json';
+
+async function runExport({ dbi, args, log, drafter, codeRefOf = gitHead }) {
   if (!args.proposal || !args.split || !args.out) throw usageError('export needs --proposal, --split and --out');
   const dir = assertOutsideRepo(args.out);
+  // A dedicated folder: cleanup later removes exactly what this export wrote.
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length) throw usageError(`--out ${dir} must be a new or empty folder`);
   const id = await resolveId(dbi, args.proposal);
   const d = drafter || require(path.join(REPO_ROOT, 'server', 'services', 'sms-shadow-drafter'));
   // The code and prompt version this checkout replays: what the exported
   // prompts are rendered from, and what a holdout export must match.
-  const codeRef = gitHead();
+  const codeRef = codeRefOf();
   const promptVersion = d.currentPromptVersion();
   const { proposal, cases, missing } = await exportCases({ dbi, proposalId: id, split: args.split, codeRef, promptVersion });
   if (!cases.length) throw usageError(`the proposal has no ${args.split} cases to export${missing.length ? ` (${missing.length} without a stored draft)` : ''}`, 1);
@@ -165,6 +174,8 @@ async function runExport({ dbi, args, log, drafter }) {
     notes: null,
     results: cases.map((c) => ({ incident_key: c.incident_key, verdict: null, reason: null })),
   }, null, 2)}\n`);
+  const written = ['cases.jsonl', 'results-template.json', ...promptFiles.keys()];
+  fs.writeFileSync(path.join(dir, EXPORT_MARKER), `${JSON.stringify({ proposal_id: proposal.id, split: args.split, files: written })}\n`);
   log(`exported ${cases.length} ${args.split} case(s) of ${String(proposal.id).slice(0, 8)} (${proposal.surface}/${proposal.failure_mode}) to ${dir}`);
   log('  customer text is redacted, but names of other people can remain: keep this folder in the session scratchpad and remove it with `record --execute --delete-export` once the run is stored');
   if (missing.length) log(`  ${missing.length} incident(s) had no stored draft and were skipped`);
@@ -174,11 +185,17 @@ async function runExport({ dbi, args, log, drafter }) {
 // Owner ruling 2026-10-02: exported cases may sit in the session scratchpad
 // (never the repo) only until the run is recorded. Removes the folder only
 // when it is an export folder (it holds cases.jsonl) outside the repository.
-function removeExportDir(dir, log) {
+function removeExportDir(dir, resultsFile, log) {
   assertOutsideRepo(dir);
-  if (!fs.existsSync(path.join(dir, 'cases.jsonl'))) throw usageError(`${dir} is not an export folder (no cases.jsonl); nothing deleted`);
-  fs.rmSync(dir, { recursive: true, force: true });
-  log(`deleted the export folder ${dir}`);
+  const markerPath = path.join(dir, EXPORT_MARKER);
+  if (!fs.existsSync(markerPath)) throw usageError(`${dir} is not an export folder (no ${EXPORT_MARKER}); nothing deleted`);
+  const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  // Only the files this export wrote (plus the graded results file beside
+  // them), by plain name; the folder goes only if nothing else is left.
+  const names = [...(marker.files || []), path.basename(resultsFile), EXPORT_MARKER].filter((n) => n === path.basename(n));
+  for (const name of new Set(names)) fs.rmSync(path.join(dir, name), { force: true });
+  if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
+  log(`deleted the exported cases in ${dir}`);
 }
 
 async function runRecord({ dbi, args, log }) {
@@ -205,7 +222,7 @@ async function runRecord({ dbi, args, log }) {
     by: args.by || 'lane:correction-loop',
     dryRun: !args.execute,
   });
-  if (args.deleteExport && args.execute) removeExportDir(path.dirname(path.resolve(args.file)), log);
+  if (args.deleteExport && args.execute) removeExportDir(path.dirname(path.resolve(args.file)), args.file, log);
   log(`${args.execute ? 'RECORDED' : 'DRY RUN (add --execute to write)'}: ${run.purpose} ${run.split} run ${run.id ? String(run.id).slice(0, 8) : '(new)'} ${run.status} — ${run.fixed_count} fixed, ${run.reproduces_count} reproduce, ${run.inconclusive_count} inconclusive of ${run.case_count}; exact production model: no`);
   return { recorded: Boolean(args.execute), run };
 }
@@ -219,9 +236,9 @@ async function runCarry({ dbi, args, log }) {
   return out;
 }
 
-async function run({ dbi, argv, log = console.log, drafter }) {
+async function run({ dbi, argv, log = console.log, drafter, codeRefOf }) {
   const args = parseArgs(argv);
-  if (args.command === 'export') return runExport({ dbi, args, log, drafter });
+  if (args.command === 'export') return runExport({ dbi, args, log, drafter, codeRefOf });
   if (args.command === 'record') return runRecord({ dbi, args, log });
   return runCarry({ dbi, args, log });
 }

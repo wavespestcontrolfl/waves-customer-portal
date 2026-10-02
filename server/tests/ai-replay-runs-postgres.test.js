@@ -231,7 +231,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
       currentPromptVersion: () => V12,
     };
     const lines = [];
-    await cli.run({ dbi: database, argv: ['export', `--proposal=${String(proposal.id).slice(0, 8)}`, '--split=dev', `--out=${dir}`], log: (l) => lines.push(l), drafter });
+    await cli.run({ dbi: database, argv: ['export', `--proposal=${String(proposal.id).slice(0, 8)}`, '--split=dev', `--out=${dir}`], log: (l) => lines.push(l), drafter, codeRefOf: () => SHA });
     const cases = fs.readFileSync(path.join(dir, 'cases.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(cases).toHaveLength(10);
     expect(cases.map((c) => c.incident_key).sort()).toEqual([...proposal.dev_incident_keys].sort());
@@ -282,6 +282,20 @@ test('export refuses a directory inside the repository, however it is spelled', 
     expect(done.run).toMatchObject({ status: 'passed', case_count: 10 });
     // The redacted cases do not outlive the recorded run.
     expect(fs.existsSync(dir)).toBe(false);
+    // A shared folder: export refuses it, and cleanup never touches other files.
+    const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-'));
+    fs.writeFileSync(path.join(shared, 'other-work.txt'), 'keep me');
+    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=dev', `--out=${shared}`], log: () => {}, drafter, codeRefOf: () => SHA }))
+      .rejects.toThrow(/new or empty folder/);
+    const sub = path.join(shared, 'replay');
+    await cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=dev', `--out=${sub}`], log: () => {}, drafter, codeRefOf: () => SHA });
+    fs.writeFileSync(path.join(sub, 'notes.txt'), 'mine');
+    const t2 = JSON.parse(fs.readFileSync(path.join(sub, 'results-template.json'), 'utf8'));
+    t2.results = t2.results.map((r) => ({ ...r, verdict: 'fixed' }));
+    fs.writeFileSync(path.join(sub, 'graded.json'), JSON.stringify(t2));
+    await cli.run({ dbi: database, argv: ['record', `--file=${path.join(sub, 'graded.json')}`, '--execute', '--delete-export'], log: () => {} });
+    expect(fs.readdirSync(sub)).toEqual(['notes.txt']);
+    expect(fs.readFileSync(path.join(shared, 'other-work.txt'), 'utf8')).toBe('keep me');
     expect(lines.join('\n')).toMatch(/names of other people can remain/);
   });
 
@@ -304,10 +318,10 @@ test('export refuses a directory inside the repository, however it is spelled', 
   });
 
   test('the holdout is exported only after the current dev run passed on this checkout', async () => {
-    const head = require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const head = 'feedface01';
     const drafter = { buildUserPromptFromFacts: () => 'u', buildSystemPromptWithProfile: () => ({ system: 's' }), currentPromptVersion: () => V12 };
     const out = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')), 'out');
-    const exportHoldout = (dir) => cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=holdout', `--out=${dir}`], log: () => {}, drafter });
+    const exportHoldout = (dir) => cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=holdout', `--out=${dir}`], log: () => {}, drafter, codeRefOf: () => head });
     let dir = out();
     await expect(exportHoldout(dir)).rejects.toMatchObject({ code: 'dev_not_passed' });
     expect(fs.existsSync(dir)).toBe(false);
@@ -322,7 +336,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
   test('an empty split exports nothing and writes no files', async () => {
     await database('ai_fix_proposals').where({ id: proposal.id }).update({ dev_incident_keys: JSON.stringify([]) });
     const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')), 'out');
-    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=dev', `--out=${dir}`], log: () => {}, drafter: { currentPromptVersion: () => V12 } }))
+    await expect(cli.run({ dbi: database, argv: ['export', `--proposal=${proposal.id}`, '--split=dev', `--out=${dir}`], log: () => {}, drafter: { currentPromptVersion: () => V12 }, codeRefOf: () => SHA }))
       .rejects.toMatchObject({ exitCode: 1 });
     expect(fs.existsSync(dir)).toBe(false);
   });
