@@ -521,7 +521,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('review: the invoice detail guards the balance of an unreconciled charge the same way the list does', async () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.orphan.id });
     expect(detail.invoice).toMatchObject({ balance_due: null, portal_recorded_balance_due: 60 });
-    expect(detail.unknowns.join(' ')).toMatch(/not money owed/);
+    expect(detail.unknowns.join(' ')).toMatch(/not confirmed money owed/);
+    expect(detail.unknowns.join(' ')).toMatch(/Do not collect or retry/);
     // An unresolved claimed attempt, and a failed row flagged ambiguous, hold the balance the same way.
     for (const key of ['g_claim', 'g_amb']) {
       const held = await read('get_invoice_detail', { invoice_id: inv[key].id });
