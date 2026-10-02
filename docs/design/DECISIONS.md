@@ -2977,10 +2977,15 @@ and resent under the same key.
 
 There are no Pests / Where / How taps (owner ruling 2026-09-30: those facts
 are voice only). `POST /admin/dispatch/:id/voice-facts` reads where product
-went down (Inside / Outside / Garage) and the pests named, each quoted from
-the note word for word, and the report step shows them as "Heard from you".
-They go on the record as the products' area and targets and the visit's
-areas serviced, so an indoor treatment keeps its re-entry wait on the
-customer's report. A saved perimeter trace makes the sprays perimeter sprays
-at the trace's length; without one they are spot treatments. Off, the tech
-portal routes pest visits exactly as before.
+went down (Inside / Outside / Garage), the pests named and how the sprays
+went down (around the outside of the home, or spots), each quoted from the
+note word for word (a quote that denies it is dropped in code), and the
+report step shows them as "Heard from you". The note is read first and the
+report is written from exactly what the completion records: the visit's
+areas serviced (a product's area only when one place was heard, as the full
+form fills it), each product's targets and the sprays' method, so an indoor
+treatment keeps its re-entry wait on the customer's report. A perimeter
+spray takes its length from the trace, which never changes the record after
+the report was read; Complete & send waits for where the tech treated and,
+for a perimeter, the trace. Off, the tech portal routes pest visits exactly
+as before.

@@ -664,16 +664,19 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
 const reportSprayMethod = (facts) => (facts?.spray === 'perimeter' ? 'perimeter_spray' : 'spot_treatment');
 
 // What the record says about one product, heard from the note: how it went
-// down, the pests it was for and where. The report is written from exactly
-// this, and the completion records exactly this.
+// down and the pests it was for; where only when the visit was in one place,
+// as the full form fills it (the note does not say which product went where,
+// so two places stay on the visit's areas serviced, never on every product).
+// The report is written from exactly this, and the completion records
+// exactly this.
 function recordedApplication(row, facts) {
   const sprayMethod = reportSprayMethod(facts);
   const { rate, rateUnit } = rowRate(row, sprayMethod);
-  const applicationArea = (facts?.areas || []).join(', ');
+  const areas = facts?.areas || [];
   return {
     applicationMethod: rowMethod(row, sprayMethod),
     targets: facts?.pests || [],
-    ...(applicationArea ? { applicationArea } : {}),
+    ...(areas.length === 1 ? { applicationArea: areas[0] } : {}),
     ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
   };
 }

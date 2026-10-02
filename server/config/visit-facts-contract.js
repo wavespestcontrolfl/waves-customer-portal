@@ -77,9 +77,10 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   covers every completion except WDO + pre-treat; 2026-09-28: "Found" and
  *   "Treated" are read-only summary lines filled from voice). Voice fill
  *   ships DARK on the Fast Complete report flow (GATE_FAST_COMPLETE_REPORT):
- *   where product went down and the pests named are read from the note
- *   (services/visit-voice-facts.js) and sent as each product's area and
- *   targets and the visit's areas serviced. Every other 'voice' fact is
+ *   where product went down, the pests named and how the sprays went down
+ *   are read from the note (services/visit-voice-facts.js) and sent as the
+ *   visit's areas serviced (a product's area only when one place was
+ *   heard), each product's targets and the sprays' method. Every other 'voice' fact is
  *   still filled by tap; 'voice' marks the fact voice fill must write into
  *   (the tap path stays behind "Show all fields").
  * - prefill: defaulted from the protocol / product label / service config;

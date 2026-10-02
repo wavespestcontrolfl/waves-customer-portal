@@ -200,10 +200,11 @@ describe('generate and read', () => {
       areasServiced: ['Inside', 'Outside'],
     });
     expect(payload).not.toHaveProperty('fresh');
+    // Two places stay on the visit; no product is said to have gone everywhere.
     expect(payload.products.map((product) => [product.name, product.applicationMethod, product.applicationArea, product.targets])).toEqual([
-      ['Taurus SC', 'spot_treatment', 'Inside, Outside', ['ghost ants']],
-      ['Atticus Talak 7.9 F', 'spot_treatment', 'Inside, Outside', ['ghost ants']],
-      ['LESCO 90/10 Nonionic Surfactant', 'spot_treatment', 'Inside, Outside', ['ghost ants']],
+      ['Taurus SC', 'spot_treatment', undefined, ['ghost ants']],
+      ['Atticus Talak 7.9 F', 'spot_treatment', undefined, ['ghost ants']],
+      ['LESCO 90/10 Nonionic Surfactant', 'spot_treatment', undefined, ['ghost ants']],
     ]);
     // The four parts, titled, and what was heard.
     for (const title of ['What we found', 'What we did and why', 'What to expect', 'What’s next']) {
@@ -374,9 +375,10 @@ describe('complete and send', () => {
     expect(body).not.toHaveProperty('customerRecapMode');
     expect(body.expectedVisit).toBeTruthy();
     expect(body.products[0]).toMatchObject({
-      productId: 'taurus', applicationMethod: 'spot_treatment', targets: ['ghost ants'], applicationArea: 'Inside, Outside', amountUnit: 'fl_oz',
+      productId: 'taurus', applicationMethod: 'spot_treatment', targets: ['ghost ants'], amountUnit: 'fl_oz',
     });
     expect(body.products[0]).not.toHaveProperty('areaValue');
+    expect(body.products[0]).not.toHaveProperty('applicationArea');
     expect(screen.getByRole('heading', { name: 'Service complete' })).toBeTruthy();
     expect(screen.getByText('The report went to the customer by text.')).toBeTruthy();
     expect(screen.getByText('Bill: $95.00 due.')).toBeTruthy();
@@ -416,6 +418,17 @@ describe('complete and send', () => {
     expect(screen.getByText('Still open: Look at the garage door seal. The office will settle it.')).toBeTruthy();
     const reread = request.calls.map((call) => call.path).filter((path) => path.includes('/promises?include='));
     expect(reread).toEqual(['/admin/dispatch/svc-1/promises?include=p-1%2Cp-2']);
+  });
+
+  test('one place heard goes on each product, as the full form fills it', async () => {
+    const request = makeRequest({ facts: { ...FACTS, areas: ['Outside'] } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.areasServiced).toEqual(['Outside']);
+    expect(body.products.map((product) => product.applicationArea)).toEqual(['Outside', 'Outside', 'Outside']);
   });
 
   test('a re-service sends the report text with no pay link and no review ask', async () => {
