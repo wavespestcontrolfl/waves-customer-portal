@@ -18,8 +18,12 @@ import {
   PestSpiderExpectation,
   PestWhatToExpect,
 } from './PestReportV2';
-export default function PestReportV2Section({ data, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
+import { reportSectionsForText } from '../ReportSections';
+export default function PestReportV2Section({ data, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   if (!data) return null;
+  // The four-section report carries its own "What to expect"; the card would
+  // say the same thing twice.
+  const reportSectionsShown = Boolean(reportSectionsForText(reportSections, data.aiSummary?.body));
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards — the
     // old maxWidth + side padding rendered this block 32px narrower than every other
@@ -34,6 +38,8 @@ export default function PestReportV2Section({ data, token = null, mode = 'live',
         mode={mode}
         tracedMap={tracedMap}
         pressureTrendSlot={pressureTrendSlot}
+        reportSections={reportSections}
+        nextVisitLabel={nextVisitLabel}
       />
       {/* Only a recorded treatment map belongs in the hero. Older payloads
           may still carry defense rows; they no longer create a schematic. */}
@@ -49,7 +55,7 @@ export default function PestReportV2Section({ data, token = null, mode = 'live',
           no relevant facts, so these three render nothing by default. */}
       {data.expectations?.rain ? <PestRainExpectation rain={data.expectations.rain} /> : null}
       {data.expectations?.spiders ? <PestSpiderExpectation spiders={data.expectations.spiders} /> : null}
-      {data.expectations?.whatToExpect ? <PestWhatToExpect whatToExpect={data.expectations.whatToExpect} /> : null}
+      {data.expectations?.whatToExpect && !reportSectionsShown ? <PestWhatToExpect whatToExpect={data.expectations.whatToExpect} /> : null}
     </div>
   );
 }

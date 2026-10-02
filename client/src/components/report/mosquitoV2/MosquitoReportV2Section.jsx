@@ -22,7 +22,7 @@ import {
   MosquitoOutlook,
 } from './MosquitoReportV2';
 
-export default function MosquitoReportV2Section({ data, print = false, token = null, mode = 'live', pressureTrendSlot = null }) {
+export default function MosquitoReportV2Section({ data, print = false, token = null, mode = 'live', pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   if (!data) return null;
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards
@@ -36,6 +36,8 @@ export default function MosquitoReportV2Section({ data, print = false, token = n
         token={token}
         mode={mode}
         pressureTrendSlot={pressureTrendSlot}
+        reportSections={reportSections}
+        nextVisitLabel={nextVisitLabel}
       />
       {data.primaryMove ? <MosquitoNextStep primaryMove={data.primaryMove} /> : null}
       {data.outlook ? <MosquitoOutlook outlook={data.outlook} /> : null}

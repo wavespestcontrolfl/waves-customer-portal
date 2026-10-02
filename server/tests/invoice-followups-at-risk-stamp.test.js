@@ -73,6 +73,7 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if ((!queue || !queue.length) && table === 'notification_prefs') return chain({ first: undefined });
     if ((!queue || !queue.length) && table === 'collections_contact_ledger') return chain({ result: [] });
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -119,6 +120,9 @@ beforeEach(() => {
     return { ok: true };
   });
   db.transaction = jest.fn(async (fn) => fn(db));
+  // fireStep takes the customer's dunning key (SHARED) and reads ownership
+  // (customer_dunning_schedules) under it; no schedule rows here.
+  db.raw = jest.fn(async () => ({ rows: [] }));
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
 });
 

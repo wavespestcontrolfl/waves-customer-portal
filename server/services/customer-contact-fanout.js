@@ -80,7 +80,7 @@ const capName100 = (value) => Array.from(String(value ?? '')).slice(0, 100).join
 // service is diff-gated like the email fan-out, so a skipped row could never
 // heal on a later pass.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 // Mirrors document-contract-delivery TERMINAL_STATUSES (same list the email
 // fan-out uses for recipient_email).
 const TERMINAL_CONTRACT_STATUSES = ['signed', 'cancelled', 'voided'];

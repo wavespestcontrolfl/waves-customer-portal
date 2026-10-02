@@ -1503,7 +1503,7 @@ async function alertBouncedContactAddress(bouncedEmail, ev = {}) {
     // Closed set mirrors the lead pipeline's CLOSED_STATUSES (leads-tools) —
     // a bounce for a duplicate/disqualified lead is exactly the marketing
     // cruft the contact-match filter exists to keep out.
-    const CLOSED_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+    const CLOSED_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
     const leads = await db('leads')
       .whereRaw('LOWER(email) = ?', [email])
       .where(function openOnly() { this.whereNull('status').orWhereNotIn('status', CLOSED_LEAD_STATUSES); })

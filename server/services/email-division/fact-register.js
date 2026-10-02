@@ -99,10 +99,14 @@ function isExpired(fact, today) {
 // expiry extended (or removed), a derived flag or the verification date
 // changing must reach the row even when no word of the fact changed —
 // otherwise hasProvenance keeps rejecting the fact at its FORMER deadline.
+// A fact checked on another day than the register's default carries its own
+// `verifiedOn`.
+const verifiedOnFor = (fact) => fact.verifiedOn || VERIFIED_ON;
+
 function managedMetadataCurrent(meta, fact) {
   return (meta.expires_on ?? null) === (fact.expiresOn ?? null)
     && (meta.derived === true) === (fact.derived === true)
-    && meta.verified_on === VERIFIED_ON
+    && meta.verified_on === verifiedOnFor(fact)
     && meta.source_url === fact.sourceUrls[0];
 }
 
@@ -186,7 +190,7 @@ function rowValues(fact, existingMeta, now) {
     source_url: fact.sourceUrls[0],
     source_urls: fact.sourceUrls,
     quote: fact.quote,
-    verified_on: VERIFIED_ON,
+    verified_on: verifiedOnFor(fact),
     derived: fact.derived === true,
     expires_on: fact.expiresOn || null,
     register_hash: factFingerprint(fact),
@@ -200,7 +204,7 @@ function rowValues(fact, existingMeta, now) {
     source: SOURCE,
     confidence: 'high',
     metadata: JSON.stringify(meta),
-    last_verified_at: new Date(`${VERIFIED_ON}T00:00:00Z`),
+    last_verified_at: new Date(`${verifiedOnFor(fact)}T00:00:00Z`),
     verified_by: SOURCE,
     updated_at: now,
   };
@@ -285,7 +289,7 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
         result.held.push({ slug: fact.slug, reason: held.reason });
         return;
       }
-      await audit(trx, hasAuditLog, AUDIT_ACTIONS.seeded, created, { verified_on: VERIFIED_ON });
+      await audit(trx, hasAuditLog, AUDIT_ACTIONS.seeded, created, { verified_on: verifiedOnFor(fact) });
       result.inserted.push(fact.slug);
       return;
     }
@@ -512,7 +516,8 @@ async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
     .orderBy('title', 'asc');
 
   const today = etDateString(now);
-  const usable = rows.filter((row) => hasProvenance(row, today));
+  // newsletter: false facts are knowledge-base only (see fact-register-data.js).
+  const usable = rows.filter((row) => hasProvenance(row, today) && FACT_BY_SLUG.get(row.slug).newsletter !== false);
   const wanted = Array.isArray(tags) ? tags : (tags ? [tags] : null);
   const filtered = (wanted && wanted.length)
     ? usable.filter((r) => {

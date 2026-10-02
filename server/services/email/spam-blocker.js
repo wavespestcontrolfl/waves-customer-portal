@@ -86,7 +86,7 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
 // Mirrors inbox-hygiene / email-actions (which mirror CLOSED_STATUSES in
 // intelligence-bar/leads-tools.js). Local copy — inbox-hygiene requires this
 // module, so importing from it would be circular.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 function normalizeAddress(value) {
   return value ? String(value).trim().toLowerCase() : '';

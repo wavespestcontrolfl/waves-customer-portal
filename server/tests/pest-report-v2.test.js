@@ -337,7 +337,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     });
     expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
     expect(out.expectations.spiders.headline).toBe('Spiders');
-    expect(out.expectations.whatToExpect.lines[0]).toMatch(/Non-repellent/);
+    expect(out.expectations.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
 
   it('gate on but no relevant facts: the expectations key is omitted (no data → no block)', () => {
@@ -424,12 +424,12 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
 
-  it('appends -pex1 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
+  it('appends -pex2 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
     delete process.env.PEST_REPORT_V2;
     try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex1');
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex2');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
     }

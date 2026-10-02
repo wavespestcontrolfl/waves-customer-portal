@@ -25,36 +25,50 @@
 // Dispatch CompletionPanel — before any attempt may have reached the
 // server; so does "+ Other product" when the product list did not load.
 //
+// Customer text (dark, GATE_FAST_COMPLETE_RECAP, `service.recapEnabled`): off,
+// the sheet pins sendCompletionSms / requestReview / includePayLink to false
+// and the customer gets nothing. On, it asks for the ONE fixed re-service text
+// (customerRecapMode 'reservice_fixed'); the SERVER builds it from the saved
+// facts (address, where, pests, products) and sends it through its normal send
+// path, so consent, STOP and opt-out checks still apply. No customer wording
+// lives here, no review ask and no pay link go with it, and after Complete the
+// tech sees the exact text that went (or why none did) from the response.
+//
 // The layout is compact (three/four-across choice rows, the note behind a
 // tap) so the choices fit a typical phone screen; the Complete button is
 // pinned in the footer either way.
 //
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
+//
+// The frame, header, saved view, note, tip picker and tiles are shared with
+// every Fast Complete sheet (FastCompleteParts.jsx), as is the /complete
+// submit (hooks/useFastCompleteSubmit.js); products, photos, pests and the
+// completion body are this sheet's own.
 import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
-import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
-import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
-import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, isOutOfStock, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
-import DictationButton from './DictationButton';
-import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
+import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { WarningIcon } from './FastCompleteProductPicker';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
-import { UiSurface, Button, Field, Input, Textarea, ActionFeedback, cn } from '../ui';
+import {
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
+  SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  visitChangedSinceSchedule,
+} from './FastCompleteParts';
+import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
-// The amount /complete would receive is above zero (a tsp amount goes as fl oz).
-const hasAmount = (row) => submittedAmount(row.totalAmount, row.amountUnit).totalAmount > 0;
 
 // How the SPRAY products went down. Spot treatment needs no measured area;
 // a perimeter spray records its linear feet (the application record's area
@@ -103,34 +117,6 @@ const ACTIVITY_LEVELS = [
   { value: 'moderate', label: 'Moderate', rating: 3 },
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
-// Tips shown before the tech searches or opens the whole list.
-const TIP_PREVIEW_COUNT = 4;
-// Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
-// longer line, never trims it.
-const CUSTOM_TIP_MAX_CHARS = 240;
-const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
-const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
-const dayOf = (value) => String(value || '').slice(0, 10);
-// Letters and digits only: the row's address is built in SQL and the live
-// one from fields, so spacing and punctuation may differ, but a different
-// unit never matches ("apt 4" vs "apt 5").
-const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Whether the tapped row's property is no longer the live visit's. The row's
-// property id decides: a move to another unit at the same street is another
-// property. A visit never stamped with one (null on both sides) falls back to
-// the whole address, unit included. A row without the fields (an older
-// payload) gives no verdict.
-function propertyMoved(service, visit) {
-  const routedId = service?.routedPropertyId;
-  if (routedId !== undefined) {
-    if (String(routedId ?? '') !== String(visit?.propertyId ?? '')) return true;
-    if (routedId != null) return false;
-  }
-  const live = visit?.address;
-  if (!service?.routedAddress || !live?.line1) return false;
-  return addressKey(service.routedAddress) !== addressKey([live.line1, live.line2, live.city, live.state, live.zip].join(' '));
-}
 
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
@@ -139,73 +125,11 @@ function propertyMoved(service, visit) {
 // project-backed).
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
-  const movedCustomer = service?.routedCustomerId && visit.customerId
-    && String(service.routedCustomerId) !== String(visit.customerId);
-  const movedDay = service?.routedScheduledDate && visit.scheduledDate
-    && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
-  const movedProperty = propertyMoved(service, visit);
-  if (movedCustomer || movedDay || movedProperty) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  if (visitChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
-  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
+  if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
   return '';
-}
-
-// "123 Oak St, Bradenton" from the context's resolved address.
-function liveAddressLine(address) {
-  if (!address || typeof address !== 'object') return '';
-  return [[address.line1, address.line2].filter(Boolean).join(' '), address.city].filter(Boolean).join(', ');
-}
-
-// Every /complete failure lands in one of four outcomes:
-//  saved       — the visit is already saved: this or an earlier attempt
-//                committed (a lost response, another device, or a partly
-//                finished earlier try whose changed body the resume check
-//                refuses — completion_resume_payload_mismatch is only
-//                answered once a record exists; the office's Billing
-//                Recovery finishes those).
-//  correctable — a definitive pre-commit rejection: fix and resubmit under a
-//                fresh key (the full form's shared rule).
-//  retry       — outcome unknown or still running (network drop, 5xx, an
-//                attempt pending or finishing its side effects): resend the
-//                SAME body under the SAME key so the server replays/resumes.
-//  terminal    — a conflict no retry can fix (a future-dated, closed or
-//                changed visit, or an idempotency_key_mismatch, which the
-//                server also answers for pending/failed attempts with no
-//                record, so it is never proof of a save): show it and let
-//                the tech leave.
-const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
-const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
-function completionFailureOutcome(err) {
-  const status = Number(err?.status);
-  if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
-  if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
-  if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
-  return 'terminal';
-}
-
-function outcomeMessage(outcome, err) {
-  if (outcome === 'retry') {
-    return `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`;
-  }
-  if (err?.code === 'idempotency_key_mismatch') {
-    return 'Another completion for this visit is in progress or was changed. Close and reopen it from the schedule to see where it stands.';
-  }
-  return err?.message || 'Completion failed';
-}
-
-function genIdempotencyKey() {
-  try {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  } catch { /* fall through */ }
-  return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-}
-
-function toggleInSet(set, value) {
-  const next = new Set(set);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
 }
 
 // A row keeps its catalog product: its method comes from the catalog (the
@@ -301,16 +225,24 @@ function targetsOf(form) {
   return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-// One tip per service visit: a library pick OR the tech's own line, never
-// both. null when the picker never loaded, so nothing the tech could not see
-// freezes onto the report.
-function techTipsOf(form, tipsAvailable) {
-  if (!tipsAvailable) return null;
-  const custom = form.customTip.trim();
-  return custom ? { ids: [], custom } : { ids: form.tipId ? [form.tipId] : [], custom: null };
-}
+// Gate on: the completion text is asked for in the server's fixed re-service
+// mode (services/reservice-fixed-recap.js). The review ask and the pay link
+// stay off, as on a re-service they always were (fast-complete scope: "leave it
+// off on re-services").
+const CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: true,
+  requestReview: false,
+  includePayLink: false,
+  customerRecapMode: 'reservice_fixed',
+};
+// Today's body: no customer text, no review ask, no pay link.
+const NO_CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: false,
+  requestReview: false,
+  includePayLink: false,
+};
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -338,12 +270,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
-    // The customer recap text ships in a later Fast Complete PR; until then
-    // this path sends none. No review ask on a re-service (adopted
-    // 2026-09-26), and a free callback never carries a pay link.
-    sendCompletionSms: false,
-    requestReview: false,
-    includePayLink: false,
+    // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
+    // link. Gate on: the fixed re-service text; the server composes it.
+    ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
   };
 }
 
@@ -413,94 +342,6 @@ function withFreshStock(product, fresh) {
   return row ? { ...product, inventory_on_hand: row.inventory_on_hand, inventory_unit: row.inventory_unit } : product;
 }
 
-// The tip library, read on its own: the picker is optional, so a slow or
-// failed read never holds the sheet. null until it arrives, and when the
-// read fails or the tips gate is off.
-function useTipLibrary({ base, request }) {
-  const [library, setLibrary] = useState(null);
-  useEffect(() => {
-    let active = true;
-    request(`${base}/tech-tips`)
-      .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
-      .catch(() => { if (active) setLibrary(null); });
-    return () => { active = false; };
-  }, [base, request]);
-  return library;
-}
-
-// One completion attempt at a time, settled into the four outcomes above.
-function useFastCompleteSubmit({ base, request }) {
-  const keyRef = useRef(null);
-  if (!keyRef.current) keyRef.current = genIdempotencyKey();
-  const pendingBodyRef = useRef(null);
-  const inFlight = useRef(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [failure, setFailure] = useState(null);
-  const [done, setDone] = useState(null);
-
-  const submit = useCallback(async (buildBody, summary) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setSubmitting(true);
-    setError('');
-    const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
-    try {
-      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      pendingBodyRef.current = null;
-      setFailure(null);
-      setDone({ summary });
-      // Saved: the done view can be dismissed (Close, Escape, backdrop).
-      setSubmitting(false);
-      inFlight.current = false;
-    } catch (err) {
-      const outcome = completionFailureOutcome(err);
-      pendingBodyRef.current = outcome === 'retry' ? body : null;
-      if (outcome === 'correctable') keyRef.current = genIdempotencyKey();
-      if (outcome === 'saved') {
-        setFailure(null);
-        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
-      } else {
-        setFailure(outcome === 'correctable' ? null : outcome);
-        setError(outcomeMessage(outcome, err));
-      }
-      setSubmitting(false);
-      inFlight.current = false;
-    }
-  }, [base, request]);
-
-  return { submitting, error, failure, done, submit, retryPending: failure === 'retry', hasPendingBody: () => !!pendingBodyRef.current };
-}
-
-// One tile — a real button, aria-pressed, 44px min touch target via the
-// shared Button component's `touch` density.
-function Chip({ label, pressed, onClick, className, disabled }) {
-  return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product', className)}
-      {...(pressed != null ? { 'aria-pressed': pressed } : {})}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {label}
-    </Button>
-  );
-}
-
-function ChoiceSection({ title, action, columns = 2, children }) {
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">{title}</h3>
-        {action}
-      </div>
-      <div className={cn('tech-visit-tile-grid', `tech-visit-tile-grid--${columns}`)}>{children}</div>
-    </section>
-  );
-}
-
 // The photo manager opens over the sheet. While it is up the sheet is inert
 // and hidden from assistive tech, the way the photo manager treats its own
 // marks dialog; `version` moves on each close so the count is read again.
@@ -553,70 +394,29 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // so it is offered only before one may have reached the server.
   const locked = submitting || submission.failure !== null;
 
-  return createPortal(
-    <>
-    <UiSurface
-      density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
-      onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) close(); }}
-    >
-      <section
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
-        {...photoManager.hiddenProps}
-      >
-        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
-      </section>
-    </UiSurface>
-    {photoManager.isOpen && (
-      <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
-    )}
-    </>,
-    document.body,
-  );
-}
-
-// The LIVE visit once loaded, so the tech sees whose property this
-// completion records against.
-function customerNameOf(visit, service) {
-  return visit?.customerName || service?.customerName || '';
-}
-
-function SheetHeader({ titleId, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
-  const address = liveAddressLine(visit?.address);
   return (
-    <header className="tech-visit-header">
-      <div>
-        <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
-        <p className="tech-visit-muted">
-          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-        </p>
-        {address && <p className="tech-visit-muted">{address}</p>}
-      </div>
-      {!done && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+    <FastCompleteFrame
+      isMobile={isMobile}
+      dialogRef={dialogRef}
+      titleId={titleId}
+      onDismiss={close}
+      hiddenProps={photoManager.hiddenProps}
+      overlay={photoManager.isOpen && (
+        <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )}
-      <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
-    </header>
+    >
+      <SheetHeader titleId={titleId} title={done ? 'Re-service complete' : 'Complete re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+    </FastCompleteFrame>
   );
 }
 
 function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
   if (submission.done) {
     return (
-      <div className="tech-visit-body">
-        <div className="tech-visit-card">
-          <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
-          <p>{submission.done.summary}</p>
-        </div>
-        <div className="tech-visit-actions">
-          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
-        </div>
-      </div>
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+        <CustomerTextResult outcome={submission.done.customerText} />
+      </SavedView>
     );
   }
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
@@ -661,50 +461,6 @@ function useProductRows(ctx, serviceType) {
   return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyStock };
 }
 
-// "+ Other product" opens the product picker: a bottom sheet over the form
-// on a phone, a popover under the button at desktop width. With no product
-// list loaded it opens the full completion screen, as it always did.
-function useProductPicker({ ctx, rows, locked, isMobile, onFullForm, onPick }) {
-  const buttonRef = useRef(null);
-  const [open, setOpen] = useState(false);
-  const hasCatalog = ctx.products.length > 0;
-  useEffect(() => { if (locked) setOpen(false); }, [locked]);
-  // The house mix is always on the sheet, so "Used most" lists the rest.
-  const commonProducts = useMemo(() => {
-    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
-    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
-  }, [ctx.rows, ctx.commonProducts]);
-  const onSheetIds = useMemo(() => new Set(rows.map((row) => String(row.productId))), [rows]);
-  const shown = open && !locked;
-  const picker = shown ? (
-    <FastCompleteProductPicker
-      variant={isMobile ? 'sheet' : 'popover'}
-      products={ctx.products}
-      commonProducts={commonProducts}
-      onSheetIds={onSheetIds}
-      anchorRef={buttonRef}
-      onPick={(product) => { setOpen(false); onPick(product); }}
-      onClose={() => setOpen(false)}
-    />
-  ) : null;
-  const onClick = (event) => {
-    if (!hasCatalog) {
-      onFullForm?.();
-      return;
-    }
-    // Safari never focuses a tapped button; the picker hands focus back here.
-    event.currentTarget.focus();
-    setOpen((was) => !was);
-  };
-  return {
-    button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
-    popover: isMobile ? null : picker,
-    sheet: isMobile ? picker : null,
-    // What the phone sheet covers is out of reach until it closes.
-    coverProps: shown && isMobile ? { 'aria-hidden': true, inert: '' } : {},
-  };
-}
-
 function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
@@ -725,8 +481,14 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // The house mix is always on the sheet, so "Used most" lists the rest.
+  const pickerCommonProducts = useMemo(() => {
+    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
+    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
+  }, [ctx.rows, ctx.commonProducts]);
   const picker = useProductPicker({
-    ctx,
+    products: ctx.products,
+    commonProducts: pickerCommonProducts,
     rows,
     locked: locked || dictationPending,
     isMobile,
@@ -751,7 +513,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
+      () => completionBody(form, rows, {
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+      }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -800,28 +564,48 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
-      {/* The reason sits above full-width actions, so neither squeezes the
-          other on a phone or beside "Check stock". */}
-      <footer className="tech-visit-footer tech-visit-footer--stacked" {...picker.coverProps}>
-        {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-        {missingReason && !submission.failure && (
-          <p className={cn('tech-visit-muted', stockRow && 'tech-visit-status--warn')} role="status">{missingReason}</p>
+      <CompleteFooter
+        submission={submission}
+        missingReason={missingReason}
+        warn={!!stockRow}
+        label="Complete re-service"
+        onSubmit={submit}
+        coverProps={picker.coverProps}
+      >
+        {stockRow && !locked && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
         )}
-        <div className="tech-visit-actions">
-          {stockRow && !locked && (
-            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
-          )}
-          <Button
-            className="tech-visit-action tech-visit-complete tech-visit-wide"
-            onClick={submit}
-            loading={submission.submitting}
-            disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
-          >
-            {submission.retryPending ? 'Retry' : 'Complete re-service'}
-          </Button>
-        </div>
-      </footer>
+      </CompleteFooter>
       {picker.sheet}
+    </div>
+  );
+}
+
+// Only an exact true turns the customer recap on (GATE_FAST_COMPLETE_RECAP,
+// delivered as the schedule row's fastCompleteRecapEnabled).
+const recapOn = (service) => service?.recapEnabled === true;
+
+// After Complete: the exact text the server sent (its words, shown as sent),
+// or why none went. Nothing when the sheet never asked for one.
+// A held message's channel is only known once the replay picks it.
+function queuedLabel(channel) {
+  if (channel === 'push') return 'Queued for the customer\'s app';
+  if (channel === 'sms') return 'Text queued';
+  return 'Message queued';
+}
+
+function CustomerTextResult({ outcome }) {
+  if (!outcome) return null;
+  const { sent, queued, unverified, body, reason, channel } = outcome;
+  // The recorded channel decides the words: a text is not an app message.
+  const app = channel === 'push';
+  return (
+    <div data-testid="fast-complete-text-result">
+      {sent && <p className="tech-visit-muted">{app ? 'Sent to the customer\'s app:' : 'Text sent to the customer:'}</p>}
+      {!sent && queued && <p className="tech-visit-muted">{queuedLabel(channel)}: {reason}.</p>}
+      {!sent && unverified && <p className="tech-visit-muted">Delivery not confirmed: {reason}.</p>}
+      {!sent && !queued && !unverified && <p className="tech-visit-muted">No text sent: {reason}.</p>}
+      {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}
     </div>
   );
 }
@@ -945,28 +729,7 @@ function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDon
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), 'added by you'].filter(Boolean).join(' · ')}</span>
       </div>
-      <div>
-        <label htmlFor={amountId} className="tech-product-editor-label">How much?</label>
-        <div className="tech-product-editor-amount">
-          <Input
-            ref={amountRef}
-            id={amountId}
-            className="tech-visit-control tech-product-amount-input"
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="any"
-            disabled={locked}
-            value={row.totalAmount ?? ''}
-            onChange={(e) => onChange({ totalAmount: e.target.value })}
-          />
-          <div role="group" aria-label="Unit" className="tech-product-units">
-            {UNIT_CHOICES[row.dimension].map((choice) => (
-              <Chip disabled={locked} key={choice.value} className="tech-product-unit" label={choice.label} pressed={row.amountUnit === choice.value} onClick={() => onChange({ amountUnit: choice.value })} />
-            ))}
-          </div>
-        </div>
-      </div>
+      <AmountEntry id={amountId} inputRef={amountRef} row={row} locked={locked} onChange={onChange} />
       <RowMethodPicker row={row} method={method} locked={locked} onChange={onChange} />
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
@@ -1004,25 +767,6 @@ function RowMethodPicker({ row, method, locked, onChange }) {
         ))}
       </div>
       {followsVisitMethod(row) && <p className="tech-visit-muted">Same as the visit&apos;s How</p>}
-    </div>
-  );
-}
-
-function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expanded, popover }) {
-  return (
-    <div className="tech-product-other">
-      <Button
-        ref={buttonRef}
-        type="button"
-        variant="secondary"
-        className="tech-visit-action tech-visit-wide"
-        disabled={locked}
-        onClick={onClick}
-        {...(hasPicker ? { 'aria-haspopup': 'dialog', 'aria-expanded': expanded } : {})}
-      >
-        + Other product
-      </Button>
-      {popover}
     </div>
   );
 }
@@ -1068,31 +812,6 @@ function MethodSection({ form, rows, setField, chooseMethod, locked }) {
   );
 }
 
-// The visit note leads the sheet. The mic appends what the tech says; on a
-// phone without speech recognition it records a clip for server transcription
-// (DictationButton's upload fallback), and renders nothing where neither works.
-function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked }) {
-  const noteId = useId();
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
-      </div>
-      <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
-        <Textarea
-          id={noteId}
-          className="tech-visit-control"
-          rows={3}
-          value={note}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="What you treated, where, and what you saw"
-        />
-      </div>
-    </section>
-  );
-}
-
 // Photos are staged against the visit by the existing photo manager (opened
 // over the sheet by the parent) and promoted into the service record at
 // completion. Optional here.
@@ -1120,87 +839,6 @@ function PhotosSection({ serviceId, request, photos, locked }) {
       <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={photos.open} disabled={locked}>
         {count ? 'Add or view photos' : 'Add photos'}
       </Button>
-    </section>
-  );
-}
-
-// What the picker says beside a tip: already covered by the customer's
-// saved settings, or when it last went out to this customer.
-function tipMark(tip, library) {
-  if (tip.condition === 'irrigation_on_file' && library?.conditions?.irrigation_on_file === true) return 'already on file';
-  const day = library?.lastSent?.[tip.id];
-  return day ? techTipSentLabel(day) : null;
-}
-
-// The tips on screen: search results, the whole list, or the short list,
-// with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
-  return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
-}
-
-function TipOption({ tip, library, pressed, locked, onPick }) {
-  return (
-    <Button
-      type="button"
-      variant="secondary"
-      className="tech-visit-action tech-visit-tip"
-      aria-pressed={pressed}
-      onClick={() => onPick(tip.id)}
-      disabled={locked}
-    >
-      <span>
-        {tip.label}
-        <span className="tech-visit-tip-copy">{[techTipSubtext(tip.copy), tipMark(tip, library)].filter(Boolean).join(' · ')}</span>
-      </span>
-    </Button>
-  );
-}
-
-// One tip per service visit, from this visit's options: a short list first,
-// the whole list behind "Show all", search across all of it, or the tech's
-// own line. Only the id (or the typed line) goes on the wire; the server
-// resolves and freezes the copy.
-function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
-  const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [writing, setWriting] = useState(false);
-  const allTips = useMemo(
-    () => (library?.groups || []).flatMap((group) => group.tips || []),
-    [library],
-  );
-  const q = query.trim().toLowerCase();
-  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
-  const hasPick = !!tipId || !!customTip.trim();
-  const writingOwn = writing || !!customTip;
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">Tip for the customer</h3>
-        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
-      </div>
-      <Field label="Search tips" className="tech-visit-field">
-        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
-      </Field>
-      <div className="tech-visit-tip-list">
-        {visible.map((tip) => (
-          <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
-        ))}
-        {noMatch && <p className="tech-visit-muted">No tips match.</p>}
-      </div>
-      <div className="tech-visit-tile-grid">
-        {!q && allTips.length > TIP_PREVIEW_COUNT && (
-          <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
-        )}
-        {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
-      </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
     </section>
   );
 }

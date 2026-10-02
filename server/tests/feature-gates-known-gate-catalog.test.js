@@ -50,4 +50,18 @@ describe('knownGateCatalog', () => {
     expect(unverified.length).toBeGreaterThan(0);
     for (const e of unverified) expect(e.boolean).toBe(false);
   });
+
+  // Codex r3 on #5514: the description is what the bar's confirmation card
+  // shows as "controls", so it is kept COMPLETE — never truncated, and with
+  // its indented continuation lines (where prerequisites often live).
+  test('descriptions are complete: long entries untruncated, continuation lines included', () => {
+    const payAfter = catalog.get('GATE_PAY_AFTER_FIRST_VISIT').description;
+    expect(payAfter.length).toBeGreaterThan(300);
+    expect(payAfter).toMatch(/Off = byte-identical to today\.$/);
+    const prepay = catalog.get('GATE_PREPAY_CARD_AND_CHARGE').description;
+    expect(prepay).toMatch(/PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true/);
+    expect(prepay).toMatch(/the flip checklist is all three vars\.$/);
+    // A non-gate header line ends the previous gate's entry.
+    for (const e of catalog.values()) expect(e.description || '').not.toMatch(/SELF_SERVE_NOTICE_HOURS=24/);
+  });
 });

@@ -571,6 +571,26 @@ describe('street-level address hold: office confirm', () => {
     await waitFor(() => expect(screen.getByText('The visit address changed since you opened this.')).toBeInTheDocument());
   });
 
+  it('the dialog shows the visit\'s LIVE slot (a moved hold), not the booking-time one the card captured', async () => {
+    // The list endpoint refreshes payload.visit_when from the visit when SmartRebooker / an admin moved it.
+    const moved = { ...hold, payload: JSON.stringify({ ...holdPayload, visit_when: '2026-10-12 14:00' }) };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [moved], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Visit: 2026-10-12 14:00')).toBeInTheDocument();
+    expect(screen.queryByText(/Mon Oct 5, 1 PM/)).not.toBeInTheDocument();
+  });
+
+  it('with no live slot on the row, the dialog falls back to the slot the card captured', async () => {
+    mockList();
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Visit: Mon Oct 5, 1 PM')).toBeInTheDocument();
+  });
+
   it('keeps Confirm disabled when the live visit address did not load', async () => {
     const noLive = { ...hold, visit_address: undefined };
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')

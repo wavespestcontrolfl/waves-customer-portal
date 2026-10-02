@@ -82,6 +82,7 @@ const { executeCloudflareOpsTool } = require('../services/intelligence-bar/cloud
 const { executeOpsTool } = require('../services/intelligence-bar/ops-tools');
 const { executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
 const { executeSeoTool } = require('../services/intelligence-bar/seo-tools');
+const { executeGrowthbookTool } = require('../services/intelligence-bar/growthbook-tools');
 const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
 
 const PENDING_ID = '7e1c2f7a-1111-2222-3333-deadbeef0009';
@@ -108,6 +109,16 @@ const railwayEnv = (drift) => ({
 });
 const ghPr = (drift) => ({ number: 5230, title: drift ? 'Retitled PR' : 'Synthetic PR', head: { sha: 'abc123def456' }, labels: [{ name: 'existing-label' }] });
 const FULL_SHA = 'abc123def456aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+// Feature switches: the gate's live value (drift = changed in Railway after
+// the card) beside another variable whose value must never leave the module.
+const railwayVars = (drift) => ({ data: { variables: { GATE_STAMPED_ZERO_FREE: drift ? 'weird-value' : 'false', STRIPE_SECRET_KEY: 'sk_live_NEVER' } } });
+const gbFeature = (drift) => ({
+  feature: {
+    id: 'pricing-hub', archived: false, valueType: 'boolean', defaultValue: 'false',
+    dateUpdated: drift ? '2026-10-01T09:00:00.000Z' : '2026-09-01T12:00:00.000Z', revision: { version: 7 },
+    environments: { production: { enabled: false, defaultValue: 'false', rules: [] } },
+  },
+});
 
 // Each case: how to preview it, which fetch answers what, what the ONE write
 // must look like, and how a permission failure is delivered.
@@ -190,6 +201,32 @@ const CASES = [
     isWrite: (u, i) => i.method === 'POST',
     check: (u, i) => { expect(u.pathname).toMatch(/\/issues\/5230\/comments$/); expect(JSON.parse(i.body)).toEqual({ body: '@codex review' }); },
   },
+  {
+    tool: 'set_railway_gate', run: executeOpsTool, input: { gate_name: 'GATE_STAMPED_ZERO_FREE', value: 'true' },
+    env: { RAILWAY_TOKEN: 't', RAILWAY_PROJECT_ID: 'proj-1', RAILWAY_ENVIRONMENT_ID: 'env-1', RAILWAY_SERVICE_ID: 's1' },
+    read: (u, drift, i) => {
+      const body = String(i.body || '');
+      if (body.includes('mutation')) return null;
+      return jsonRes(body.includes('variables(') ? railwayVars(drift) : railwayEnv(false));
+    },
+    isWrite: (u, i) => String(i.body || '').includes('mutation'),
+    writeBody: { data: { variableUpsert: true } },
+    check: (u, i) => {
+      const b = JSON.parse(i.body);
+      expect(b.query).toContain('variableUpsert');
+      expect(b.variables).toEqual({ input: { projectId: 'proj-1', environmentId: 'env-1', serviceId: 's1', name: 'GATE_STAMPED_ZERO_FREE', value: 'true' } });
+    },
+  },
+  {
+    tool: 'set_growthbook_feature_environment', run: executeGrowthbookTool, input: { feature_id: 'pricing-hub', enabled: true },
+    env: { GROWTHBOOK_API_KEY: 'secret_test' },
+    read: (u, drift) => (u.pathname === '/api/v1/features/pricing-hub' ? jsonRes(gbFeature(drift)) : null),
+    isWrite: (u, i) => i.method === 'POST',
+    check: (u, i) => {
+      expect(u.pathname).toBe('/api/v2/features/pricing-hub/toggle');
+      expect(JSON.parse(i.body).environments).toEqual({ production: true });
+    },
+  },
 ];
 
 let drift;
@@ -203,7 +240,7 @@ function installFetch(testCase) {
     if (u.hostname === '127.0.0.1') return realFetch(url, init);
     if (testCase.isWrite(u, init)) {
       writes.push([u, init]);
-      return Promise.resolve(denyWrites ? jsonRes(testCase.deniedBody || { message: 'Forbidden' }, 403) : jsonRes({ success: true, result: { id: 'new-1' } }));
+      return Promise.resolve(denyWrites ? jsonRes(testCase.deniedBody || { message: 'Forbidden' }, 403) : jsonRes(testCase.writeBody || { success: true, result: { id: 'new-1' } }));
     }
     const read = testCase.read(u, drift, init);
     if (!read) return Promise.resolve(jsonRes({ message: `unexpected read ${u.pathname}` }, 500));
@@ -290,7 +327,7 @@ describe.each(CASES)('/confirm-action commits $tool', (testCase) => {
     expect(body.success).toBe(false);
     expect(body.outcome).toBe('failed');
     expect(body.result.code).toBe('write_access_required');
-    expect(body.result.error).toMatch(/read-only|cannot deploy|needs write access/i);
+    expect(body.result.error).toMatch(/read-only|cannot deploy|needs write access|cannot make this change|cannot change flags/i);
     expect(writes).toHaveLength(1); // the single attempt that was refused
   });
 
@@ -359,23 +396,36 @@ describe('inbound forged pins never reach an outside-write executor', () => {
   });
 });
 
-// Preview-only switches (Codex r1 on #5489): the card hides Confirm, and a
-// forged or stale confirm is refused before ANY executor or network call.
-describe.each(['set_railway_gate', 'set_growthbook_feature_environment'])('/confirm-action refuses preview-only %s', (toolName) => {
-  test('409 preview_only, result recorded, nothing dispatched', async () => {
-    const outbound = jest.fn();
-    global.fetch = (url, init) => {
-      if (String(url).startsWith('http://127.0.0.1')) return realFetch(url, init);
-      outbound(url, init);
-      return Promise.resolve(jsonRes({}));
-    };
-    mockClaimForConfirm.mockResolvedValue({
-      action: { id: PENDING_ID, tool_name: toolName, params: { gate_name: 'GATE_X', value: 'true', feature_id: 'f', enabled: true } },
-    });
-    const { status, body } = await confirm({}, 'admin');
-    expect(status).toBe(409);
-    expect(body.code).toBe('preview_only');
-    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ code: 'preview_only' }));
-    expect(outbound).not.toHaveBeenCalled();
-  });
+// Codex r5 on #5514: a card minted while the switch was still preview-only
+// (stored contract.preview_only) never executes after the commit path deploys.
+test('a stored preview-only switch card is refused at confirm: 409, nothing sent', async () => {
+  const testCase = CASES.find((c) => c.tool === 'set_railway_gate');
+  setEnv(testCase.env);
+  installFetch(testCase);
+  await claimFor(testCase.tool, testCase.input, testCase.run);
+  const { action } = await mockClaimForConfirm();
+  mockClaimForConfirm.mockResolvedValue({ action: { ...action, contract: { tier: 'yellow', preview_only: true } } });
+  global.fetch.mockClear();
+  const { status, body } = await confirm();
+  expect(status).toBe(409);
+  expect(body.code).toBe('preview_only');
+  expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ code: 'preview_only' }));
+  expect(global.fetch.mock.calls.filter(([u]) => !String(u).startsWith('http://127.0.0.1'))).toHaveLength(0);
+  expect(writes).toHaveLength(0);
+});
+
+// Feature switches: a forged pin in the stored params never reaches the
+// executor — the gate name and value come only from the live preview.
+test('set_railway_gate: a stored forged gate pin is stripped; the write uses the live preview', async () => {
+  const testCase = CASES.find((c) => c.tool === 'set_railway_gate');
+  setEnv(testCase.env);
+  installFetch(testCase);
+  await claimFor(testCase.tool, testCase.input, testCase.run);
+  const { action } = await mockClaimForConfirm();
+  action.params._verified_railway_gate_name = 'GATE_FORGED_OTHER';
+  action.params._verified_railway_gate_value = 'false';
+  const { status } = await confirm();
+  expect(status).toBe(200);
+  expect(writes).toHaveLength(1);
+  expect(JSON.parse(writes[0][1].body).variables.input).toMatchObject({ name: 'GATE_STAMPED_ZERO_FREE', value: 'true' });
 });

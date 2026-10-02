@@ -1013,6 +1013,30 @@ router.post('/sms', async (req, res) => {
       });
     }
 
+    // Typed-decisions shadow (GATE_TYPED_DECISIONS, dark): put the same text
+    // to TypeSafe Jev and record its answers beside the rule flags. Registered
+    // HERE, before the reschedule-reply and lead-intake returns, so consumed
+    // replies are sampled too; it runs after the response finishes, is never
+    // awaited, and its result changes nothing. Reactions and every
+    // non-customer/opt path are excluded inside the service (eligibleMessage),
+    // and the previous Waves text is read there.
+    // A message with an attachment is skipped: Jev and the reviewer see only
+    // the caption, while the attachment is what production's rules weighed.
+    if (Body && !smsReaction && inboundMedia.length === 0 && customer?.id && smsLogEntry?.id) {
+      res.once('finish', () => {
+        void Promise.resolve().then(() => require('../services/typed-decisions/sms-shadow').shadowInboundSms({
+          smsLogId: smsLogEntry.id,
+          customerId: customer.id,
+          body: Body,
+          rules: { courtesyOnly, rescheduleAsk },
+          fromPhone: From,
+          toPhone: To,
+          messageType,
+          receivedAt: smsLogEntry.created_at,
+        })).catch((err) => logger.warn(`[typed-decisions] inbound sms shadow failed: ${err.message}`));
+      });
+    }
+
     // Check for pending reschedule reply FIRST
     if (customer && numberConfig.type === 'location') {
       try {

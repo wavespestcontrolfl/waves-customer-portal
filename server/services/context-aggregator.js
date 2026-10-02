@@ -151,18 +151,60 @@ function lawnOverall(row = {}) {
   );
 }
 
-// The ONLY sanctioned customer copy inside technician_notes is the reviewed
-// WHAT WE DID / WHAT WE FOUND parse (owner ruling 2026-07-16; the raw field
-// carries access codes, billing notes, and candid remarks). Anything that
-// doesn't parse renders as NO notes — never the raw text.
-function customerSafeVisitNotes(notes) {
+function visitStructuredNotes(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value) return {};
   try {
-    const parsed = technicianReportCustomerCopy(notes);
-    // Contract (Codex r5 — the earlier did/found read silently discarded
-    // EVERY approved note): the parser returns { whatWeDid, whatWeFound,
-    // body, violations } and body is already the vetted joined copy — null
-    // when the banned-copy guard flagged it, which stays null here.
-    return parsed?.body || null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+
+// The ONLY sanctioned customer copy inside technician_notes is the reviewed
+// report parse (owner ruling 2026-07-16; the raw field carries access codes,
+// billing notes, and candid remarks). Anything that doesn't parse renders as
+// NO notes — never the raw text. One rule for every customer render of the
+// note (owner ruling 2026-10-01: customers see only the report text, never
+// the tech's raw note): the texting AI's context and the pre-visit brief
+// here, the voice agent's visit report and history, the portal's service
+// history, the service-report PDF and the pay page.
+//
+// Takes the service_records row (technician_notes, structured_notes,
+// service_data, and completion_source for `projectLine`):
+//   - a typed report held from customers (typedReportDelivery other than
+//     auto_send) shows none;
+//   - the parse's body (null when a banned-copy screen flagged it; Codex r5:
+//     the vetted joined copy) stands only where the web report would let it
+//     (activity-indicators technicianReportDrivesSummary: the frozen
+//     rejection, the governing typed story, the rodent trapping screens);
+//   - the WDO inspection-fee scrub and the access-code redactor run on top
+//     (parser-approved is not code-free).
+// `projectLine`: a project completion's note is not a technician's note:
+// project-completion.js writes it from the project's own title and
+// recommendations, which the customer's project report already shows, so
+// the portal's own renders keep it, scrubbed and redacted.
+// Fails closed: anything unreadable or throwing is no notes.
+function customerSafeVisitNotes(record, { projectLine = false } = {}) {
+  if (!record || typeof record !== 'object') return null;
+  try {
+    const structured = visitStructuredNotes(record.structured_notes);
+    const { suppressesCustomerArtifacts } = require('../routes/services');
+    if (suppressesCustomerArtifacts(structured)) return null;
+    const { customerSafeServiceNotes } = require('./project-types');
+    let copy = null;
+    if (projectLine && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
+      copy = customerSafeServiceNotes(record.technician_notes, structured);
+    } else {
+      const serviceData = typeof record.service_data === 'string'
+        ? JSON.parse(record.service_data || '{}')
+        : (record.service_data || {});
+      const body = technicianReportCustomerCopy(record.technician_notes)?.body || null;
+      const { technicianReportDrivesSummary } = require('./service-report/activity-indicators');
+      if (!technicianReportDrivesSummary({ serviceData, body })) return null;
+      copy = customerSafeServiceNotes(body, structured);
+    }
+    const safe = copy ? redactAccessCodes(copy) : null;
+    return safe && String(safe).trim() ? safe : null;
   } catch { return null; }
 }
 
@@ -1307,18 +1349,18 @@ class ContextAggregator {
         // as this customer's price (codex #3128 r6).
         billingLane,
       },
-      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
+      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type, fromPhone: m.from_phone ?? null, toPhone: m.to_phone ?? null })),
       // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
       // billing notes, candid remarks live there) — only the reviewed
       // WHAT WE DID / WHAT WE FOUND parse may reach customer-facing prompts
       // (Codex r1); unparseable notes render as none, never raw.
-      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService.technician_notes) } : null,
+      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService) } : null,
       // v10 grounding: the last few visits with reviewed notes + areas —
       // "what did you do last time" is a routine customer text.
       serviceHistory: serviceHistory.slice(0, 3).map(s => ({
         type: s.service_type,
         date: s.service_date,
-        notes: customerSafeVisitNotes(s.technician_notes),
+        notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
       upcomingServices: upcomingServices.map((s, i) => withScheduledServiceId({

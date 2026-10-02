@@ -515,7 +515,10 @@ async function findConflictingVisits({
     if (arrivalWindowRoutingEnabled()) {
       const fit = await checkArrivalPlacement({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
-        windowStart, windowEnd, excludeServiceIds: excludeIds,
+        // A caller may give the arrival check its own exclusion list (the
+        // series carry keeps a carried stop's members visible so the stop is
+        // judged as ONE grouped stop); otherwise the occupancy list applies.
+        windowStart, windowEnd, excludeServiceIds: arrivalWindow.excludeServiceIds || excludeIds,
       });
       // Interviews merge into this branch too (Codex r4 P2): an admin move
       // whose window overlaps a booked interview gets the conflict row.
