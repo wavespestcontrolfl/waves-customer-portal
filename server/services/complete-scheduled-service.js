@@ -9466,7 +9466,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (svc.paf_held_term_id) {
           deferredPrepayCovered = !!(await AnnualPrepayRenewals.pafHeldStampCovers(svc, db));
         } else {
-          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true });
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
+            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
           if (heldTerm) {
             await db('scheduled_services').where({ id: svc.id }).whereNull('paf_held_term_id')
               .update({ paf_held_term_id: heldTerm.id });

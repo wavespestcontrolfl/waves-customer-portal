@@ -4122,7 +4122,12 @@ function pafPrepayJobHolds(job) {
 // this visit, or null. Completion stamps it on the visit at closeout
 // (scheduled_services.paf_held_term_id); everything after the closeout reads
 // that stamp (pafHeldStampCovers), never this live re-derivation.
-async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = false } = {}) {
+// `activated`: the same question for a year that was charged and ACTIVATED
+// while this visit's closeout was still running (GitHub Codex #5567 r14):
+// activation skips completed rows, so completion asks whether the visit is
+// one the now-paid year bought (canonical paid coverage, coveredTermsAsOf)
+// and stamps it, instead of billing it beside the year.
+async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = false, activated = false } = {}) {
   if (scheduledService.prepaid_method) return null;
   if (!scheduledService.customer_id) return null;
   try {
@@ -4134,14 +4139,21 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
     } else if (!(await annualPrepayTableExists())) return null;
     // Cheapest question first: almost every customer has no payment_pending
     // term at all, so most calls end on this one indexed read.
-    const terms = await conn('annual_prepay_terms')
-      .where({ customer_id: scheduledService.customer_id, status: 'payment_pending' })
-      // A term a payment dispute suspended back to payment_pending is no
-      // longer backed by money: its visits bill normally during the dispute.
-      .whereNull('dispute_suspended_at')
-      .whereNotNull('source_estimate_id')
-      .whereNotNull('prepay_invoice_id')
-      .select('*');
+    const terms = activated
+      ? await coveredTermsAsOf(conn)
+        .where('t.customer_id', scheduledService.customer_id)
+        .whereNot('t.status', PAYMENT_PENDING_STATUS)
+        .whereNotNull('t.source_estimate_id')
+        .whereNotNull('t.prepay_invoice_id')
+        .select('t.*')
+      : await conn('annual_prepay_terms')
+        .where({ customer_id: scheduledService.customer_id, status: 'payment_pending' })
+        // A term a payment dispute suspended back to payment_pending is no
+        // longer backed by money: its visits bill normally during the dispute.
+        .whereNull('dispute_suspended_at')
+        .whereNotNull('source_estimate_id')
+        .whereNotNull('prepay_invoice_id')
+        .select('*');
     if (!terms.length) return null;
     let estimateId = scheduledService.source_estimate_id || null;
     if (scheduledService.recurring_parent_id) {
@@ -4161,11 +4173,13 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
     const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
     if (!job || job.deferred_to_first_visit !== true) return null;
     if (String(job.invoice_id || '') !== String(term.prepay_invoice_id)) return null;
-    if (!pafPrepayJobHolds(job)) return null;
-    // The year bill must still be live: a voided / cancelled / refunded year
-    // holds nothing, even before the term sync catches up.
-    const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
-    if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return null;
+    if (!activated) {
+      if (!pafPrepayJobHolds(job)) return null;
+      // The year bill must still be live: a voided / cancelled / refunded year
+      // holds nothing, even before the term sync catches up.
+      const invoice = await conn('invoices').where({ id: term.prepay_invoice_id }).first('status');
+      if (!invoice || PAF_PREPAY_DEAD_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return null;
+    }
     // A visit billed to a third-party payer (a visit-specific or account
     // payer assigned after the accept) is not held: completion bills it to
     // that payer, so it never releases the year's charge either (GitHub Codex
@@ -4178,7 +4192,7 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
     // first activation will stamp (count cap, window as projected for a
     // payment today, ownership, callbacks out), minus a visit the stamp-time
     // price check would refuse — never every same-service visit on the plan.
-    const sold = await coverageRowsForTerm(term, conn, { projectFirstActivationOn: etDateString() });
+    const sold = await coverageRowsForTerm(term, conn, activated ? {} : { projectFirstActivationOn: etDateString() });
     if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return null;
     const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
       includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
