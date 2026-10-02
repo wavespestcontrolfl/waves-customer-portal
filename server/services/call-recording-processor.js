@@ -3729,10 +3729,23 @@ async function avAddressUniqueOwner(matches, opts) {
 const addressZip5 = (value) => require('./customer-properties').normalizeZip(value);
 
 // The unit a street line / line-2 pair carries, in any supported position.
+// The FULL unit of an address, keyed by the canonical address normalizer:
+// structural and dwelling parts both count ("Bldg 9 Apt 204" never equals
+// "Bldg 10 Apt 204"), and Lot / Space values are kept. A unit on line 1 that
+// conflicts with line 2 returns null, which never equals anything, so the
+// caller refuses.
 function addressLineUnit(line, line2) {
-  const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
-  const first = require('../utils/address-normalizer').splitUnitFirstLine(line);
-  return unitKey(line2) || (first ? unitKey(first.unit) : streetEmbeddedUnitKey(line));
+  const { normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine } = require('../utils/address-normalizer');
+  const key = (unit) => (unit ? unitLineValueKey(normalizeUnitLine(unit)) : '');
+  const fromLine2 = key(String(line2 || '').trim());
+  const fromLine1 = key(unitAnywhereOnLine(String(line || '')));
+  if (fromLine1 && fromLine2 && fromLine1 !== fromLine2) return null;
+  return fromLine2 || fromLine1;
+}
+
+// Both sides parsed (null = a conflicting line 1 / line 2) and equal; none = none.
+function unitsAgree(a, b) {
+  return a !== null && b !== null && a === b;
 }
 
 // Do two renderings of ONE address agree? A missing street or ZIP on either side
@@ -3769,8 +3782,8 @@ function storedAddressMatchesVerdict(stored = {}, normalized = {}, verdictAddres
     { address_line1: stored.address_line1, zip: stored.zip },
     { address_line1: normalized?.street_line_1, zip: normalized?.postal_code },
     { strict: true },
-  ) && addressLineUnit(stored.address_line1, stored.address_line2)
-    === addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2);
+  ) && unitsAgree(addressLineUnit(stored.address_line1, stored.address_line2),
+    addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2));
 }
 
 // GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be

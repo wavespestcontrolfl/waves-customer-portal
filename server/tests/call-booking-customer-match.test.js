@@ -126,6 +126,16 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
     expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored)).toBe(false);
     expect(firstNameAdvisoryAddressOk(null, stored)).toBe(false);
   });
+  test('the FULL subpremise must agree: building + apartment, lot and space; a line-1/line-2 conflict refuses', () => {
+    const v2 = (line1, line2 = null) => ({ street_line_1: line1, street_line_2: line2 });
+    const at = (line1, line2 = null) => ({ ...stored, address_line1: line1, address_line2: line2 });
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9 Apt 204'), v2('100 Example Loop Bldg 9 Apt 204'))).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9 Apt 204'), v2('100 Example Loop Bldg 10 Apt 204'))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Lot 12'), v2('100 Example Loop Lot 14'))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Space 7'), v2('100 Example Loop'))).toBe(false);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Apt 3', 'Apt 4'), v2('100 Example Loop', 'Apt 4'))).toBe(false);
+  });
+
   test('the unit must agree with the address the verdict was computed on (none = none)', () => {
     const v2 = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
     expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Unit 3'))).toBe(true);

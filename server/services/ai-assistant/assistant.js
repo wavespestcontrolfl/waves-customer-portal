@@ -445,7 +445,7 @@ class WavesAssistant {
 
     // Reply to customer
     const reply = customer
-      ? `Thanks ${customer.first_name} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
+      ? `Thanks ${String(customer.first_name || '').trim() || 'there'} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
       : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
 
     await db('agent_messages').insert({
