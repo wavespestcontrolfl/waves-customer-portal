@@ -98,6 +98,25 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it('an untouched Tree & Shrub suggestion requires an actual quantity before closeout', async () => {
+  const service = cockroachService({ serviceType: 'Tree & Shrub Care',
+    completionProfile: { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false },
+    findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } });
+  const catalog = [{ id: 'snapshot', name: 'Snapshot 2.5TG', category: 'herbicide', application_method: 'granular_broadcast', rate_unit: 'lb' }];
+  stubFetchWithImmediateDefaults({ source: 'protocol_visit', programKey: 'tree_shrub', products: [
+    { id: 'snapshot', treeShrubKey: 'snapshot', requiresDoseSelection: true },
+  ] });
+  const onSubmit = vi.fn();
+  render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={onSubmit} />);
+  await screen.findByText('Snapshot 2.5TG');
+  const blocked = await screen.findByRole('button', { name: /Product Actuals Required/ });
+  expect(blocked.disabled).toBe(true);
+  fireEvent.click(blocked);
+  expect(onSubmit).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByPlaceholderText('Total'), { target: { value: '2.76' } });
+  await waitFor(() => expect(screen.queryByRole('button', { name: /Product Actuals Required/ })).toBeNull());
+});
+
 it('seeds Alpine WSG + Gentrol IGR + Advion Cockroach Gel Bait on a completed, typed cockroach visit', async () => {
   stubFetchWithImmediateDefaults();
   await act(async () => {

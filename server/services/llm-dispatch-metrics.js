@@ -294,7 +294,7 @@ function extractUsage(provider, data) {
       out.cached_input_tokens = toCount(u.cachedContentTokenCount);
       out.output_tokens = toCount(u.candidatesTokenCount);
       out.reasoning_tokens = toCount(u.thoughtsTokenCount);
-    } else if (provider === 'typesafe') {
+    } else if (provider === 'typesafe' || provider === 'cloudflare') {
       const u = data?.usage;
       if (!u || typeof u !== 'object') return out;
       out.input_tokens = toCount(u.input_tokens);

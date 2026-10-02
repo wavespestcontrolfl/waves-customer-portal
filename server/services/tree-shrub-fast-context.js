@@ -27,7 +27,8 @@ const {
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const ROTATION_WINDOW_DAYS = 60;
-const PALM_FERTILIZER_SPACING_DAYS = 75;
+// Palm spacing = the shared three-calendar-month rule (owner program, #5089).
+const { palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS: PALM_FERTILIZER_SPACING_DAYS } = require('./tree-shrub-completion-defaults');
 const HISTORY_RECORD_LIMIT = 12;
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
 // (both schedule feeds hide it); /complete does not refuse it, so this does.
@@ -231,7 +232,7 @@ function buildTreeShrubWarnings({ catalogRows, applications, visitDate }) {
       const groups = resistanceGroups({ ...entry.app, moa_group: entry.app.moa_group ?? entry.app.history_moa_group });
       if (groups.length) rotationEntries.push({ entry, groups });
     }
-    if (!palmApplication && entry.daysAgo <= PALM_FERTILIZER_SPACING_DAYS && isPalmFertilizer({ ...entry.app, id: entry.app.product_id, name: entry.app.product_name })) palmApplication = entry;
+    if (!palmApplication && palmFeedingTooSoon(entry.app.application_date, visitDate) && isPalmFertilizer({ ...entry.app, id: entry.app.product_id, name: entry.app.product_name })) palmApplication = entry;
   }
   const warnings = [];
   for (const row of catalogRows) {

@@ -52,6 +52,7 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
+import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -133,6 +134,18 @@ function isFastCompleteReportEligible(service) {
 function isTreeShrubFastCompleteEligible(service) {
   return service?.treeShrubFastCompleteEnabled === true
     && service?.completionProfile?.findingsType === 'tree_shrub'
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
+// `lawnReserviceFastCompleteEnabled` rides the schedule payload per service. An
+// open lawn re-service (completionProfile.serviceKey === 'lawn_re_service', a
+// TYPED one_time_lawn_treatment visit) then opens the one-screen sheet instead
+// of the Dispatch typed-completion deep link. Gate off, or any other service,
+// routes exactly as before.
+function isLawnReserviceFastCompleteEligible(service) {
+  return service?.lawnReserviceFastCompleteEnabled === true
+    && service?.completionProfile?.serviceKey === 'lawn_re_service'
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
@@ -297,6 +310,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [recapService, setRecapService] = useState(null);
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
+  const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -667,10 +681,12 @@ export default function TechHomePage({ section = 'today' }) {
     else setRecapService(service);
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
-  // a tree & shrub visit under the gate and the tech's flag opens its Fast
-  // Complete sheet first; everything else is the deep link, as before.
+  // a lawn re-service under its gate, or a tree & shrub visit under its gate and
+  // the tech's flag, opens its Fast Complete sheet first; everything else is the
+  // deep link, as before.
   const openTypedVisit = useCallback((service) => {
-    if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
+    if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
+    else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
     else openTypedCompletion(service);
   }, []);
   const handleProjectQuickAction = useCallback(() => {
@@ -1240,6 +1256,38 @@ export default function TechHomePage({ section = 'today' }) {
           onFullForm={() => {
             const raw = treeShrubFastService;
             setTreeShrubFastService(null);
+            openTypedCompletion(raw);
+          }}
+        />
+      )}
+
+      {lawnReserviceFastService && (
+        <FastCompleteLawnReserviceSheet
+          key={lawnReserviceFastService.id}
+          service={{
+            id: lawnReserviceFastService.id,
+            customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
+            serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,
+            address: shortAddress(lawnReserviceFastService.address) || lawnReserviceFastService.address || '',
+            timeLabel: serviceWindowLabel(lawnReserviceFastService) || '',
+            // The visit the tech tapped, checked against the live context
+            // (same fields the pest and tree & shrub sheets route with).
+            routedCustomerId: lawnReserviceFastService.customerId || lawnReserviceFastService.customer_id || null,
+            routedScheduledDate: lawnReserviceFastService.scheduledDate || lawnReserviceFastService.scheduled_date || null,
+            routedPropertyId: 'propertyId' in lawnReserviceFastService ? lawnReserviceFastService.propertyId : undefined,
+            routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
+          }}
+          request={techRequest}
+          onClose={(options) => {
+            setLawnReserviceFastService(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setLawnReserviceFastService(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" with no catalog go to the full
+          // completion screen (the Dispatch typed-completion deep link).
+          onFullForm={() => {
+            const raw = lawnReserviceFastService;
+            setLawnReserviceFastService(null);
             openTypedCompletion(raw);
           }}
         />

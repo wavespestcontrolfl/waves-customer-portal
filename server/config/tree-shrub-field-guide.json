@@ -1,0 +1,573 @@
+{
+  "products": {
+    "snapshot": {
+      "kind": "Weed prevention · granules",
+      "targetTitle": "Weed targets",
+      "targets": "Annual grasses and broadleaf weeds before germination. Examples below; the label has the complete species list.",
+      "apply": "Remove existing weeds. Spread evenly with a calibrated drop or rotary spreader around established, listed ornamentals. Water in with at least ½ inch within 24 hours.",
+      "rates": [
+        [
+          "2.3 lb / 1,000 sq ft",
+          "Crabgrass, annual bluegrass, common chickweed."
+        ],
+        [
+          "3.45 lb / 1,000 sq ft",
+          "Chamberbitter, bittercress, spotted spurge, yellow woodsorrel."
+        ],
+        [
+          "4.6 lb / 1,000 sq ft",
+          "Goosegrass, creeping woodsorrel, prostrate spurge."
+        ]
+      ],
+      "limits": [
+        "Does not control weeds already growing.",
+        "No annual bedding plants, unrooted cuttings, or groundcovers that are not established.",
+        "At 150 lb/acre or higher: wait at least 60 days between applications. Maximum 600 lb/acre in 12 months."
+      ],
+      "source": "Corteva · EPA 62719-175 · 04-02-24 · pp. 1–5",
+      "url": "https://assets.greenbook.net/23-32-58-12-04-2024-Snapshot_2.5_TG_-_label.pdf",
+      "name": "Snapshot 2.5TG",
+      "equipment": [
+        "hand",
+        "push"
+      ],
+      "summary": "2.3–4.6 lb / 1,000 sq ft"
+    },
+    "f8012": {
+      "kind": "Plant nutrition · granules",
+      "targetTitle": "Nutrients",
+      "targets": "8% nitrogen, 12% potash, 4% magnesium, 2% manganese. The nitrogen is slow release.",
+      "apply": "Use a rotary or chest spreader, or spread by hand. Apply to dry foliage and water in soon afterward. Sweep granules off pavement.",
+      "rates": [
+        [
+          "Planting beds: 1–1½ lb / 100 sq ft",
+          "Up to four applications per year as needed."
+        ],
+        [
+          "Trees and larger shrubs: ½–1 lb / inch of trunk diameter",
+          "Distribute evenly from the outer foliage edge inward. Bag directions specify spring and late fall."
+        ]
+      ],
+      "limits": [
+        "Keep fertilizer out of water and storm drains.",
+        "Not for nursery container production."
+      ],
+      "program": "Waves uses the canopy-width palm chart (width² ÷ 105, rounded down). That is a company rate choice; it is not the formula printed on this bag.",
+      "source": "LESCO #511542 · bag label · 11-17-23",
+      "url": "https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/550294952765_label/550294952765-label.pdf",
+      "name": "LESCO 8-0-12 #511542",
+      "equipment": [
+        "hand",
+        "push"
+      ],
+      "summary": "lb per palm · canopy chart"
+    },
+    "f0016": {
+      "kind": "Plant nutrition · granules",
+      "targetTitle": "Nutrients",
+      "targets": "16% potash, 6% magnesium, 2% manganese. Contains no nitrogen or phosphate.",
+      "apply": "Use a rotary or chest spreader, or spread by hand. Apply to dry foliage and water in soon afterward. Sweep granules off pavement.",
+      "rates": [
+        [
+          "Planting beds: 1–1½ lb / 100 sq ft",
+          "Up to four applications per year as needed."
+        ],
+        [
+          "Trees and larger shrubs: ½–1 lb / inch of trunk diameter",
+          "Distribute evenly from the outer foliage edge inward. Bag directions specify spring and late fall."
+        ]
+      ],
+      "limits": [
+        "Keep fertilizer out of water and storm drains.",
+        "Not for nursery container production."
+      ],
+      "program": "Waves uses the canopy-width palm chart (width² ÷ 105, rounded down). That is a company rate choice; it is not the formula printed on this bag.",
+      "source": "LESCO #510513 · safety data sheet (bag label link pending)",
+      "url": "https://www.siteone.com/pdf/sdsPDF?resourceId=22883&skuId=437827",
+      "name": "LESCO 0-0-16 #510513",
+      "equipment": [
+        "hand",
+        "push"
+      ],
+      "summary": "lb per palm · canopy chart"
+    },
+    "mainspring": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Whiteflies, caterpillars, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals.",
+      "apply": "Spray for even, thorough foliage coverage when infestations are first detected. Do not make foliar applications during rain.",
+      "rates": [
+        [
+          "2–8 fl oz / 100 gal",
+          "Whiteflies, caterpillars, soft scales, and the other listed foliar pests except aphids."
+        ],
+        [
+          "4–8 fl oz / 100 gal",
+          "Aphids."
+        ]
+      ],
+      "limits": [
+        "No application while bees forage or plants flower; wait until all petals have fallen.",
+        "At least 7 days between treatments. Outdoor maximum: 32 fl oz/acre/year, accounting for other cyantraniliprole products.",
+        "Keep people and pets out until sprays dry."
+      ],
+      "program": "The table retains the draft 4–8 fl oz/100 gal choice. Whether to use the full 2–8 range for whiteflies and caterpillars still needs your call.",
+      "source": "Syngenta · EPA 100-1543 · 09-23 · pp. 19–20",
+      "url": "https://assets.syngenta-us.com/pdf/labels/SCP%201543A-L1A_0923.pdf",
+      "name": "Mainspring GNL",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        0.04,
+        0.08
+      ],
+      "summary": ""
+    },
+    "distance": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Whiteflies and scale crawlers. Scale species include black, California red, euonymus, Florida wax, San Jose, and snow scale. Mealybugs: suppression only.",
+      "apply": "Cover all plant surfaces evenly to the point of runoff. The foliar table specifies 100 gal of mix per 20,000 sq ft. Time scale treatments for crawlers.",
+      "rates": [
+        [
+          "6–8 fl oz / 100 gal",
+          "Whiteflies."
+        ],
+        [
+          "8–12 fl oz / 100 gal",
+          "Listed scales; mealybug suppression."
+        ]
+      ],
+      "mixes": [
+        [
+          "Whiteflies",
+          0.06,
+          0.08
+        ],
+        [
+          "Scale crawlers",
+          0.08,
+          0.12
+        ]
+      ],
+      "limits": [
+        "Does not provide rapid adult-insect control.",
+        "Whitefly directions: second treatment in 14–28 days if needed; maximum two per six months or crop cycle.",
+        "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
+      ],
+      "source": "Valent · EPA 59639-96 · 2019-DIS-0001-1330-L · p. 6",
+      "url": "https://www.domyown.com/msds/Distance_IGR_Label_2020.pdf",
+      "name": "Distance IGR",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "Choose target rate"
+    },
+    "tritek": {
+      "kind": "Insects, mites & diseases · contact oil",
+      "targetTitle": "Pest & disease targets",
+      "targets": "Listed aphids, leafminers, mites, plant bugs, psyllids, sawflies, scales, and whiteflies. Disease uses include black spot, powdery mildew, and rust.",
+      "apply": "Add to water with agitation and keep agitating. Wet upper and lower leaf surfaces and the canopy evenly, without significant runoff.",
+      "rates": [
+        [
+          "1–2 gal / 100 gal water",
+          "Landscape ornamentals, shade trees, and shrubs. The draft rows use 1% or 1.5% within this range."
+        ]
+      ],
+      "limits": [
+        "Do not treat moisture-stressed plants.",
+        "Check plant sensitivity before wide use.",
+        "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl, or dimethoate; check the full incompatibility and timing directions.",
+        "Keep people and pets out until sprays dry."
+      ],
+      "source": "BRANDT · EPA 48813-1 · 2011-02 · p. 6",
+      "url": "https://brandt.co/media/3204/15034brn100_brandt_tritek-lbl_2011-02_25g_booklet.pdf",
+      "name": "TriTek 1%",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        1.28,
+        1.28
+      ],
+      "summary": ""
+    },
+    "floramite": {
+      "kind": "Mites · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Listed spider mites and red mites, including two-spotted, southern red, citrus red, spruce spider, and bamboo spider mites.",
+      "apply": "Spray both sides of leaves thoroughly when mites first appear. Use 1–4 qt of finished spray per 100 sq ft. Keep mix pH at 5.5–6.5.",
+      "rates": [
+        [
+          "4–8 fl oz / 100 gal",
+          "Lower rate for light populations or prevention; higher rate for heavier pressure or longer residual control."
+        ]
+      ],
+      "limits": [
+        "Not effective against broad, rust, or flat mites.",
+        "Maximum two applications per crop per year and 32 fl oz/acre/year.",
+        "Rotate after one application; use at least two alternative products before returning to Floramite."
+      ],
+      "source": "Manufacturer specimen label · use rates pp. 6–8",
+      "url": "https://bynder.envu.com/m/146955d9ada95ff9/original/Digital_FMC_Floramite_label_NA_US_EN.pdf",
+      "name": "Floramite SC",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        0.04,
+        0.08
+      ],
+      "summary": ""
+    },
+    "talus": {
+      "kind": "Insects · use-site restriction",
+      "targetTitle": "Pest targets",
+      "pending": "Residential use is prohibited by the label currently linked by SePRO. Replacement decision needed for this program.",
+      "targets": "Immature whiteflies, scales, mealybugs, and other listed sucking insects. It is not an adulticide.",
+      "apply": "No residential application directions are offered here.",
+      "rates": [
+        [
+          "Residential rate: none",
+          "Mixing amounts have been removed from this draft."
+        ]
+      ],
+      "limits": [
+        "Do not apply in residential areas (label p. 4)."
+      ],
+      "program": "The earlier program carried Talus as a residential treatment. Keep it on hold while the program replacement is decided.",
+      "source": "SePRO · EPA 71711-21-67690 · pp. 3–4",
+      "url": "https://www.seproscientific.com/labels/talus-70df-label.pdf",
+      "name": "Talus 70DF",
+      "equipment": [],
+      "summary": "On hold"
+    },
+    "merit": {
+      "kind": "Insects · soil drench or injection",
+      "targetTitle": "Pest targets",
+      "equipment": [
+        "soil"
+      ],
+      "equipmentNote": "Measure finished solution in quarts or gallons. Calculate product dose from trunk diameter or shrub height.",
+      "targets": "Listed soft and armored scales, whiteflies, royal palm bug, and specified borers. Match the species to the label table.",
+      "apply": "Dose by tree trunk diameter measured 4½ ft above ground, or by shrub height. For soil injection, distribute at low pressure through at least four holes per plant; keep the area moist for 7–10 days.",
+      "rates": [
+        [
+          "0.1–0.2 fl oz / inch of trunk diameter or foot of shrub height",
+          "Soft scales, whiteflies, royal palm bug, and other pests in the first group."
+        ],
+        [
+          "0.2 fl oz / inch or foot",
+          "Armored scales and specified borers. Trees ≥15 inches DBH have separate borer directions."
+        ]
+      ],
+      "limits": [
+        "Maximum 1.6 pt/acre/year.",
+        "Do not treat saturated soil or any Tilia species.",
+        "Follow the flowering and pollinator restrictions."
+      ],
+      "program": "Use the owned FlowZone soil injector kit with the 4-gal backpack. Tank capacity alone cannot determine the dose; plant measurements are required.",
+      "source": "Envu · Merit 2F · 2025 specimen · pp. 12–13",
+      "url": "https://www.domyown.com/msds/Envu_Merit_2F_Insecticide_Label_2025.pdf",
+      "name": "Merit 2F",
+      "summary": "Dose by plant size"
+    },
+    "kphite": {
+      "kind": "Diseases · method-specific rates",
+      "targetTitle": "Disease targets",
+      "targets": "Listed Phytophthora, Pythium, Rhizoctonia, Fusarium, and other ornamental diseases. Mildews have foliar directions.",
+      "apply": "Use the directions for the plant and delivery method. Soil drench, foliar spray, and direct trunk injection are different label uses.",
+      "rates": [
+        [
+          "Soil drench: 12–24 fl oz / 100 gal",
+          "The ornamental table also prints ⅛–¼ fl oz/gal."
+        ],
+        [
+          "Foliar: 1–2 qt in at least 100 gal / acre",
+          "The table also prints ⅓–⅔ fl oz/gal; see disease and plant directions."
+        ]
+      ],
+      "limits": [
+        "Do not treat dormant plants or plants under heat or moisture stress.",
+        "Do not apply less than 3 days apart.",
+        "Avoid conditions that keep tissue wet for more than 4 hours."
+      ],
+      "program": "The FlowZone soil injector kit is available. Confirm the T&O container label and soil-delivery directions before setting an injector recipe. The old draft showed the foliar concentration beside root-rot treatment.",
+      "source": "Plant Food Systems · EPA 73806-1 · T&O 0417 · p. 6",
+      "url": "https://plantfoodsystems.com/wp-content/uploads/2020/04/KPhite-Booklet-TO_a11y-1.pdf",
+      "name": "KPHITE 7LP",
+      "equipment": [],
+      "summary": "Choose application method"
+    },
+    "conserve": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Listed caterpillars, including bagworms, oleander caterpillars, Florida fern caterpillars, and fall webworms. Other target groups have different rates.",
+      "apply": "Cover upper and lower leaf surfaces and penetrate dense foliage without excessive runoff. Treat bagworms while small and actively feeding; treat webworms before large webs form.",
+      "rates": [
+        [
+          "Caterpillar table: 0.06 fl oz / gal",
+          "6 fl oz / 100 gal; 24 fl oz / acre."
+        ],
+        [
+          "Other target groups",
+          "Outdoor exposed thrips, leafminers, and mites use separate table entries."
+        ]
+      ],
+      "limits": [
+        "Do not treat flowering, pollen-shedding, or nectar-producing parts if bees may forage during the next 3 hours.",
+        "Use the resistance-management directions for the treatment site.",
+        "Keep people and pets out until sprays dry."
+      ],
+      "program": "Replace the generic draft range with a target-specific recipe and a measurable batch size before implementation.",
+      "source": "Corteva · EPA 62719-291 · 10-27-22 · pp. 7–8",
+      "url": "https://assets.greenbook.net/23-33-44-05-01-2023-Conserve_SC_-_label.pdf",
+      "name": "Conserve SC",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "Target-specific rate"
+    },
+    "headway": {
+      "kind": "Diseases · label mismatch",
+      "targetTitle": "Disease targets",
+      "pending": "The Headway liquid label found is for turfgrass. It does not establish a tree-and-shrub leaf-disease treatment.",
+      "targets": "The reviewed label lists turfgrass diseases. An ornamental product and disease-specific label are still needed for this row.",
+      "apply": "No tree-and-shrub application directions are offered here.",
+      "rates": [
+        [
+          "Tree & Shrub rate: unconfirmed",
+          "Confirm the exact product or choose an ornamental replacement."
+        ]
+      ],
+      "limits": [
+        "Do not transfer a turf rate to shrubs or palms."
+      ],
+      "source": "Syngenta · EPA 100-1216 · 02-2016 · pp. 2–4",
+      "url": "https://labelsds.com/document.php?file=Headway+Label+2-1-16.pdf&product=866",
+      "name": "Headway",
+      "equipment": [],
+      "summary": "On hold"
+    },
+    "zylam": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
+      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Drench and bark applications have separate instructions.",
+      "rates": [
+        [
+          "7.25–16 fl oz / 100 gal",
+          "Ornamental foliar application."
+        ]
+      ],
+      "limits": [
+        "No application while bees forage or plants flower; wait until all petals have fallen.",
+        "Foliar limit: 78.9 fl oz/acre/season; no more than three applications per growing season.",
+        "Follow Group 4A rotation restrictions and keep others out until dry."
+      ],
+      "source": "PBI-Gordon · EPA 2217-937 · 08-2020 · pp. 2–3, 6",
+      "url": "https://labelsds.com/document.php?file=Zylam+Liquid+Label+8-1-20.pdf&product=503",
+      "name": "Zylam Liquid",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        0.0725,
+        0.16
+      ],
+      "summary": ""
+    },
+    "tritek15": {
+      "kind": "Insects, mites & diseases · contact oil",
+      "targetTitle": "Pest & disease targets",
+      "targets": "Listed aphids, leafminers, mites, plant bugs, psyllids, sawflies, scales, and whiteflies. Disease uses include black spot, powdery mildew, and rust.",
+      "apply": "Add to water with agitation and keep agitating. Wet upper and lower leaf surfaces and the canopy evenly, without significant runoff.",
+      "rates": [
+        [
+          "1–2 gal / 100 gal water",
+          "Landscape ornamentals, shade trees, and shrubs. The draft rows use 1% or 1.5% within this range."
+        ]
+      ],
+      "limits": [
+        "Do not treat moisture-stressed plants.",
+        "Check plant sensitivity before wide use.",
+        "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl, or dimethoate; check the full incompatibility and timing directions.",
+        "Keep people and pets out until sprays dry."
+      ],
+      "source": "BRANDT · EPA 48813-1 · 2011-02 · p. 6",
+      "url": "https://brandt.co/media/3204/15034brn100_brandt_tritek-lbl_2011-02_25g_booklet.pdf",
+      "name": "TriTek 1.5%",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "mix": [
+        1.92,
+        1.92
+      ],
+      "summary": ""
+    },
+    "f13013": {
+      "kind": "Plant nutrition",
+      "pending": "13-0-13 identifies the nutrient analysis, but the manufacturer and exact bag label are not confirmed.",
+      "targetTitle": "Purpose",
+      "targets": "Pending the exact product label.",
+      "apply": "Application method and directions are not verified.",
+      "rates": [
+        [
+          "Label needed",
+          "No application recipe has been verified."
+        ]
+      ],
+      "limits": [
+        "Confirm the actual container label before adding treatment instructions."
+      ],
+      "source": "Exact product label not on file",
+      "name": "13-0-13",
+      "equipment": [
+        "hand",
+        "push"
+      ],
+      "summary": "Label needed"
+    },
+    "mncombo": {
+      "kind": "Plant nutrition",
+      "pending": "The exact Mn Combo manufacturer, formulation, and container label are still needed.",
+      "targetTitle": "Purpose",
+      "targets": "Pending the exact product label.",
+      "apply": "Application method and directions are not verified.",
+      "rates": [
+        [
+          "Label needed",
+          "No application recipe has been verified."
+        ]
+      ],
+      "limits": [
+        "Confirm the actual container label before adding treatment instructions."
+      ],
+      "source": "Exact product label not on file",
+      "name": "Mn Combo",
+      "equipment": [],
+      "summary": "Label needed"
+    },
+    "sequestar": {
+      "kind": "Plant nutrition",
+      "pending": "Confirm the exact Sequestar EDDHA formulation and label before assigning a dose or injector recipe.",
+      "targetTitle": "Purpose",
+      "targets": "Pending the exact product label.",
+      "apply": "Application method and directions are not verified.",
+      "rates": [
+        [
+          "Label needed",
+          "No application recipe has been verified."
+        ]
+      ],
+      "limits": [
+        "Confirm the actual container label before adding treatment instructions."
+      ],
+      "source": "Exact product label not on file",
+      "program": "The FlowZone soil injector kit is available. Confirm the exact product label and delivery method before assigning it to this treatment.",
+      "name": "Sequestar EDDHA",
+      "equipment": [],
+      "summary": "Label needed"
+    },
+    "copper": {
+      "kind": "Diseases",
+      "pending": "Copper products have different active ingredients and concentrations. The exact brand and formulation are still needed.",
+      "targetTitle": "Disease targets",
+      "targets": "Pending the exact product label.",
+      "apply": "Application method and directions are not verified.",
+      "rates": [
+        [
+          "Label needed",
+          "No application recipe has been verified."
+        ]
+      ],
+      "limits": [
+        "Confirm the actual container label before adding treatment instructions."
+      ],
+      "source": "Exact product label not on file",
+      "name": "Copper",
+      "equipment": [],
+      "summary": "Label needed"
+    }
+  },
+  "equipment": {
+    "hand": {
+      "name": "LESCO handheld · 5 lb",
+      "model": "1235445",
+      "detail": "Hand crank · 5 lb hopper"
+    },
+    "push": {
+      "name": "LESCO push · 50 lb",
+      "model": "092807",
+      "detail": "Broadcast spreader · 50 lb hopper"
+    },
+    "bg": {
+      "name": "B&G · 1 gal",
+      "model": "N124-S",
+      "detail": "Part 11003500 · 9-inch wand · Extenda-Ban"
+    },
+    "flowzone": {
+      "name": "FlowZone · 4 gal",
+      "model": "Typhoon",
+      "detail": "4-gal backpack sprayer"
+    },
+    "rig": {
+      "name": "Rig · 110 gal",
+      "detail": "110-gal spray rig"
+    },
+    "soil": {
+      "name": "FlowZone soil injector kit",
+      "detail": "Attachment for the FlowZone 4-gal backpack · measure delivery in qt or gal"
+    }
+  },
+  "palmChart": [
+    {
+      "width": 6,
+      "lb": 0.3
+    },
+    {
+      "width": 8,
+      "lb": 0.6
+    },
+    {
+      "width": 10,
+      "lb": 0.9
+    },
+    {
+      "width": 12,
+      "lb": 1.3
+    },
+    {
+      "width": 14,
+      "lb": 1.8
+    },
+    {
+      "width": 16,
+      "lb": 2.4
+    },
+    {
+      "width": 18,
+      "lb": 3
+    },
+    {
+      "width": 20,
+      "lb": 3.8
+    }
+  ]
+}

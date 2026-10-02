@@ -61,13 +61,17 @@ async function createTurfHeightReading(knex, {
 // query-builder issue or a missing table can never crash report rendering.
 
 /** The reading for a single visit (report module + GET endpoint), or null. */
-async function getTurfHeightForVisit(serviceRecordId, knex = db) {
+// `onFailure` (optional): called when the read FAILED, so a caller can tell "no
+// reading" from "could not read" (the return stays null / [] either way, and
+// nothing here ever throws).
+async function getTurfHeightForVisit(serviceRecordId, knex = db, { onFailure } = {}) {
   if (!serviceRecordId) return null;
   try {
     return await knex('turf_height_readings')
       .where({ service_record_id: serviceRecordId })
       .first(READING_COLUMNS);
-  } catch {
+  } catch (err) {
+    if (typeof onFailure === 'function') onFailure(err);
     return null;
   }
 }
@@ -96,7 +100,7 @@ async function getLatestTurfHeight(customerId, knex = db, { eligibleVisitIds } =
  * only ever reveal readings as-of that report's visit — never later ones. The
  * live portal card passes no cap.
  */
-async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasuredAt = null, { eligibleVisitIds } = {}) {
+async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasuredAt = null, { eligibleVisitIds, onFailure } = {}) {
   if (!customerId) return [];
   const n = Math.min(Math.max(parseInt(limit, 10) || 12, 1), 60);
   try {
@@ -109,7 +113,8 @@ async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasu
       .orderBy('measured_at', 'desc')
       .limit(n)
       .select('id', 'manual_height_in', 'range_status', 'target_min_in', 'target_max_in', 'measured_at');
-  } catch {
+  } catch (err) {
+    if (typeof onFailure === 'function') onFailure(err);
     return [];
   }
 }

@@ -765,13 +765,18 @@ function headingsOf(markdown) {
 // index treats as ownership evidence (meta description, secondary keywords,
 // H2/H3 headings), from the frontmatter and/or a markdown body. Ownership is
 // judged on these symmetrically; geo framing stays on title/slug/keyword.
+// Field boundary inside extraTargetingOf's joined text: an ASCII record
+// separator, which no field contains (a field may itself contain newlines)
+// and every tokenizer treats as whitespace.
+const TARGETING_FIELD_SEP = '\u001e';
+
 function extraTargetingOf({ frontmatter = {}, body = '', meta_description = null, secondary_keywords = null } = {}) {
   const fromBody = parseTargetingFields(body);
   return [
     meta_description ?? frontmatter.meta_description ?? fromBody.meta_description,
     ...asStringList(secondary_keywords ?? frontmatter.secondary_keywords), ...fromBody.secondary_keywords,
     ...fromBody.headings,
-  ].filter(Boolean).map((v) => String(v).trim()).join(' ');
+  ].filter(Boolean).map((v) => String(v).trim()).join(TARGETING_FIELD_SEP);
 }
 
 function targetingText(fields) {
@@ -1007,7 +1012,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // → compare against all (conservative).
   const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   // Retired topics need no corpus: judged in every mode, before any fetch.
-  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
+  if (!spokeOnly(candidate.targetSites)) findings.push(...retiredTopicFindings({ query, title, slug, category, targeting: candidate.targeting, leafOnly: normalizeSlug(slug).split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite) }));
   const idx = index || (corpus ? indexCorpus(corpus) : null);
   if (!idx) {
     // Pre-spend: a geo or retired-topic verdict needs no corpus and stands on its own.
@@ -1158,6 +1163,25 @@ function canonicalPestNames(text) {
 // served cities, geo qualifiers and framing words dropped — so "how to get
 // rid of paper wasps in Sarasota" and /pest-control/get-rid-of-paper-wasps/
 // both reduce to "paper wasp".
+// topicKey's normalization, in word order (no sort / dedupe) — for phrase
+// matching inside free targeting text.
+function topicWords(text) {
+  const cities = cityTokens();
+  const geoFree = canonicalPestNames(String(text || '')).replace(new RegExp(REGIONAL_RE.source, 'gi'), ' ').replace(/\b(?:florida|fla|fl)\b\.?/gi, ' ');
+  return tokenize(geoFree)
+    .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
+    .map(stem)
+    .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));
+}
+
+function containsPhrase(words, phrase) {
+  if (!phrase.length || phrase.length > words.length) return false;
+  for (let i = 0; i + phrase.length <= words.length; i++) {
+    if (phrase.every((w, j) => words[i + j] === w)) return true;
+  }
+  return false;
+}
+
 function topicKey(text) {
   const cities = cityTokens();
   // Footprint regions ("Manatee County", "Southwest Fla.") and a bare
@@ -1183,8 +1207,13 @@ function retiredIndex() {
   const byTopic = new Map();
   for (const post of RETIRED_POSTS) {
     const url = normalizeSlug(post.url);
-    byUrl.set(url, post);
-    byLeaf.set(slugLeaf(url), post);
+    // A `live` row is a kept post that owns its topic: its own URL stays
+    // open (the live corpus already blocks a new blog there, and refreshes
+    // are the sanctioned move), only the topic is protected.
+    if (!post.live) {
+      byUrl.set(url, post);
+      byLeaf.set(slugLeaf(url), post);
+    }
     // Keys come from the row's canonical `topics` and its slug leaf (a
     // decorative slug like skip-the-guesswork-… alone would miss "diy pest
     // control vs pro"). A post made only of generic words (get-rid-of-pests)
@@ -1195,11 +1224,20 @@ function retiredIndex() {
       if (key && !byTopic.has(key)) byTopic.set(key, post);
     }
   }
-  retiredIndexCache = { byUrl, byLeaf, byTopic };
+  // Live topic owners also match when their phrase appears, in order, in a
+  // field ("dollar spot management" contains the owned "dollar spot"): a
+  // kept post owns every angle on its topic. Retired topics stay exact-only
+  // (containment blocked 12 of 82 curated planned topics when tried for
+  // them). Ordered, per field: loose words would read "dollar weed vs gray
+  // leaf spot" as "dollar spot".
+  const livePhrases = RETIRED_POSTS.filter((p) => p.live)
+    .flatMap((post) => (post.topics || []).map((t) => ({ phrase: topicWords(t), post })))
+    .filter((x) => x.phrase.length > 1);
+  retiredIndexCache = { byUrl, byLeaf, byTopic, livePhrases };
   return retiredIndexCache;
 }
 
-function retiredTopicFindings({ query = '', title = '', slug = '', category = null, leafOnly = false, urlOnly = false } = {}) {
+function retiredTopicFindings({ query = '', title = '', slug = '', category = null, targeting = '', leafOnly = false, urlOnly = false } = {}) {
   const idx = retiredIndex();
   const url = normalizeSlug(slug);
   const leaf = slugLeaf(url);
@@ -1209,12 +1247,28 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
   if (!hit && !urlOnly) {
     for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
       const key = text ? topicKey(text) : '';
-      const post = key ? idx.byTopic.get(key) : null;
+      // Exact key first; a live owner also matches when its phrase appears,
+      // in order, inside this field ("dollar spot management") — never as
+      // loose words ("dollar weed vs gray leaf spot").
+      const fieldWords = key ? topicWords(text) : [];
+      const post = key
+        ? (idx.byTopic.get(key) || (idx.livePhrases.find((o) => containsPhrase(fieldWords, o.phrase)) || {}).post || null)
+        : null;
       // Scoped to the categories the topic was retired from (the post's own
       // and its merge target's): category nouns and framing drop out of the
       // key, so a lawn "rainy season" guide would otherwise read as the
       // retired pest-control rainy-season post. Unknown category: all.
       if (post && (!category || [post.url, post.merged_into].some((u) => categoryFromSlug(u) === category))) { hit = post; where = label; break; }
+    }
+    // A live owner's topic also counts when it appears only in the other
+    // targeting fields (meta description, secondary keywords, H2/H3s).
+    if (!hit && targeting) {
+      // Phrase, field by field (extraTargetingOf joins fields with a record separator),
+      // so words from two different fields never combine.
+      const fields = String(targeting).split(TARGETING_FIELD_SEP).map(topicWords);
+      const owner = idx.livePhrases.find((o) => fields.some((f) => containsPhrase(f, o.phrase))
+        && (!category || [o.post.url, o.post.merged_into].some((u) => categoryFromSlug(u) === category)));
+      if (owner) { hit = owner.post; where = 'targeting (meta description / secondary keywords / headings)'; }
     }
   }
   if (!hit) return [];
@@ -1223,7 +1277,9 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
     code: CODES.RETIRED_TOPIC,
     url: hit.url,
     merged_into: hit.merged_into,
-    message: hit.redirected === false
+    message: hit.live
+      ? `The ${where} matches the topic of the live post ${hit.url}. A new blog may not split that topic; grow ${hit.url} as a refresh instead.`
+      : hit.redirected === false
       ? `The ${where} matches the retired post ${hit.url}, deleted with no redirect (no page fit it). A new blog may not bring a retired topic back; if it is worth covering, grow the closest live page, ${hit.merged_into}, as a refresh.`
       : `The ${where} matches the retired post ${hit.url}, merged into ${hit.merged_into} and redirected there. A new blog may not bring a retired topic back; grow ${hit.merged_into} as a refresh instead.`,
   }];
@@ -1247,4 +1303,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { topicKey, retiredTopicFindings, retiredIndex, RETIRED_POSTS, extraTargetingOf, CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

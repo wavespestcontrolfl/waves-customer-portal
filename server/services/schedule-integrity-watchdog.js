@@ -39,6 +39,10 @@
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
  *
+ * A fourth pass, the combined-booking check (combined-booking-check.js), runs
+ * at the end of each tick: multi-service accepts get their time/technician,
+ * per-visit prices and first-day invoice verified and one short admin note.
+ *
  * The STALE IN-PROGRESS class (a visit whose scheduled_date was before today
  * ET still sitting in on_site/en_route) was removed 2026-09-28: the 7 PM ET
  * tech text about today's still-open visits (server/services/tech-open-visit-nudge.js)
@@ -695,6 +699,25 @@ async function runInner({ now = new Date() } = {}) {
     churnedWorkCheckFailed: churned.failed,
   });
 
+  // Combined-booking check (owner request 2026-09-29): a multi-service accept's
+  // time/tech, per-visit prices and first-day invoice, one concise admin note
+  // per estimate. Runs here, after the accepted-plan alerts above, because
+  // whether the visits exist at all is that alert's finding: the check asks the
+  // same classifier and leaves the schedule shape to it. Its own failure never
+  // stops the watchdog's other output.
+  let combinedBooking = null;
+  let combinedBookingCheckFailed = false;
+  try {
+    // It rings within what is left of this run's shared budget
+    // (docs/admin-notifications.md: non-customer rows ring at most 10 a day).
+    combinedBooking = await require('./combined-booking-check').runCombinedBookingCheck({
+      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted),
+    });
+  } catch (err) {
+    combinedBookingCheckFailed = true;
+    logger.error(`[schedule-integrity] combined-booking check failed: ${err.message}`);
+  }
+
   return {
     skipped: false,
     todayET,
@@ -707,6 +730,8 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleCheckFailed,
     churnedLiveWork: churned.alerts.length,
     churnedWorkCheckFailed: churned.failed,
+    combinedBooking,
+    combinedBookingCheckFailed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
   };
