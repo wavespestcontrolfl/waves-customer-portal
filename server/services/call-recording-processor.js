@@ -3754,11 +3754,18 @@ function addressesExactlyMatch(stored = {}, verdictInput = {}) {
 
 // GATE_CALL_FIRST_NAME_ADVISORY: a last-name-only customer is created — and booked —
 // only when the verdict is an accepted in-area premise AND the stored address exactly
-// matches the address the verdict ran on (`verdictInput`: the V2 service_address; a
-// street recovery that rewrote it is not exact). Used by customer creation and by the
-// booking hold, so neither can re-judge what the other accepted. Pure.
+// matches BOTH the address the verdict ran on (`verdictInput`: the caller's raw V2
+// service_address; a street recovery that rewrote it is not exact) AND the verdict's own
+// normalized address (street, city, ZIP — Google's form carries no unit). A correction
+// that changed anything but cosmetics therefore holds, whichever of the two the stored
+// row kept (codex #5559 r13 pre-push P1). Used by customer creation and by the booking
+// hold, so neither can re-judge what the other accepted. Pure.
 function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
-  return verdictAcceptsAddress(av) && !!verdictInput && addressesExactlyMatch(extracted, verdictInput);
+  const n = av?.normalized;
+  return verdictAcceptsAddress(av) && !!verdictInput && !!n
+    && addressesExactlyMatch(extracted, verdictInput)
+    && addressesExactlyMatch({ ...extracted, address_line2: null },
+      { street_line_1: n.street_line_1, street_line_2: null, city: n.city, postal_code: n.postal_code });
 }
 
 // The missing_first_name card: ONE open card per call (the unique index stays) whose

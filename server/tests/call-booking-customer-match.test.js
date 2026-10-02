@@ -116,10 +116,13 @@ describe('FIX 1: a first-name-less booking needs the BOOKED address validated (s
 });
 
 describe('FIX 1: "book only on an exact match" — ONE predicate for creation and the booking hold', () => {
-  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE' };
+  const AV = { status: 'validated_accept', inServiceArea: true, granularity: 'PREMISE',
+    normalized: { street_line_1: '100 Example Loop', city: 'Sarasota', state: 'FL', postal_code: '34240-1234' } };
   const V2 = { street_line_1: '100 Example Loop', street_line_2: null, city: 'Sarasota', postal_code: '34240' };
   const stored = { address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34240' };
-  const ok = (st, v2 = V2) => firstNameAdvisoryAddressOk(AV, st, v2);
+  // the cleanup cases judge stored vs the caller's words; Google's form is pinned to the caller's here
+  const ok = (st, v2 = V2) => firstNameAdvisoryAddressOk(
+    { ...AV, normalized: { street_line_1: v2.street_line_1, city: v2.city, postal_code: v2.postal_code } }, st, v2);
 
   test('an exact match passes; case, whitespace, punctuation, ZIP+4 and the suffix alias table are the only cleanup', () => {
     expect(ok(stored)).toBe(true);
@@ -149,6 +152,18 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
     ['a missing verdict input piece', {}, { postal_code: '' }],
   ])('%s holds (no auto-create, no auto-book)', (_label, storedOver, v2Over) => {
     expect(ok({ ...stored, ...storedOver }, { ...V2, ...v2Over })).toBe(false);
+  });
+
+  test('the stored address must also match the verdict\'s normalized address (codex #5559 r13 pre-push P1)', () => {
+    // shadow mode: V1 and V2 agree on 120, Google corrected it to 100, the stored row kept 120 → hold
+    const said = { ...V2, street_line_1: '120 Example Loop' };
+    expect(firstNameAdvisoryAddressOk({ ...AV, status: 'corrected' }, { ...stored, address_line1: '120 Example Loop' }, said)).toBe(false);
+    // a differing normalized city or ZIP holds; a verdict with no normalized form holds
+    expect(firstNameAdvisoryAddressOk({ ...AV, normalized: { ...AV.normalized, city: 'Bradenton' } }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, normalized: { ...AV.normalized, postal_code: '34241' } }, stored, V2)).toBe(false);
+    expect(firstNameAdvisoryAddressOk({ ...AV, normalized: undefined }, stored, V2)).toBe(false);
+    // the unit is judged against the caller's words only (Google's form has none)
+    expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, { ...V2, street_line_2: 'Apt 3' })).toBe(true);
   });
 
   test('no verdict input (V2 invalid or absent) is never exact', () => {
