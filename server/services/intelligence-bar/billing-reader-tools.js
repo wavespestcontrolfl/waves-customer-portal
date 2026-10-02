@@ -701,7 +701,10 @@ function invoiceItem(row, today, ledger, heldIds, paymentsTruncated = false, unc
   }
   const statementOrphanRows = unconfirmed ? unconfirmed.statementOrphans || [] : [];
   if (statementOrphanRows.length) {
-    unknown.push(`${statementOrphanRows.length} unreconciled partial refund(s) recorded against this invoice's payer statement before it settled: reconciliation required, so the payer settlement amounts are unknown. Say it is unknown; use get_invoice_detail.`);
+    const refunds = statementOrphanRows.filter(isStatementPartialRefund).length;
+    const charges = statementOrphanRows.length - refunds;
+    if (refunds) unknown.push(`${refunds} unreconciled partial refund(s) recorded against this invoice's payer statement before it settled: reconciliation required, so the payer settlement amounts are unknown. Say it is unknown; use get_invoice_detail.`);
+    if (charges) unknown.push(`${charges} payer-statement payment(s) for this invoice's statement were accepted by Stripe but not settled by the portal: whether the statement is paid is unconfirmed (reconciliation required). Say it is unknown; use get_invoice_detail.`);
   }
   if (unresolvedAttempts) {
     unknown.push(`${unresolvedAttempts} saved-card charge attempt(s) for this invoice have no confirmed result (claimed, ambiguous, or failed with an ambiguous outcome): Stripe may already have charged the customer, so amount paid and balance due are not reliable. Do not collect or retry the charge; use get_invoice_detail.`);
@@ -895,13 +898,31 @@ function reversalReconciliationEntry(row) {
   };
 }
 
+// A statement-level orphan is one of two things (recordStatementPaymentIssue writes the second, the partial
+// refund branch the first): a partial refund taken before settlement, or a statement payment Stripe accepted
+// that the webhook refused to settle (stale intent, unverified funding, surcharge mismatch).
+const isStatementPartialRefund = (row) => /^statement S-\d+: partial refund/.test(String(row.original_db_error || ''));
 function statementReconciliationEntry(row) {
   const statement = STATEMENT_ORPHAN_MARKER.exec(String(row.original_db_error || ''));
+  if (!isStatementPartialRefund(row)) {
+    return {
+      type: 'payer_statement_reconciliation',
+      id: row.id,
+      at: iso(row.created_at),
+      kind: 'charge_not_settled',
+      received: false,
+      reconciliation_required: true,
+      statement_level: { statement_id: statement ? statement[1] : null, charged_amount: money(row.amount), applies_to: 'the whole payer statement, not this invoice alone' },
+      state_note: 'Stripe accepted a payment for the payer statement this invoice is on, but the portal did not settle it (a stale or mismatched payment held for manual review): whether the statement is paid is unconfirmed. Reconciliation required; say it is unknown, and do not retry or refund it from here.',
+      stripe_payment_intent_id: pgBase(row.stripe_payment_intent_id),
+    };
+  }
   return {
     type: 'payer_statement_reconciliation',
     id: row.id,
     at: iso(row.created_at),
     received: false,
+    kind: 'partial_refund',
     reconciliation_required: true,
     statement_level: { statement_id: statement ? statement[1] : null, refund_amount: money(row.amount), applies_to: 'the whole payer statement, not this invoice alone' },
     state_note: 'A partial refund was recorded against the payer statement this invoice is on before it settled, and is not yet reconciled: the payer settlement amounts may be overstated. Reconciliation required; say it is unknown.',
@@ -997,7 +1018,10 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (payerFunded.length) parts.push(`${payerFunded.length} payment record(s) funded by a third-party payer${payerNames.length ? ` (${payerNames.join(', ')})` : ''}, not the customer's own payment`);
-  if (statementReconciliation.length) parts.push(`${statementReconciliation.length} unreconciled partial refund(s) recorded against the payer statement before it settled (reconciliation required: the payer settlement may be overstated)`);
+  const statementRefunds = statementReconciliation.filter((entry) => entry.kind === 'partial_refund');
+  const statementCharges = statementReconciliation.filter((entry) => entry.kind === 'charge_not_settled');
+  if (statementRefunds.length) parts.push(`${statementRefunds.length} unreconciled partial refund(s) recorded against the payer statement before it settled (reconciliation required: the payer settlement may be overstated)`);
+  if (statementCharges.length) parts.push(`${statementCharges.length} payer-statement payment(s) accepted by Stripe but not settled by the portal (reconciliation required: whether the statement is paid is unconfirmed)`);
   for (const entry of payerFunded.filter((item) => item.statement_level)) {
     parts.push(`payer statement S-${entry.statement_level.statement_id} (${entry.status}) covers this invoice: its $${Number(entry.statement_level.statement_amount).toFixed(2)} is the whole statement's amount, not this invoice's share`);
   }

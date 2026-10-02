@@ -225,7 +225,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const byMarker = await newStatement('g_stmt_marker', {});
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_sm_${run}`, customer_id: null, invoice_id: null, amount: 15, source: 'statement_pay_webhook',
       original_db_error: `statement S-${byMarker}: partial refund $15.00 before settlement — reconcile refund_amount after settle` });
-    inv.statementOrphanIds = { byPi, byMarker };
+    // A statement payment Stripe accepted that the webhook refused to settle (recordStatementPaymentIssue): a charge, not a refund.
+    const byCharge = await newStatement('g_stmt_charge', {});
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_sc_${run}`, customer_id: null, invoice_id: null, amount: 500, source: 'statement_pay_webhook',
+      original_db_error: `statement S-${byCharge}: surcharge mismatch: charged 51000c, expected 50000c for card/credit — manual review` });
+    inv.statementOrphanIds = { byPi, byMarker, byCharge };
     // A combined PaymentIntent quarantined against the ANCHOR invoice only; every allocated invoice carries the PaymentIntent.
     K = await customer(`Anchor${run}`, `Combined${run}`);
     const comboPi = `pi_combo_${run}`;
@@ -682,11 +686,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   });
 
   test('review: a statement-level orphan (partial refund before settlement) is reconciliation-required on the statement\'s invoices', async () => {
+    // Linked through the statement's PaymentIntent (no marker in the reason): an unrecognized reason is a charge to reconcile, never assumed a refund.
+    const viaPi = (await read('get_invoice_detail', { invoice_id: inv.g_stmt_pi.id })).payments_timeline.find((e) => e.type === 'payer_statement_reconciliation');
+    expect(viaPi).toMatchObject({ received: false, reconciliation_required: true, kind: 'charge_not_settled' });
     for (const key of ['g_stmt_pi', 'g_stmt_marker']) {
       const detail = await read('get_invoice_detail', { invoice_id: inv[key].id });
       const entry = detail.payments_timeline.find((e) => e.type === 'payer_statement_reconciliation');
       expect(entry).toMatchObject({ received: false, reconciliation_required: true });
-      expect(entry.statement_level.refund_amount).toBeGreaterThan(0);
       expect(detail.payment_summary.statement_reconciliation_required).toBe(1);
       expect(detail.payment_summary.statement).toMatch(/reconciliation required/);
     }
@@ -696,6 +702,19 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       expect(item.statement_reconciliation_required).toBe(1);
       expect(item.unknown.join(' ')).toMatch(/reconciliation required/);
     }
+    // A statement payment accepted but not settled is a charge to reconcile, never a refund.
+    const charge = await read('get_invoice_detail', { invoice_id: inv.g_stmt_charge.id });
+    const chargeEntry = charge.payments_timeline.find((e) => e.type === 'payer_statement_reconciliation');
+    expect(chargeEntry).toMatchObject({ kind: 'charge_not_settled', reconciliation_required: true, statement_level: { charged_amount: 500 } });
+    expect(chargeEntry.statement_level).not.toHaveProperty('refund_amount');
+    expect(chargeEntry.state_note).not.toMatch(/refund was recorded/);
+    expect(charge.payment_summary.statement).toMatch(/accepted by Stripe but not settled/);
+    expect(charge.payment_summary.statement).not.toMatch(/partial refund/);
+    const refund = await read('get_invoice_detail', { invoice_id: inv.g_stmt_marker.id });
+    expect(refund.payments_timeline.find((e) => e.type === 'payer_statement_reconciliation')).toMatchObject({ kind: 'partial_refund' });
+    const listed = (await read('get_customer_invoices', { customer_id: G, limit: 50 })).invoices.find((i) => i.id === inv.g_stmt_charge.id);
+    expect(listed.unknown.join(' ')).toMatch(/accepted by Stripe but not settled/);
+    expect(listed.unknown.join(' ')).not.toMatch(/partial refund/);
     // The ordinary statement invoice (no orphan) is untouched.
     const plain = await read('get_invoice_detail', { invoice_id: inv.g_stmt.id });
     expect(plain.payment_summary.statement_reconciliation_required).toBe(0);
