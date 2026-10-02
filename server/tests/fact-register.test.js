@@ -657,6 +657,16 @@ describe('findUnverifiedClaims', () => {
       'Large patch is rarely dormant in summer.',
       'Large patch is hardly ever inactive in summer.',
       'Large patch rarely slows down once temperatures are above 85°F.',
+      // a double negative is the claim: nothing may sit between the adverb and its predicate
+      'Large patch rarely fails to thrive in summer.',
+      'Large patch seldom fails to spread in summer.',
+      'Large patch rarely stops short of spreading in summer.',
+      // decimal temperatures are read numerically
+      'Large patch thrives at 85.5°F.',
+      'Large patch thrives at 26.7°C.',
+      'Large patch thrives when temperatures are above 80.5 degrees.',
+      // a figure followed by "maximum <noun>" is not a ceiling
+      'Large patch does 90°F maximum damage.',
       // Celsius is converted before the 80°F line is applied (codex #5414 round 4)
       'Large patch thrives at 30°C.',
       'Large patch thrives when temperatures are 30 degrees Celsius or higher.',
@@ -764,6 +774,15 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active when temperatures are lower than or equal to 80 degrees.',
       'Large patch is active when temperatures are at or below 80°F.',
       'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
+      // a ceiling named after the figure caps it
+      'Large patch is active at 80°F max.',
+      'Large patch is active at 80 degrees maximum.',
+      'Large patch is active when temperatures are 80°F at most.',
+      'Large patch is active at 80°F max, and it slows after that.',
+      // cool decimals stay cool
+      'Large patch is active when temperatures are 75.5°F.',
+      'Large patch is active when temperatures are below 80.5°F.',
+      'Large patch is active when temperatures are 24.5°C.',
       // cool Celsius figures stay cool once converted
       'Large patch is active between 70°F and 30°C.',
       'Large patch is active between 20°C and 85°F.',

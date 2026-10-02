@@ -705,7 +705,7 @@ const PATCH = /\b(?:(?:brown|large)\s+patch|rhizoctonia\s+solani|r\.\s?solani)\b
 // 90s / eighties / nineties / triple digits"; (iv) a figure of 80+ given
 // in degrees ("at 85°F", "in 90-degree weather"). A downward comparator
 // ("below 80°F", "under 85", "cooler than 90") is never a trigger.
-const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?!\\d|,\\d{3})(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
+const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?:\\.\\d+)?(?!\\d|,\\d{3}|\\.\\d)(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
 const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more|greater|higher|warmer|hotter)\\s+than|upwards\\s+of|in\\s+excess\\s+of|north\\s+of|at\\s+least|top(?:s|ped|ping)?|reach(?:es|ed|ing)?|hit(?:s|ting)?|(?:climb(?:s|ed|ing)?|ris(?:e|es|ing|en)|rose|go(?:es|ing)?|went|push(?:es|ed|ing)?|soar(?:s|ed|ing)?|stay(?:s|ed|ing)?|remain(?:s|ed|ing)?|get(?:s|ting)?|got)\\s+(?:up\\s+)?(?:to|past|above|over|into|beyond|at))';
 const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?|inch(?:es)?|cm|centimet(?:er|re)s?|met(?:er|re)s?|mm))';
 // A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
@@ -718,12 +718,12 @@ const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahren
 const NOT_AN_ANGLE = '(?!\\s*(?:arcs?|angles?|turns?|rotations?|bends?|corners?|elbows?|sweeps?|curves?|slopes?|pitch|of\\s+(?:arc|rotation|sweep|turn))\\b)';
 const TEMP_TENS = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
 const TEMP_UNITS_WORD = 'one|two|three|four|five|six|seven|eight|nine';
-const TEMP_NUM = `(?<![\\d.,])(?:\\d{1,3}(?!\\d|,\\d{3}|\\.\\d)|(?:${TEMP_TENS})(?:[-\\s](?:${TEMP_UNITS_WORD}))?(?![a-z])|(?:one|a)\\s+hundred)`;
+const TEMP_NUM = `(?<![\\d.,])(?:\\d{1,3}(?:\\.\\d+)?(?!\\d|,\\d{3}|\\.\\d)|(?:${TEMP_TENS})(?:[-\\s](?:${TEMP_UNITS_WORD}))?(?![a-z])|(?:one|a)\\s+hundred)`;
 const TENS_VALUE = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const UNIT_VALUE = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
 function tempValue(text) {
   const word = String(text).toLowerCase().trim();
-  if (/^\d+$/.test(word)) return parseInt(word, 10);
+  if (/^\d+(?:\.\d+)?$/.test(word)) return parseFloat(word); // "85.5", "26.7"
   if (/hundred$/.test(word)) return 100;
   const [tens, unit] = word.split(/[-\s]+/);
   return (TENS_VALUE[tens] || 0) + (UNIT_VALUE[unit] || 0);
@@ -762,6 +762,10 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 // of 80°F or less" is cool through the trailing "or less" fold.
 const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
+// A ceiling named AFTER the figure, closing its clause: "80°F max", "80
+// degrees maximum", "80°F at most" — the same cap as "a maximum of 80°F".
+// It must end the clause: "90°F maximum damage" is not a ceiling.
+const TEMP_POSTFIX_CEILING = new RegExp(`(?:${TEMP_NUM})${TEMP_UNIT}\\s*,?\\s*(?:max(?:imum)?|at\\s+(?:the\\s+)?most|tops)\\b(?=\\s*(?:[.,;:!?)]|$|and\\b|or\\b|but\\b))`, 'gi');
 const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -783,6 +787,7 @@ function foldTemperatures(sentence) {
     return token(hot ? 'hottemp' : 'cooltemp', match);
   });
   text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
+  text = text.replace(TEMP_POSTFIX_CEILING, (match) => token('cooltemp', match));
   // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
   // judged on its Fahrenheit value, so the raw-number triggers never see it.
   text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
@@ -817,7 +822,10 @@ const PATCH_TRIGGER = new RegExp(
 // bare, they are a negation — "rarely absent in summer", "seldom quiet",
 // "rarely lets up" assert the claim (codex #5414 round 3 P1), which
 // NEGATED_RECEDE catches because absent / quiet / lets up are receding terms.
-const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:\\w+\\s+){0,2}?(?:(?:a|an)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
+// The predicate must follow the adverb DIRECTLY: no free words in between,
+// so "rarely fails to thrive" (a double negative, the claim) is not read as
+// "rarely thrives" (codex #5414 round 5 P1). Unlisted wording is flagged.
+const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:ever\\s+)?(?:(?:a|an|much\\s+of\\s+a)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
 const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
