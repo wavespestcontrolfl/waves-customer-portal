@@ -833,6 +833,17 @@ function initScheduledJobs() {
     return;
   }
 
+  // Public forecast history: first successful snapshot per city / ET day.
+  // Afternoon retry fills weather gaps, never rewrites morning predictions.
+  cron.schedule('15 8,14 * * *', async () => {
+    if (!gateEnvValue('GATE_PEST_FORECAST_HISTORY')) return;
+    try {
+      await runExclusive('pest-forecast-history', () => require('./pest-forecast/history').collectDailyForecasts());
+    } catch (err) {
+      logger.error(`[pest-forecast-history] ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
