@@ -44,20 +44,66 @@ leave the temporal comparison unavailable. Seven days of actual collection
 must elapse before the first comparison is possible. The immediate baseline
 wording correction does not depend on the history gate.
 
+## Observation evaluation
+
+`server/scripts/evaluate-pest-forecast.js` produces an aggregate, read-only
+evaluation. It consumes completed, technician-attributed cockroach forms
+with an exact German or American species selection and explicit "Live roaches"
+evidence. It also supports legacy one-time pest forms with one exact controlled
+pest choice and explicit live-pest/active-trail evidence; that general form was
+retired for new completions in July 2026. Generic pest visits do not provide
+the species-specific evidence this evaluator requires and remain excluded.
+It rejects ambiguous identity, customer-only reports, no-activity
+findings, AI identification outputs and free-text guesses. The serviced city
+comes from frozen report identity (or the visit's stamped address if no frozen
+address exists), never the customer's current address or a ZIP approximation.
+The mapping is versioned as `typed-live-pest-v1`; other form families remain
+outside coverage until their evidence mapping is reviewed.
+
+Only a forecast saved before the observation day, at most seven days earlier,
+is eligible. The first customer/city/pest observation per ET week counts once,
+so repeat callbacks do not inflate the sample. Output includes exclusions,
+missing-history coverage, per-city/pest sample counts, mean model/baseline
+scores and tied-average ranks. It emits no customer, technician, address or
+service-record identifiers.
+
+For an approved fixture/export containing `{ "records": [], "forecasts": [] }`:
+
+```sh
+node server/scripts/evaluate-pest-forecast.js --input /path/to/export.json
+```
+
+For an explicitly selected, authorized database, set
+`PEST_FORECAST_EVAL_DATABASE_URL` and pass `--from YYYY-MM-DD --to YYYY-MM-DD`
+(past range, at most 90 days). The script uses a READ ONLY transaction and
+does not load an application `.env` or default to `DATABASE_URL`. Keep input
+exports private; only the aggregate result is intended for review.
+
+These observations are a positive service-call sample, not independently
+adjudicated biological truth or a random survey. They can assess how the
+model ranked pests subsequently recorded on visits. They cannot establish
+population accuracy, false-positive rate or probability calibration. A future
+accuracy claim needs a reviewed sample including explicit inspected negatives,
+adequate city/pest coverage and a temporal holdout. Do not infer negatives
+from missing observations or promote claims based on training-set fit.
+
 ## Verification
 
 Unit tests cover baseline-versus-time semantics, exact-date/model/city matching,
-outages, gate changes and bounded reads during pool exhaustion. `pest-forecast-history-postgres.test.js` applies the
-migration in a random isolated schema, exercises concurrent immutable saves,
-date/JSON reads, cancellation of exhausted-pool reads, and blocked SQL cleanup. It requires the explicit
+outages, gate changes, observation provenance, no future-data leakage and
+repeat-visit deduplication, plus bounded reads during pool exhaustion.
+`pest-forecast-history-postgres.test.js` applies the migration in a random
+isolated schema, exercises concurrent immutable saves, date/JSON reads, the
+overall read timeout, cancellation of exhausted-pool and blocked SQL reads,
+and the read-only evaluation query. It requires the explicit
 `PEST_FORECAST_TEST_DATABASE_URL`; the CI PostgreSQL job runs it. A skipped
 suite is not migration/DB verification.
 
-Local verification on 2026-10-02: 146 backend unit/regression checks, three
-initial PostgreSQL integration checks in a disposable local PostgreSQL 16 cluster,
+Local verification on 2026-10-02: 170 backend unit/regression checks, five
+PostgreSQL integration checks in a disposable local PostgreSQL 16 cluster,
 101 React comparison/report checks and four standalone embed checks passed. The
 local cluster contained only test fixtures and was stopped afterward. This
-does not validate real-world prediction accuracy. The expanded four-test
+does not validate real-world prediction accuracy. The expanded five-test
 PostgreSQL suite also passed against Railway codex-dev PostgreSQL 16.15,
 including queued-acquisition cleanup and blocked-query cancellation. No extra
 test schemas remained. Railway PR preview migration and deployment succeeded;

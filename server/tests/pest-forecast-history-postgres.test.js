@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const migration = require('../models/migrations/20261002190000_pest_forecast_snapshots');
 const { saveSnapshot, readPreviousForecast } = require('../services/pest-forecast/history');
 const { computeForecast } = require('../services/pest-forecast/forecast');
+const { loadEvaluationData, evaluateForecasts } = require('../services/pest-forecast/validation');
 const { BY_SLUG } = require('../services/pest-forecast/locations');
 
 const url = process.env.PEST_FORECAST_TEST_DATABASE_URL;
@@ -18,8 +19,13 @@ jest.setTimeout(30000);
     db = knexFactory({ client: 'pg', connection: url, searchPath: [schema], pool: { min: 0, max: 3 } });
     await db.raw('CREATE SCHEMA ??', [schema]);
     await migration.up(db);
+    await db.schema.createTable('scheduled_services', t => { t.uuid('id').primary(); t.text('service_address_city'); t.text('service_address_state'); });
+    await db.schema.createTable('service_records', t => {
+      t.uuid('id').primary(); t.uuid('scheduled_service_id'); t.uuid('customer_id'); t.uuid('technician_id');
+      t.text('status'); t.date('service_date'); t.jsonb('service_data'); t.jsonb('structured_notes');
+    });
   });
-  afterEach(async () => { await db('pest_forecast_snapshots').del(); });
+  afterEach(async () => { await db('pest_forecast_snapshots').del(); await db('service_records').del(); });
   afterAll(async () => {
     if (db) { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); }
   });
@@ -79,4 +85,16 @@ jest.setTimeout(30000);
     expect((await readPreviousForecast(make('2026-10-02'), db)).as_of_date).toBe('2026-09-25');
   });
 
+  test('read-only evaluator loads real JSON/date columns without changing source rows', async () => {
+    await saveSnapshot(make('2026-10-01'), db);
+    await db('service_records').insert({ id: randomUUID(), customer_id: randomUUID(), technician_id: randomUUID(),
+      status: 'completed', service_date: '2026-10-02', service_data: JSON.stringify({
+        reportIdentitySnapshot: { address: { city: 'Bradenton', state: 'FL' } },
+        typedReportSnapshot: { type: 'cockroach', values: { species: 'German', evidence_observed: 'Live roaches', activity_level: 'Moderate' } },
+      }) });
+    const input = await loadEvaluationData(db, { from: '2026-10-01', to: '2026-10-03' });
+    expect(evaluateForecasts(input).coverage.matchedObservations).toBe(1);
+    expect((await db('service_records').count('* as n').first()).n).toBe('1');
+    expect((await db('pest_forecast_snapshots').count('* as n').first()).n).toBe('1');
+  });
 });
