@@ -169,6 +169,17 @@ describe('validateTypedFacts', () => {
     expect(facts.unclearFields).toEqual(['activity_level', 'activity_locations', 'evidence_observed']);
   });
 
+  test('a field refused on its own takes no unrelated finding with it (pre-push P1)', () => {
+    const note = 'Heavy flea activity. Inspection only today, did the exterior flea treatment in the yard. Asked them to wash pet bedding.';
+    const facts = validateTypedFacts('flea', fieldsOf('flea', {
+      evidence_level: { value: 'Heavy', quote: 'Heavy flea activity' },
+      treatment_completed: [{ value: 'Inspection only', quote: 'Inspection only' }, { value: 'Exterior flea treatment', quote: 'exterior flea treatment' }],
+      customer_prep: [{ value: 'Wash pet bedding', quote: 'wash pet bedding' }],
+    }), note);
+    expect(facts.values).toEqual({ evidence_level: 'Heavy', customer_prep: 'Wash pet bedding' });
+    expect(facts.unclearFields).toEqual(['treatment_completed']);
+  });
+
   test('chips that contradict each other are left for a person', () => {
     const note = 'Inspection only today, did the exterior flea treatment in the yard.';
     const facts = validateTypedFacts('flea', fieldsOf('flea', {

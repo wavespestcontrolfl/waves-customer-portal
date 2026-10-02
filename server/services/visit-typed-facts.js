@@ -146,11 +146,14 @@ function validateTypedFacts(type, json, note) {
     // refuses on its own (chips that contradict each other), and both fields
     // of any pair it refuses together. A clash no field or pair explains
     // leaves every filled field.
+    // A field refused alone fails every pair it is in, so pairs are judged
+    // among the fields that stand alone (pre-push P1: one contradicting
+    // chip list must not take unrelated findings with it).
     const keys = Object.keys(values);
-    const involved = new Set();
-    keys.forEach((a, i) => {
-      if (refused(type, { [a]: values[a] })) involved.add(a);
-      for (const b of keys.slice(i + 1)) {
+    const involved = new Set(keys.filter((key) => refused(type, { [key]: values[key] })));
+    const standing = keys.filter((key) => !involved.has(key));
+    standing.forEach((a, i) => {
+      for (const b of standing.slice(i + 1)) {
         if (refused(type, { [a]: values[a], [b]: values[b] })) involved.add(a).add(b);
       }
     });
