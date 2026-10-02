@@ -683,7 +683,11 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     // edited member is in the scan too (Codex #4311 r27 P1).
     .where((q) => q.whereIn('scheduled_service_id', ids)
       .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
-        .whereIn('scheduled_service_id', ids).select('packet_id')))
+        .whereIn('scheduled_service_id', ids).select('packet_id'))
+      // An invoice minted from the service record alone carries no visit link of its own; it
+      // moves with the visit's payer (visit-linked-invoice-withdrawal.js), so its session does too.
+      .orWhere((x) => x.whereNull('scheduled_service_id')
+        .whereIn('service_record_id', database('service_records').whereIn('scheduled_service_id', ids).select('id'))))
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
     // the in-flight signal the PI-status check must see and report.

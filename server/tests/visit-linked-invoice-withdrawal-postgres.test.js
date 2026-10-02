@@ -136,6 +136,25 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     });
   });
 
+  test('the combined-session release fence reaches a service-record-only invoice; money already in flight refuses', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const { visitId, invoiceId } = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_combo_fixture' } });
+    const piOf = (status) => ({ id: 'pi_combo_fixture', status, metadata: { combined_allocation: `${invoiceId}:12000` } });
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent').mockResolvedValue(piOf('requires_payment_method'));
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+
+    // A bank debit already moving is reported, never cancelled.
+    retrieve.mockResolvedValue(piOf('processing'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [visitId])).toEqual({ released: 0, inFlight: 1 });
+    expect(cancel).not.toHaveBeenCalled();
+
+    // An unconfirmed combined session is cancelled and unstamped before the payer change.
+    retrieve.mockResolvedValue(piOf('requires_payment_method'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [visitId])).toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).toHaveBeenCalledWith('pi_combo_fixture');
+    expect(await invoiceRow(invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
+  });
+
   test('a directly linked invoice is withdrawn the same way', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'visit' });
     const payerId = await payer();
