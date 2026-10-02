@@ -518,6 +518,16 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(callerTurns('no labels at all here')).toBe('');
   });
 
+  test('#5524 r5 P1: the fact-check record holds only the caller\'s call turns, never the summary or staff turns', async () => {
+    mockGetRecentCalls.mockResolvedValue([{ direction: 'inbound', created_at: new Date(), call_summary: 'Office said the tech has a new baby',
+      transcript: 'Agent: our tech just had a new baby\nCaller: the ants are back by the lanai' }]);
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    const { record } = factInput(mockFactCheck.mock.calls[0][1]);
+    expect(record).toContain('the ants are back by the lanai');
+    expect(record).not.toMatch(/new baby/);
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);

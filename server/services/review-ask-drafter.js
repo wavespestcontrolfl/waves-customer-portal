@@ -1099,9 +1099,16 @@ async function draftTechVoice({ customer, recipientFirstName, recipientName, ser
     const check = { channel, firstName, techName, termite, corpus: facts, ownWords: customerOwnWords(ctx) };
     // The fact check reads the record without anything Waves texted (earlier
     // review asks included): a claim is never backed by our own wording.
+    // ...and only what the CALLER said on calls (labeled transcript turns):
+    // the AI summary and staff turns can never back a claim either.
     const record = buildTechVoiceFacts({
       firstName, serviceType, techName, serviceDaysAgo, termite,
-      ctx: { ...ctx, priorTouches: [], sms: ctx.sms.filter((m) => m.direction === "customer") },
+      ctx: {
+        ...ctx,
+        priorTouches: [],
+        sms: ctx.sms.filter((m) => m.direction === "customer"),
+        calls: ctx.calls.map((c) => ({ ...c, call_summary: callerTurns(c.transcript) || null, transcript: null })),
+      },
     });
     const prompt = { system: buildTechVoiceSystemPrompt(stepKind, serviceDaysAgo), facts, channel, check, record };
     const deadline = Date.now() + TECH_VOICE_BUDGET_MS;

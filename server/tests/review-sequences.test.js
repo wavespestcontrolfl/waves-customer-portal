@@ -511,6 +511,7 @@ describe('review sequences — cadence engine', () => {
     db.mockImplementation(mock);
 
     const out = await ReviewService.sendOutreachTouch({
+      serviceRecordId: 'sr-pe-tv',
       customer: mock.__state.rows.customers[0],
       channel: 'email', templateId: 'final_nudge',
       sequenceId: 'seq-pe-tv', sequenceStep: 2, manageRetryVia: 'sequence',
@@ -4849,7 +4850,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       });
       db.mockImplementation(mock);
 
-      const result = await ReviewService.startReviewSequence({ customerId: 'tv-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-1', serviceRecordId: 'sr-tv-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
 
       expect(result.started).toBe(true);
       expect(mockDraftAskBody).not.toHaveBeenCalled();
@@ -4878,7 +4879,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       db.mockImplementation(mock);
       const out = await ReviewService.sendOutreachTouch({
         customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'cadence',
-        sequenceId: 'seq-tv3', sequenceStep: 0,
+        sequenceId: 'seq-tv3', serviceRecordId: 'sr-tv-3', sequenceStep: 0,
       });
       expect(out.ok).toBe(true);
       expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
@@ -4917,7 +4918,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       db.mockImplementation(mock);
       const out = await ReviewService.sendOutreachTouch({
         customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'admin_custom_key', triggeredBy: 'cadence',
-        sequenceId: 'seq-tv5', sequenceStep: 1,
+        sequenceId: 'seq-tv5', serviceRecordId: 'sr-tv-5', sequenceStep: 1,
       });
       expect(out.ok).toBe(true);
       const sent = mockSendCustomerMessage.mock.calls[0][0].body;
@@ -4938,7 +4939,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftTechVoice.mock.calls[0][0].serviceType).toBe('Termite Inspection');
     });
 
-    test('#5524 r3: a visit-less cadence with no recent visit never calls the writer (fixed copy), one with a visit drafts about it', async () => {
+    test('#5524 r5: a cadence with no visit of its own never calls the writer (fixed copy), even when the customer has recent visits', async () => {
       mockGates.reviewAskTechVoice = true;
       const mock = makeMock({
         customers: [{ id: 'tv-6', first_name: 'Ravi', last_name: 'P', phone: '+19410000091', nearest_location_id: 'venice' }],
@@ -4968,7 +4969,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       });
       db.mockImplementation(mock);
 
-      const result = await ReviewService.startReviewSequence({ customerId: 'tv-2', serviceType: 'pest control', techName: 'Adam B', startedBy: 'admin-1' });
+      const result = await ReviewService.startReviewSequence({ customerId: 'tv-2', serviceRecordId: 'sr-tv-2', serviceType: 'pest control', techName: 'Adam B', startedBy: 'admin-1' });
 
       expect(result.started).toBe(true);
       expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
@@ -5387,6 +5388,11 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey }],
       service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      review_sequences: [{
+        id: `seq-${id}`, customer_id: id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
     }));
 
     let mock = fixture('tvd-1', new Date(Date.now() - 2 * 86400000));

@@ -4648,48 +4648,18 @@ const ReviewService = {
     // A record technician whose name will not resolve gets NO name, never the
     // sequence's cached one (that cache can be a newer visit's technician).
     // A record-scoped cadence whose visit has no technician also gets no name.
-    // The visit a tech-voice draft is about. A cadence with no visit at all
-    // (admin "start sequence", no record or scheduled visit) takes the
-    // customer's newest completed visit from the last 30 days, for drafting
-    // only; none = no draft (fixed copy), never an unscoped history.
-    const voiceVisit = !techVoice ? null
-      : (serviceRecordId || scheduledServiceId) ? {
-        serviceRecordId, serviceDate, technicianId,
-        // The record's own service type decides (it gates the termite rule),
-        // never a sequence's cached type, on every touch.
-        serviceType: (serviceRecordId && await db("service_records").where({ id: serviceRecordId }).first("service_type")
-          .then((sr) => sr?.service_type || null).catch(() => null)) || serviceType,
-      }
-        : await db("service_records")
-          .where({ customer_id: customer.id, status: "completed" })
-          .where("service_date", ">=", new Date(Date.now() - 30 * 86400000))
-          .orderBy("service_date", "desc")
-          .limit(5)
-          .select("id", "service_date", "technician_id", "service_type", "structured_notes")
-          // A completed visit only, with the paid-invoice path's own outcome
-          // rule (an incomplete / declined visit is never the subject).
-          // Everything about the visit comes from that visit, its service
-          // type included (it decides the termite rule), never the sequence.
-          .then((rows) => {
-            const sr = rows.find((r) => {
-              let notes = r.structured_notes || {};
-              if (typeof notes === "string") { try { notes = JSON.parse(notes); } catch { notes = {}; } }
-              return !notes.visitOutcome || notes.visitOutcome === "completed";
-            });
-            return sr ? { serviceRecordId: sr.id, serviceDate: sr.service_date, technicianId: sr.technician_id, serviceType: sr.service_type } : null;
-          })
-          .catch(() => null);
-    // Anchor a recovered visit to the cadence the first time, so later
-    // touches draft about the SAME visit even if a newer one completes.
-    if (techVoice && voiceVisit?.serviceRecordId && !serviceRecordId && !scheduledServiceId && sequenceId != null) {
-      await db("review_sequences").where({ id: sequenceId }).whereNull("service_record_id")
-        .update({ service_record_id: voiceVisit.serviceRecordId })
-        .catch((err) => logger.warn(`[review] tech voice: visit anchor failed (sequenceId=${sequenceId}): ${err.message}`));
-      // This touch is about that visit too: its request row carries the id,
-      // so the visit-summary send guards (uncertain summary, packet lock)
-      // apply to it exactly as they do to later touches.
-      serviceRecordId = voiceVisit.serviceRecordId;
-    }
+    // The visit a tech-voice draft is about: the cadence's own visit. A
+    // cadence with no visit (the admin page's manual "start sequence") has
+    // no record to ground a draft in, so it sends the fixed copy and spends
+    // no AI call. (Guessing a visit for it changed its click anchor, request
+    // fields and same-day tie-breaks; reviewed and dropped on #5524.)
+    const voiceVisit = !techVoice || !(serviceRecordId || scheduledServiceId) ? null : {
+      serviceRecordId, serviceDate, technicianId,
+      // The record's own service type decides (it gates the termite rule),
+      // never a sequence's cached type, on every touch.
+      serviceType: (serviceRecordId && await db("service_records").where({ id: serviceRecordId }).first("service_type")
+        .then((sr) => sr?.service_type || null).catch(() => null)) || serviceType,
+    };
     const voiceTechId = voiceVisit?.technicianId || null;
     const voiceTechName = !techVoice ? techName
       : voiceTechId ? ((await technicianFirstName(voiceTechId)) || null)
