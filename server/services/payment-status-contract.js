@@ -401,10 +401,13 @@ const TOPIC_RE = /\b(?:payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|bill
 // Every word a payment / invoice / refund / balance STATUS can be said with, deliberately wide: one more synonym is one more
 // alternative here, never a new checker.
 const PAYMENT_NOUN = '(?:payments?(?!\\s+(?:links?|page|portal|options?|methods?|instructions?|plan|reminders?))|funds|money|transfers?|deposits?|transactions?|refunds?|invoices?|bills?)';
+// Codex round-61 P2: "accepted" is a status ("your payment was accepted") but NOT when a payment METHOD is its subject ("Checks are
+// accepted", "Credit cards and bank accounts are accepted") - that is a pay-method answer.
+const ACCEPTED_STATUS = "(?<!\\b(?:cards?|checks?|cheques?|cash|ach|bank\\s+accounts?|bank\\s+transfers?|apple\\s+pay|google\\s+pay|venmo|paypal|e-?checks?|methods?|forms?\\s+of\\s+payment)\\s+(?:are|is)\\s+(?:also\\s+|all\\s+|gladly\\s+)?)accepted";
 const STATUS_ALTERNATIVES = [
   '(?:un|over|under|pre|re)?paid', 'received', 'receipts?', 'process\\w*', 'pending', 'post(?:ed|s|ing)?', 'clear(?:ed|s|ing)?', 'arriv\\w*', 'appear\\w*',
-  'settle[sd]?', 'settling', 'settlement', 'completed?', 'successful(?:ly)?', 'approved', 'accepted', 'declined', 'denied', 'rejected',
-  'fail(?:ed|s|ure)?', 'bounced?', 'returned', 'revers\\w*', 'refund\\w*', 'credit(?:s|ed)?', 'debit(?:s|ed)?', 'charged', 'charges', 'deducted',
+  'settle[sd]?', 'settling', 'settlement', 'completed?', 'successful(?:ly)?', 'approved', ACCEPTED_STATUS, 'declined', 'denied', 'rejected',
+  'fail(?:ed|s|ure)?', 'bounced?', 'returned', 'revers\\w*', 'refund\\w*', 'credit(?:s|ed)?(?!\\s+cards?)', 'debit(?:s|ed)?(?!\\s+cards?)', 'charged', 'charges', 'deducted',
   'withdrawn', 'collected', 'captured', 'applied', 'land(?:ed|s)?', 'cashed', 'deposited', 'submitted',
   '(?:went|go(?:es)?|gone|going|came|come(?:s)?|coming) (?:through|thru|in)', 'made it', 'hit your',
   'owe[sd]?', 'owing', 'due', 'overdue', 'outstanding', 'balance', 'delinquent', 'arrears', 'late fees?', 'past due',

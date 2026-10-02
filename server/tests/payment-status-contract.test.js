@@ -828,3 +828,11 @@ describe('a copied payment sentence and the payment method the customer named', 
     expect(c.copiesOffTarget([copied], inbound)).toBe(off);
   });
 });
+
+// Codex round-61 P2: a payment-METHOD answer is not a status ("Checks are accepted", "Credit cards are accepted")
+test.each(['Checks are accepted.', 'Credit cards are accepted.', 'Credit cards and bank accounts are accepted.', 'We take debit cards and bank accounts.'])('pay-method answer, not a status: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'What payment methods do you take?' })).toBe(false);
+});
+test.each(['Your payment was accepted.', 'A credit was applied to your account.', 'We debited your account.'])('still a status: %s', (b) => {
+  expect(c.assertsPaymentStatus(b, { inboundText: 'What payment methods do you take?' })).toBe(true);
+});

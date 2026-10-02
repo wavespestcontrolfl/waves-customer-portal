@@ -627,7 +627,9 @@ router.get('/:token', async (req, res, next) => {
         payerOwnedLive,
       });
       if (zelleVisibility.visible || zelleVisibility.reason === 'credit_pending') {
-        manualPayOptions = configuredManualPayOptions;
+        // Codex round-61 P1: the recipient is read AGAIN after the eligibility awaits - a ZELLE_RECIPIENT rotated (or removed) while
+        // the probes ran must never surface the old destination (removed => no Zelle at all)
+        manualPayOptions = manualPayOptionsFromEnv();
         visibilityProjectedCredit = zelleVisibility.projectedCredit ?? null;
       }
     }

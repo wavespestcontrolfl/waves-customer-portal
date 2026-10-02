@@ -165,3 +165,13 @@ describe('degraded sibling resolution (read-only callers)', () => {
     expect(siblings.mock.calls[0][1]).not.toHaveProperty('onDegrade');
   });
 });
+
+// Codex round-61 P1: the pay page reads the Zelle recipient AGAIN after the eligibility awaits
+test('the pay page GET re-reads the recipient after payPageZelleVisibility (never the value captured before its awaits)', () => {
+  const src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
+  const vis = src.indexOf('const zelleVisibility = await payPageZelleVisibility({');
+  const reread = src.indexOf('manualPayOptions = manualPayOptionsFromEnv();', vis);
+  expect(vis).toBeGreaterThan(-1);
+  expect(reread).toBeGreaterThan(vis);
+  expect(src).not.toContain('manualPayOptions = configuredManualPayOptions;');
+});
