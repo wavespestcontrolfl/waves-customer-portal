@@ -226,6 +226,32 @@ describe('tokenParity', () => {
     expect(tokenParity('Here is the gate: maps.app.goo.gl/abc', 'Aquí está la puerta: maps.app.goo.gl/abc', { strictTimes: false })).toMatchObject({ ok: true });
   });
 
+  test('a link on any domain ending is protected; a run-together "ok.gracias" is not a link', () => {
+    expect(tokenParity('Book at example.ch/bookingA', 'Reserve en example.ch/bookingB', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(protectedTokens('ok.gracias Thanks.See you').links).toEqual([]);
+  });
+
+  test('an internationalized email is protected', () => {
+    expect(tokenParity('Write to ana@ejemplo.рф', 'Escriba a ana@ejemplo.рф', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Write to ana@ejemplo.рф', 'Escriba a ana@ejemplos.рф', { strictTimes: false })).toMatchObject({ ok: false });
+  });
+
+  test('a local seven-digit phone number keeps its order', () => {
+    expect(tokenParity('Call me at 555-1234.', 'Llámeme al 1234-555.', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Call me at 555-1234.', 'Llámeme al 555 1234.', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('a percent in other languages keeps its percent: "10 процентов" is 10%, not a bare 10', () => {
+    expect(tokenParity('Is the discount 10 percent?', 'Скидка 10 процентов?', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Is the discount 10?', 'Скидка 10 процентов?', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Is the discount 10%?', 'İndirim yüzde 10 mu?', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('a longer mostly-English text with a lowercase unknown word goes to the language read; a name does not', () => {
+    expect(needsTranslation('Can you come kesho please')).toBe(true);
+    expect(needsTranslation('Is Termidor safe for my dog today')).toBe(false);
+  });
+
   test('a signed rate keeps its sign: -10% is not 10%', () => {
     expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un 10%.')).toMatchObject({ ok: false });
     expect(tokenParity('Your rate changes by -10%.', 'Su tarifa cambia un -10 %.')).toMatchObject({ ok: true });

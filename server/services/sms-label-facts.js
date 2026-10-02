@@ -1038,11 +1038,11 @@ const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|q
 // reply guards (a one-word "yes" stays English there). namesExempt (a model's
 // English output): a capitalized word is a name or product ("Use Termidor"),
 // so only a lowercase unknown word counts ("Please come kesho").
-function hasUnknownShortWord(text, { namesExempt = false } = {}) {
+function hasUnknownShortWord(text, { namesExempt = false, maxWords = 4 } = {}) {
   const c = canonText(text);
   if (isPureReaction(c)) return false;
   const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
-  if (!words.length || words.length > 4) return false;
+  if (!words.length || words.length > maxWords) return false;
   return words.some((raw) => {
     if (namesExempt && /^\p{Lu}/u.test(raw)) return false;
     const w = raw.toLowerCase();

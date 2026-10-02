@@ -40,8 +40,12 @@ function trialEnabled() {
 function needsTranslation(inbound) {
   if (typeof inbound !== 'string' || !inbound.trim()) return false;
   const labelFacts = require('./sms-label-facts');
-  // (a short reply can read as English to the guards' majority checks: ask about one with an unknown word too)
-  return !labelFacts.isEnglishInbound(inbound) || labelFacts.hasUnknownShortWord(inbound);
+  // (a short reply can read as English to the guards' majority checks: ask about one with an unknown word too;
+  // a longer one with a lowercase word the lexicon does not know - "Can you come kesho please" - is asked about
+  // as well. A name or product is capitalized and never asks. A typo costs one classification call, which
+  // answers English.)
+  return !labelFacts.isEnglishInbound(inbound) || labelFacts.hasUnknownShortWord(inbound)
+    || labelFacts.hasUnknownShortWord(inbound.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '), { namesExempt: true, maxWords: Infinity });
 }
 
 // A model's English output, checked with the same language guard. That guard
@@ -284,13 +288,17 @@ async function inboundMeaningCheck({ original, english, language }) {
 // Every figure a customer could act on, compared between two versions of one
 // message: links and emails exactly, phone numbers and other numbers whole
 // (see numberValues).
-// A scheme-free link counts too: the drafter writes the portal as portal.wavespestcontrol.com, and a customer
-// pastes maps.app.goo.gl/abc. A bare host is a dotted name ending in a common top-level domain.
+// A scheme-free link counts too, on any domain ending (the drafter writes the portal as
+// portal.wavespestcontrol.com; a customer pastes maps.app.goo.gl/abc or example.ch/booking): a dotted host of
+// letter labels. With a path ("/...") any ending counts, internationalized ones too (ejemplo.рф/x); a bare host
+// with no path needs a common ending, so a run-together "ok.gracias" or "Thanks.See" is not a link. Emails take
+// any ending, internationalized ones too (ana@ejemplo.рф).
 // (a link also ends at CJK sentence punctuation, which has no space after it: "…/pay。付款")
 const LINK_END = '[^\\s<>"\')\\u3001\\u3002\\uFF01\\uFF0C\\uFF1A\\uFF1B\\uFF1F\\u300D\\u300F\\uFF09]';
-const BARE_TLDS = 'com|net|org|gov|edu|mil|info|biz|io|co|us|ly|gl|me|app|dev|link|page|site|online|tv|ai|mx|es|ca|uk|de|fr|br|pt|it|cn|jp|kr|ru|in|ph|vn';
-const LINK_RE = new RegExp(`https?:\\/\\/${LINK_END}+|www\\.${LINK_END}+|(?<![@\\w.-])(?:[a-z0-9-]+\\.)+(?:${BARE_TLDS})\\b(?!\\.\\w)(?:\\/${LINK_END}*)?`, 'gi');
-const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
+const BARE_TLDS = 'com|net|org|gov|edu|mil|int|info|biz|io|co|us|uk|ca|au|nz|ie|ly|gl|me|app|dev|link|page|site|online|store|shop|tv|ai|mx|es|de|fr|ch|at|nl|be|br|pt|it|pl|cn|jp|kr|ru|ua|in|ph|vn|ar|cl|pe|ve|cu|do|pr|ht|рф';
+const HOST = '(?<![@\\p{L}\\p{N}.-])(?:[\\p{L}\\p{N}-]+\\.)+';
+const LINK_RE = new RegExp(`https?:\\/\\/${LINK_END}+|www\\.${LINK_END}+|${HOST}(?:\\p{L}{2,}|xn--[a-z0-9-]+)\\/${LINK_END}*|${HOST}(?:${BARE_TLDS})(?![\\p{L}\\p{N}])`, 'giu');
+const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.(?:\p{L}{2,}|xn--[a-z0-9-]+)/giu;
 // A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
 // "$50.45" cannot stand in for "$45.50"). Spelling is normalised so a faithful
 // translation still matches: thousands separators dropped ("2,500" = "2.500"),
@@ -357,11 +365,18 @@ function trimZeros(n) {
 // A phone number is one value, its groups in order ("941-555-1234" never
 // matches "555-941-1234"); spacing and punctuation may differ.
 // An international number ("+44 20 7946 0958") is one value the same way.
-const PHONE_RE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}\b|(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/g;
+// A local seven-digit number ("555-1234") is one ordered value too.
+const PHONE_RE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}\b|(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b|\b\d{3}[\s.-]\d{4}\b/g;
 
 // slash and hyphen dates, and dotted ones with a year ("05.10.2026", "5.10.26", "2026.10.05"); a two-part
 // "5.10" stays a decimal
 const DATE_RE = /\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|\b\d{1,2}\.\d{1,2}\.(?:\d{4}|\d{2})\b|\b\d{4}\.\d{1,2}\.\d{1,2}\b/g;
+
+// A rate keeps its percent in the languages customers text in: the sign in any form (%, ٪, ％) and the word
+// after the number ("10 por ciento", "10 процентов", "10 퍼센트") or before it ("%10", "yüzde 10", "百分之10").
+// A percent word not listed reads as a bare number on its side only, so the rate is held, never passed.
+const PERCENT_AFTER_RE = /^\s*(?:[%\u066A\uFF05]|por\s?ciento|pour\s?cent|percent|per\s?cent|prozent|por\s?cento|per\s?cento|procent|procento|процент|відсот|퍼센트|パーセント|प्रतिशत|phần\s?trăm|porsyento|persen)/iu;
+const PERCENT_BEFORE_RE = /(?:[%\u066A\uFF05]|yüzde|百分之)\s*$/iu;
 
 function numberValues(text, { strictTimes = false } = {}) {
   const out = [];
@@ -398,7 +413,7 @@ function numberValues(text, { strictTimes = false } = {}) {
     let values;
     const money = raw.includes(':') ? '' : moneyPrefix(str.slice(0, m.index), after);
     // a rate keeps its percent sign ("2.9%" is not a bare "2.9"); "por ciento" / "pour cent" read as %
-    const percent = !raw.includes(':') && /^\s*(?:%|por\s?ciento\b|pour\s?cent\b|percent\b|per\s?cent\b|prozent\b)/i.test(after);
+    const percent = !raw.includes(':') && (PERCENT_AFTER_RE.test(after) || PERCENT_BEFORE_RE.test(str.slice(0, m.index)));
     const grouped = /^(\d{1,3}(?:([.,])\d{3})+)([.,])(\d{1,2})$/.exec(raw);
     // "1,234.56" and "1.234,56" are one amount: thousands groups plus cents, the two separators different
     if (grouped && grouped[2] !== grouped[3]) values = [`${grouped[1].replace(/[.,]/g, '')}.${grouped[4]}`.replace(/\.0+$/, '')];
