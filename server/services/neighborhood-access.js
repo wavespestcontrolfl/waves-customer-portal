@@ -323,9 +323,12 @@ const FINAL_OUTCOMES = new Set(['filed', 'duplicate', 'filed_conflict']);
 // alike, so the two can never disagree on what "this value" is.
 const VALUE_HASH_SQL = "encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex')";
 
-// The customers whose current code (non-empty, customer not deleted) has no
-// filing for that exact value yet. A filing that could not finish (lookup
-// failed, no pin, two properties) left no row, so it is retried every pass.
+// The customers whose current code (non-empty, customer not deleted) is not
+// filed where their property now is: no filing for that exact value, or a
+// filing in a different neighborhood than the one property's current link (an
+// address move cleared it, or the office re-linked it). A filing that could not
+// finish (lookup failed, no pin, two properties) left no row, so it is retried
+// every pass.
 async function unfiledGateCodeCustomers(conn) {
   return conn('property_preferences as pp')
     .join('customers as c', 'c.id', 'pp.customer_id')
@@ -333,7 +336,10 @@ async function unfiledGateCodeCustomers(conn) {
     .whereNull('c.deleted_at')
     .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''")
     .where((w) => w.whereNull('f.customer_id')
-      .orWhereRaw(`f.value_hash <> ${VALUE_HASH_SQL}`))
+      .orWhereRaw(`f.value_hash <> ${VALUE_HASH_SQL}`)
+      .orWhereRaw(`f.neighborhood_id IS DISTINCT FROM (
+        SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
+        FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active)`))
     .orderBy('pp.customer_id')
     .pluck('pp.customer_id');
 }
@@ -349,8 +355,10 @@ async function fileOneSavedCode(customerId, lookup) {
       'neighborhood_id', 'neighborhood_source', 'neighborhood_checked_at');
   if (props.length !== 1) return { status: props.length ? 'multi_property' : 'no_property' };
   const snapshot = props[0];
-  const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office'
-    && Number.isFinite(Number(snapshot.latitude)) && Number.isFinite(Number(snapshot.longitude))
+  // A NULL or blank pin is no pin (Number(null) is 0, which would look up 0,0).
+  const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== '')
+    && Number.isFinite(Number(snapshot.latitude)) && Number.isFinite(Number(snapshot.longitude));
+  const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
     ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude))
     : null;
 
@@ -366,9 +374,11 @@ async function fileOneSavedCode(customerId, lookup) {
       .first('neighborhood_gate_code', 'access_notes');
     const value = String(prefs?.neighborhood_gate_code || '').trim();
     if (!value) return { status: 'no_code' };
-    // A code the 10-01 message harvest marked unconfirmed (same marker the
-    // backfill reads) files needs_confirm, and flags an existing copy.
-    const unconfirmed = String(prefs?.access_notes || '').includes(UNCONFIRMED_MARK);
+    // A code the 10-01 message harvest marked unconfirmed files needs_confirm
+    // (and flags an existing copy) — only while the note names THIS code
+    // ("Gate code 2424 is unconfirmed: confirm on site."); a replacement code
+    // saved later, with the old note left behind, is not the one it doubted.
+    const unconfirmed = String(prefs?.access_notes || '').includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
     let neighborhoodId = active[0].neighborhood_id;
     if (!neighborhoodId && parcel) {
       const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });

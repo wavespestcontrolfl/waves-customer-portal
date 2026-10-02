@@ -31,14 +31,14 @@ postgres('neighborhood gate-code filing sweep', () => {
       .returning('id');
     return row.id;
   };
-  const customerWithCode = async (code, { neighborhoodId = null, properties = 1, street = '100 Synthetic Way', notes = null } = {}) => {
+  const customerWithCode = async (code, { neighborhoodId = null, properties = 1, street = '100 Synthetic Way', notes = null, pin = true } = {}) => {
     const id = randomUUID();
     await trx('customers').insert({ id, first_name: 'Sample', last_name: 'Owner', phone: '+12025550177', email: `${id}@example.invalid` });
     for (let i = 0; i < properties; i += 1) {
       await trx('customer_properties').insert({
         id: randomUUID(), customer_id: id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: i === 0,
         address_line1: i === 0 ? street : `${200 + i} Other Way`, city: 'Lakewood Ranch', zip: '34202',
-        latitude: 27.4, longitude: -82.35, active: true, address_key: randomUUID(),
+        latitude: pin ? 27.4 : null, longitude: pin ? -82.35 : null, active: true, address_key: randomUUID(),
         neighborhood_id: neighborhoodId, neighborhood_source: neighborhoodId ? 'county' : null,
       });
     }
@@ -63,9 +63,11 @@ postgres('neighborhood gate-code filing sweep', () => {
     trx = await database.transaction();
     mockConnection = trx;
     // Only this test's rows: every customer already coded counts as filed.
-    await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, outcome)
-      SELECT customer_id, encode(sha256(convert_to(btrim(neighborhood_gate_code), 'UTF8')), 'hex'), 'filed'
-      FROM property_preferences WHERE btrim(coalesce(neighborhood_gate_code, '')) <> ''
+    await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, neighborhood_id, outcome)
+      SELECT pp.customer_id, encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex'),
+        (SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
+         FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active), 'filed'
+      FROM property_preferences pp WHERE btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''
       ON CONFLICT (customer_id) DO NOTHING`);
   });
   afterEach(async () => {
@@ -155,6 +157,45 @@ postgres('neighborhood gate-code filing sweep', () => {
     await customerWithCode('1616', { neighborhoodId: n, notes: '[10-01 from messages] Gate code 1616 is unconfirmed: confirm on site.' });
     await sweepSavedGateCodes();
     expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['1616', 'needs_confirm']]);
+  });
+
+  test('an old unconfirmed note does not doubt a replacement code', async () => {
+    const n = await neighborhood('Meadow Brook');
+    await customerWithCode('1717', { neighborhoodId: n, notes: '[10-01 from messages] Gate code 1616 is unconfirmed: confirm on site.' });
+    await sweepSavedGateCodes();
+    expect((await accessRows(n)).map((r) => [r.code, r.status])).toEqual([['1717', 'active']]);
+  });
+
+  test('a property with no pin never calls the county lookup, and stays pending', async () => {
+    const customerId = await customerWithCode('1818', { pin: false });
+    const lookup = jest.fn();
+    const r = await sweepSavedGateCodes({ lookup });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(r.tally).toEqual({ no_neighborhood: 1 });
+    expect(await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).toBeUndefined();
+  });
+
+  test('a code is filed again where the property is re-linked (address move, office fix)', async () => {
+    const n1 = await neighborhood('Old Grove');
+    const n2 = await neighborhood('New Grove');
+    const customerId = await customerWithCode('1919', { neighborhoodId: n1 });
+    await sweepSavedGateCodes();
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2, neighborhood_source: 'office' });
+    expect((await sweepSavedGateCodes()).tally).toEqual({ filed: 1 });
+    expect((await accessRows(n2)).map((r) => r.code)).toEqual(['1919']);
+    expect((await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).neighborhood_id).toBe(n2);
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+  });
+
+  test('the ledger seed keeps a code the office retired after the backfill from coming back', async () => {
+    const seed = require('../models/migrations/20261002110000_neighborhood_access_filings_seed');
+    const n = await neighborhood('Retired Gate');
+    const customerId = await customerWithCode('2020', { neighborhoodId: n });
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '2020', status: 'retired', source: 'backfill', source_customer_id: customerId });
+    await trx('neighborhood_access_filings').where({ customer_id: customerId }).del();
+    await seed.up(trx);
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    expect((await accessRows(n)).map((r) => r.status)).toEqual(['retired']);
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
