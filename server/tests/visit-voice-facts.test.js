@@ -457,6 +457,24 @@ describe('validateVoiceFacts', () => {
     expect(spray('The perimeter was left unsprayed, sprayed the kitchen')).toMatchObject({ spray: null, unclearSpray: true });
   });
 
+  test('a treatment names only the pests up to the next treatment word (codex local r22 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('For ants I baited inside and sprayed outside for roaches.', [
+      { name: 'ants', quote: 'ants' },
+      { name: 'roaches', quote: 'roaches' },
+    ])).toEqual(['ants', 'roaches']);
+  });
+
+  test('an undone word is said of what it names, never of another place in its clause (codex local r22 on #5538)', () => {
+    const note = 'Sprayed inside for ants and left the garage untreated. Sprayed outside and the inside was left untreated. Sprayed outside, left the garage and the shed untreated.';
+    const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(area('inside', 'Sprayed inside for ants and left the garage untreated')).toMatchObject({ areas: [{ area: 'Inside' }], unclearAreas: [] });
+    expect(area('garage', 'Sprayed inside for ants and left the garage untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(area('outside', 'Sprayed outside and the inside was left untreated')).toMatchObject({ areas: [{ area: 'Outside' }], unclearAreas: [] });
+    expect(area('inside', 'Sprayed outside and the inside was left untreated')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(area('garage', 'Sprayed outside, left the garage and the shed untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+  });
+
   test('a place is judged by the treatment of its own clause (codex local r18 on #5538)', () => {
     const note = 'Did not treat inside but sprayed outside for ants.';
     const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Did not treat inside but sprayed outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

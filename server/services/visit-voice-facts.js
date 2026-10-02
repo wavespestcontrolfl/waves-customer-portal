@@ -153,15 +153,10 @@ function clauseBounds(quote, offset) {
   };
 }
 const spanOf = (match) => (match ? { offset: match.index, length: match[0].length } : null);
-// The first place a quote names in its plain words.
-function areaSubject(area) {
-  const placeRe = new RegExp(String.raw`\b(?:${AREA_WORDS[area]})\b`);
-  return (quote) => spanOf(placeRe.exec(quote));
-}
 function areaAssertion(area) {
-  const subject = areaSubject(area);
   return (quote) => {
-    const place = subject(quote);
+    // The first place the quote names in its plain words.
+    const place = spanOf(AREA_PLACE_RE[area].exec(quote));
     if (!place) return treatmentAssertion(quote);
     const { from, to } = clauseBounds(quote, place.offset);
     const words = [...quote.slice(from, to).matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))]
@@ -169,21 +164,6 @@ function areaAssertion(area) {
     const before = words.filter((w) => w.offset < place.offset).pop();
     return before || words[0] || treatmentAssertion(quote);
   };
-}
-
-// A quote that calls its own treatment undone ("left the garage untreated")
-// never counts, judged in the clauses the fact stands on: its treatment
-// word's, and its subject's (the place it names, or the words that say how
-// the sprays went down). An undone place in another clause is that place's:
-// "sprayed inside for ants, left the garage untreated" still sprayed inside
-// (codex local r21 on #5538). A quote with no treatment word is read whole.
-function undoneInQuote(quote, { assertion, subject }) {
-  const span = assertion(quote);
-  if (!span) return UNDONE_RE.test(quote);
-  return [span, subject?.(quote)].filter(Boolean).some(({ offset }) => {
-    const { from, to } = clauseBounds(quote, offset);
-    return UNDONE_RE.test(quote.slice(from, to));
-  });
 }
 
 // What a pest quote asserts: the pest's own name, as a whole word.
@@ -223,7 +203,8 @@ const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DE
 //     ants and roaches I sprayed around the house", codex local r21 on
 //     #5538), also after an observation ("found roaches under the sink and
 //     sprayed"), unless the note denies that word or it names another pest
-//     heard after it in its clause, which makes it that pest's ("saw ants
+//     heard after it, before the next treatment word in its clause, which
+//     makes it that pest's ("saw ants
 //     inside, treated outside for spiders", "ants seen in the kitchen,
 //     sprayed for roaches");
 //   - else, with no observation before it in its clause, a treatment word
@@ -243,8 +224,15 @@ function treatedInSentence(name, note, others) {
   const clauseBreaks = breaksOf(CLAUSE_BREAK_RE);
   const mentionsOf = (words) => new RegExp(`(?<![a-z])${escapeRegExp(words)}(?![a-z])`, 'g');
   const undenied = (word) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, word.at));
+  // What a treatment word names after it is its own, up to the next
+  // treatment word: in "for ants I baited inside and sprayed outside for
+  // roaches" the baiting names no pest (codex local r22 on #5538).
   const namesAnother = (word) => {
-    const rest = note.slice(word.end, Math.min(note.length, ...clauseBreaks.filter((i) => i >= word.end)));
+    const clauseEnd = Math.min(note.length, ...clauseBreaks.filter((i) => i >= word.end));
+    const following = new RegExp(TREATMENT_WORD_RE.source, 'g');
+    following.lastIndex = word.end;
+    const nextWord = following.exec(note);
+    const rest = note.slice(word.end, nextWord ? Math.min(clauseEnd, nextWord.index) : clauseEnd);
     return others.some((other) => mentionsOf(other).test(rest));
   };
   return [...note.matchAll(mentionsOf(name))].some(({ index: at }) => {
@@ -264,11 +252,58 @@ function treatedInSentence(name, note, others) {
   });
 }
 
+// A quote that calls its own treatment undone never counts, read where the
+// fact stands (the clauses of its treatment word and of its subject: the
+// place it names, or the words that say how the sprays went down) and only
+// for what the undone word is said of:
+//   - the object of "left": "left the garage untreated" is the garage's,
+//     "left the garage and the shed untreated" both;
+//   - else the subject of "was left": "the inside was left untreated";
+//   - else the words after the treatment word's "and": "sprayed inside and
+//     garage untreated" is the garage's.
+// Said of nothing, it undoes the clause's treatment; said of another place,
+// never this fact's: "sprayed inside for ants and left the garage untreated"
+// still sprayed inside (codex local r21, r22 on #5538). A quote with no
+// treatment word is read whole.
+const UNDONE_MARK_RE = new RegExp(String.raw`${TREATMENT_WORD_RE.source}|${OBSERVATION_WORDS_RE.source}|\b(?:${DENIAL_WORDS}|left|leave|leaving)\b`, 'g');
+const UNDONE_LEFT_RE = /^(?:left|leave|leaving)$/;
+const UNDONE_JOIN_RE = /\b(?:and|but|then|so|while)\b/;
+const UNDONE_FILLER_RE = /\b(?:the|a|an|all|was|were|is|are|been|being|remained|remains|stayed|stays|kept|and|or|its|their|of)\b/g;
+const objectWords = (text) => text.replace(UNDONE_FILLER_RE, ' ').replace(/[^a-z']+/g, ' ').trim();
+function undoneObject(quote, at) {
+  const { from } = clauseBounds(quote, at);
+  const before = quote.slice(from, at);
+  const marks = [...before.matchAll(UNDONE_MARK_RE)];
+  // The words after a mark, from its first joining word when one follows it.
+  const tail = (mark, to) => {
+    const text = before.slice(mark ? mark.index + mark[0].length : 0, to);
+    const join = mark && UNDONE_JOIN_RE.exec(text);
+    return objectWords(join ? text.slice(join.index + join[0].length) : text);
+  };
+  const last = marks.pop();
+  if (last && UNDONE_LEFT_RE.test(last[0])) {
+    return objectWords(before.slice(last.index + last[0].length)) || tail(marks.pop(), last.index);
+  }
+  return tail(last, before.length);
+}
+function undoneInQuote(quote, { assertion, subject }) {
+  const span = assertion(quote);
+  if (!span) return UNDONE_RE.test(quote);
+  const clauses = [span, subject ? spanOf(subject.exec(quote)) : null].filter(Boolean)
+    .map(({ offset }) => clauseBounds(quote, offset));
+  return [...quote.matchAll(new RegExp(UNDONE_RE.source, 'g'))].some(({ index: at }) => {
+    if (!clauses.some(({ from, to }) => at >= from && at < to)) return false;
+    const object = undoneObject(quote, at);
+    return !object || (!!subject && subject.test(object));
+  });
+}
+
 // An area whose own word the quote denies ("sprayed outside but not the
 // garage", "treated everything except inside") is not heard there: the
 // place's plain words, after a denial, "except", "but not", "other than" or
 // "instead of".
 const AREA_WORDS = { inside: 'inside|interior|indoors', outside: 'outside|exterior|outdoors|perimeter', garage: 'garage' };
+const AREA_PLACE_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [area, new RegExp(String.raw`\b(?:${words})\b`)]));
 const AREA_DENIED_RE = Object.fromEntries(Object.entries(AREA_WORDS).map(([area, words]) => [
   area,
   new RegExp(String.raw`\b(?:${DENIAL_WORDS}|except|but\s+not|other\s+than|instead\s+of)\s+(?:(?:in|on|at|to)\s+)?(?:the\s+|a\s+|any\s+)?(?:${words})\b`),
@@ -340,7 +375,7 @@ function validateVoiceFacts(json, note) {
   const unresolvedAreas = new Set();
   for (const entry of listOf(answer.areas)) {
     if (!AREA_LABELS[entry?.area]) continue;
-    const read = readQuote(entry.quote, grounding, { assertion: areaAssertion(entry.area), subject: areaSubject(entry.area), denialAfter: TRAILING_DENIAL.treatment });
+    const read = readQuote(entry.quote, grounding, { assertion: areaAssertion(entry.area), subject: AREA_PLACE_RE[entry.area], denialAfter: TRAILING_DENIAL.treatment });
     // Heard, but the note does not hold the quote, denies it there, or the
     // quote only names the place ("ants in the kitchen" is a sighting, not a
     // treated inside): never recorded, and never silently dropped either,
@@ -391,11 +426,8 @@ const METHOD_SUPPORTED = {
   spot: (quote) => SPOT_WORDS_RE.test(quote) || !PERIMETER_WORDS_RE.test(quote),
 };
 // The words a spray quote says how the sprays went down with: an undone word
-// in their clause undoes the spray (undoneInQuote).
-const SPRAY_SUBJECT = {
-  perimeter: (quote) => spanOf(PERIMETER_WORDS_RE.exec(quote)),
-  spot: (quote) => spanOf(SPOT_WORDS_RE.exec(quote)),
-};
+// said of them undoes the spray (undoneInQuote).
+const SPRAY_SUBJECT = { perimeter: PERIMETER_WORDS_RE, spot: SPOT_WORDS_RE };
 
 // How the sprays went down: only a grounded quote the note does not deny. A
 // perimeter spray decides the trace and the sprays' method, so one the note
