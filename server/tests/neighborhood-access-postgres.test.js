@@ -219,13 +219,18 @@ postgres('neighborhood access directory', () => {
     }
     const { rows } = await trx.raw("SELECT 1 FROM pg_indexes WHERE indexname = 'customer_properties_neighborhood_id_index'");
     expect(rows).toHaveLength(1);
-    // …so the original's down() (which drops that index by name) still works.
+    // …so the original's down() (which drops that index by name) still works
+    // (the later filings ledger references neighborhoods: it goes first, as
+    // a real rollback would take it).
+    await require('../models/migrations/20261002100000_neighborhood_access_filings').down(trx);
     await migration.down(trx);
     expect(await trx.schema.hasColumn('customer_properties', 'neighborhood_id')).toBe(false);
   });
 
   test('migration up is idempotent and down removes everything it added', async () => {
     await migration.up(trx);
+    // The later filings ledger references neighborhoods; a real rollback takes it first.
+    await require('../models/migrations/20261002100000_neighborhood_access_filings').down(trx);
     await migration.down(trx);
     expect(await trx.schema.hasTable('neighborhood_access')).toBe(false);
     expect(await trx.schema.hasColumn('customer_properties', 'neighborhood_id')).toBe(false);

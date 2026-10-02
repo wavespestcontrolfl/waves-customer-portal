@@ -16,6 +16,7 @@
  * moves a row, and nothing acts on a Jev answer: this is evidence-gathering.
  */
 const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
+const { readCorrectionReason } = require('../services/correction-reasons');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -23,7 +24,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
-const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
+const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
 const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
@@ -77,6 +78,9 @@ function mapReview(row, subject) {
     baselineAnswers: parse(row.baseline_answers),
     sampledFor: row.sampled_for,
     servedModel: row.served_model,
+    provider: row.provider,
+    // The name the reviewer sees for whose answer this is (Jev, Clef).
+    providerLabel: providerLabel(row.provider),
     label: parse(row.label),
     labelStatus: row.label_status,
     labeledBy: row.labeled_by,
@@ -194,7 +198,11 @@ function readLabelRequest(body) {
   const note = body.note == null ? null : String(body.note).trim().slice(0, MAX_NOTE_CHARS) || null;
   // The transcript version shown (subjectVersion); null for text subjects.
   const seenSubject = typeof body.seen_subject === 'string' && /^[0-9a-f]{64}$/.test(body.seen_subject) ? body.seen_subject : null;
-  return { verdict, seen, seenSubject, note, force: body.force === true };
+  // The one-tap reason (five values), kept inside the label beside the note.
+  const reasonRead = readCorrectionReason(body.reason);
+  if (reasonRead.error) return { error: reasonRead.error };
+  if (reasonRead.reason && verdict !== 'jev_wrong') return { error: 'reason applies to jev_wrong only' };
+  return { verdict, seen, seenSubject, note, reason: reasonRead.reason, force: body.force === true };
 }
 
 // jev_wrong must say what the right answer was, in the question's own domain
@@ -261,11 +269,11 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     if (await subjectMoved(target)) {
       return res.status(409).json({ error: 'This message or call changed after Jev answered; it is not what Jev judged', code: 'subject_changed' });
     }
-    const { verdict, seen, seenSubject, note, force } = request;
+    const { verdict, seen, seenSubject, note, reason, force } = request;
     const labelStatus = VERDICT_STATUS[verdict];
 
     const update = db(TABLE).where({ id }).update({
-      label: JSON.stringify({ verdict, correct_value: correct.correctValue, note }),
+      label: JSON.stringify({ verdict, correct_value: correct.correctValue, note, reason }),
       label_status: labelStatus,
       labeled_by: labeler(req),
       labeled_at: new Date(),
@@ -288,7 +296,7 @@ router.post('/reviews/:id/label', async (req, res, next) => {
       action: 'typed_decision.labeled',
       resource_type: 'decision_review',
       resource_id: id,
-      metadata: { capability: row.capability, question_id: row.question_id, verdict, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null },
+      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null },
       ip_address: req.ip,
       user_agent: req.get('user-agent') || null,
     });

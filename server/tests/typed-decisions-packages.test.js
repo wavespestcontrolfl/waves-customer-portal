@@ -64,3 +64,18 @@ describe('typed-decision packages', () => {
     for (const id of ids) expect({ id, hash: packageHash(PACKAGES[id]) }).toEqual({ id, hash: snapshot[id] });
   });
 });
+
+describe('decision providers', () => {
+  const { DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel } = require('../services/typed-decisions/packages');
+  test('a closed set with typesafe as the default, each with the name reviewers see', () => {
+    expect([...DECISION_PROVIDERS]).toEqual(['typesafe', 'cloudflare']);
+    expect(DEFAULT_DECISION_PROVIDER).toBe('typesafe');
+    expect(Object.keys(DECISION_PROVIDER_LABELS).sort()).toEqual([...DECISION_PROVIDERS].sort());
+    expect(providerLabel('typesafe')).toBe('Jev');
+    expect(providerLabel('cloudflare')).toBe('Clef');
+    // rows from before the column, and anything unknown, read as the default: never an object key
+    // provider is NOT NULL and registry-constrained: an unknown value is malformed data, never shown as Jev's
+    expect(() => providerLabel(undefined)).toThrow(/unknown decision provider/);
+    expect(() => providerLabel('constructor')).toThrow(/unknown decision provider/);
+  });
+});

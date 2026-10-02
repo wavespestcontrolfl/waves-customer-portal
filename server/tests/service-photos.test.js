@@ -29,7 +29,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-function makeKnex({ existing = null, insertError = null, isTransaction = false, metadataAvailable = true } = {}) {
+function makeKnex({ existing = null, insertError = null, isTransaction = false, metadataAvailable = true, extraColumns = [] } = {}) {
   let insertPayload = null;
   const columnInfo = {
     service_record_id: {},
@@ -41,6 +41,7 @@ function makeKnex({ existing = null, insertError = null, isTransaction = false, 
     captured_at: {},
     image_sha256: {},
     created_at: {},
+    ...Object.fromEntries(extraColumns.map((column) => [column, {}])),
   };
 
   const knex = jest.fn(() => {
@@ -165,6 +166,44 @@ describe('service photo uploads', () => {
       caption: null,
       sort_order: 0,
     });
+  });
+
+  test('a known Fast Complete slot key is stored in ai_tags and unknown keys are dropped', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const photo = (slot, extra = {}) => ({ data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after.jpg', slot, ...extra });
+
+    const known = makeKnex({ extraColumns: ['ai_tags'] });
+    await uploadServicePhotoDataUrls({ serviceRecordId: 'record-1', photos: [photo('whole_palm')], knex: known });
+    expect(known.getInsertPayload().ai_tags).toEqual({ slot: 'whole_palm' });
+
+    // Merged over object tags the caller already sent.
+    const merged = makeKnex({ extraColumns: ['ai_tags'] });
+    await uploadServicePhotoDataUrls({ serviceRecordId: 'record-1', photos: [photo('front_beds', { aiTags: { captionSource: 'ai' } })], knex: merged });
+    expect(merged.getInsertPayload().ai_tags).toEqual({ captionSource: 'ai', slot: 'front_beds' });
+
+    for (const bad of ['../../etc', 'FRONT_BEDS', 'front_beds ', { toString: () => 'front_beds' }, 7, '', null, undefined, 'constructor', '__proto__']) {
+      const knex = makeKnex({ extraColumns: ['ai_tags'] });
+      await uploadServicePhotoDataUrls({ serviceRecordId: 'record-1', photos: [photo(bad)], knex });
+      expect(knex.getInsertPayload().ai_tags).toBeNull();
+    }
+    // An unknown slot never replaces the caller's own tags.
+    const kept = makeKnex({ extraColumns: ['ai_tags'] });
+    await uploadServicePhotoDataUrls({ serviceRecordId: 'record-1', photos: [photo('nope', { aiTags: { captionSource: 'ai' } })], knex: kept });
+    expect(kept.getInsertPayload().ai_tags).toEqual({ captionSource: 'ai' });
+  });
+
+  test('the photo chain hash covers the stored slot, so the validator accepts the row', async () => {
+    const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+    const { validatePhotoChainRows } = require('../services/service-report/photo-chain');
+    const knex = makeKnex({ extraColumns: ['ai_tags', 'hash_sha256', 'prev_hash_sha256'] });
+    const result = await uploadServicePhotoDataUrls({
+      serviceRecordId: 'record-1',
+      photos: [{ data: 'data:image/jpeg;base64,aGVsbG8=', name: 'after.jpg', slot: 'leaf_close_up' }],
+      knex,
+    });
+    const row = result.photos[0];
+    expect(row.ai_tags).toEqual({ slot: 'leaf_close_up' });
+    expect(validatePhotoChainRows([{ ...row, ...knex.getInsertPayload(), id: row.id, hash_sha256: row.hash_sha256 }]).valid).toBe(true);
   });
 
   test('does not upload duplicate image hashes for the same service record', async () => {

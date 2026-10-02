@@ -61,6 +61,55 @@ function normalizePathPoints(raw) {
   });
 }
 
+function visitCompletedError() {
+  return Object.assign(
+    operationalError('This visit is complete, so its trace stays on the report.', 409),
+    { code: 'visit_completed' },
+  );
+}
+
+function propertyChangedError() {
+  return Object.assign(
+    operationalError('This visit moved to another property. Close it and reopen it from the schedule.', 409),
+    { code: 'visit_property_changed' },
+  );
+}
+
+// Every save takes the visit row's lock, the one a completion holds while
+// it judges the trace (complete-scheduled-service.js, traceSeen), so a save
+// either lands before that read or waits for the completion (Codex #5538).
+// A caller that loaded the visit at a property (every trace opener sends it)
+// is refused, at the write itself, when the office has moved the visit since:
+// a save that waited on this lock behind the move never lands a map of the
+// old home on the new one (Codex #5538). The report flow, whose trace is
+// judged with the report, is also refused once the visit is completed
+// (openVisitOnly); the Zone action may still add a trace to a completed visit.
+async function lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly) {
+  const visit = await conn('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .forUpdate()
+    .first('property_id', 'status');
+  if (expectedPropertyId === undefined) return;
+  if (!visit || String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
+    throw propertyChangedError();
+  }
+  if (openVisitOnly && visit.status === 'completed') throw visitCompletedError();
+}
+
+// One visit's row: the keys it replaces, then the upsert.
+async function upsertZoneRow(conn, scheduledServiceId, buildRecord) {
+  const existing = await conn('treatment_zone_maps')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first('id', 'snapshot_s3_key', 'mask_s3_key');
+  const record = buildRecord(existing);
+  const [row] = await conn('treatment_zone_maps')
+    .insert(record)
+    .onConflict('scheduled_service_id')
+    .merge()
+    .returning('*');
+  return { row, existing, record };
+}
+
 async function saveTreatmentZoneMap({
   scheduledServiceId,
   customerId = null,
@@ -77,6 +126,14 @@ async function saveTreatmentZoneMap({
   // report animates this over the snapshot (owner 2026-07-30).
   maskPngBuffer = null,
   captureMode = null,
+  // Optional: the property the caller loaded the visit at. Checked under the
+  // visit row's lock at the write itself, so an office move that commits
+  // after the route's read still refuses the save. Undefined (a caller that
+  // sends none) writes as before, under the same lock.
+  expectedPropertyId,
+  // The report flow's trace is judged with the report: also refused once the
+  // visit is completed.
+  openVisitOnly = false,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -125,11 +182,8 @@ async function saveTreatmentZoneMap({
     );
   }
 
-  const existing = await knex('treatment_zone_maps')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .first('id', 'snapshot_s3_key', 'mask_s3_key');
-
-  const record = {
+  // The saved row's fields, from the keys it replaces.
+  const buildRecord = (existing) => ({
     scheduled_service_id: scheduledServiceId,
     customer_id: customerId || null,
     created_by_technician_id: technicianId || null,
@@ -163,13 +217,29 @@ async function saveTreatmentZoneMap({
       return mode;
     })(),
     updated_at: knex.fn.now(),
+  });
+  const persist = async (conn) => {
+    await lockVisitForTrace(conn, scheduledServiceId, expectedPropertyId, openVisitOnly);
+    return upsertZoneRow(conn, scheduledServiceId, buildRecord);
   };
 
-  const [row] = await knex('treatment_zone_maps')
-    .insert(record)
-    .onConflict('scheduled_service_id')
-    .merge()
-    .returning('*');
+  let saved;
+  try {
+    saved = await knex.transaction(persist);
+  } catch (err) {
+    // A refused save leaves no orphaned upload behind (best effort).
+    if (err?.code === 'visit_property_changed' || err?.code === 'visit_completed') {
+      for (const key of [snapshotKey, maskKey].filter(Boolean)) {
+        try {
+          await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+        } catch (deleteErr) {
+          logger.warn(`[treatment-zone] refused upload delete failed: ${deleteErr.message}`);
+        }
+      }
+    }
+    throw err;
+  }
+  const { row, existing, record } = saved;
 
   // Replaced snapshot: drop the orphaned object, best effort only.
   if (snapshotKey && existing?.snapshot_s3_key && existing.snapshot_s3_key !== snapshotKey) {
@@ -193,6 +263,54 @@ async function saveTreatmentZoneMap({
   }
 
   return row;
+}
+
+// "Remove the trace" (the Fast Complete report flow): a trace that no longer
+// matches the note comes off before the visit is completed. Under the visit
+// row's lock, which the completion takes before it reads the trace, with the
+// actor's current assignment judged on the locked row (lockOwnedLiveVisit; a
+// technician reassigned meanwhile is refused): a visit moved to another
+// property, or already completed (its report shows the trace), is refused.
+// The images come off S3 after the commit, best effort.
+async function deleteTreatmentZoneMap({ scheduledServiceId, actor, expectedPropertyId, knex = db }) {
+  if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
+  if (!actor) throw operationalError('actor is required');
+  const { lockOwnedLiveVisit } = require('./technician-visit-scope');
+  const removed = await knex.transaction(async (trx) => {
+    const visit = await lockOwnedLiveVisit(trx, actor, scheduledServiceId, ['property_id', 'status'], { allowCompleted: true });
+    if (expectedPropertyId !== undefined && String(expectedPropertyId ?? '') !== String(visit.property_id ?? '')) {
+      throw propertyChangedError();
+    }
+    if (visit.status === 'completed') throw visitCompletedError();
+    const [row] = await trx('treatment_zone_maps')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .del()
+      .returning(['snapshot_s3_key', 'mask_s3_key']);
+    return row || null;
+  });
+  for (const key of [removed?.snapshot_s3_key, removed?.mask_s3_key].filter(Boolean)) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+    } catch (err) {
+      logger.warn(`[treatment-zone] removed trace image delete failed: ${err.message}`);
+    }
+  }
+  return removed;
+}
+
+// A visit completed through the Fast Complete report flow froze the trace its
+// record was judged against (structured_notes.traceJudged.seen: that trace's
+// updated_at, or null for none): its report shows only that trace, never
+// one saved or replaced after (another tracer after completion, a save that
+// waited behind the completion) nor one the record never saw (a trace kept
+// while the map gate was dark). Any other record shows its trace as before
+// (Codex #5538).
+function traceJudgedAllows(structuredNotes, row) {
+  const judged = structuredNotes?.traceJudged;
+  if (!judged || typeof judged !== 'object' || !Object.prototype.hasOwnProperty.call(judged, 'seen')) return true;
+  const stamp = (value) => (value == null ? null : new Date(value).getTime());
+  const seen = stamp(judged.seen);
+  return seen !== null && Number.isFinite(seen) && seen === stamp(row?.updated_at);
 }
 
 async function getTreatmentZoneMapForScheduledService(scheduledServiceId, { knex = db } = {}) {
@@ -269,7 +387,9 @@ async function treatmentZonePdfSignature(service, knex = db) {
 }
 
 module.exports = {
+  traceJudgedAllows,
   saveTreatmentZoneMap,
+  deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
   treatmentZonePdfSignature,
   normalizePathPoints,

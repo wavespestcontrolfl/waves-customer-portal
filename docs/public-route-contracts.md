@@ -77,6 +77,18 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+"From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
+`true`, read at call time) adds `blogPost: { title, url }` — the one Waves
+blog post the technician or the office picked at completion, frozen on the
+record (`structured_notes.blogPost`) with its live URL and re-checked at read
+to be on the marketing site's own host
+(`server/services/service-report/report-blog-post.js`). The web report
+renders it in live mode only, above the footer. Off, or nothing frozen, the
+field is `null` (the switch hides frozen posts too). Auth, headers and routes
+are unchanged.
+
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), when the visit's rating was entered by staff
@@ -90,6 +102,44 @@ instead of the five weighted components; customer-rated reports keep the
 five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
+
+Re-service report card (owner-approved design 2026-09-26, Fast Complete PR D;
+`GATE_RESERVICE_REPORT_CARD` — dark, off unless exactly `'true'`, read at call
+time): on the service-report payload (`/api/reports/:token/data` and the PDF,
+which share `buildReportV1Data`), when the card gate is on AND the existing
+`reserviceReport` callback block is composed (`GATE_RESERVICE_REPORT_COPY` on,
+a pest/lawn callback record), gate on adds an optional `data.reserviceReportCard`
+object `{ version: 1, youToldUs, whatWeDid, stillSeeing }`; gate off, or no
+callback block, omits the key entirely (never `null`), so the payload is
+byte-identical to before. `server/services/service-report/reservice-report-card.js`
+is the pure builder.
+- `youToldUs` (`null` or `{ source, quoted, lead, text, pests }`): the
+  customer's booking words, read ONLY from the copy frozen onto
+  `service_records.service_data.reserviceRequest` at completion (from the
+  locked `scheduled_services.customer_request` / `_source` / `_pests` row;
+  never read live, so a later booking edit cannot rewrite a permanent report;
+  records completed before the freeze carry none). `source` is
+  `picker` | `text` | `call` | `office`, or `null` when only pest chips are
+  on file (no words shown). Picker and text words are the
+  customer's verbatim words (`quoted: true`); a call paraphrase
+  (`lead: 'On your call, you mentioned'`) and office words
+  (`lead: 'As reported to our office:'`) are never quoted. `text` always passes
+  the report writer's customer-words scrub (`scrubCustomerText`: pest talk
+  only, access details such as gate codes removed) and the banned
+  customer-copy screen, and is capped at 280 characters; a scrub that is
+  unavailable or throws drops the words (never shown raw). A call / office
+  paraphrase written about the customer in the third person is dropped.
+  `pests` are display labels of the picker's chip keys. Nothing left → `null`.
+- `whatWeDid` (`null` or `{ pests, where, found, safetyLine }`): only for a
+  performed (`treated`) outcome; pests from the product rows' targets, where
+  from `areas_serviced`, `found` from the technician's own activity tap, and
+  the safety line only with a recorded wet application.
+- `stillSeeing`: the topic word for the "Still seeing …? Tell us" button. The
+  button links only the existing authenticated `/?tab=schedule` portal route,
+  rendered only when the payload's existing `reserviceEligible === true` and in
+  the live view (never the PDF); no re-service token or new route is exposed.
+The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
+when the card is present.
 
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
@@ -1452,6 +1502,14 @@ creates a placeholder first name. The explicitly linked profile
 (`estimates.customer_id`) with a blank first name takes the collected first
 name through `propagateCustomerNameChange`; phone-matched or sibling profiles
 never do.
+
+Greeting name (2026-10-02, precursor to #5559). GET `/api/estimates/:token/data`
+`estimate.customerFirstName` is the greeting token, not blindly the first word of
+`customer_name`: when the linked customer (`estimates.customer_id`) has a blank first
+name and the estimate name begins with that customer's surname (or is a single word
+and the surname is unknown), it is `null`, and the page greets "there". Unlinked
+estimates, a linked customer with a first name, or a failed lookup keep the first word
+of `customer_name` as before. The linked customer's name fields are never returned.
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
@@ -2027,7 +2085,8 @@ separate customer text right after the lawn completion text, rendered from the
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -2113,6 +2172,46 @@ first render (first writer wins per assessment, no migration) together with the
 `sinceLast` block it carried, and replayed byte for byte after, so a permanent
 token never changes when later visits are added. A render whose entry could not
 be frozen is marked uncacheable (`weekWeatherUncacheable`); delivery is not held.
+The same gate also builds the lawn progress engine's block
+(`server/services/service-report/lawn-progress.js`, P13: a state per prior applied
+row and prior check, and an overall direction, from `sinceLast` plus both visits'
+scores and this render's photo confidence). It adds NO public key: it rides the
+in-process report object as a non-enumerable `reportV2.progress`, so JSON, spread
+and `Object.keys` never see it and the `/api/reports/:token/data` payload is what
+it was (a test pins that). The block itself never reaches the payload; the only
+thing a customer sees of it is the sentences below. Pure, no read, no write, and
+a failure cannot break a render.
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
+`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
+`{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
+(`mode: 'live'`), and the web report prints it in the lead as "Since your last
+visit, <Mon D>" above "What we applied today". PDF and static builds mount the
+same lead card but never carry the key, so PDF content and its cache signature
+are unchanged by this gate.
+Every line is a fixed sentence selected by key in
+`server/services/service-report/lawn-since-last-copy.js`; no model writes it and
+it carries no product name, active ingredient, number, date or timing word. In
+order, at most four lines and 40 words (a second per-treatment line gives way
+to the watch list; past 40 words whole lines are dropped from the end): what the prior
+visit applied, by product kind ("Last visit we applied weed control and
+fertilizer."); the overall direction when the engine compared the two visits
+(up / down / holding steady; nothing when the photos cannot support a
+comparison); at most two per-treatment states (ahead of schedule, on track,
+holding steady, too early, behind, or seasonal for color), spoken ONLY for an
+expectation row the owner has approved (`server/config/lawn-expectations.js`
+`approved: true`) and never for an `unclear` item; and "Still on our watch
+list: …" naming the prior visit's watched topics (weeds, stressed areas, mowing
+height, watering, sprinkler coverage) that today's report still carries as a
+watch or needs-attention finding. A topic today's report no longer carries is
+not called cleared, and no better / same / worse wording exists: that verdict
+comes only from a same-spot recheck record, which nothing writes yet. Under a
+watering banner the block names neither watering nor sprinkler coverage (the
+banner owns them). The key is absent when there is nothing to say, when there
+is no prior visit, or when the prior visit froze no memory. The sentences are
+selected at render from the frozen memory and the two visits' scores, so a
+permanent token repeats them while those inputs stand; approving an expectation
+row later adds that row's line to reports already delivered.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -2720,7 +2819,24 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
-internals, or tech notes — generic 404 for missing/draft/expired/malformed),
+internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
+for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
+"Based on N photos." from a count of the diagnostic's stored photos (capped at
+12; the number is left out when none are stored or the count fails) plus a
+fixed note when `input_assessment.photo_quality` is limited or poor; null when
+neither applies. Per finding, `evidence` `{ why, certainty, confirm }`: what
+the condition looks like, how sure the read is, and the on-site check that
+would settle it (`confirm` is null for a high-confidence finding and for
+conditions that need no check; `certainty` is null for a clean lawn). Every
+string is fixed copy in `server/services/lawn-diagnostic-evidence.js` selected
+ONLY by the finding's already-allowlisted condition label and clamped
+confidence, so the naming gate still decides what is named and the stored
+`observed_evidence`, `inferred_context`, `negative_evidence`,
+`confirmation_step` and photo limitations (model or client free text) are
+still never published. A label the table does not know gets no `evidence`
+key. The `/api/public/lawn-assessment` teaser's `first_finding` never carries
+`evidence`),
 `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
 + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
 validation before coercion — name plus a valid email or phone — links one
@@ -2823,6 +2939,18 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
+Forecast evidence: `baseline_comparison` is `above|below|near` the monthly
+seasonal model. The legacy `pests[].trend` stays `up|down|flat` with
+`trend_basis: seasonal_baseline` for existing embeds; it is not a temporal
+trend. `week_over_week` is null unless the same city's same model has a
+comparable-weather snapshot exactly seven ET calendar days earlier. When
+available it carries direction, score delta, and both dates, describing
+modeled change only. `model_version` identifies the scoring model and
+`evidence.observation_validation` remains `not_validated`. Public requests
+may READ `pest_forecast_snapshots` under `GATE_PEST_FORECAST_HISTORY`, but
+never write history or read customer observations. The gated 08:15/14:15 ET
+cron captures the first successful city forecast per day. History failure
+preserves the weather outlook with unavailable comparisons.
 Note: unlike the token-gated read routes, the forecast and `/locations`
 responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
@@ -3398,8 +3526,17 @@ data — for operator preview/share. Token in path, `noindex`).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
-per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
-legacy 5-char codes still resolve).
+per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07.
+Legacy 1-7 char codes (5-char space minted 2026-04-19 → 2026-08-07, ~26
+bits) still resolve while `GATE_SHORTLINK_LEGACY_EXPIRE` is unset; with the
+gate `=== 'true'` a legacy code whose row exists answers 410 with the same
+expired page as a past `expires_at` (no telemetry bump), and a legacy code
+with no row stays the generic 404 — so the gate never turns an unknown code
+into an existence oracle. Independently of the gate, a re-send never reuses
+a legacy code for its entity: `existingShortUrlFor` mints a fresh 10-char
+code instead; send-reconciliation readers that search historical bodies use
+`allShortUrlsFor`, which returns every code ever minted for the entity,
+legacy and replacement alike).
 `/go/:code` (outside-link click redirect for prep-guide links to third-party
 sites — 302 to the registered destination / generic 404 with no enumeration
 leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status

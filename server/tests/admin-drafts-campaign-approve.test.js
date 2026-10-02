@@ -147,6 +147,7 @@ beforeEach(() => {
   // Draft finalization may run in a transaction (upsell pitched flip) — the
   // trx handle reuses the same table-keyed queue machinery.
   db.transaction = jest.fn(async (fn) => fn(db));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings })); // the review-provenance stamp (flags.review_verdict)
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_real_sid' });
   mockGates.campaignDrafts = true;
   mockGates.smsGratitudeReplies = false;

@@ -169,13 +169,10 @@ function buildAiSummary(personality) {
 
 // Shape the raw pest-forecast payload (pest-forecast/forecast.js) into a compact
 // "what to expect this season" card: the lead summary, this month's weather line,
-// and the 2–3 pests most worth watching (rising first, then highest level).
+// and the 2–3 highest modeled levels. Baseline deltas are not time trends.
 function buildForecast(forecast) {
   if (!forecast || !Array.isArray(forecast.pests) || !forecast.pests.length) return null;
   const ranked = [...forecast.pests].sort((a, b) => {
-    const aUp = a.trend === 'up' ? 1 : 0;
-    const bUp = b.trend === 'up' ? 1 : 0;
-    if (aUp !== bUp) return bUp - aUp;
     const aRank = LEVEL_RANK[a.level] ?? 0;
     const bRank = LEVEL_RANK[b.level] ?? 0;
     if (aRank !== bRank) return bRank - aRank;
@@ -187,6 +184,8 @@ function buildForecast(forecast) {
     emoji: p.emoji || null,
     level: p.level || null,
     trend: p.trend || null,
+    baselineComparison: p.baseline_comparison || null,
+    weekOverWeek: p.week_over_week || null,
     note: p.note || null,
   }));
   return {

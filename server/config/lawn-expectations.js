@@ -124,6 +124,9 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Atticus Talak', FAMILY.INSECTICIDE],
   ['Atticus Talak 7.9 F', FAMILY.INSECTICIDE],
   ['Talak 7.9 F', FAMILY.INSECTICIDE],
+  // "Talstar P" is the office's name for Talak (bifenthrin, 96 oz); 9 confirmed
+  // lawn visits in the 10-02 P13 replay carried it unmapped.
+  ['Talstar P', FAMILY.INSECTICIDE],
   ['Arena 50 WDG', FAMILY.INSECTICIDE],
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],

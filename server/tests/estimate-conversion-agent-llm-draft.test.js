@@ -20,6 +20,8 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   buildLiveEtaSnapshot: jest.fn(() => null),
   // Round-42: the lane also persists the draft's technician first names (none in these fixtures).
   techNamesFromContext: jest.fn(() => []),
+  visitLoopCommitmentIds: jest.fn(() => []),
+  visitLoopStatus: jest.fn(() => null),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's
@@ -340,7 +342,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
     });
 
     // Codex round-16 P2: the opt-in also requires the release gate (gate-off is byte-identical).
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false });
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false, includeVisitLoops: true });
 
     ContextAggregator.getContextForCustomer.mockClear();
     const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
@@ -351,7 +353,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
         body: 'Hello what happened this morning',
         decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
       });
-      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true, includeVisitLoops: true });
     } finally {
       if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
     }

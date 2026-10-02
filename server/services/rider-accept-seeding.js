@@ -24,6 +24,7 @@
  * accept can host a rider.
  */
 const logger = require('./logger');
+const { deferredCommitScope } = require('../utils/trx-commit-promise');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const HORIZON_DAYS = 730;
@@ -193,13 +194,13 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
 // stop). Otherwise the savepoint rolls back and the normal walk is seeded.
 // No rider = the normal seed, untouched. `seed(conn, overrideDates|null,
 // commitScope|null)`. Inside the savepoint the seeder's post-commit work (tier
-// sync, shortfall bell, coverage alerts) waits on rideCommitScope: it fires
+// sync, shortfall bell, coverage alerts) waits on deferredCommitScope: it fires
 // only when the ride is KEPT and the caller's transaction then commits. A
 // rolled-back ride rejects it, so nothing is filed for rows that were thrown
 // away — the fallback walk's own seed files its own.
 async function seedWithRide(conn, parentRow, rider, seed) {
   if (!rider) return { seedResult: await seed(conn, null, null), rides: false };
-  const scope = rideCommitScope(conn);
+  const scope = deferredCommitScope(conn);
   try {
     const seedResult = await conn.transaction(async (sp) => {
       const result = await seed(sp, rider.overrideDates, scope);
@@ -215,20 +216,6 @@ async function seedWithRide(conn, parentRow, rider, seed) {
     logger.warn(`[rider-accept] rider ${parentRow.id} does not ride (${err.message}) — seeding the quarterly walk`);
     return { seedResult: await seed(conn, null, null), rides: false };
   }
-}
-
-// A commit scope for work done inside the ride savepoint: its executionPromise
-// resolves only after keep() AND the caller's transaction commits (a pool
-// caller's ride transaction has already committed by keep()); drop() rejects
-// it. Consumers only read isTransaction / executionPromise.
-function rideCommitScope(conn) {
-  let keep;
-  let drop;
-  const kept = new Promise((resolve, reject) => { keep = resolve; drop = reject; });
-  const outerCommit = conn.isTransaction && conn.executionPromise ? conn.executionPromise : Promise.resolve();
-  const executionPromise = kept.then(() => outerCommit);
-  executionPromise.catch(() => {});
-  return { isTransaction: true, executionPromise, keep: () => keep(), drop: (err) => drop(err) };
 }
 
 // Live plan rows of the given series — the one shared reader

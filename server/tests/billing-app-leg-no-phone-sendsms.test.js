@@ -28,6 +28,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate !== 'smsGratitudeReplies'),
   gateEnvValue: jest.fn(() => false),
   gateEnvTimestamp: jest.fn(() => null),
+  homeLineLive: jest.fn(() => false),
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-sms-templates', () => ({ isTemplateActive: jest.fn(async () => true) }));

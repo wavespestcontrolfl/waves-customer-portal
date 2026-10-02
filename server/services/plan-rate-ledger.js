@@ -597,6 +597,11 @@ module.exports = {
   acceptedRecurringBillingLines,
   estimateFamilySlices,
   loadComponents,
+  // One family slice (insert-or-merge). Exported for the annual rate review
+  // apply lane (services/rate-review-apply.js), which moves ONE family's
+  // slice by a noticed delta under source 'annual_review' — a non-manual
+  // source by design (see MANUAL_RATE_SOURCES below).
+  upsertComponent,
   applyAcceptToLedger,
   resetLedgerToScalar,
   syncScalarWriteToLedger,

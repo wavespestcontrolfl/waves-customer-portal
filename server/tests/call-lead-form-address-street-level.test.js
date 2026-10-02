@@ -742,7 +742,9 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(lock).toBeGreaterThan(0);
     expect(recheck).toBeGreaterThan(proc.indexOf('await lockTriageCall(trx, call.id);', lock));
     expect(write).toBeGreaterThan(recheck);
-    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;");
+    // The street-level reason is still filtered by the lock-time recheck (the
+    // owed-first-name reason rides the same filter since #5559).
+    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)");
     // Every other reason still opens review as before.
     expect(proc).not.toContain('...(bridgeNeedsConfirmation.length || schedulingChangeHeld ||');
   });

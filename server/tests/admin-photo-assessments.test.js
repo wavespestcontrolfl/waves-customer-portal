@@ -230,6 +230,48 @@ describe('GET / (list)', () => {
   });
 });
 
+describe('GET /customer/:type/:id (customer app Photo ID diagnostics)', () => {
+  const ID = '11111111-2222-4333-8444-555555555555';
+  test('tree_shrub returns result_v2 and v2_internal, scoped to customer mode', async () => {
+    mockRows.tree_shrub_assessments = [{
+      id: ID, mode: 'customer', customer_id: 'cust-1', created_at: '2026-10-02T00:00:00Z',
+      result_v2: JSON.stringify({ kind: 'workup', answer: { headline: 'Yellowing fronds' } }),
+      v2_internal: JSON.stringify({ ladder: 'gemini_only', escalation_reasons: [] }),
+    }];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/customer/tree_shrub/${ID}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        type: 'tree_shrub', customer_id: 'cust-1',
+        v2: { kind: 'workup' }, internal: { ladder: 'gemini_only' },
+      });
+    });
+    expect(whereCalls).toContainEqual({ table: 'tree_shrub_assessments', cond: { id: ID, mode: 'customer' } });
+  });
+
+  test('lawn reads v2 from report_contract and internal from ai_analysis', async () => {
+    mockRows.lawn_diagnostics = [{
+      id: ID, mode: 'customer',
+      report_contract: JSON.stringify({ v2: { kind: 'workup', answer: { headline: 'Brown patches in the lawn' } } }),
+      ai_analysis: JSON.stringify({ engine: 'v2', internal: { ladder: 'gemini_only' } }),
+    }];
+    await withServer(async (base) => {
+      const body = await fetch(`${base}/api/admin/photo-assessments/customer/lawn/${ID}`).then((r) => r.json());
+      expect(body).toMatchObject({ v2: { kind: 'workup' }, internal: { ladder: 'gemini_only' } });
+    });
+  });
+
+  test('unknown type, malformed id, or a missing row is a 404', async () => {
+    mockRows.lawn_diagnostics = [];
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/api/admin/photo-assessments/customer/bogus/${ID}`)).status).toBe(404);
+      expect((await fetch(`${base}/api/admin/photo-assessments/customer/lawn/not-a-uuid`)).status).toBe(404);
+      expect((await fetch(`${base}/api/admin/photo-assessments/customer/lawn/${ID}`)).status).toBe(404);
+    });
+  });
+});
+
 describe('GET /:type/:id (detail)', () => {
   test('returns tech view + customer preview + signed photo URLs for pest', async () => {
     mockRows.pest_identifications = [pestRow()];

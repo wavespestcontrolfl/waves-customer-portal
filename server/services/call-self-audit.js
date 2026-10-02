@@ -17,7 +17,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled, typedDecisionsLive } = require('../config/feature-gates');
+const { isEnabled, typedDecisionsLive, typedDecisionsClefLive } = require('../config/feature-gates');
 const { createDeepMessage } = require('./llm/deep');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -66,15 +66,25 @@ function compactDirection(direction) {
 
 // Shadow: put the same call to TypeSafe Jev (call_judge.v2) and record its
 // answers beside production's and the deep judge's in decision_reviews. Dark
-// behind GATE_TYPED_DECISIONS. Never throws and never touches the audit's own
-// findings or counters; it only tallies into `tally` ({ asked, recorded, failed }
-// counts calls, not rows).
+// behind GATE_TYPED_DECISIONS. With GATE_TYPED_DECISIONS_CLEF also on, the
+// same package goes to Cloudflare Clef as a second leg and each provider's
+// rows carry the other's answers (siblingAnswers), so a case where they
+// differ queues both for the reviewer. Never throws and never touches the
+// audit's own findings or counters; it only tallies into `tally`
+// ({ asked, recorded, failed } counts calls, not rows; `tally.clef` holds the
+// second leg's own counts and exists only while that gate is on).
 const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
 async function shadowJevJudge(call, prod, verdict, tally) {
   if (!typedDecisionsLive()) return;
+  const clef = typedDecisionsClefLive();
   tally.asked++;
-  const outcome = await askAndRecord(call, prod, verdict);
-  if (outcome === 'recorded') tally.recorded++; else tally.failed++;
+  if (clef) {
+    tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 };
+    tally.clef.asked++;
+  }
+  const outcome = await askAndRecord(call, prod, verdict, clef);
+  if (outcome.typesafe === 'recorded') tally.recorded++; else tally.failed++;
+  if (clef) { if (outcome.cloudflare === 'recorded') tally.clef.recorded++; else tally.clef.failed++; }
 }
 
 // What the production extraction recorded for the call_judge fields.
@@ -89,29 +99,59 @@ function productionAnswers(call) {
   };
 }
 
-async function askAndRecord(call, prod, verdict) {
+// One call to every live provider, then one record per provider that
+// answered, each handed the others' answers. Returns { typesafe, cloudflare }
+// as 'recorded' | 'failed' (cloudflare only when asked).
+async function askAndRecord(call, prod, verdict, clef = false) {
+  const outcome = { typesafe: 'failed', ...(clef ? { cloudflare: 'failed' } : {}) };
   try {
     const { askPackage } = require('./typed-decisions/jev');
     const { packageFor } = require('./typed-decisions/packages');
     const { recordDecisions } = require('./typed-decisions/shadow-recorder');
     const { callSubjectHash, callTranscriptSpan } = require('./typed-decisions/subject-hash');
-    const result = await askPackage('call_judge.v2', {
+    const state = {
       call_direction: compactDirection(call.direction),
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
-    });
-    if (!result.ok) return 'failed';
+    };
+    const providers = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
+    const legs = await Promise.all(providers.map(async (provider) => {
+      try {
+        const result = provider === 'typesafe' ? await askPackage('call_judge.v2', state) : await askPackage('call_judge.v2', state, { provider });
+        return result && result.ok ? { provider, result } : null;
+      } catch (err) {
+        logger.warn(`[self-audit] ${provider} shadow ask failed for ${call.id}: ${err.message}`);
+        return null;
+      }
+    }));
+    const answered = legs.filter(Boolean);
+    if (!answered.length) return outcome;
     const bool = (v) => (typeof v === 'boolean' ? v : undefined);
     const baselines = { complaint: { deep_judge: bool(verdict.complaint) } };
     for (const f of JEV_SHARED_FIELDS) baselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-    const recorded = await recordDecisions({
-      capability: 'call_judge', pkg: packageFor('call_judge.v2'), subjectType: 'call_log', subjectId: call.id, result, baselines,
-      subjectHash: callSubjectHash(call.transcription),
-    });
-    return recorded.recorded > 0 ? 'recorded' : 'failed';
+    const subjectHash = callSubjectHash(call.transcription);
+    await Promise.all(answered.map(async ({ provider, result }) => {
+      try {
+        const siblingAnswers = {};
+        for (const other of answered) {
+          if (other.provider === provider) continue;
+          for (const [questionId, answer] of Object.entries(other.result.answers || {})) {
+            (siblingAnswers[questionId] = siblingAnswers[questionId] || []).push(answer);
+          }
+        }
+        const recorded = await recordDecisions({
+          capability: 'call_judge', pkg: packageFor('call_judge.v2'), provider, subjectType: 'call_log', subjectId: call.id, result, baselines,
+          siblingAnswers, subjectHash,
+        });
+        outcome[provider] = recorded.recorded > 0 ? 'recorded' : 'failed';
+      } catch (err) {
+        logger.warn(`[self-audit] ${provider} shadow record failed for ${call.id}: ${err.message}`);
+      }
+    }));
+    return outcome;
   } catch (err) {
     logger.warn(`[self-audit] jev shadow failed for ${call.id}: ${err.message}`);
-    return 'failed';
+    return outcome;
   }
 }
 

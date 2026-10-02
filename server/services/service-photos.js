@@ -9,6 +9,7 @@ const {
   latestPhotoChainEntry,
 } = require('./service-report/photo-chain');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
+const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 
 const SERVICE_PHOTO_PREFIX = 'service-photos/';
 const STAGED_SERVICE_PHOTO_PREFIX = 'service-photo-staging/';
@@ -200,6 +201,9 @@ async function uploadServicePhotoBuffer({
     'state_badge',
     'zone_id',
     'captured_at',
+    // Hashed into the chain payload (photo-chain.js), so the hash computed
+    // here must see the value the validator will read back.
+    'ai_tags',
     'image_sha256',
     'hash_sha256',
     'prev_hash_sha256',
@@ -444,6 +448,70 @@ async function promoteStagedPhotosForCompletedVisit({ scheduledServiceId, knex =
   return { serviceRecordId: serviceRecord.id, photos };
 }
 
+// A photo taken before the visit is completed waits in staging; its
+// technician (or an admin) can change its description or remove it from the
+// notes box until the visit is completed (GATE_NOTE_BOX_PHOTOS, owner "ok go"
+// 2026-10-02 on the Fast Complete mockup v8). Completion locks the visit row
+// and promotes the staged photos into the record under that lock, so a change
+// takes the same lock first: it lands before the completion reads the photo,
+// or finds the visit completed and changes nothing.
+const STAGED_PHOTO_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, actor }) {
+  if (!STAGED_PHOTO_ID_RE.test(String(scheduledServiceId)) || !STAGED_PHOTO_ID_RE.test(String(photoId))) {
+    return { error: { status: 404, code: 'photo_not_found' } };
+  }
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id', 'technician_id');
+  if (!visit) return { error: { status: 404, code: 'service_not_found' } };
+  if (actor?.techRole !== 'admin' && visit.technician_id !== actor?.technicianId) {
+    return { error: { status: 403, code: 'not_assigned' } };
+  }
+  const record = await trx('service_records').where({ scheduled_service_id: scheduledServiceId }).first('id');
+  if (record) return { error: { status: 409, code: 'visit_completed' } };
+  const photo = await trx('scheduled_service_photo_staging')
+    .where({ id: photoId, scheduled_service_id: scheduledServiceId })
+    .forUpdate()
+    .first();
+  if (!photo) return { error: { status: 404, code: 'photo_not_found' } };
+  return { photo };
+}
+
+async function updateStagedServicePhotoCaption({ scheduledServiceId, photoId, caption, actor, knex = db }) {
+  const clean = sanitizeCustomerFacingPhotoCaption(caption);
+  return withPhotoDbTransaction(knex, async (trx) => {
+    const locked = await lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, actor });
+    if (locked.error) return locked;
+    const [photo] = await trx('scheduled_service_photo_staging')
+      .where({ id: photoId })
+      .update({ caption: clean, updated_at: new Date() })
+      .returning('*');
+    return { photo };
+  });
+}
+
+async function deleteStagedServicePhoto({ scheduledServiceId, photoId, actor, knex = db }) {
+  const result = await withPhotoDbTransaction(knex, async (trx) => {
+    const locked = await lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, actor });
+    if (locked.error) return locked;
+    await trx('scheduled_service_photo_staging').where({ id: photoId }).del();
+    return { photo: locked.photo };
+  });
+  // The file goes once its row is gone for good: a failed delete leaves an
+  // orphaned file (logged), never a photo row pointing at nothing.
+  if (result.photo?.s3_key) await deleteUploadedObject(result.photo.s3_key);
+  return result;
+}
+
+// A Fast Complete slot key rides in ai_tags as { slot }, merged over any
+// object tags the caller sent. Only a known key is stored; anything else is
+// dropped, and the tags are left exactly as sent.
+function withPhotoSlot(aiTags, slot) {
+  const known = normalizeTreeShrubPhotoSlot(slot);
+  if (!known) return aiTags;
+  const parsed = parseJsonOrNull(aiTags);
+  const base = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  return { ...base, slot: known };
+}
+
 async function uploadServicePhotoDataUrls({
   serviceRecordId,
   photos = [],
@@ -471,7 +539,7 @@ async function uploadServicePhotoDataUrls({
         capturedAt: photo.capturedAt,
         device: photo.device,
         appVersion: photo.appVersion,
-        aiTags: photo.aiTags,
+        aiTags: withPhotoSlot(photo.aiTags, photo.slot),
         annotation: photo.annotation,
         knex,
       });
@@ -509,6 +577,8 @@ module.exports = {
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
   uploadStagedServicePhotoBuffer,
+  updateStagedServicePhotoCaption,
+  deleteStagedServicePhoto,
   promoteStagedServicePhotos,
   promoteStagedPhotosForCompletedVisit,
 };

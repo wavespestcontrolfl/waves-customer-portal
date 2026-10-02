@@ -6,6 +6,7 @@ import {
   batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
+  combinedReminderControls,
   combinedReminderSummary,
   followupActionErrorMessage,
   followupSendNowPlan,
@@ -453,6 +454,58 @@ describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () 
     const dated = combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" });
     expect(dated).toMatch(/^On combined reminders with 3 invoices for this customer\. Next: the 60-day reminder on .+ ET\.$/);
     expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
+  });
+
+  it("combined controls: pause while reminders run, resume while paused, never a release", () => {
+    const live = { ...customerSchedule, customerId: "cust-1", controllable: true };
+    for (const status of ["active", "held", "autopay_hold"]) {
+      const controls = combinedReminderControls({ ...live, status });
+      expect(controls.map((c) => c.control)).toEqual(["pause"]);
+      expect(controls[0].label).toBe("Pause combined");
+      expect(controls[0].promptText).toMatch(/^Why pause combined reminders for this customer\?/);
+    }
+    expect(combinedReminderControls({ ...live, status: "paused" }).map((c) => c.label)).toEqual(["Resume combined"]);
+    // a released customer is combined again by the next run, so the panel never offers it
+    for (const status of ["active", "held", "autopay_hold", "paused"]) {
+      expect(combinedReminderControls({ ...live, status }).map((c) => c.control)).not.toContain("release");
+    }
+  });
+
+  // Codex #5593 r1 P1: a schedule can stay open after the gate, a prerequisite or the allowlist turns off.
+  it("combined controls: none unless the server says the schedule is controllable, and none without the customer id", () => {
+    expect(combinedReminderControls(null)).toEqual([]);
+    // an older server response: no customer id, no controllable flag
+    expect(combinedReminderControls(customerSchedule)).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1" })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1", controllable: false })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1", controllable: false, status: "paused" })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, controllable: true })).toEqual([]);
+  });
+
+  // Codex #5593 r1 P2: Resume clears the stored reason, so the panel says why before anyone presses it.
+  it("a paused schedule says why, on the panel line and in the Resume confirm: the office's words or the system's reason", () => {
+    const paused = { ...customerSchedule, customerId: "cust-1", controllable: true, status: "paused" };
+    const byStaff = { ...paused, pausedBy: "staff", pausedReason: "customer will pay Friday" };
+    expect(combinedReminderSummary(byStaff)).toBe(
+      'On combined reminders with 3 invoices for this customer. Combined reminders are paused (by the office: "customer will pay Friday").',
+    );
+    expect(combinedReminderControls(byStaff)[0].confirmText).toBe(
+      'Resume combined reminders for this customer? They were paused by the office: "customer will pay Friday".',
+    );
+    const bySystem = { ...paused, pausedBy: "system", pausedReason: "there is no way to reach them" };
+    expect(combinedReminderSummary(bySystem)).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused (automatically: there is no way to reach them).",
+    );
+    expect(combinedReminderControls(bySystem)[0].confirmText).toBe(
+      "Resume combined reminders for this customer? They were paused automatically: there is no way to reach them.",
+    );
+    // no reason from the server: still a confirm, no made-up reason
+    expect(combinedReminderControls({ ...paused, pausedBy: "staff", pausedReason: null })[0].confirmText).toBe(
+      "Resume combined reminders for this customer?",
+    );
+    expect(combinedReminderSummary({ ...paused, pausedReason: null })).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused.",
+    );
   });
 
   // Codex local review P2: the server omits the count (null) when it cannot read the balance in time; the

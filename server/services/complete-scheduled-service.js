@@ -2703,6 +2703,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // property, catalog service, type, date, address) — OPTIONAL. Sent by
       // the tech Fast Complete sheet; re-checked on the locked row below.
       expectedVisit = null,
+      // The saved trace the Fast Complete report flow judged the report
+      // against: its updated_at, or null for none — OPTIONAL. Undefined (every
+      // other caller) skips the check. Re-checked under the visit row lock.
+      traceSeen,
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -3358,8 +3362,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const rulesBlock = reportRulesReviewBlockPayload({
         isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
       });
+      // A same-key retry of a recorded attempt already got past the heads-up
+      // (it answers before any claim): asking again would make the retry
+      // carry reportRulesConfirmed, a request the attempt's hash refuses.
       if (rulesBlock
-        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCompletionAttemptForKey(
+          svc.id, completionInput.idempotencyKey || bodyIdempotencyKey, k,
+        ), true))) {
         return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
@@ -3379,6 +3389,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // aborts the closeout (Codex #5516; waves-db failSoftRead).
         return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
       })().catch(() => []);
+      // Only a committed completion skips it (its report already went out).
+      // An uncommitted retry is asked again, even under the same key: the
+      // promise may have changed since that attempt failed, and its
+      // confirmation is outside the request hash (completion-attempts.js),
+      // so answering never strands the retry (codex local r15 on #5538).
       if (stalePromiseIds.length
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: 409, body: {
@@ -3924,6 +3939,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const treeShrubTechFindingsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
       ? freezeTechFindings(completionInput.body?.treeShrubReview)
       : null;
+    // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
+    // is checked against the one link rule (report-blog-post.js) and its
+    // title and live URL frozen, so the report shows the post the customer
+    // was sent to on the day. Gated here too: with the switch off a stale or
+    // crafted client cannot keep it alive. An optional read: in a grouped
+    // closeout `db` is the packet's transaction, so it runs in a savepoint,
+    // and a failed read is a pick that cannot be verified (refused below).
+    // Every service but WDO, termite pre-treat, lawn and tree, shrub & palm
+    // (owner ruling 2026-10-02; blogPostAllowedFor is the search route's rule
+    // too): a post sent for any other visit is ignored, never frozen.
+    const ReportBlogPost = require('../services/service-report/report-blog-post');
+    const blogPostPick = require('../config/feature-gates').reportBlogPostLive()
+      && ReportBlogPost.blogPostAllowedFor({ serviceType: svc.service_type, profile: completionProfile })
+      ? await ReportBlogPost.resolveReportBlogPostPick(
+        (reader) => failSoftRead(db, reader, null),
+        completionInput.body?.blogPostId,
+      )
+      : { post: null, rejected: false };
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -4303,6 +4336,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
         code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      } });
+    }
+    // A blog post that is no longer live on the site (unpublished, moved,
+    // never live) is an actionable 400 for a fresh attempt, before any write,
+    // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && blogPostPick.rejected) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('blog_post_unavailable'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'That blog post is not live on the Waves site right now. Pick another or remove it, then complete.',
+        code: 'BLOG_POST_UNAVAILABLE',
       } });
     }
     // GATE_TS_TECH_FINDINGS_COPY: an edited finding prints verbatim, so its
@@ -5676,6 +5723,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
+          // The trace the report flow judged (Codex #5538): a trace saved or
+          // replaced since from another tab or device would publish a map the
+          // record was never judged against (a perimeter over spot
+          // treatments). Read under this row lock, which every trace save
+          // takes too (treatment-zone-maps.js), so a save either committed
+          // first and is seen here, or waits for this completion.
+          // With the map gate dark the sheet cannot see a trace, so nothing is
+          // compared; the record still freezes what it was judged against
+          // (traceJudged below), and its report never shows a trace it
+          // never saw.
+          if (traceSeen !== undefined && lockedSvcRow && isEnabled('treatmentZoneMap')) {
+            const traceNow = await trx.transaction(async (sp) => sp('treatment_zone_maps')
+              .where({ scheduled_service_id: svc.id })
+              .first('updated_at'));
+            const stamp = (value) => (value == null ? null : new Date(value).getTime());
+            if (stamp(traceSeen) !== stamp(traceNow?.updated_at)) {
+              throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6065,6 +6131,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // The trace the report flow judged this record against (its
+            // updated_at, or null for none): the report shows only that one
+            // (treatment-zone-maps.js traceJudgedAllows).
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6185,6 +6255,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formObservations,
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
+            ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -6360,6 +6431,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
               : {}),
           };
+          // Re-service report card (services/service-report/reservice-report-card.js,
+          // GATE_RESERVICE_REPORT_CARD): the customer's booking words
+          // (scheduled_services.customer_request / _source / _pests) freeze
+          // onto the record HERE, from the LOCKED row, so a later edit of the
+          // booking can never rewrite what the permanent report says the
+          // customer told us. Frozen whether or not the card gate is on yet
+          // (a gate flip must not strand visits completed while it was dark);
+          // inert data until the card renders. Callbacks with something on
+          // file only; the helper is pure and returns null otherwise. A
+          // backdated backlog closeout (backfill) never freezes: the booking
+          // words may have been edited since the real visit, and a record
+          // completed without the freeze carries no request (Codex r11).
+          const frozenReserviceRequest = isBackfillCompletion ? null
+            : require('../services/service-report/reservice-report-card')
+              .freezeReserviceRequest(lockedSvcRow || svc);
+          if (frozenReserviceRequest) serviceData.reserviceRequest = frozenReserviceRequest;
           // Freeze the appointment's add-on line identities with the
           // completion (codex P2 on #3189): schedule add-on rows are
           // MUTABLE after completion (the update-details route replaces
@@ -6413,6 +6500,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (primaryFreezeTrusted && primaryIdentityFreezable(frozenCompletionProfile || {})) {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          }
+          // The blog post was judged on the pre-lock identity (Codex #5547):
+          // a repoint since to a service that carries none (WDO, pre-treat,
+          // a report the customer never gets) drops it, and so does an
+          // identity the re-resolve could not establish.
+          if (structuredNotes.blogPost && (!primaryFreezeTrusted
+            || !require('../services/service-report/report-blog-post').blogPostAllowedFor({
+              serviceType: lockedSvcRow ? lockedSvcRow.service_type : svc.service_type,
+              profile: frozenCompletionProfile,
+            }))) {
+            delete structuredNotes.blogPost;
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the
@@ -6879,9 +6977,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
               || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
-                .where({ scheduled_service_id: svc.id })
-                .first()));
+              // A report-flow completion counts only the trace it judged
+              // (traceSeen): one it never saw drives no exterior timer
+              // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
+                const row = await sp('treatment_zone_maps')
+                  .where({ scheduled_service_id: svc.id })
+                  .first();
+                return !!row && require('./treatment-zone-maps').traceJudgedAllows(judged, row);
+              });
             } catch (traceErr) {
               // Only the EXPECTED missing-table case means "no trace". Any
               // other failure (timeout, permissions) fails CLOSED by
@@ -7796,6 +7901,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
             code: 'visit_identity_changed',
+          } });
+        }
+        if (err && err.code === 'trace_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
+            code: 'trace_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
@@ -14416,6 +14528,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // from the service recipient. Keep id/status/total for display only.
       // (mirrors the track-public.js token suppression)
       invoiceToken: invoice && !invoice.payer_id ? (invoice.token || null) : null,
+      // The same Bill-To read, for display: a payer-billed invoice is the
+      // payer's (AP) to pay, so the tech sheet never shows it as the
+      // customer's balance.
+      invoicePayerBilled: !!invoice?.payer_id,
       invoiceStatus: invoice?.status || null,
       reportUrl,
       invoicePaymentActionRequired,

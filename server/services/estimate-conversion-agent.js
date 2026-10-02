@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { greetingFirstToken } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -135,7 +136,8 @@ function classifyEstimateSmsIntent(body, context = {}) {
 
   blockedActions.push('create_subscription', 'charge_card');
 
-  const firstName = firstNameFrom(context.customer?.first_name || context.estimate?.customer_name);
+  const firstName = firstNameFrom(context.customer?.first_name
+    || greetingFirstToken({ customerName: context.estimate?.customer_name, customer: context.customer }));
   let suggestedMessage = null;
   if (homeQuestion && scheduleWindow) {
     suggestedMessage = `Hello ${firstName}! You do not need to be home for the first visit as long as we have access to the exterior areas. I can look at openings for that week and send you the best available options.`;
@@ -254,7 +256,7 @@ function classifyCustomerSmsTriageIntent(body, context = {}) {
   const hasKnownContext = !!context.customer || !!context.estimate || !!context.lead;
   const firstName = firstNameFrom(
     context.customer?.first_name
-      || context.estimate?.customer_name
+      || greetingFirstToken({ customerName: context.estimate?.customer_name, customer: context.customer })
       || context.lead?.first_name
   );
   const blockedActions = ['send_without_human_review', 'create_subscription', 'charge_card'];
@@ -590,7 +592,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // generateGroundedDraft below) — one of the two SMS drafting paths that
     // actually surfaces the LIVE ETA fact — so it opts in explicitly rather
     // than relying on getContextForCustomer's default (no LIVE ETA lookup).
-    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS'), includeVisitLoops: true });
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -688,6 +690,9 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
       // Technician first name(s) independent of live entries (round-42 P2).
       techNames: drafter.techNamesFromContext(context),
+      // PR #5499 r1: open call_commitments ids its VISIT STATUS & OPEN LOOPS lines named.
+      visitLoopCommitmentIds: drafter.visitLoopCommitmentIds(context, factsBlock),
+      visitLoopStatus: drafter.visitLoopStatus(context, factsBlock),
       reserviceLanesSnapshot,
       reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
@@ -821,6 +826,9 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
         ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
         ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
+        ...(Array.isArray(llmDraft?.visitLoopCommitmentIds) && llmDraft.visitLoopCommitmentIds.length
+          ? { visit_loop_commitment_ids: llmDraft.visitLoopCommitmentIds } : {}),
+        ...(llmDraft?.visitLoopStatus ? { visit_loop_status: llmDraft.visitLoopStatus } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
