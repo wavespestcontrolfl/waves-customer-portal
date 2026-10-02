@@ -44,7 +44,7 @@ test('only scheduling texts are counted, and each is tied to what followed it', 
   expect(summary.per_week).toEqual({ '2026-09-28': 3 });
   expect(summary.followed_within_48h).toEqual({ any: 2, moves: 1, cancels_or_skips: 1, new_bookings: 0 });
   expect(summary.person_replied).toBe(2);
-  expect(summary.person_reply_median_minutes).toBe(120);
+  expect(summary.person_reply_median_minutes).toBe(75); // the mean of the middle two (30, 120)
   expect(summary.offers).toBeNull();
 });
 

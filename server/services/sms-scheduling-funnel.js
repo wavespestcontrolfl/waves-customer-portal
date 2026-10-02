@@ -61,7 +61,8 @@ function firstWithin(times, from, to) {
 function median(values) {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 // The ledger's rows by kind and state. An offer still marked open past its
