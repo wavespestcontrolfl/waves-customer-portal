@@ -1279,6 +1279,39 @@ function classifySavedMethodChargeInvoice(freshInvoice) {
 // never sit silently unpaid. Idempotent: the charge service's durable
 // claim fences a concurrent in-flow executor, and every outcome resolves
 // the stamp.
+// The authorization evidence a stranded prepay job may recover under
+// (codex #5434 r1 P1): `recordable` — the job's attested consent text
+// version is still the current text, so the sweep may (re)record the prepay
+// authorization from the current copy (the accept's idempotent no-op path).
+// Otherwise (a deploy landed between the accept and this recovery, or the
+// job predates persisted versions) the sweep must never manufacture a
+// current-version consent the customer never read: it proceeds only on the
+// customer's own authorization row — recorded by the accept under THAT
+// version (looked up by version; by any version for an unstamped job) since
+// the authorization moment — and otherwise throws into the sweep's
+// deterministic pay-link fallback + office alert, where the customer
+// authorizes on-session.
+async function resolvePrepayRecoveryAuthorization(job, customerId) {
+  const { renderedConsentVersionIsCurrent } = require('./payment-method-consent-text');
+  const version = typeof job?.consent_text_version === 'string' && job.consent_text_version ? job.consent_text_version : null;
+  if (renderedConsentVersionIsCurrent(version)) return { recordable: true, version };
+  const since = (job?.authorized_at || job?.created_at) ? new Date(job.authorized_at || job.created_at) : null;
+  const onRecord = job?.stripe_payment_method_id
+    ? await require('./payment-method-consents').hasConsentSnapshotForVariant(customerId, job.stripe_payment_method_id, {
+      source: 'estimate_accept',
+      // The PREPAY authorization specifically (codex #5434 r3 P1) — never a
+      // base consent the recurring-card backstop recorded for the method.
+      variant: 'prepay_card',
+      ...(version ? { version } : { anyVersion: true }),
+      ...(since && !Number.isNaN(since.getTime()) ? { since } : {}),
+    })
+    : false;
+  if (!onRecord) {
+    throw new Error(`consent text version ${version || 'unstamped'} is no longer current and no authorization row exists for this acceptance — delivering pay link`);
+  }
+  return { recordable: false, version };
+}
+
 async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStaleMinutes = 60, limit = 20 } = {}) {
   // The kill switch stops NEW quoting/charging, but committed jobs must
   // still drain (pre-push Codex P0 r6): with the gate off, a stranded
@@ -1657,13 +1690,28 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // webhook backstop skips accepted prepay terms — idempotently
       // complete the save → prepay consent → enrollment here from the
       // job's persisted SetupIntent context, then charge the enrolled row.
+      // The authorization the customer actually gave (codex #5434 r1 P1): the
+      // job carries the consent text version the accept attested. While that
+      // is still the current text, recovery may (re)record the prepay
+      // authorization from the current copy — the idempotent no-op path.
+      // Under an older version (a deploy landed between the accept and this
+      // recovery) — or no stamp (a job written before versions were
+      // persisted) — recovery NEVER records current-version consent the
+      // customer never read: it proceeds only on the customer's own
+      // authorization row (recorded by the accept under that version), and
+      // otherwise routes to the deterministic pay-link fallback + office
+      // alert, where the customer authorizes on-session.
+      const { recordable: jobConsentVersionCurrent } = await resolvePrepayRecoveryAuthorization(job, invoice.customer_id);
       if (!pmRow && job.setup_intent_id && job.stripe_payment_method_id) {
         const enrollment = await completeRecurringCardEnrollment({
           customerId: invoice.customer_id,
           stripePaymentMethodId: job.stripe_payment_method_id,
           setupIntentId: job.setup_intent_id,
           estimateId: row.id,
-          consentVariant: 'prepay_card',
+          // The prepay variant is (re)recorded from the current copy only
+          // while the attested version is current; otherwise the customer's
+          // own prior row (verified above) is the authorization of record.
+          consentVariant: jobConsentVersionCurrent ? 'prepay_card' : null,
           // Same stamped payer scope as the existing-row enrollment and the
           // charge guard (Codex r15): a self_pay_override visit on a
           // payer-billed account must not have this recovery enrollment
@@ -1692,7 +1740,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // the tender-correct prepay variant. FAIL CLOSED like the accept —
       // no immutable authorization row, no charge; defer and the
       // stale-claim lease retries.
-      if (pmRow) {
+      if (pmRow && jobConsentVersionCurrent) {
         try {
           const ConsentService = require('./payment-method-consents');
           const consentMethodType = pmRow.method_type || 'card';
@@ -2085,6 +2133,7 @@ function acceptDiscardsBindableCapture(policy) {
 }
 
 module.exports = {
+  resolvePrepayRecoveryAuthorization,
   ACCEPTED_NO_CAPTURE_MARKER,
   acceptDiscardsBindableCapture,
   normalizeCollectionTender,

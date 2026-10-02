@@ -30,6 +30,9 @@ export default function SaveCardConsent({
   checked,
   onChange,
   locked = false,
+  // Momentarily uninteractive (a charge or an intent sync in flight): the
+  // choice must not diverge from the PaymentIntent's consent stamp mid-flight.
+  disabled = false,
   methodType = 'card',
   headline,
   style,
@@ -90,7 +93,7 @@ export default function SaveCardConsent({
       <input
         type="checkbox"
         checked={isChecked}
-        disabled={locked}
+        disabled={locked || disabled}
         onChange={(e) => {
           if (locked) return;
           if (collapsible && !isChecked && !viewedTerms) {

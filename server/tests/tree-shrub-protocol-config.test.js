@@ -15,7 +15,7 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     // Display name was refined to "Tree & Shrub Protocol" (#1799); the
     // version string still pins the 10/10 SWFL program identity.
     expect(program.name).toMatch(/Tree & Shrub Protocol/);
-    expect(program.version).toBe('2026.06-swfl-tree-shrub-10');
+    expect(program.version).toBe('2026.09-tree-shrub-field-guide');
     expect(program.visits).toHaveLength(12);
     expect(program.notes.join('\n')).toMatch(/IRAC\/FRAC/);
     expect(program.notes.join('\n')).toMatch(/ordinance/i);
@@ -80,25 +80,18 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     const program = protocols.tree_shrub;
     const notes = program.notes.join('\n');
 
-    // The dose is a formula from the measured width (no table lookup that
-    // rounds between rows): width x width / 85 is 1.5 lb per 100 sq ft of a
-    // circular canopy to within 0.5%, and every worked example follows it.
-    const circle = (d) => 1.5 * Math.PI * (d / 2) ** 2 / 100;
-    expect(Math.abs(1 / 85 - circle(1)) / circle(1)).toBeLessThan(0.005);
-    expect(notes).toMatch(/width × width ÷ 85 lb/);
-    expect(notes).not.toMatch(/next size down/);
+    expect(notes).toMatch(/width × width ÷ 105 lb/);
     const table = [...notes.matchAll(/(\d+) ft = ([\d.]+) lb/g)].map(([, d, lb]) => [Number(d), Number(lb)]);
     expect(table.map(([d]) => d)).toEqual([6, 8, 10, 12, 14, 16, 18, 20]);
-    for (const [d, lb] of table) expect(Math.abs(lb - circle(d))).toBeLessThan(0.05);
-    expect(program.calibration.palm_fertilizer_rate).toMatch(/canopy width \(ft\) × width ÷ 85 .*20 ft = 4\.7 lb/);
+    for (const [d, lb] of table) expect(lb).toBe(Math.floor(d * d / 105 * 10) / 10);
+    expect(program.calibration.palm_fertilizer_rate).toMatch(/width × width ÷ 105/);
     expect(notes).toMatch(/Palm scout every visit/);
     expect(notes).toMatch(/never a disease name without a diagnosis/);
     expect(notes).toMatch(/do not quote a treatment on symptoms/);
     expect(notes).toMatch(/Lethal-bronzing injections are preventive only/);
-    // Every visit that carries palm fertilizer tells the tech the dose by canopy width.
-    const palmVisits = program.visits.filter((row) => /8-2-12/.test(`${row.primary}\n${row.secondary}`));
-    expect(palmVisits.map((row) => row.month)).toEqual(['Jan', 'Apr', 'May', 'Oct', 'Dec']);
-    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy width: width × width ÷ 85 lb .*20 ft = 4\.7 lb/);
+    expect(treeShrubText()).not.toMatch(/÷ 85|8-2-12/);
+    expect(visit('Jul').primary).toMatch(/0-0-16 #510513/);
+
   });
 
   test('no visit line quotes a palm injection on symptoms alone', () => {
@@ -112,9 +105,9 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     }
   });
 
-  test('documents the 9x every-6-weeks program in the rendered program notes', () => {
+  test('omits plan-only labels and scheduling filler from the reference', () => {
     const notes = protocols.tree_shrub.notes.join('\n');
-    expect(notes).toMatch(/9x program \(every 6 weeks/);
-    expect(notes).toMatch(/month it lands in/);
+    expect(notes).not.toMatch(/9x program|6x only|visit N of/);
+    expect(notes).not.toMatch(/Customers follow their scheduled appointments|Use the customer's scheduled visit month/);
   });
 });

@@ -458,6 +458,13 @@ describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
 });
 
 describe('non-lawn protocol text resolves products without lineMeta (PR r1 P2)', () => {
+  test('T&S label holds stay unselected even when the old product appeared in primary', () => {
+    const catalog = [{ id: 't', name: 'Talus IGR' }, { id: 'm', name: 'Mn Combo' }, { id: 'd', name: 'Distance IGR' }];
+    const visit = { fieldGuide: {}, primary: 'Talus IGR held: residential use prohibited\nMn Combo: exact container label needed\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal', secondary: '' };
+    const lines = jobCard._test.linesFromProtocolText(visit, catalog);
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(line).toMatchObject({ selected: false, labelHold: expect.stringContaining('verified label') });
+  });
   test('primary lines are base, secondary lines are "if needed"', () => {
     const catalog = [{ id: 's', name: 'Snapshot 2.5TG', cost_per_unit: 1 }, { id: 'm', name: 'Merit 2F', cost_per_unit: 1 }];
     const visit = { primary: 'Snapshot 2.5TG Q1: 2.3 lb/1,000 sq ft beds ($17)', secondary: 'Merit 2F drench only for documented scale ($4)' };
@@ -1171,6 +1178,26 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   };
   const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]', chemical_sensitivities: true, chemical_sensitivity_details: 'asthma, no pyrethroids' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
+
+  test('the scheduled T&S guide keeps label details but cannot bypass unavailable product checks', async () => {
+    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+    process.env.GATE_PROTOCOL_SOP = 'true';
+    try {
+      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
+        products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: '2027-12-01' }] });
+      const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+      const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+      expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
+      expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toBeNull();
+      expect(card.protocol.procedure.fieldGuide.products.tritek.summary).toMatch(/Mix withheld/);
+      expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
+      // Holding a job must not mutate the shared admin reference.
+      expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
+    } finally {
+      delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE;
+      delete process.env.GATE_PROTOCOL_SOP;
+    }
+  });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
@@ -2006,5 +2033,26 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // An alternate-address visit is not an outage: the add-on line governs there.
     rows.scheduled_services = [{ ...rows.scheduled_services[0], address_diverges: true }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
+  });
+});
+
+describe('field guide mix check reuses the visit line product', () => {
+  const { fieldGuideLineProduct } = require('../services/job-card')._test;
+  const mainspring = { id: 'ms', name: 'Mainspring GNL Insecticide' };
+  const floramite = { id: 'fl', name: 'Floramite SC/LS 8 oz' };
+
+  test('a short guide label resolves to the one visit line that begins with it', () => {
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, floramite])).toBe(mainspring);
+    expect(fieldGuideLineProduct('Floramite SC', [mainspring, floramite])).toBe(floramite);
+  });
+
+  test('no match, a mid-word prefix, or two candidates stays unresolved', () => {
+    expect(fieldGuideLineProduct('Kontos', [mainspring])).toBeNull();
+    expect(fieldGuideLineProduct('Mainspring G', [mainspring])).toBeNull();
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, { id: 'ms2', name: 'Mainspring GNL 1 qt' }])).toBeNull();
+  });
+
+  test('the same row listed on two lines still counts once', () => {
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, mainspring])).toBe(mainspring);
   });
 });

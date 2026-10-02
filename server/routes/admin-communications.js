@@ -1099,6 +1099,8 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
+      // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
         providerPreSendCheck: (() => {
@@ -1106,6 +1108,7 @@ router.post('/sms', async (req, res, next) => {
           return checks.composeProviderPreSendChecks(
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
           );
         })(),
       } : {}),
@@ -4051,6 +4054,9 @@ router.delete('/scheduled/:id', async (req, res, next) => {
  * the call-disposition-as-spam flow. Surfaced here so the SMS inbox can block
  * without routing through the calls tab. */
 
+// Block list role rule (owner 2026-10-02): any staff login may READ the list
+// (the SMS tab filters and labels blocked threads from it); only an admin may
+// block or unblock — unblocking releases that number's held texts.
 // GET /api/admin/communications/blocked-numbers — list + set for client-side filter
 router.get('/blocked-numbers', async (req, res, next) => {
   try {
@@ -4075,7 +4081,7 @@ router.get('/blocked-numbers', async (req, res, next) => {
 // formatting. A number that resolves to a live customer (main phone or a
 // service-contact slot) is refused, mirroring the call-disposition guard —
 // blocking it would silently drop that customer's texts.
-router.post('/blocked-numbers', async (req, res, next) => {
+router.post('/blocked-numbers', requireAdmin, async (req, res, next) => {
   try {
     const { blockType, reason } = req.body;
     const number = normalizePhone(req.body.number);
@@ -4125,7 +4131,7 @@ router.post('/blocked-numbers', async (req, res, next) => {
 });
 
 // DELETE /api/admin/communications/blocked-numbers/:number — unblock
-router.delete('/blocked-numbers/:number', async (req, res, next) => {
+router.delete('/blocked-numbers/:number', requireAdmin, async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.number }).del();
     res.json({ success: true });

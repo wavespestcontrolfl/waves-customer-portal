@@ -15,7 +15,8 @@
  * labeled row keeps the answers its label was given against. sampled_for moves
  * WITH the answers (a re-run that turns an agreement into a disagreement puts
  * the row in the queue, and the reverse takes it out); its random-audit draw is
- * a stable hash of the row's key, so re-running never re-rolls it.
+ * a stable hash of the row's key, drawn before the disagreement check, so
+ * re-running never re-rolls it and the audit stays a population sample.
  *
  * Rows hold ids and answers only. No message text, transcript or free text is
  * accepted into a row: baselines are reduced to yes/no/choice values.
@@ -30,8 +31,9 @@ const SUBJECT_TYPES = ['call_log', 'sms_log'];
 const CONFLICT_KEY = ['capability', 'package_id', 'subject_type', 'subject_id', 'question_id'];
 const MERGE_COLUMNS = ['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash'];
 const HEX64 = /^[0-9a-f]{64}$/;
-// Share of agreeing answers pulled into the review set anyway, so the
-// reviewer also sees where Jev and the baselines are both wrong.
+// Share of ALL answers pulled into the review set as a population sample, so
+// the reviewer also sees where Jev and the baselines are both wrong and the
+// evaluation (eval.js) has an unbiased set to measure on.
 const RANDOM_AUDIT_RATE = 0.10;
 
 // The yes/no (noul) or choice a Jev answer comes down to; undefined for a
@@ -68,13 +70,19 @@ function presentBaselines(baselines) {
 }
 
 /**
- * Why a row is in the review set: 'disagreement' when the Jev yes/no (or
- * choice) differs from ANY present baseline value; otherwise 'random_audit'
- * with probability RANDOM_AUDIT_RATE; otherwise null. `rand` is a number in
- * [0, 1) or a function returning one; it is read only when there is no
- * disagreement.
+ * Why a row is in the review set. The random audit is drawn FIRST, from every
+ * row alike: 'random_audit' with probability RANDOM_AUDIT_RATE whether or not
+ * the baselines agree, so the audit is a population sample (hard cases
+ * included) that eval.js can measure release performance on. A row the draw
+ * passes over is 'disagreement' when the Jev yes/no (or choice) differs from
+ * ANY present baseline value; otherwise null. `rand` is a number in [0, 1) or
+ * a function returning one. (Before this ordering the audit was drawn only
+ * from agreements and overstated performance; decision_reviews held no rows
+ * when it changed.)
  */
 function sampleFor(jevAnswer, baselines, rand = Math.random) {
+  const draw = typeof rand === 'function' ? rand() : rand;
+  if (typeof draw === 'number' && draw < RANDOM_AUDIT_RATE) return 'random_audit';
   const jev = comparable(jevAnswer);
   if (jev !== undefined) {
     for (const value of Object.values(presentBaselines(baselines))) {
@@ -82,8 +90,7 @@ function sampleFor(jevAnswer, baselines, rand = Math.random) {
       if (base !== undefined && base !== jev) return 'disagreement';
     }
   }
-  const draw = typeof rand === 'function' ? rand() : rand;
-  return typeof draw === 'number' && draw < RANDOM_AUDIT_RATE ? 'random_audit' : null;
+  return null;
 }
 
 // Only yes/no/choice values survive into baseline_answers; text never does.

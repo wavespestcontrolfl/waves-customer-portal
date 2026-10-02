@@ -21,7 +21,7 @@ const Drafter = require('../services/review-ask-drafter');
 const CUSTOMER = { id: 'cust-1', first_name: 'Aaron', last_name: 'Boss' };
 // One-segment budget (owner spec 2026-08-06): pre-render ≤145 chars, and the
 // rendered preview (43-char link) must fit a single GSM segment.
-const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick review: {review_url} Reply if anything is off.';
+const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick Google review: {review_url}';
 
 function mockDb(smsRows = []) {
   db.mockImplementation(() => ({
@@ -41,6 +41,26 @@ beforeEach(() => {
 
 describe('verifyDraftBody — the auto-send safety net', () => {
   const verify = (body) => Drafter.verifyDraftBody(body, { firstName: 'Aaron' });
+
+  test('#5511 GitHub r1: neutral wording is enforced in code, not only the prompt', () => {
+    expect(verify('Aaron, if we earned it, a Google review helps: {review_url}')).toBe('satisfaction_condition');
+    expect(verify("Aaron, a Google review helps: {review_url} Reply if anything's off.")).toBe('office_phrase');
+    expect(verify('Aaron, text me instead of posting if something is wrong: {review_url}')).toBe('steers_from_review');
+    expect(Drafter.verifyEmailIntro('Aaron, if you were happy with the visit, a review would help.', { firstName: 'Aaron' })).toBe('satisfaction_condition');
+    // #5524 r4: the older writer's SMS must name a Google review too.
+    expect(verify('Aaron, would you leave us a review? {review_url}')).toBe('missing_google_review');
+    // #5524 r10: a condition on how the visit went is a satisfaction condition too.
+    expect(verify('Aaron, if everything looks good, would you leave a Google review? {review_url}')).toBe('satisfaction_condition');
+    expect(verify('Aaron, if all went well, a Google review helps: {review_url}')).toBe('satisfaction_condition');
+    expect(verify('Aaron, if you get a chance, a Google review would be great: {review_url}')).toBeNull();
+    // #5524 r14: deserve / merit wording is a satisfaction condition too.
+    expect(verify('Aaron, if you think we deserve it, would you leave a Google review? {review_url}')).toBe('satisfaction_condition');
+    // #5524 r11: the older writer's email intro must name a Google review too.
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out. Would you leave us a review?', { firstName: 'Aaron' })).toBe('missing_google_review');
+    // #5511 GitHub r2: the condition and the ask split across sentences.
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us. If anything still looks off, just reply. Otherwise leave a Google review.', { firstName: 'Aaron' })).toBe('steers_from_review');
+    expect(verify("Aaron, text me if something's not right. Google review: {review_url}")).toBe('steers_from_review');
+  });
 
   test('a clean grounded draft passes', () => {
     expect(verify(CLEAN_BODY)).toBeNull();
@@ -104,7 +124,7 @@ describe('verifyDraftBody — the auto-send safety net', () => {
   });
 
   test('"feel free to reply" is NOT an incentive', () => {
-    expect(verify('Hi Aaron, feel free to reply here - {review_url}')).toBeNull();
+    expect(verify('Hi Aaron, Google review here, feel free to reply too - {review_url}')).toBeNull();
   });
 
   test('rejects unrendered placeholders other than the link', () => {
@@ -190,9 +210,9 @@ describe('draftAskBody — gating + fallback contract', () => {
   });
 
   test('smart punctuation is normalized to GSM before verification', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron — hope the ants are gone… If so: {review_url}. Anything off, just reply here.' });
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron — hope the ants are gone… Google review: {review_url}.' });
     const body = await Drafter.draftAskBody({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
-    expect(body).toBe('Hi Aaron - hope the ants are gone... If so: {review_url}. Anything off, just reply here.');
+    expect(body).toBe('Hi Aaron - hope the ants are gone... Google review: {review_url}.');
   });
 
   test('a draft that fails verification falls back to null (template sends instead)', async () => {
@@ -213,7 +233,7 @@ describe('draftAskBody — gating + fallback contract', () => {
 
 describe('verifyEmailIntro — the email opener safety net', () => {
   const verify = (body) => Drafter.verifyEmailIntro(body, { firstName: 'Aaron' });
-  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything still looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. A quick Google review would mean a lot to our small crew.';
 
   test('a clean grounded intro passes', () => {
     expect(verify(CLEAN_INTRO)).toBeNull();
@@ -244,7 +264,7 @@ describe('verifyEmailIntro — the email opener safety net', () => {
 });
 
 describe('draftEmailIntro — gating + fallback contract', () => {
-  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. A quick Google review would mean a lot to our small crew.';
 
   test('gate off → null, and no model call is made', async () => {
     mockGates.reviewAskPersonalized = false;
@@ -263,8 +283,9 @@ describe('draftEmailIntro — gating + fallback contract', () => {
   });
 
   test('line breaks in the model output collapse to one paragraph', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick review below would mean a lot. Reply here if anything is off.' });
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick Google review below would mean a lot.' });
     const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
+    expect(out).toBeTruthy();
     expect(out).not.toMatch(/\n/);
   });
 
@@ -280,7 +301,7 @@ describe('draftEmailIntro — gating + fallback contract', () => {
 });
 
 describe('draftEmailIntro — step-aware instruction (codex #3235 r1)', () => {
-  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. A quick Google review would mean a lot to our small crew.';
 
   test('a Day-0 step (email fallback) is prompted as a right-after-the-visit email, not a follow-up', async () => {
     mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
@@ -305,8 +326,8 @@ describe('name matching is word-bounded (codex #3235 r7)', () => {
   });
 
   test('the name as its own word passes', () => {
-    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick review: {review_url} Reply if off.', { firstName: 'Al' })).toBeNull();
-    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. Reply if anything is off.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick Google review: {review_url}', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. A Google review would mean a lot.', { firstName: 'Al' })).toBeNull();
   });
 });
 
@@ -334,7 +355,7 @@ describe('scheme-less URLs detected generically (codex #3235 r16 — closes the 
   });
 
   test('ordinary prose with abbreviations still passes', () => {
-    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. If anything looks off, just reply to this email and we will make it right.', { firstName: 'Aaron' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. A Google review would mean a lot.', { firstName: 'Aaron' })).toBeNull();
   });
 });
 
@@ -347,7 +368,7 @@ describe('deadline and access-instruction frames are banned (codex #3235 r17 —
   });
 
   test('mentioning pets warmly (no instruction frame) still passes', () => {
-    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. If anything looks off, just reply to this email.', { firstName: 'Aaron' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. A Google review would mean a lot.', { firstName: 'Aaron' })).toBeNull();
   });
 });
 

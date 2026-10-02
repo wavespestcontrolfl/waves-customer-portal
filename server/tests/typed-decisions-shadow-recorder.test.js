@@ -54,12 +54,14 @@ describe('sampleFor', () => {
     expect(sampleFor({ choice: 'a', confidence: 0.9 }, { rules: 'a' }, 0.99)).toBeNull();
     expect(sampleFor({ score: 3 }, { rules: true }, 0.99)).toBeNull();
   });
-  test('rand may be a function and is not drawn when there is a disagreement', () => {
+  test('the audit draw comes first and is population-wide: a disagreeing row the draw picks is a random_audit (pre-push P1 on the eval PR)', () => {
     const rand = jest.fn(() => 0.01);
-    expect(sampleFor(noul(0.9), { production: false }, rand)).toBe('disagreement');
-    expect(rand).not.toHaveBeenCalled();
-    expect(sampleFor(noul(0.9), { production: true }, rand)).toBe('random_audit');
+    expect(sampleFor(noul(0.9), { production: false }, rand)).toBe('random_audit');
     expect(rand).toHaveBeenCalledTimes(1);
+    expect(sampleFor(noul(0.9), { production: true }, rand)).toBe('random_audit');
+    expect(rand).toHaveBeenCalledTimes(2);
+    // passed over by the draw, the disagreement still queues
+    expect(sampleFor(noul(0.9), { production: false }, () => 0.5)).toBe('disagreement');
   });
 });
 
@@ -134,8 +136,10 @@ describe('recordDecisions', () => {
     expect(draw).toBeGreaterThanOrEqual(0);
     expect(draw).toBeLessThan(1);
     expect(first.sampled_for).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : null);
-    // the answer changed to disagree: sampled_for moves with it (and merges, see above)
-    expect((await run(0.2, true)).sampled_for).toBe('disagreement');
+    // the answer changed to disagree: sampled_for moves with it (and merges, see
+    // above) — unless the stable draw already holds this row in the audit, which
+    // is drawn first and keeps it there whatever the baselines say.
+    expect((await run(0.2, true)).sampled_for).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : 'disagreement');
   });
 
   test('gate off: nothing written', async () => {

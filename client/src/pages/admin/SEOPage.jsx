@@ -1535,6 +1535,7 @@ const CITATION_BLOCK_REASON = {
   non_html: "Not an HTML page",
   blocked_host: "Address not allowed to be fetched",
   truncated: "Page too large to read fully",
+  soft_404: "Page says it was not found",
 };
 function citationDetail(c) {
   const d = c.status_detail || {};
@@ -1545,6 +1546,8 @@ function citationDetail(c) {
           `${m.field}: expected ${m.expected}, saw ${[].concat(m.seen ?? "nothing").join(" / ")}`
       )
       .join("; ");
+  if (d.reason === "phone_unconfirmed")
+    return `Name found, but none of the phones shown is ours (saw ${[].concat(d.seen ?? "none").join(", ")})`;
   if (d.reason === "address_unconfirmed")
     return `Name and phone match, but the address shown could not be confirmed (saw ${d.seen})`;
   if (c.status === "fetch-blocked" || d.reason === "no_listing_url")
@@ -1555,6 +1558,956 @@ function citationDetail(c) {
     );
   return "";
 }
+function BacklinkStatsRow({ data }) {
+  return (
+  <>
+  {/* Stats */}
+  <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:10px]">
+    {" "}
+    <KpiCard label="Total Links" value={data.total || 0} />{" "}
+    <KpiCard
+      label="Critical"
+      value={data.critical || 0}
+      color={"#991B1B"}
+    />{" "}
+    <KpiCard label="Warning" value={data.warning || 0} color={"#A16207"} />{" "}
+    <KpiCard label="Clean" value={data.clean || 0} color={"#15803D"} />{" "}
+    <KpiCard
+      label="Citations"
+      value={data.citationStats?.total || 0}
+      sub={{
+        text: `${data.citationStats?.verified || 0} verified`,
+      }}
+    />{" "}
+  </div>
+  {/* Velocity KPIs */}
+  {data.velocity && (
+    <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:10px] [margin-top:10px]">
+      <KpiCard
+        label="New 7d"
+        value={`+${data.velocity.new_7d}`}
+        color={"#15803D"}
+      />
+      <KpiCard
+        label="Lost 7d"
+        value={
+          data.velocity.lost_7d > 0 ? `-${data.velocity.lost_7d}` : "0"
+        }
+        color={data.velocity.lost_7d > 0 ? "#991B1B" : "#71717A"}
+      />
+      <KpiCard
+        label="Net 7d"
+        value={
+          data.velocity.net_7d >= 0
+            ? `+${data.velocity.net_7d}`
+            : `${data.velocity.net_7d}`
+        }
+        color={
+          data.velocity.net_7d > 0
+            ? "#15803D"
+            : data.velocity.net_7d < 0
+              ? "#991B1B"
+              : "#71717A"
+        }
+      />
+      <KpiCard
+        label="Trend"
+        value={
+          data.velocity.trend === "growing"
+            ? "Growing"
+            : data.velocity.trend === "shrinking"
+              ? "Shrinking"
+              : "Flat"
+        }
+        color={
+          data.velocity.net_7d > 0
+            ? "#15803D"
+            : data.velocity.net_7d < 0
+              ? "#991B1B"
+              : "#71717A"
+        }
+      />
+    </div>
+  )}
+  </>
+  );
+}
+
+function BacklinkOverviewPanel({ data, sevColor }) {
+  return (
+    <>
+      {data.anchorDistribution && (
+        <UiCard className="p-6">
+          {" "}
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+            Anchor Text Distribution
+          </div>
+          {Object.entries(data.anchorDistribution).map(([type, count]) => (
+            <div
+              key={type}
+              className="flex items-center [gap:10px] [margin-bottom:6px]"
+            >
+              {" "}
+              <div className="[width:100px] text-ui-body text-zinc-900 text-right">
+                {type.replace("_", " ")}
+              </div>{" "}
+              <div className="[flex:1] [height:14px] bg-zinc-100 rounded-xs">
+                {" "}
+                <div
+                  style={{
+                    background:
+                      type === "branded"
+                        ? "#15803D"
+                        : type === "keyword_rich"
+                          ? "#A16207"
+                          : "#18181B",
+                    width: `${Math.min(100, (count / Math.max(data.total, 1)) * 100)}%`,
+                  }}
+                  className="[height:100%] rounded-xs"
+                />{" "}
+              </div>{" "}
+              <div className="[width:30px] text-ui-body text-ink-secondary">
+                {count}
+              </div>{" "}
+            </div>
+          ))}
+        </UiCard>
+      )}
+      {(data.recentToxic || []).length > 0 && (
+        <UiCard className="p-6">
+          {" "}
+          <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
+            Toxic Links
+          </div>
+          {data.recentToxic.map((l, i) => (
+            <div
+              key={i}
+              style={{
+                borderLeft: `3px solid ${sevColor[l.severity]}`,
+              }}
+              className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
+            >
+              {" "}
+              <div className="text-ui-body text-zinc-900">
+                {l.source_domain}
+              </div>{" "}
+              <div className="text-ui-body text-ink-secondary">
+                Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100
+              </div>{" "}
+            </div>
+          ))}
+        </UiCard>
+      )}
+      {/* Trend */}
+      {(data.snapshots || []).length > 1 && (
+        <UiCard className="p-6">
+          {" "}
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+            Backlink Trend
+          </div>{" "}
+          <div className="flex [gap:8px] items-end [height:60px]">
+            {(data.snapshots || []).reverse().map((s, i) => (
+              <div key={i} className="[flex:1] text-center">
+                {" "}
+                <div className="text-ui-body text-ink-secondary">
+                  {s.total_backlinks}
+                </div>{" "}
+                <div
+                  style={{
+                    height: `${Math.max(4, (s.total_backlinks || 0) / 2)}px`,
+                  }}
+                  className="bg-zinc-900 rounded-xs [margin-top:2px]"
+                />{" "}
+                <div className="text-ui-body text-ink-secondary [margin-top:2px]">
+                  {new Date(s.snapshot_date).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </div>{" "}
+              </div>
+            ))}
+          </div>{" "}
+        </UiCard>
+      )}
+
+      {/* Recently Lost Links */}
+      {(data.recentlyLost || []).length > 0 && (
+        <UiCard className="p-6">
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+            Recently Lost Links
+          </div>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>Source Domain</TH>
+                  <TH className="text-right u-nums">DR</TH>
+                  <TH>Anchor</TH>
+                  <TH>Target</TH>
+                  <TH>Reason</TH>
+                  <TH>Lost</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {data.recentlyLost.map((l, i) => (
+                  <TR
+                    key={
+                      l.id ||
+                      `${l.source_domain || "lost"}-${l.target_url || i}`
+                    }
+                  >
+                    <TD className="u-nums">{l.source_domain}</TD>
+                    <TD className="text-right u-nums">
+                      {l.domain_rating || "—"}
+                    </TD>
+                    <TD className="[max-width:160px] overflow-hidden text-ellipsis whitespace-nowrap">
+                      {l.anchor_text || "—"}
+                    </TD>
+                    <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                      {l.target_url || "—"}
+                    </TD>
+                    <TD className="u-nums">
+                      {LOST_REASON_LABEL[l.lost_reason] ||
+                        (l.lost_reason
+                          ? l.lost_reason
+                          : "unverified (legacy)")}
+                    </TD>
+                    <TD className="u-nums">
+                      {l.lost_at || l.updated_at
+                        ? formatETDate(l.lost_at || l.updated_at)
+                        : "—"}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        </UiCard>
+      )}
+    </>
+  );
+}
+
+function BacklinkGapsPanel({ data }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
+        Competitor Gap Opportunities ({(data.competitorGaps || []).length})
+        {data.newGapsSince7d > 0 && (
+          <span className="[margin-left:8px] [padding:2px_8px] rounded-sm text-ui-body font-medium text-zinc-900 [background:#15803D18]">
+            {data.newGapsSince7d} new this week
+            {data.newHighValueGapsSince7d > 0
+              ? ` (${data.newHighValueGapsSince7d} high-value)`
+              : ""}
+          </span>
+        )}
+      </div>{" "}
+      <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
+        Domains linking to competitors but not to Waves
+      </div>
+      {(data.competitorGaps || []).length === 0 ? (
+        <div className="text-ui-body text-ink-secondary [padding:20px] text-center">
+          Run a competitor gap scan to find opportunities
+        </div>
+      ) : (
+        (data.competitorGaps || []).map((g, i) => (
+          <div
+            key={i}
+            className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
+          >
+            {" "}
+            <div className="flex justify-between items-center">
+              {" "}
+              <div className="flex items-center [gap:6px]">
+                <span className="text-ui-body text-zinc-900 font-medium">
+                  {g.source_domain}
+                </span>
+                {g.created_at &&
+                  new Date(g.created_at) >=
+                    new Date(Date.now() - 7 * 86400000) && (
+                    <span className="[padding:1px_6px] rounded-xs text-ui-body font-medium text-zinc-900 [background:#15803D18]">
+                      New
+                    </span>
+                  )}
+              </div>{" "}
+              <span className="text-ui-body text-ink-secondary">
+                DR: {g.source_domain_rating || "?"}
+              </span>{" "}
+            </div>{" "}
+            <div className="text-ui-body text-ink-secondary">
+              Links to: {g.competitor_domain} · Anchor: "
+              {(g.anchor_text || "").substring(0, 40)}"
+            </div>{" "}
+          </div>
+        ))
+      )}
+    </UiCard>
+  );
+}
+
+function LlmHeaderCard({ llmDash, llmError, llmScanning, handleLlmScan, canRunSeoActions, onRetry }) {
+  return (
+    <UiCard className="p-6">
+      <div className="flex justify-between [gap:16px] flex-wrap">
+        <div>
+          <h3 className="text-[18px] font-medium text-zinc-900 [margin:0_0_8px]">
+            AI citations and mentions
+          </h3>
+          <p className="text-ui-body text-ink-secondary [margin:0px]">
+            {llmDash
+              ? `${llmDash.summary.queriesTracked} active queries observed across ${llmDash.summary.platforms.length} engines`
+              : llmError
+                ? "Observations could not be loaded."
+                : "Loading observations…"}
+          </p>
+        </div>
+        {canRunSeoActions && (
+          <Button
+            onClick={handleLlmScan}
+            disabled={llmScanning}
+            variant="secondary"
+          >
+            {llmScanning ? "Scanning…" : "Run Scan"}
+          </Button>
+        )}
+      </div>
+      <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+        Citation rate counts answers with a Waves source link attached.
+        Mention rate counts answers that name Waves. Search-result links
+        do not count as citations. Unanswered probes and unresolved links
+        are excluded from rates. These API observations are directional;
+        validate a sample in each consumer app.
+      </p>
+      {llmError && (
+        <Button
+          onClick={onRetry}
+          className="[margin-top:12px]"
+          variant="secondary"
+        >
+          Retry loading observations
+        </Button>
+      )}
+    </UiCard>
+  );
+}
+
+function LlmBenchmarkCard({ llmDash }) {
+  if (!(llmDash?.benchmark)) return null;
+  return (
+    <UiCard className="p-6">
+      <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+        Fixed 40-question benchmark
+      </h3>
+      <div className="flex flex-wrap [gap:24px]">
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Linked citation rate
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {aeoRate(llmDash.benchmark.citationRate)}
+          </div>
+        </div>
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Brand mention rate
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {aeoRate(llmDash.benchmark.mentionRate)}
+          </div>
+        </div>
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Recommended rate
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {aeoRate(llmDash.benchmark.recommendedRate)}
+          </div>
+        </div>
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Questions observed
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {llmDash.benchmark.observedQuestions} /{" "}
+            {llmDash.benchmark.questions}
+          </div>
+        </div>
+      </div>
+      <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+        {llmDash.benchmark.activeQuestions} questions active ·{" "}
+        {llmDash.benchmark.measured} measured answers (a model change
+        keeps its answers separate). Recommended counts a mentioned
+        answer with positive sentiment ranked in the top 3 brands
+        {(llmDash.benchmark.rankMethods || []).includes("known_list_v1")
+          ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
+          : ""}
+        {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
+          ? " (some ranks are read from the answer text, so they are conservative and never better than the true rank)"
+          : ""}
+        {llmDash.benchmark.unclassified > 0
+          ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
+          : ""}
+        . Coverage of the{" "}
+        {llmDash.benchmark.coverage?.expected ?? 0} expected
+        question×engine pairs, by each pair's latest answer:{" "}
+        {llmDash.benchmark.coverage?.measured ?? 0} measured,{" "}
+        {llmDash.benchmark.coverage?.noAnswer ?? 0} no answer,{" "}
+        {llmDash.benchmark.coverage?.unresolved ?? 0} unresolved,{" "}
+        {llmDash.benchmark.coverage?.legacy ?? 0} legacy,{" "}
+        {llmDash.benchmark.coverage?.missing ?? 0} not yet observed.
+        Historical observations used a different citation method. Compare the same
+        questions and model in repeat runs. This view uses the latest
+        observations within 30 days; sampling dates may differ by
+        engine.
+      </p>
+    </UiCard>
+  );
+}
+
+function LlmCitedPagesCard({ llmDash }) {
+  if (!(llmDash?.citedPageRanking)) return null;
+  return (
+    <UiCard className="p-6">
+      <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+        Cited pages to win
+      </h3>
+      <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
+        Directory and article pages answer engines cite, ranked page by
+        page. First: pages cited in a current &ldquo;who should I
+        hire&rdquo; answer that does not name Waves. Since{" "}
+        {llmDash.citedPageRanking.since}.
+      </p>
+      {llmDash.citedPageRanking.pages.length === 0 ? (
+        <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
+          No directory or article pages cited in this window.
+        </p>
+      ) : (
+        llmDash.citedPageRanking.pages.map((p) => (
+          <div
+            key={p.key}
+            className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+          >
+            <a
+              href={p.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-zinc-900 break-words"
+            >
+              {p.rank}. {p.url}
+            </a>
+            <div className="text-ink-secondary">
+              {p.currentMisses > 0
+                ? `In ${p.currentMisses} current answer${p.currentMisses === 1 ? "" : "s"} without Waves (${p.missEngines.join(", ")})`
+                : p.tier === 2
+                  ? "Cited in current answers that name Waves"
+                  : p.currentCitations > 0
+                    ? "Cited in current answers, not to a who-to-hire question"
+                    : "Cited earlier in the window"}
+              {" · "}cited {p.citations}x · {p.category}
+              {p.subtype ? ` (${p.subtype.replace(/_/g, " ")})` : ""}
+            </div>
+            <div className="text-ink-secondary">
+              {p.questions
+                .slice(0, 3)
+                .map((q) => `${q.id ? `${q.id}: ` : ""}${q.query}`)
+                .join(" · ")}
+            </div>
+          </div>
+        ))
+      )}
+      {llmDash.citedPageRanking.placements?.length > 0 && (
+        <>
+          <h4 className="text-ui-body text-zinc-900 font-medium [margin:16px_0_4px]">
+            Placements live on a cited page
+          </h4>
+          {llmDash.citedPageRanking.placements.map((r) => (
+            <div
+              key={r.prospectId}
+              className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+            >
+              <div className="text-zinc-900">
+                {r.host} · live since {r.liveOn} ·{" "}
+                {PLACEMENT_VERDICT_LABEL[r.verdict] || r.verdict}
+              </div>
+              <div className="text-ink-secondary">
+                Waves named in {r.before.named}/{r.before.answers}{" "}
+                answers before, {r.after.named}/{r.after.answers} since
+                {r.after.citingPage > 0
+                  ? ` (${r.after.namedWhenCiting}/${r.after.citingPage} that cite the page)`
+                  : ""}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </UiCard>
+  );
+}
+
+function LlmCitedUrlHealthCard({ llmDash }) {
+  if (!(llmDash?.citedUrlHealth)) return null;
+  return (
+    <UiCard className="p-6">
+      <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+        Owned page health
+      </h3>
+      <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
+        Daily check of every owned URL an answer engine cited in the
+        last 30 days — a citation with no live page behind it is worse
+        than no citation. {llmDash.citedUrlHealth.checked} of{" "}
+        {llmDash.citedUrlHealth.candidates ??
+          llmDash.citedUrlHealth.checked}{" "}
+        cited URLs checked
+        {llmDash.citedUrlHealth.lastCheckedOn
+          ? ` (last: ${llmDash.citedUrlHealth.lastCheckedOn})`
+          : ""}
+        , {llmDash.citedUrlHealth.bad} broken
+        {llmDash.citedUrlHealth.unchecked > 0
+          ? `, ${llmDash.citedUrlHealth.unchecked} not checked yet`
+          : ""}
+        .
+      </p>
+      {llmDash.citedUrlHealth.badUrls.length === 0 ? (
+        <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
+          {llmDash.citedUrlHealth.checked === 0 &&
+          llmDash.citedUrlHealth.unchecked > 0
+            ? "Not checked yet — the nightly check runs at 1:20 AM ET."
+            : llmDash.citedUrlHealth.unchecked > 0
+              ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the nightly check runs at 1:20 AM ET.`
+              : "No broken owned URLs detected."}
+        </p>
+      ) : (
+        llmDash.citedUrlHealth.badUrls.map((b) => (
+          <div
+            key={b.url}
+            className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+          >
+            <a
+              href={b.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-zinc-900 break-words"
+            >
+              {b.url}
+            </a>
+            <div className="text-ink-secondary">
+              {b.verdict}
+              {b.finalUrl && b.finalUrl !== b.url
+                ? ` · final: ${b.finalUrl}`
+                : ""}{" "}
+              · cited {b.citationCount}x · checked{" "}
+              {b.lastCheckedOn}
+            </div>
+          </div>
+        ))
+      )}
+    </UiCard>
+  );
+}
+
+function LlmEntityCard({ llmDash }) {
+  if (!(llmDash?.entity)) return null;
+  return (
+    <UiCard className="p-6">
+      <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+        Entity accuracy: what engines say about Waves
+      </h3>
+      <div className="flex flex-wrap [gap:24px]">
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Facts stated correctly
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {aeoRate(llmDash.entity.factAccuracy)}
+          </div>
+        </div>
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Answers with a wrong claim
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {aeoRate(llmDash.entity.wrongClaimRate)}
+          </div>
+        </div>
+        <div>
+          <div className="text-ui-body text-ink-secondary">
+            Questions observed
+          </div>
+          <div className="text-[24px] text-zinc-900">
+            {llmDash.entity.observedQuestions} /{" "}
+            {llmDash.entity.questions}
+          </div>
+        </div>
+      </div>
+      <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+        {llmDash.entity.activeQuestions} questions active ·{" "}
+        {llmDash.entity.observed} answers scored against the
+        owner-approved cohort {llmDash.entity.version}. Facts are the
+        founder, founding year, license, footprint, services and contact
+        details; wrong claims are the rulings an answer must not
+        contradict (a franchise, fumigation, damage-repair coverage
+        inferred from the termite bond).
+        {llmDash.entity.missingMostOften?.length > 0 && (
+          <>
+            {" "}
+            Missing most often:{" "}
+            {llmDash.entity.missingMostOften
+              .map((f) => `${f.label} (${f.count})`)
+              .join(", ")}
+            .
+          </>
+        )}
+        {llmDash.entity.wrongMostOften?.length > 0 && (
+          <>
+            {" "}
+            Wrong most often:{" "}
+            {llmDash.entity.wrongMostOften
+              .map((f) => `${f.label} (${f.count})`)
+              .join(", ")}
+            .
+          </>
+        )}
+      </p>
+    </UiCard>
+  );
+}
+
+function LlmPlatformRow({ llmDash, data }) {
+  return (
+    <div className="flex [gap:12px] flex-wrap">
+      <UiCard className="p-6 [flex:1] [min-width:240px]">
+        <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+          Linked Waves pages
+        </h3>
+        {(llmDash?.citedPages || []).length === 0 && (
+          <p className="text-ui-body text-ink-secondary">
+            No verified linked citations yet.
+          </p>
+        )}
+        {(llmDash?.citedPages || []).map((c) => (
+          <div
+            key={c.url}
+            className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body"
+          >
+            <a
+              href={c.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-zinc-900 break-words [min-width:0px]"
+            >
+              {c.url}
+            </a>
+            <span className="text-ink-secondary">{c.count}</span>
+          </div>
+        ))}
+      </UiCard>
+      <UiCard className="p-6 [flex:1] [min-width:240px]">
+        <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+          Competitors mentioned
+        </h3>
+        {(llmDash?.competitors || []).length === 0 && (
+          <p className="text-ui-body text-ink-secondary">
+            None detected in measured answers.
+          </p>
+        )}
+        {(llmDash?.competitors || []).map((c) => (
+          <div
+            key={c.name}
+            className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body text-zinc-900"
+          >
+            <span>{c.name}</span>
+            <span>{c.count}</span>
+          </div>
+        ))}
+      </UiCard>
+    </div>
+  );
+}
+
+function LlmRecentAnswersCard({ llmDash, data }) {
+  return (
+    <UiCard className="p-6">
+      <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+        Latest answer evidence
+      </h3>
+      {!llmDash?.grid?.length && (
+        <p className="text-ui-body text-ink-secondary">
+          No observations for active queries yet.
+        </p>
+      )}
+      {(llmDash?.grid || []).map((m) => (
+        <details
+          key={`${m.query}::${m.llm_platform}::${m.model_version}`}
+          className="[padding:12px_0] text-ui-body text-zinc-900 border-b border-hairline border-zinc-200"
+        >
+          <summary className="cursor-pointer [line-height:1.6]">
+            {m.benchmark_id && `${m.benchmark_id} · `}
+            {m.query}
+            <span className="block text-ink-secondary">
+              {aeoStatus(m)} · {m.llm_platform} · {m.model_version} ·{" "}
+              {String(m.check_date).slice(0, 10)}
+            </span>
+          </summary>
+          <p className="whitespace-pre-wrap break-words [line-height:1.6]">
+            {m.response_raw || "No answer text returned."}
+          </p>
+          {m.waves_cited_urls.map((url) => (
+            <p key={url}>
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-zinc-900 break-words"
+              >
+                {url}
+              </a>
+            </p>
+          ))}
+          {m.target_cited && (
+            <p className="text-ink-secondary">
+              The guide mapped to this benchmark question was linked.
+            </p>
+          )}
+        </details>
+      ))}
+    </UiCard>
+  );
+}
+
+function LlmMentionsPanel({ data, llmDash, llmError, llmScanning, handleLlmScan, canRunSeoActions, onRetry }) {
+  return (
+    <div className="flex flex-col [gap:12px] [min-width:0px]">
+      <LlmHeaderCard llmDash={llmDash} llmError={llmError} llmScanning={llmScanning} handleLlmScan={handleLlmScan} canRunSeoActions={canRunSeoActions} onRetry={onRetry} />
+      <LlmBenchmarkCard llmDash={llmDash} />
+      <LlmCitedUrlHealthCard llmDash={llmDash} />
+      <LlmCitedPagesCard llmDash={llmDash} />
+      <AeoRateTable
+        label="Benchmark by engine and model"
+        rows={llmDash?.benchmark?.byPlatform || []}
+      />
+      <div className="grid [grid-template-columns:repeat(auto-fit,_minmax(min(100%,_320px),_1fr))] [gap:12px] [min-width:0px]">
+        <AeoRateTable
+          label="Benchmark by question type"
+          rows={llmDash?.benchmark?.byIntent || []}
+        />
+        <AeoRateTable
+          label="Benchmark by city"
+          rows={llmDash?.benchmark?.byCity || []}
+        />
+      </div>
+      <details className="text-ui-body text-zinc-900">
+        <summary className="cursor-pointer [padding:10px_0]">
+          All managed queries and benchmark history
+        </summary>
+        <AeoRateTable
+          label="All managed queries by engine"
+          rows={llmDash?.byPlatform || []}
+        />
+        <AeoRateTable
+          label="Daily benchmark observations by engine and model"
+          rows={llmDash?.trend || []}
+        />
+      </details>
+      <LlmEntityCard llmDash={llmDash} />
+      <EntityFactsTable
+        label="Entity accuracy by engine and model"
+        rows={llmDash?.entity?.byPlatform || []}
+      />
+      <EntityFactsTable
+        label="Entity accuracy by question"
+        rows={llmDash?.entity?.byQuestion || []}
+        first="Question"
+      />
+      <LlmPlatformRow llmDash={llmDash} data={data} />
+      <LlmRecentAnswersCard llmDash={llmDash} data={data} />
+    </div>
+  );
+}
+
+const CITATION_STATUS_COLOR = Object.fromEntries(
+  CITATION_STATES.map(([key, , color]) => [key, color])
+);
+const CITATION_STATUS_LABEL = Object.fromEntries(
+  CITATION_STATES.map(([key, label]) => [key, label])
+);
+
+// One citation row is edited at a time. The editor reads and writes only the existing
+// PUT /admin/seo/citations/:id; the list is reloaded from /admin/seo/backlinks after a save.
+function CitationEditor({ c, edit, setEdit, locations, saving, error, onSave }) {
+  return (
+    <div className="flex flex-col [gap:10px] [padding:0_0_12px]">
+      <div className="flex [gap:10px] items-center flex-wrap">
+        <Input
+          value={edit.listing_url}
+          onChange={(e) => setEdit({ ...edit, listing_url: e.target.value })}
+          placeholder="Public listing URL (https://…) — blank clears it"
+          className="[flex:1] [min-width:280px]"
+        />
+        <Select
+          className="!w-auto"
+          value={edit.location_id}
+          onChange={(e) => setEdit({ ...edit, location_id: e.target.value })}
+          title="Which office this listing should show"
+        >
+          <option value="">Any office</option>
+          {locations.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+        </Select>
+        <Button
+          disabled={saving}
+          onClick={() =>
+            onSave(c.id, {
+              listing_url: edit.listing_url,
+              location_id: edit.location_id,
+            })
+          }
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <div className="flex [gap:10px] items-center flex-wrap">
+        <Button
+          variant="secondary"
+          disabled={saving || c.status === "missing"}
+          onClick={() => onSave(c.id, { status: "missing" })}
+        >
+          Mark missing
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={saving || c.status === "unverified"}
+          onClick={() => onSave(c.id, { status: "unverified" })}
+        >
+          Back to unverified
+        </Button>
+        <span className="text-ui-body text-ink-secondary">
+          Saving a new URL or office re-queues the row for the next audit.
+          Missing means no listing exists.
+        </span>
+      </div>
+      {error && <div className="text-ui-body text-zinc-900">{error}</div>}
+    </div>
+  );
+}
+
+function CitationRow({ c, canEdit, editing, onToggle }) {
+  const color = CITATION_STATUS_COLOR[c.status] || "#71717A";
+  const detail = citationDetail(c);
+  return (
+    <div className="flex items-center [gap:10px] [padding:8px_0]">
+      <div
+        style={{ background: color }}
+        className="[width:8px] [height:8px] rounded-sm shrink-0"
+      />
+      <div className="[flex:1] text-ui-body text-zinc-900">
+        {c.directory_name}
+        {detail && (
+          <div className="text-ui-body text-ink-secondary">{detail}</div>
+        )}
+      </div>
+      {c.listing_url && (
+        <a
+          href={c.listing_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-ui-body text-zinc-900 [text-decoration:none]"
+        >
+          View
+        </a>
+      )}
+      <span
+        style={{ background: color + "22", color }}
+        className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
+      >
+        {CITATION_STATUS_LABEL[c.status] || c.status}
+      </span>
+      {canEdit && (
+        <Button variant="secondary" onClick={onToggle}>
+          {editing ? "Close" : "Edit"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// The citation editor's draft, pending save and error live in BacklinksTab (via this hook),
+// so switching sub-tabs mid-edit or mid-save loses none of them.
+function useCitationEditor(reload) {
+  const [edit, setEdit] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const save = async (id, body) => {
+    setSaving(true);
+    setError("");
+    try {
+      await adminFetch(`/admin/seo/citations/${id}`, { method: "PUT", body });
+      await reload();
+      setEdit(null);
+    } catch (e) {
+      setError(e.message || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const toggle = (c) => {
+    setError("");
+    setEdit(
+      edit?.id === c.id
+        ? null
+        : { id: c.id, listing_url: c.listing_url || "", location_id: c.location_id || "" }
+    );
+  };
+  return { edit, setEdit, saving, error, save, toggle };
+}
+
+function CitationsPanel({ data, canRunSeoActions, editor }) {
+  const { edit, setEdit, saving, error, save, toggle } = editor;
+  const stats = data.citationStats || {};
+  return (
+    <UiCard className="p-6">
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+        Directory Citations ({stats.total || 0})
+      </div>
+      <div className="flex flex-wrap [gap:8px] [margin-bottom:12px]">
+        {CITATION_STATES.map(([key, label, color]) => (
+          <span
+            key={key}
+            style={{ background: color + "22", color }}
+            className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
+          >
+            {label} {stats[key] || 0}
+          </span>
+        ))}
+      </div>
+      {(data.citations || []).map((c, i) => (
+        <div key={c.id || i} className="border-b border-hairline border-zinc-200">
+          <CitationRow
+            c={c}
+            canEdit={canRunSeoActions}
+            editing={edit?.id === c.id}
+            onToggle={() => toggle(c)}
+          />
+          {edit?.id === c.id && (
+            <CitationEditor
+              c={c}
+              edit={edit}
+              setEdit={setEdit}
+              locations={data.citationLocations || []}
+              saving={saving}
+              error={error}
+              onSave={save}
+            />
+          )}
+        </div>
+      ))}
+    </UiCard>
+  );
+}
+
 function BacklinksTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1563,11 +2516,8 @@ function BacklinksTab() {
   const [llmDash, setLlmDash] = useState(null);
   const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
+  const citationEditor = useCitationEditor(() => adminFetch("/admin/seo/backlinks").then(setData));
   const canRunSeoActions = isAdminUser();
-  // One citation row is edited at a time: { id, listing_url, location_id }.
-  const [citEdit, setCitEdit] = useState(null);
-  const [citSaving, setCitSaving] = useState(false);
-  const [citError, setCitError] = useState("");
   useEffect(() => {
     adminFetch("/admin/seo/backlinks")
       .then((d) => {
@@ -1611,19 +2561,6 @@ function BacklinksTab() {
       setScanning(false);
     }
   };
-  const saveCitation = async (id, body) => {
-    setCitSaving(true);
-    setCitError("");
-    try {
-      await adminFetch(`/admin/seo/citations/${id}`, { method: "PUT", body });
-      setData(await adminFetch("/admin/seo/backlinks"));
-      setCitEdit(null);
-    } catch (e) {
-      setCitError(e.message || "Save failed");
-    } finally {
-      setCitSaving(false);
-    }
-  };
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
@@ -1642,9 +2579,6 @@ function BacklinksTab() {
     watch: "#71717A",
     clean: "#15803D",
   };
-  const statusColor = Object.fromEntries(
-    CITATION_STATES.map(([key, , color]) => [key, color])
-  );
   return (
     <div className="flex flex-col [gap:16px]">
       {/* Sub-tabs */}
@@ -1693,872 +2627,29 @@ function BacklinksTab() {
           </Button>
         )}{" "}
       </div>
-      {/* Stats */}
-      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:10px]">
-        {" "}
-        <KpiCard label="Total Links" value={data.total || 0} />{" "}
-        <KpiCard
-          label="Critical"
-          value={data.critical || 0}
-          color={"#991B1B"}
-        />{" "}
-        <KpiCard label="Warning" value={data.warning || 0} color={"#A16207"} />{" "}
-        <KpiCard label="Clean" value={data.clean || 0} color={"#15803D"} />{" "}
-        <KpiCard
-          label="Citations"
-          value={data.citationStats?.total || 0}
-          sub={{
-            text: `${data.citationStats?.verified || 0} verified`,
-          }}
-        />{" "}
-      </div>
-      {/* Velocity KPIs */}
-      {data.velocity && (
-        <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:10px] [margin-top:10px]">
-          <KpiCard
-            label="New 7d"
-            value={`+${data.velocity.new_7d}`}
-            color={"#15803D"}
-          />
-          <KpiCard
-            label="Lost 7d"
-            value={
-              data.velocity.lost_7d > 0 ? `-${data.velocity.lost_7d}` : "0"
-            }
-            color={data.velocity.lost_7d > 0 ? "#991B1B" : "#71717A"}
-          />
-          <KpiCard
-            label="Net 7d"
-            value={
-              data.velocity.net_7d >= 0
-                ? `+${data.velocity.net_7d}`
-                : `${data.velocity.net_7d}`
-            }
-            color={
-              data.velocity.net_7d > 0
-                ? "#15803D"
-                : data.velocity.net_7d < 0
-                  ? "#991B1B"
-                  : "#71717A"
-            }
-          />
-          <KpiCard
-            label="Trend"
-            value={
-              data.velocity.trend === "growing"
-                ? "Growing"
-                : data.velocity.trend === "shrinking"
-                  ? "Shrinking"
-                  : "Flat"
-            }
-            color={
-              data.velocity.net_7d > 0
-                ? "#15803D"
-                : data.velocity.net_7d < 0
-                  ? "#991B1B"
-                  : "#71717A"
-            }
-          />
-        </div>
-      )}
-      {/* Overview sub-tab */}
+      <BacklinkStatsRow data={data} />
       {subTab === "overview" && (
-        <>
-          {data.anchorDistribution && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Anchor Text Distribution
-              </div>
-              {Object.entries(data.anchorDistribution).map(([type, count]) => (
-                <div
-                  key={type}
-                  className="flex items-center [gap:10px] [margin-bottom:6px]"
-                >
-                  {" "}
-                  <div className="[width:100px] text-ui-body text-zinc-900 text-right">
-                    {type.replace("_", " ")}
-                  </div>{" "}
-                  <div className="[flex:1] [height:14px] bg-zinc-100 rounded-xs">
-                    {" "}
-                    <div
-                      style={{
-                        background:
-                          type === "branded"
-                            ? "#15803D"
-                            : type === "keyword_rich"
-                              ? "#A16207"
-                              : "#18181B",
-                        width: `${Math.min(100, (count / Math.max(data.total, 1)) * 100)}%`,
-                      }}
-                      className="[height:100%] rounded-xs"
-                    />{" "}
-                  </div>{" "}
-                  <div className="[width:30px] text-ui-body text-ink-secondary">
-                    {count}
-                  </div>{" "}
-                </div>
-              ))}
-            </UiCard>
-          )}
-          {(data.recentToxic || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
-                Toxic Links
-              </div>
-              {data.recentToxic.map((l, i) => (
-                <div
-                  key={i}
-                  style={{
-                    borderLeft: `3px solid ${sevColor[l.severity]}`,
-                  }}
-                  className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
-                >
-                  {" "}
-                  <div className="text-ui-body text-zinc-900">
-                    {l.source_domain}
-                  </div>{" "}
-                  <div className="text-ui-body text-ink-secondary">
-                    Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100
-                  </div>{" "}
-                </div>
-              ))}
-            </UiCard>
-          )}
-          {/* Trend */}
-          {(data.snapshots || []).length > 1 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Backlink Trend
-              </div>{" "}
-              <div className="flex [gap:8px] items-end [height:60px]">
-                {(data.snapshots || []).reverse().map((s, i) => (
-                  <div key={i} className="[flex:1] text-center">
-                    {" "}
-                    <div className="text-ui-body text-ink-secondary">
-                      {s.total_backlinks}
-                    </div>{" "}
-                    <div
-                      style={{
-                        height: `${Math.max(4, (s.total_backlinks || 0) / 2)}px`,
-                      }}
-                      className="bg-zinc-900 rounded-xs [margin-top:2px]"
-                    />{" "}
-                    <div className="text-ui-body text-ink-secondary [margin-top:2px]">
-                      {new Date(s.snapshot_date).toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                      })}
-                    </div>{" "}
-                  </div>
-                ))}
-              </div>{" "}
-            </UiCard>
-          )}
-
-          {/* Recently Lost Links */}
-          {(data.recentlyLost || []).length > 0 && (
-            <UiCard className="p-6">
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Recently Lost Links
-              </div>
-              <div className="overflow-x-auto">
-                <Table className="[width:100%] [border-collapse:collapse]">
-                  <THead>
-                    <TR>
-                      <TH>Source Domain</TH>
-                      <TH className="text-right u-nums">DR</TH>
-                      <TH>Anchor</TH>
-                      <TH>Target</TH>
-                      <TH>Reason</TH>
-                      <TH>Lost</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
-                    {data.recentlyLost.map((l, i) => (
-                      <TR
-                        key={
-                          l.id ||
-                          `${l.source_domain || "lost"}-${l.target_url || i}`
-                        }
-                      >
-                        <TD className="u-nums">{l.source_domain}</TD>
-                        <TD className="text-right u-nums">
-                          {l.domain_rating || "—"}
-                        </TD>
-                        <TD className="[max-width:160px] overflow-hidden text-ellipsis whitespace-nowrap">
-                          {l.anchor_text || "—"}
-                        </TD>
-                        <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
-                          {l.target_url || "—"}
-                        </TD>
-                        <TD className="u-nums">
-                          {LOST_REASON_LABEL[l.lost_reason] ||
-                            (l.lost_reason
-                              ? l.lost_reason
-                              : "unverified (legacy)")}
-                        </TD>
-                        <TD className="u-nums">
-                          {l.lost_at || l.updated_at
-                            ? formatETDate(l.lost_at || l.updated_at)
-                            : "—"}
-                        </TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              </div>
-            </UiCard>
-          )}
-        </>
+        <BacklinkOverviewPanel data={data} sevColor={sevColor} />
       )}
-
-      {/* Citations sub-tab */}
       {subTab === "citations" && (
-        <UiCard className="p-6">
-          {" "}
-          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-            Directory Citations ({data.citationStats?.total || 0})
-          </div>
-          <div className="flex flex-wrap [gap:8px] [margin-bottom:12px]">
-            {CITATION_STATES.map(([key, label, color]) => (
-              <span
-                key={key}
-                style={{ background: color + "22", color }}
-                className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
-              >
-                {label} {data.citationStats?.[key] || 0}
-              </span>
-            ))}
-          </div>
-          {(data.citations || []).map((c, i) => (
-            <div
-              key={c.id || i}
-              className="border-b border-hairline border-zinc-200"
-            >
-            <div className="flex items-center [gap:10px] [padding:8px_0]">
-              {" "}
-              <div
-                style={{
-                  background: statusColor[c.status] || "#71717A",
-                }}
-                className="[width:8px] [height:8px] rounded-sm shrink-0"
-              />{" "}
-              <div className="[flex:1] text-ui-body text-zinc-900">
-                {c.directory_name}
-                {citationDetail(c) && (
-                  <div className="text-ui-body text-ink-secondary">
-                    {citationDetail(c)}
-                  </div>
-                )}
-              </div>
-              {c.listing_url && (
-                <a
-                  href={c.listing_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-ui-body text-zinc-900 [text-decoration:none]"
-                >
-                  View
-                </a>
-              )}
-              <span
-                style={{
-                  background: (statusColor[c.status] || "#71717A") + "22",
-                  color: statusColor[c.status] || "#71717A",
-                }}
-                className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
-              >
-                {(CITATION_STATES.find(([key]) => key === c.status) || [])[1] ||
-                  c.status}
-              </span>{" "}
-              {canRunSeoActions && (
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setCitError("");
-                    setCitEdit(
-                      citEdit?.id === c.id
-                        ? null
-                        : {
-                            id: c.id,
-                            listing_url: c.listing_url || "",
-                            location_id: c.location_id || "",
-                          }
-                    );
-                  }}
-                >
-                  {citEdit?.id === c.id ? "Close" : "Edit"}
-                </Button>
-              )}
-            </div>
-            {citEdit?.id === c.id && (
-              <div className="flex flex-col [gap:10px] [padding:0_0_12px]">
-                <div className="flex [gap:10px] items-center flex-wrap">
-                  <Input
-                    value={citEdit.listing_url}
-                    onChange={(e) =>
-                      setCitEdit({ ...citEdit, listing_url: e.target.value })
-                    }
-                    placeholder="Public listing URL (https://…) — blank clears it"
-                    className="[flex:1] [min-width:280px]"
-                  />
-                  <Select
-                    className="!w-auto"
-                    value={citEdit.location_id}
-                    onChange={(e) =>
-                      setCitEdit({ ...citEdit, location_id: e.target.value })
-                    }
-                    title="Which office this listing should show"
-                  >
-                    <option value="">Any office</option>
-                    {(data.citationLocations || []).map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button
-                    disabled={citSaving}
-                    onClick={() =>
-                      saveCitation(c.id, {
-                        listing_url: citEdit.listing_url,
-                        location_id: citEdit.location_id,
-                      })
-                    }
-                  >
-                    {citSaving ? "Saving…" : "Save"}
-                  </Button>
-                </div>
-                <div className="flex [gap:10px] items-center flex-wrap">
-                  <Button
-                    variant="secondary"
-                    disabled={citSaving || c.status === "missing"}
-                    onClick={() => saveCitation(c.id, { status: "missing" })}
-                  >
-                    Mark missing
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    disabled={citSaving || c.status === "unverified"}
-                    onClick={() => saveCitation(c.id, { status: "unverified" })}
-                  >
-                    Back to unverified
-                  </Button>
-                  <span className="text-ui-body text-ink-secondary">
-                    Saving a new URL or office re-queues the row for the next
-                    audit. Missing means no listing exists.
-                  </span>
-                </div>
-                {citError && (
-                  <div className="text-ui-body text-zinc-900">{citError}</div>
-                )}
-              </div>
-            )}
-            </div>
-          ))}
-        </UiCard>
+        <CitationsPanel
+          data={data}
+          canRunSeoActions={canRunSeoActions}
+          editor={citationEditor}
+        />
       )}
-
-      {/* Competitor Gaps sub-tab */}
-      {subTab === "gaps" && (
-        <UiCard className="p-6">
-          {" "}
-          <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
-            Competitor Gap Opportunities ({(data.competitorGaps || []).length})
-            {data.newGapsSince7d > 0 && (
-              <span className="[margin-left:8px] [padding:2px_8px] rounded-sm text-ui-body font-medium text-zinc-900 [background:#15803D18]">
-                {data.newGapsSince7d} new this week
-                {data.newHighValueGapsSince7d > 0
-                  ? ` (${data.newHighValueGapsSince7d} high-value)`
-                  : ""}
-              </span>
-            )}
-          </div>{" "}
-          <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
-            Domains linking to competitors but not to Waves
-          </div>
-          {(data.competitorGaps || []).length === 0 ? (
-            <div className="text-ui-body text-ink-secondary [padding:20px] text-center">
-              Run a competitor gap scan to find opportunities
-            </div>
-          ) : (
-            (data.competitorGaps || []).map((g, i) => (
-              <div
-                key={i}
-                className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
-              >
-                {" "}
-                <div className="flex justify-between items-center">
-                  {" "}
-                  <div className="flex items-center [gap:6px]">
-                    <span className="text-ui-body text-zinc-900 font-medium">
-                      {g.source_domain}
-                    </span>
-                    {g.created_at &&
-                      new Date(g.created_at) >=
-                        new Date(Date.now() - 7 * 86400000) && (
-                        <span className="[padding:1px_6px] rounded-xs text-ui-body font-medium text-zinc-900 [background:#15803D18]">
-                          New
-                        </span>
-                      )}
-                  </div>{" "}
-                  <span className="text-ui-body text-ink-secondary">
-                    DR: {g.source_domain_rating || "?"}
-                  </span>{" "}
-                </div>{" "}
-                <div className="text-ui-body text-ink-secondary">
-                  Links to: {g.competitor_domain} · Anchor: "
-                  {(g.anchor_text || "").substring(0, 40)}"
-                </div>{" "}
-              </div>
-            ))
-          )}
-        </UiCard>
-      )}
-
-      {/* Citation evidence and brand mentions are separate measurements. */}
+      {subTab === "gaps" && <BacklinkGapsPanel data={data} />}
       {subTab === "llm" && (
-        <div className="flex flex-col [gap:12px] [min-width:0px]">
-          <UiCard className="p-6">
-            <div className="flex justify-between [gap:16px] flex-wrap">
-              <div>
-                <h3 className="text-[18px] font-medium text-zinc-900 [margin:0_0_8px]">
-                  AI citations and mentions
-                </h3>
-                <p className="text-ui-body text-ink-secondary [margin:0px]">
-                  {llmDash
-                    ? `${llmDash.summary.queriesTracked} active queries observed across ${llmDash.summary.platforms.length} engines`
-                    : llmError
-                      ? "Observations could not be loaded."
-                      : "Loading observations…"}
-                </p>
-              </div>
-              {canRunSeoActions && (
-                <Button
-                  onClick={handleLlmScan}
-                  disabled={llmScanning}
-                  variant="secondary"
-                >
-                  {llmScanning ? "Scanning…" : "Run Scan"}
-                </Button>
-              )}
-            </div>
-            <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
-              Citation rate counts answers with a Waves source link attached.
-              Mention rate counts answers that name Waves. Search-result links
-              do not count as citations. Unanswered probes and unresolved links
-              are excluded from rates. These API observations are directional;
-              validate a sample in each consumer app.
-            </p>
-            {llmError && (
-              <Button
-                onClick={() => setLlmError(false)}
-                className="[margin-top:12px]"
-                variant="secondary"
-              >
-                Retry loading observations
-              </Button>
-            )}
-          </UiCard>
-          {llmDash?.benchmark && (
-            <UiCard className="p-6">
-              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
-                Fixed 40-question benchmark
-              </h3>
-              <div className="flex flex-wrap [gap:24px]">
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Linked citation rate
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {aeoRate(llmDash.benchmark.citationRate)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Brand mention rate
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {aeoRate(llmDash.benchmark.mentionRate)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Recommended rate
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {aeoRate(llmDash.benchmark.recommendedRate)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Questions observed
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {llmDash.benchmark.observedQuestions} /{" "}
-                    {llmDash.benchmark.questions}
-                  </div>
-                </div>
-              </div>
-              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
-                {llmDash.benchmark.activeQuestions} questions active ·{" "}
-                {llmDash.benchmark.measured} measured answers (a model change
-                keeps its answers separate). Recommended counts a mentioned
-                answer with positive sentiment ranked in the top 3 brands
-                {(llmDash.benchmark.rankMethods || []).includes("known_list_v1")
-                  ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
-                  : ""}
-                {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
-                  ? " (some ranks are read from the answer text, so they are conservative and never better than the true rank)"
-                  : ""}
-                {llmDash.benchmark.unclassified > 0
-                  ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
-                  : ""}
-                . Coverage of the{" "}
-                {llmDash.benchmark.coverage?.expected ?? 0} expected
-                question×engine pairs, by each pair's latest answer:{" "}
-                {llmDash.benchmark.coverage?.measured ?? 0} measured,{" "}
-                {llmDash.benchmark.coverage?.noAnswer ?? 0} no answer,{" "}
-                {llmDash.benchmark.coverage?.unresolved ?? 0} unresolved,{" "}
-                {llmDash.benchmark.coverage?.legacy ?? 0} legacy,{" "}
-                {llmDash.benchmark.coverage?.missing ?? 0} not yet observed.
-                Historical observations used a different citation method. Compare the same
-                questions and model in repeat runs. This view uses the latest
-                observations within 30 days; sampling dates may differ by
-                engine.
-              </p>
-            </UiCard>
-          )}
-          {llmDash?.citedUrlHealth && (
-            <UiCard className="p-6">
-              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
-                Owned page health
-              </h3>
-              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
-                Daily check of every owned URL an answer engine cited in the
-                last 30 days — a citation with no live page behind it is worse
-                than no citation. {llmDash.citedUrlHealth.checked} of{" "}
-                {llmDash.citedUrlHealth.candidates ??
-                  llmDash.citedUrlHealth.checked}{" "}
-                cited URLs checked
-                {llmDash.citedUrlHealth.lastCheckedOn
-                  ? ` (last: ${llmDash.citedUrlHealth.lastCheckedOn})`
-                  : ""}
-                , {llmDash.citedUrlHealth.bad} broken
-                {llmDash.citedUrlHealth.unchecked > 0
-                  ? `, ${llmDash.citedUrlHealth.unchecked} not checked yet`
-                  : ""}
-                .
-              </p>
-              {llmDash.citedUrlHealth.badUrls.length === 0 ? (
-                <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
-                  {llmDash.citedUrlHealth.checked === 0 &&
-                  llmDash.citedUrlHealth.unchecked > 0
-                    ? "Not checked yet — the nightly check runs at 1:20 AM ET."
-                    : llmDash.citedUrlHealth.unchecked > 0
-                      ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the nightly check runs at 1:20 AM ET.`
-                      : "No broken owned URLs detected."}
-                </p>
-              ) : (
-                llmDash.citedUrlHealth.badUrls.map((b) => (
-                  <div
-                    key={b.url}
-                    className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
-                  >
-                    <a
-                      href={b.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-zinc-900 break-words"
-                    >
-                      {b.url}
-                    </a>
-                    <div className="text-ink-secondary">
-                      {b.verdict}
-                      {b.finalUrl && b.finalUrl !== b.url
-                        ? ` · final: ${b.finalUrl}`
-                        : ""}{" "}
-                      · cited {b.citationCount}x · checked{" "}
-                      {b.lastCheckedOn}
-                    </div>
-                  </div>
-                ))
-              )}
-            </UiCard>
-          )}
-          {llmDash?.citedPageRanking && (
-            <UiCard className="p-6">
-              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
-                Cited pages to win
-              </h3>
-              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
-                Directory and article pages answer engines cite, ranked page by
-                page. First: pages cited in a current &ldquo;who should I
-                hire&rdquo; answer that does not name Waves. Since{" "}
-                {llmDash.citedPageRanking.since}.
-              </p>
-              {llmDash.citedPageRanking.pages.length === 0 ? (
-                <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
-                  No directory or article pages cited in this window.
-                </p>
-              ) : (
-                llmDash.citedPageRanking.pages.map((p) => (
-                  <div
-                    key={p.key}
-                    className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
-                  >
-                    <a
-                      href={p.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-zinc-900 break-words"
-                    >
-                      {p.rank}. {p.url}
-                    </a>
-                    <div className="text-ink-secondary">
-                      {p.currentMisses > 0
-                        ? `In ${p.currentMisses} current answer${p.currentMisses === 1 ? "" : "s"} without Waves (${p.missEngines.join(", ")})`
-                        : p.tier === 2
-                          ? "Cited in current answers that name Waves"
-                          : p.currentCitations > 0
-                            ? "Cited in current answers, not to a who-to-hire question"
-                            : "Cited earlier in the window"}
-                      {" · "}cited {p.citations}x · {p.category}
-                      {p.subtype ? ` (${p.subtype.replace(/_/g, " ")})` : ""}
-                    </div>
-                    <div className="text-ink-secondary">
-                      {p.questions
-                        .slice(0, 3)
-                        .map((q) => `${q.id ? `${q.id}: ` : ""}${q.query}`)
-                        .join(" · ")}
-                    </div>
-                  </div>
-                ))
-              )}
-              {llmDash.citedPageRanking.placements?.length > 0 && (
-                <>
-                  <h4 className="text-ui-body text-zinc-900 font-medium [margin:16px_0_4px]">
-                    Placements live on a cited page
-                  </h4>
-                  {llmDash.citedPageRanking.placements.map((r) => (
-                    <div
-                      key={r.prospectId}
-                      className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
-                    >
-                      <div className="text-zinc-900">
-                        {r.host} · live since {r.liveOn} ·{" "}
-                        {PLACEMENT_VERDICT_LABEL[r.verdict] || r.verdict}
-                      </div>
-                      <div className="text-ink-secondary">
-                        Waves named in {r.before.named}/{r.before.answers}{" "}
-                        answers before, {r.after.named}/{r.after.answers} since
-                        {r.after.citingPage > 0
-                          ? ` (${r.after.namedWhenCiting}/${r.after.citingPage} that cite the page)`
-                          : ""}
-                      </div>
-                    </div>
-                  ))}
-                </>
-              )}
-            </UiCard>
-          )}
-          <AeoRateTable
-            label="Benchmark by engine and model"
-            rows={llmDash?.benchmark?.byPlatform || []}
-          />
-          <div className="grid [grid-template-columns:repeat(auto-fit,_minmax(min(100%,_320px),_1fr))] [gap:12px] [min-width:0px]">
-            <AeoRateTable
-              label="Benchmark by question type"
-              rows={llmDash?.benchmark?.byIntent || []}
-            />
-            <AeoRateTable
-              label="Benchmark by city"
-              rows={llmDash?.benchmark?.byCity || []}
-            />
-          </div>
-          <details className="text-ui-body text-zinc-900">
-            <summary className="cursor-pointer [padding:10px_0]">
-              All managed queries and benchmark history
-            </summary>
-            <AeoRateTable
-              label="All managed queries by engine"
-              rows={llmDash?.byPlatform || []}
-            />
-            <AeoRateTable
-              label="Daily benchmark observations by engine and model"
-              rows={llmDash?.trend || []}
-            />
-          </details>
-          {llmDash?.entity && (
-            <UiCard className="p-6">
-              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
-                Entity accuracy: what engines say about Waves
-              </h3>
-              <div className="flex flex-wrap [gap:24px]">
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Facts stated correctly
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {aeoRate(llmDash.entity.factAccuracy)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Answers with a wrong claim
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {aeoRate(llmDash.entity.wrongClaimRate)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-ui-body text-ink-secondary">
-                    Questions observed
-                  </div>
-                  <div className="text-[24px] text-zinc-900">
-                    {llmDash.entity.observedQuestions} /{" "}
-                    {llmDash.entity.questions}
-                  </div>
-                </div>
-              </div>
-              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
-                {llmDash.entity.activeQuestions} questions active ·{" "}
-                {llmDash.entity.observed} answers scored against the
-                owner-approved cohort {llmDash.entity.version}. Facts are the
-                founder, founding year, license, footprint, services and contact
-                details; wrong claims are the rulings an answer must not
-                contradict (a franchise, fumigation, damage-repair coverage
-                inferred from the termite bond).
-                {llmDash.entity.missingMostOften?.length > 0 && (
-                  <>
-                    {" "}
-                    Missing most often:{" "}
-                    {llmDash.entity.missingMostOften
-                      .map((f) => `${f.label} (${f.count})`)
-                      .join(", ")}
-                    .
-                  </>
-                )}
-                {llmDash.entity.wrongMostOften?.length > 0 && (
-                  <>
-                    {" "}
-                    Wrong most often:{" "}
-                    {llmDash.entity.wrongMostOften
-                      .map((f) => `${f.label} (${f.count})`)
-                      .join(", ")}
-                    .
-                  </>
-                )}
-              </p>
-            </UiCard>
-          )}
-          <EntityFactsTable
-            label="Entity accuracy by engine and model"
-            rows={llmDash?.entity?.byPlatform || []}
-          />
-          <EntityFactsTable
-            label="Entity accuracy by question"
-            rows={llmDash?.entity?.byQuestion || []}
-            first="Question"
-          />
-          <div className="flex [gap:12px] flex-wrap">
-            <UiCard className="p-6 [flex:1] [min-width:240px]">
-              <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
-                Linked Waves pages
-              </h3>
-              {(llmDash?.citedPages || []).length === 0 && (
-                <p className="text-ui-body text-ink-secondary">
-                  No verified linked citations yet.
-                </p>
-              )}
-              {(llmDash?.citedPages || []).map((c) => (
-                <div
-                  key={c.url}
-                  className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body"
-                >
-                  <a
-                    href={c.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-zinc-900 break-words [min-width:0px]"
-                  >
-                    {c.url}
-                  </a>
-                  <span className="text-ink-secondary">{c.count}</span>
-                </div>
-              ))}
-            </UiCard>
-            <UiCard className="p-6 [flex:1] [min-width:240px]">
-              <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
-                Competitors mentioned
-              </h3>
-              {(llmDash?.competitors || []).length === 0 && (
-                <p className="text-ui-body text-ink-secondary">
-                  None detected in measured answers.
-                </p>
-              )}
-              {(llmDash?.competitors || []).map((c) => (
-                <div
-                  key={c.name}
-                  className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body text-zinc-900"
-                >
-                  <span>{c.name}</span>
-                  <span>{c.count}</span>
-                </div>
-              ))}
-            </UiCard>
-          </div>
-          <UiCard className="p-6">
-            <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
-              Latest answer evidence
-            </h3>
-            {!llmDash?.grid?.length && (
-              <p className="text-ui-body text-ink-secondary">
-                No observations for active queries yet.
-              </p>
-            )}
-            {(llmDash?.grid || []).map((m) => (
-              <details
-                key={`${m.query}::${m.llm_platform}::${m.model_version}`}
-                className="[padding:12px_0] text-ui-body text-zinc-900 border-b border-hairline border-zinc-200"
-              >
-                <summary className="cursor-pointer [line-height:1.6]">
-                  {m.benchmark_id && `${m.benchmark_id} · `}
-                  {m.query}
-                  <span className="block text-ink-secondary">
-                    {aeoStatus(m)} · {m.llm_platform} · {m.model_version} ·{" "}
-                    {String(m.check_date).slice(0, 10)}
-                  </span>
-                </summary>
-                <p className="whitespace-pre-wrap break-words [line-height:1.6]">
-                  {m.response_raw || "No answer text returned."}
-                </p>
-                {m.waves_cited_urls.map((url) => (
-                  <p key={url}>
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-zinc-900 break-words"
-                    >
-                      {url}
-                    </a>
-                  </p>
-                ))}
-                {m.target_cited && (
-                  <p className="text-ink-secondary">
-                    The guide mapped to this benchmark question was linked.
-                  </p>
-                )}
-              </details>
-            ))}
-          </UiCard>
-        </div>
+        <LlmMentionsPanel
+          data={data}
+          llmDash={llmDash}
+          llmError={llmError}
+          llmScanning={llmScanning}
+          handleLlmScan={handleLlmScan}
+          canRunSeoActions={canRunSeoActions}
+          onRetry={() => setLlmError(false)}
+        />
       )}
-
       {subTab === "prospects" && (
         <LinkBuildingBoard canRun={canRunSeoActions} />
       )}

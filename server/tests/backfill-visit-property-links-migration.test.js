@@ -12,8 +12,21 @@ const migration = require('../models/migrations/20260829000050_backfill_visit_pr
 
 const { STATE_KEY } = migration;
 
-// Real-looking but fictional addresses; keys computed by the SAME helper the
-// migration uses so the fixture can never drift from production normalization.
+// Keys come from the live helper, except the c3 retirement candidates
+// (p4-p6): addressKey dropped the city when a ZIP is present on 2026-10-01
+// (migration 20261002090000 recomputed every stored key), so same-street+ZIP
+// rows with different cities, the duplicates this migration retires, could
+// only coexist under the key as it was on 2026-08-29 (street + unit + city +
+// ZIP), reproduced by canonicalizeLegacyKey.
+const { canonicalizeLegacyKey } = (() => {
+  const CANON = { st: 'street', street: 'street', ave: 'avenue', avenue: 'avenue', rd: 'road', road: 'road', dr: 'drive', drive: 'drive', ln: 'lane', lane: 'lane', ct: 'court', court: 'court', blvd: 'boulevard', boulevard: 'boulevard', cir: 'circle', circle: 'circle', pl: 'place', place: 'place', ter: 'terrace', terrace: 'terrace', way: 'way', trl: 'trail', trail: 'trail', pkwy: 'parkway', parkway: 'parkway', hwy: 'highway', highway: 'highway' };
+  const zip5 = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
+  const strip = (s) => String(s || '').replace(/[.,#]/g, ' ').replace(/\b(?:apt|apartment|unit|ste|suite)\b\.?/gi, ' ').replace(/\s+/g, ' ').trim();
+  return {
+    canonicalizeLegacyKey: ({ address_line1, address_line2, city, zip }) => [strip([address_line1, address_line2].filter(Boolean).join(' ')), city, zip5(zip)]
+      .filter(Boolean).join(' ').toLowerCase().replace(/[.,#]/g, ' ').split(/\s+/).map((w) => CANON[w] || w).join(' ').replace(/[^a-z0-9]/g, ''),
+  };
+})();
 const A = { address_line1: '100 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
 const B = { address_line1: '110 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
 const P = { address_line1: '20 Duplicate Way', address_line2: null, city: 'Nokomis', zip: '34275' };
@@ -42,11 +55,11 @@ function seedDb() {
       prop('p3', 'c3', P, { is_primary: true, label: 'Primary' }),
       // Same street + ZIP as the primary, different city spelling, no label,
       // occupancy unknown, referenced by nothing → retire.
-      prop('p4', 'c3', P2, { label: null, occupancy_type: 'unknown' }),
+      prop('p4', 'c3', P2, { label: null, occupancy_type: 'unknown', address_key: canonicalizeLegacyKey(P2) }),
       // Same shape but an OPEN visit references it → keep.
-      prop('p5', 'c3', { ...P2, city: 'N Venice' }, { label: null, occupancy_type: 'unknown' }),
+      prop('p5', 'c3', { ...P2, city: 'N Venice' }, { label: null, occupancy_type: 'unknown', address_key: canonicalizeLegacyKey({ ...P2, city: 'N Venice' }) }),
       // Same shape, referenced ONLY by a cancelled visit → history, retire.
-      prop('p6', 'c3', { ...P2, city: 'Nokomis FL' }, { label: null, occupancy_type: 'unknown' }),
+      prop('p6', 'c3', { ...P2, city: 'Nokomis FL' }, { label: null, occupancy_type: 'unknown', address_key: canonicalizeLegacyKey({ ...P2, city: 'Nokomis FL' }) }),
       prop('pu-unit', 'c4', U, { is_primary: true, label: 'Condo' }),
       prop('pu-nounit', 'c4', U0, { label: 'Lobby office' }),
       prop('pu-other', 'c4', V, { label: 'Other' }),
@@ -398,7 +411,7 @@ describe('20260829000050 backfill visit property links', () => {
   test('down() leaves a retired row retired when an equal-key active row appeared since', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
-    db.customer_properties.push(prop('p4-new', 'c3', P2, { label: 'Re-added by admin', occupancy_type: 'rental_investment' }));
+    db.customer_properties.push(prop('p4-new', 'c3', P2, { label: 'Re-added by admin', occupancy_type: 'rental_investment', address_key: canonicalizeLegacyKey(P2) }));
     await expect(migration.down(fakeKnex(db))).resolves.toBeUndefined();
     expect(property(db, 'p4').active).toBe(false);
   });

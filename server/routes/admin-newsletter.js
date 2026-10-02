@@ -850,6 +850,7 @@ router.patch('/sends/:id', async (req, res, next) => {
         proof_token: null,
         proof_sent_at: null,
         proof_approved_at: null,
+        proof_refused_at: null,
       } : {}),
     });
     if (!updatedCount) {
@@ -1095,6 +1096,7 @@ router.post('/sends/:id/send', async (req, res) => {
               proof_token: null,
               proof_sent_at: null,
               proof_approved_at: null,
+              proof_refused_at: null,
               updated_at: new Date(),
             });
           if (reverted) {
@@ -1238,6 +1240,7 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
       proof_token: null,
       proof_sent_at: null,
       proof_approved_at: null,
+      proof_refused_at: null,
       updated_at: new Date(),
     });
     if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });

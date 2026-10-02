@@ -64,8 +64,18 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
   for (const item of response.products) {
     const product = rows.find((row) => String(row.id) === String(item?.id));
     if (!product) continue;
+    const selection = buildSelectedProduct(product, { applicationMethodOverride: item?.completionApplicationMethod || undefined });
     selections.push({
-      ...buildSelectedProduct(product, { applicationMethodOverride: item?.completionApplicationMethod || undefined }),
+      ...selection,
+      // Snapshot needs its weed rate; palms need individual canopy widths.
+      // Clear catalog shortcuts before an area/tank calculator can reuse one.
+      ...(item.requiresDoseSelection ? {
+        requiresDoseSelection: true,
+        rate: '', totalAmount: '', totalAmountManual: false,
+        amountUnit: 'lb', rateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',
+        catalogRateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',
+        carrierGallons: '', maxLabelRatePer1000: item.treeShrubKey === 'snapshot' ? 4.6 : null,
+      } : {}),
       // Provenance flag only — no visible tag renders from it today (the
       // product-card UI has no cheap per-line badge slot), but it lets a
       // later change key off "this row came from the protocol default"

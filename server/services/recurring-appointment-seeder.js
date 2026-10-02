@@ -461,7 +461,13 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // forward a day at a time (re-applying the weekend shift) until clear —
   // skipping the visit entirely would silently shrink the customer's plan.
   const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
-  for (const nextDateStr of recurringDateCandidates(baseDate, pattern, {
+  // opts.overrideDates (rider seeding, GATE_PEST_RIDES_LAWN_AT_ACCEPT): the
+  // caller already decided the dates, so they replace the pattern walk. Every
+  // other field below is built exactly as before.
+  const overrideDates = Array.isArray(opts.overrideDates)
+    ? opts.overrideDates.map(dateOnly).filter((d) => d && !existingDates.has(d))
+    : null;
+  for (const nextDateStr of overrideDates || recurringDateCandidates(baseDate, pattern, {
     recurrenceOptions: rOpts, skipWeekends, weekendShift: shiftDir, existingDates, blackoutDates, maxAttempts,
   })) {
     if (rows.length >= targetNewRows) break;
@@ -1090,7 +1096,7 @@ async function runTierSyncOnPool(customerId) {
   }
 }
 
-async function syncCustomerTierAfterSeeding(conn, customerId) {
+async function syncCustomerTierAfterSeeding(conn, customerId, commitScope = conn) {
   if (!customerId) return;
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -1106,8 +1112,8 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
     // acquires the customer row lock without holding anything else — no
     // cycle. On ROLLBACK there is no series, so there is nothing to sync;
     // any miss is healed by the nightly reconcile.
-    if (conn.isTransaction && conn.executionPromise) {
-      conn.executionPromise.then(
+    if (commitScope.isTransaction && commitScope.executionPromise) {
+      commitScope.executionPromise.then(
         () => runTierSyncOnPool(customerId),
         () => { /* rolled back — no series landed, nothing to sync */ },
       );
@@ -1210,7 +1216,7 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
 
 // Re-apply the parent term's coverage across the series after seeding, so
 // the new rows are stamped if — and only if — the term has slots for them.
-async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = []) {
+async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = [], commitScope = conn) {
   if (!columns?.annual_prepay_term_id) return;
   if (!conn || !parent?.id) return;
   const dates = [...new Set((coverageDates || []).filter(Boolean))].sort();
@@ -1278,7 +1284,7 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
           // a savepoint's executionPromise resolves on RELEASE, so filing
           // against it would let a rollback leave a false alert that dedupes
           // the real retry for seven days.
-          notifyConn: conn,
+          notifyConn: commitScope,
         });
       }
     }
@@ -1302,7 +1308,7 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
     require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
     if (resolvedTerm) {
       await require('./annual-prepay-renewals')._private.fileCoverageExceptionAfterCommit(
-        conn, resolvedTerm, 'generator_coverage_failed',
+        commitScope, resolvedTerm, 'generator_coverage_failed',
         'Newly scheduled visits on this annual prepay could not be marked as covered, so completing them will invoice the customer for prepaid work. Re-apply the prepay coverage to those visits, or void the invoices if they have already been issued.',
       ).catch(() => {});
     }
@@ -1315,6 +1321,12 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
   }
   const columns = opts.columns || await scheduledServiceColumns(conn);
+  // Post-commit work (tier sync, shortfall bell, coverage alerts) waits on the
+  // transaction that really commits. A caller seeding inside its own savepoint
+  // (rider-accept-seeding.seedWithRide) passes the outer transaction here: a
+  // savepoint's executionPromise resolves on RELEASE, before the accept
+  // commits, so a later rollback would leave false alerts behind.
+  const commitScope = opts.commitScope || conn;
   // B6: seeded DATES honor the customer's live weekday preference, but
   // the STAMPED flag (parent + children) carries only caller/operator
   // intent — the preference is consulted live by every generator and the
@@ -1365,8 +1377,8 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // before this fires.
   const notifyShortfallAfterCommit = () => {
     if (!seedShortfall) return;
-    if (conn.isTransaction && conn.executionPromise) {
-      conn.executionPromise.then(
+    if (commitScope.isTransaction && commitScope.executionPromise) {
+      commitScope.executionPromise.then(
         () => notifySeedShortfall(parent, seedShortfall),
         () => {},
       );
@@ -1422,7 +1434,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent
     // was just marked recurring — that alone is tier evidence.
-    await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+    await syncCustomerTierAfterSeeding(conn, parent.customer_id, commitScope);
     notifyShortfallAfterCommit();
     return {
       pattern,
@@ -1459,6 +1471,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   await applySeededPrepayCoverage(
     conn, parent, columns,
     insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean),
+    commitScope,
   );
   // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
   // every caller (estimate converter, admin-schedule, customer booking)
@@ -1478,7 +1491,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   } catch (vgErr) {
     require('./logger').warn(`[recurring-seeder] visit-group seam failed for parent ${parent.id}: ${vgErr.message}`);
   }
-  await syncCustomerTierAfterSeeding(conn, parent.customer_id);
+  await syncCustomerTierAfterSeeding(conn, parent.customer_id, commitScope);
   notifyShortfallAfterCommit();
   return {
     pattern,

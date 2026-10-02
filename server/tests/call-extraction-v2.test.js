@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.21.0');
+    expect(SCHEMA_VERSION).toBe('1.22.0');
   });
 
   describe('model-output schema', () => {
@@ -1373,6 +1373,71 @@ describe('extraction compat adapter', () => {
     expect([flat.definite_commitment, flat.relative_date_used, flat.moved_appointment_relative_date_used]).toEqual([true, false, null]);
     delete v2.scheduling.definite_commitment;
     expect(flatView(v2).definite_commitment).toBeNull();
+  });
+
+  test('flatView secondary_contacts_consent_signature is keyed on phone identity and covers every entry and the singleton (schema 1.22.0)', () => {
+    const v2 = validPersisted();
+    expect(flatView(v2).secondary_contacts_consent_signature).toBe('');
+    const entry = (role, texts, onSite, name, phone = null, email = null) => ({
+      name_full: name, first_name: name, last_name: null, phone_e164: phone, email,
+      role, wants_notifications: true, wants_appointment_texts: texts, on_site: onSite,
+    });
+    // Each entry is keyed by WHO it is: phone last-10, else lowercased email, else normalized name.
+    v2.secondary_contacts = [
+      entry('spouse_partner', true, true, 'Sample', '+15550100123'),
+      entry('tenant', true, false, 'Other', null, 'Other@Example.com'),
+      entry('lender', false, false, 'Third Person'),
+    ];
+    expect(flatView(v2).secondary_contacts_consent_signature)
+      .toBe('5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:1:0|third person:lender:1:0:0');
+    // Swapping the flags between two people changes the signature (flags are bound to identity, not position).
+    const swapped = validPersisted();
+    swapped.secondary_contacts = [entry('spouse_partner', false, false, 'Sample', '+15550100123'), entry('tenant', true, true, 'Other', null, 'other@example.com')];
+    const original = validPersisted();
+    original.secondary_contacts = [entry('spouse_partner', true, true, 'Sample', '+15550100123'), entry('tenant', false, false, 'Other', null, 'other@example.com')];
+    expect(flatView(swapped).secondary_contacts_consent_signature).not.toBe(flatView(original).secondary_contacts_consent_signature);
+    // Singleton-only payloads are fingerprinted too; a phone change changes the signature.
+    const single = (phone) => { const x = validPersisted(); x.secondary_contact = entry('spouse_partner', true, true, 'Sample', phone); return x; };
+    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('S=5550100123:spouse_partner:1:1:1');
+    // The singleton is fingerprinted even when the array is populated: a
+    // singleton phone drifting from secondary_contacts[0] changes the signature.
+    const both = (singlePhone) => {
+      const x = single(singlePhone);
+      x.secondary_contacts = [entry('spouse_partner', true, true, 'Sample', '+15550100123')];
+      return x;
+    };
+    expect(flatView(both('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(both('+15550100123')).secondary_contacts_consent_signature);
+    // A name-only singleton takes the same-person mirror's phone (and flags).
+    const nameOnly = validPersisted();
+    nameOnly.secondary_contact = entry('spouse_partner', false, false, 'Sample Spouse', null);
+    nameOnly.secondary_contacts = [entry('spouse_partner', true, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(nameOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
+    // A one-word name with no phone/email of its own pairs with its mirror too.
+    const firstOnly = validPersisted();
+    firstOnly.secondary_contact = entry('spouse_partner', false, false, 'John', null);
+    firstOnly.secondary_contacts = [entry('spouse_partner', true, true, 'John', '+15550100123')];
+    expect(flatView(firstOnly).secondary_contact).toMatchObject({ phone: '+15550100123', on_site: true });
+    // An 'unknown' singleton role takes the same-person mirror's specific role.
+    const roleless = validPersisted();
+    roleless.secondary_contact = entry('unknown', false, false, 'Sample Spouse', '+15550100123');
+    roleless.secondary_contacts = [entry('tenant', false, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(roleless).secondary_contact).toMatchObject({ role: 'tenant', on_site: true });
+    // A first-name-only singleton pairs with a mirror whose full name starts with it.
+    const prefix = validPersisted();
+    prefix.secondary_contact = { ...entry('spouse_partner', false, false, 'John', null), name_full: 'John', first_name: 'John', last_name: null };
+    prefix.secondary_contacts = [{ ...entry('spouse_partner', true, true, 'John Smith', '+15550100123'), name_full: 'John Smith', first_name: 'John', last_name: 'Smith' }];
+    expect(flatView(prefix).secondary_contact).toMatchObject({ phone: '+15550100123', on_site: true, last_name: 'Smith' });
+    // Array-only payload (no singleton): the mirror is the canonical contact, flags kept.
+    const arrayOnly = validPersisted();
+    arrayOnly.secondary_contact = null;
+    arrayOnly.secondary_contacts = [entry('tenant', true, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(arrayOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
+    expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
+    // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
+    const flat = flatView(single('+15550100123'));
+    expect(flat).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
+    expect(flat).not.toHaveProperty('secondary_on_site_evidence');
+    expect(flat).not.toHaveProperty('secondary_on_site_grounded');
   });
 
   test('flatView maps the commercial dictated booking judgements (schema 1.21.0), null when not judged', () => {

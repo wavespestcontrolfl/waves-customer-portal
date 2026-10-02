@@ -791,7 +791,7 @@ describe('resumeCampaign — preconditions', () => {
       throw new Error(`unexpected ${table}`);
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/returned to draft/) });
-    expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_token: null, sending_claim_token: null });
+    expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_refused_at: null, proof_token: null, sending_claim_token: null });
     expect(wheres).toContainEqual([{ id: 's', status: 'failed' }]);
   });
 

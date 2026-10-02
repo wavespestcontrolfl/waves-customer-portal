@@ -135,18 +135,44 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
+      // Atomic JSON-path stamps (`jsonb_set(estimate_data, '{key}', value)`)
+      // reach this fake as the raw marker object; apply the keys to the
+      // stored JSON instead of replacing the column with the marker, so a
+      // later read of estimate_data (proposal, delivery marker) still parses.
+      const applyJsonbSet = (row, column, raw) => {
+        const sql = String(raw.__raw);
+        const bindings = Array.isArray(raw.bindings) ? [...raw.bindings] : [];
+        const wasString = typeof row[column] === 'string';
+        let data = row[column];
+        if (wasString) { try { data = JSON.parse(data); } catch { data = {}; } }
+        data = data && typeof data === 'object' ? data : {};
+        const re = /'\{([A-Za-z0-9_]+)\}',\s*(to_jsonb\(\?::text\)|'true'::jsonb|'false'::jsonb|\?::jsonb)/g;
+        let m;
+        while ((m = re.exec(sql))) {
+          const [, key, valueSrc] = m;
+          if (valueSrc === "'true'::jsonb") data[key] = true;
+          else if (valueSrc === "'false'::jsonb") data[key] = false;
+          else {
+            const b = bindings.shift();
+            data[key] = valueSrc === '?::jsonb' ? JSON.parse(b) : b;
+          }
+        }
+        row[column] = wasString ? JSON.stringify(data) : data;
+      };
       hits.forEach((row) => {
-        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
-        // accept writes — assigning the raw token would clobber the column.
-        const raw = obj.estimate_data && obj.estimate_data.__raw;
-        if (raw && /jsonb_set/.test(raw)) {
-          const key = /'\{(\w+)\}'/.exec(raw)[1];
-          const wasString = typeof row.estimate_data === 'string';
-          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
-          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
-          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
-        } else {
-          Object.assign(row, obj);
+        for (const [col, val] of Object.entries(obj)) {
+          if (val && typeof val === 'object' && val.__raw && String(val.__raw).includes('jsonb_set(')) applyJsonbSet(row, col, val);
+          else if (val && typeof val === 'object' && val.__raw && String(val.__raw).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'")) {
+            // The accept's wholesale estimate_data write merges the ROW's
+            // current served marker over the snapshot it was built from.
+            const wasString = typeof row[col] === 'string';
+            let existing = row[col];
+            if (wasString) { try { existing = JSON.parse(existing); } catch { existing = {}; } }
+            const next = JSON.parse(val.bindings[0]);
+            if (existing && typeof existing === 'object' && existing.rateReviewTermsServed != null) next.rateReviewTermsServed = existing.rateReviewTermsServed;
+            row[col] = wasString ? JSON.stringify(next) : next;
+          }
+          else row[col] = val;
         }
       });
       return {
@@ -176,7 +202,10 @@ jest.mock('../models/db', () => {
     return b;
   };
 
-  const dbFn = (table) => makeBuilder(table);
+  // state.onTable: a per-test hook fired on EVERY table access (root and
+  // transaction alike) so a test can interleave a concurrent write at a
+  // chosen point inside the accept transaction.
+  const dbFn = (table) => { if (typeof state.onTable === 'function') state.onTable(table); return makeBuilder(table); };
   dbFn.fn = { now: () => new Date() };
   dbFn.raw = (sql, bindings) => {
     // Advisory-lock statements (`pg_advisory_xact_lock`) flow through here —
@@ -245,6 +274,21 @@ jest.mock('../services/estimate-card-holds', () => ({
   attachCardHoldPaymentMethod: jest.fn(async () => ({})),
   cardHoldNoShowFee: jest.fn(() => 49),
   cardHoldCancelWindowHours: jest.fn(() => 24),
+}));
+// The public /pdf download, pdfkit path: the real generator streams a PDF
+// through pdfkit; here it only needs to end the response so the served
+// marker written beside it can be asserted.
+// The browser document renderer: never reachable in tests (no headless
+// browser); the mock lets the /pdf route tests pin WHEN it is attempted.
+jest.mock('../services/pdf/estimate-doc-pdf', () => {
+  const actual = jest.requireActual('../services/pdf/estimate-doc-pdf');
+  return { ...actual, renderEstimateDocumentPdf: jest.fn(async () => { throw new Error('no browser in tests'); }) };
+});
+jest.mock('../services/pdf/estimate-pdf', () => ({
+  generateEstimateProposalPDF: jest.fn((estimate, res) => {
+    res.set('Content-Type', 'application/pdf');
+    res.end('%PDF-1.4 test');
+  }),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
@@ -369,6 +413,7 @@ function resetStore(estimateRow) {
   };
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
+  db.__state.onTable = null;
 }
 
 function storedEstimate() {
@@ -386,6 +431,11 @@ async function putAccept(token, body = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks keeps queued *Once values: a test whose accept is refused
+  // before conversion would otherwise hand its queued conversion to the next
+  // test. convertEstimate has no default implementation, so a reset only
+  // drops that leftover queue.
+  EstimateConverter.convertEstimate.mockReset();
   InvoiceService.create.mockImplementation(async () => ({
     id: 'inv-1', token: 'invtok1', total: 159, applied_deposit_credit: 0,
   }));
@@ -1505,7 +1555,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       // IP: the record takes req.ip (proxy-validated under index.js's
       // trust-proxy setting; the loopback here, where nothing is trusted).
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '198.51.100.77' },
-      body: JSON.stringify({ termsVersion: CURRENT }),
+      // A recurring pest plan: the tab rendered the 'plan' scope (the
+      // Services line with the annual rate review sentence) and attests it.
+      body: JSON.stringify({ termsVersion: CURRENT, termsScope: 'plan' }),
     });
     expect(res.status).toBe(200);
 
@@ -1520,9 +1572,10 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       customer_id: customerId,
       method: 'public_estimate',
       terms_version: CURRENT,
-      terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+      terms_text: acceptanceTerms.acceptanceTermsSnapshot('plan'),
       user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
     });
+    expect(records[0].terms_text).toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
     expect(records[0].ip).toMatch(/127\.0\.0\.1|::1/);
     expect(records[0].ip).not.toContain('198.51.100.77');
     expect(records[0].accepted_at).toBeTruthy();
@@ -1538,7 +1591,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({ id: 'est-terms-2', token: 'tok-terms-2-x0123456789' });
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
 
-    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT });
+    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(failed.status).toBeGreaterThanOrEqual(500);
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
@@ -1550,12 +1603,356 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-3', token: 'tok-terms-3-x0123456789' });
 
-    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01' });
+    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01', termsScope: 'plan' });
     expect(stale.status).toBe(409);
     expect(stale.data.code).toBe('TERMS_VERSION_STALE');
     expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // Scope attestation (codex #5434 r1 P0): the record carries the Services
+  // line the tab rendered — the server re-derives the estimate's scope and
+  // refuses the other one (or none) with the same reloadable 409.
+  test.each([
+    ['the other scope', { termsVersion: null, termsScope: 'base' }],
+    ['no scope beside a current version (a bundle that predates scopes)', { termsVersion: null }],
+    ['an unknown scope', { termsVersion: null, termsScope: 'all' }],
+  ])('a recurring plan accept attesting %s → 409 TERMS_VERSION_STALE before any mutation', async (_name, body) => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-s', token: 'tok-terms-s-x0123456789' });
+    const res = await putAccept('tok-terms-s-x0123456789', { ...body, termsVersion: CURRENT });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test("a rodent-only estimate serves and records the 'base' scope — no rate review sentence — and refuses 'plan'", async () => {
+    mockGateState.acceptanceTerms = true;
+    const rodent = {
+      id: 'est-terms-r',
+      token: 'tok-terms-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] },
+          oneTime: { items: [], membershipFee: 0 },
+        },
+      }),
+    };
+    seed(rodent);
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    expect(acceptanceTermsScopeFor(storedEstimate(), JSON.parse(rodent.estimate_data), {})).toBe('base');
+
+    const wrong = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(wrong.status).toBe(409);
+    expect(wrong.data.code).toBe('TERMS_VERSION_STALE');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    conversionOk();
+    const res = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'base' });
+    expect(res.status).toBe(200);
+    const records = db.__state.tables.estimate_acceptances;
+    expect(records).toHaveLength(1);
+    expect(records[0].terms_version).toBe(CURRENT);
+    expect(records[0].terms_text).toBe(acceptanceTerms.acceptanceTermsSnapshot('base'));
+    expect(records[0].terms_text).not.toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
+  });
+
+  test("the customer's one-time toggle on a plan estimate is a 'base' accept: 'plan' is refused", async () => {
+    mockGateState.acceptanceTerms = true;
+    // A pest plan the customer may take as a single visit (show_one_time_option + a resolvable one-time price).
+    seed({ id: 'est-terms-o', token: 'tok-terms-o-x0123456789', show_one_time_option: true, onetime_total: 150 });
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const estData = JSON.parse(storedEstimate().estimate_data);
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {}, { oneTime: true })).toBe('base');
+
+    const res = await putAccept('tok-terms-o-x0123456789', { termsVersion: CURRENT, termsScope: 'plan', serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // codex #5434 r3 P1 + the merge-head pre-push P1: the accept stamps the
+  // frozen-document fact only on persisted evidence the customer was SERVED
+  // the disclosure — the served marker (/pdf download, legacy page card) or
+  // the recorded 'plan' drawer snapshot — never on plan eligibility alone.
+  test('gate off: a plan accept stamps rateReviewDisclosedAtAccept only when the served marker is current; rodent never', async () => {
+    mockGateState.acceptanceTerms = false;
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
+    const planData = (extra = {}) => JSON.stringify({
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      ...extra,
+    });
+
+    // No evidence at all (an older tab, nothing downloaded): unstamped.
+    seed({ id: 'est-stamp-0', token: 'tok-stamp-0-x0123456789' });
+    conversionOk();
+    expect((await putAccept('tok-stamp-0-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // The document or page served the current line: stamped, still no drawer row.
+    seed({ id: 'est-stamp-1', token: 'tok-stamp-1-x0123456789', estimate_data: planData({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-1-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(1);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // A marker from an older copy version is no evidence for this line.
+    seed({ id: 'est-stamp-2', token: 'tok-stamp-2-x0123456789', estimate_data: planData({ rateReviewTermsServed: 'v2025-01' }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-2-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+
+    // Rodent: no rate to review, marker or not.
+    seed({
+      id: 'est-stamp-r',
+      token: 'tok-stamp-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({
+        result: { recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] }, oneTime: { items: [], membershipFee: 0 } },
+        rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION,
+      }),
+    });
+    conversionOk();
+    expect((await putAccept('tok-stamp-r-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+  });
+
+  test('served evidence persisted AFTER the accept read the row is still honored: merged through the wholesale write and read under the lock', async () => {
+    // GH Codex r5 P1: a /pdf download (or legacy page view) lands between
+    // the accept's unlocked read and its guarded UPDATE. The marker write
+    // does not move updated_at, so the accept's guard does not 409 — the
+    // accept must merge the row's marker through its own estimate_data write
+    // and decide the stamp from the row under its lock, not the snapshot.
+    mockGateState.acceptanceTerms = false;
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-stamp-race', token: 'tok-stamp-race-x0123456789' });
+    conversionOk();
+    let injected = false;
+    db.__state.onTable = (table) => {
+      // First transaction touch of the customers table = matchAcceptCustomerByPhone,
+      // which runs before the guarded estimates UPDATE.
+      if (table === 'customers' && !injected) {
+        injected = true;
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await putAccept('tok-stamp-race-x0123456789', {});
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(injected).toBe(true);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.rateReviewDisclosedAtAccept).toBe(true);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
+  });
+
+  test('a whole-blob preference write preserves served evidence recorded since its read (codex local review on #5434)', async () => {
+    // PUT /preferences rewrites estimate_data from the row it read; the marker
+    // never moves updated_at, so the route's guard cannot catch a download
+    // that recorded the disclosure in between — the SQL merge must keep it.
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-pref-1', token: 'tok-pref-1-x0123456789' });
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      touches += 1;
+      // A download lands right after the route's read: the stored row gains
+      // the marker before the route's whole-blob UPDATE.
+      if (touches === 2) {
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pref-1-x0123456789/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interior_spray: false }),
+    });
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.preferences.interior_spray).toBe(false);
+    // The route's own snapshot (built from its pre-download read) lacked the
+    // marker; the SQL-side merge is what carried it through.
+    const mergeOps = db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'"));
+    expect(mergeOps).toHaveLength(1);
+    expect(JSON.parse(mergeOps[0].bindings[0]).rateReviewTermsServed).toBeUndefined();
+  });
+
+  test("gate on: the recorded 'plan' drawer snapshot is evidence on its own (no served marker)", async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-stamp-d', token: 'tok-stamp-d-x0123456789' });
+    conversionOk();
+    const res = await putAccept('tok-stamp-d-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(res.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(1);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
+  });
+
+  test('GET /:token/pdf marks the served disclosure for an open recurring plan (pdfkit path) and never for a frozen estimate', async () => {
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    // The synthesized document prints the engine lines (estimate_data.lineItems),
+    // the same shape the /data projection tests use for an eligible plan.
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
+    const open = await fetch(`${base}/api/estimates/tok-pdf-1-x0123456789/pdf`);
+    expect(open.status).toBe(200);
+    expect(servedOps()).toHaveLength(1);
+    // Evidence proven → the browser renderer was attempted (and fell back).
+    expect(renderDoc).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    // Frozen: still downloadable, but the marker is never written.
+    seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-2-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+    // A stored (disabled) proposal with operator terms: both renderers
+    // suppress the canned line beside authored terms, so no evidence either
+    // (pre-push Codex on #5434).
+    seed({
+      id: 'est-pdf-3',
+      token: 'tok-pdf-3-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(documentData),
+        proposal: {
+          enabled: false,
+          terms: 'Operator terms govern this proposal.',
+          buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 60, frequency: 'quarterly', taxable: false }] }],
+        },
+      }),
+    });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-3-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+  });
+
+  test('GET /:token/pdf: a non-customer download (bot / unfurler UA) records no served evidence (local max-effort review on #5434)', async () => {
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    seed({
+      id: 'est-pdf-bot',
+      token: 'tok-pdf-bot-x0123456789',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    const res = await fetch(`${base}/api/estimates/tok-pdf-bot-x0123456789/pdf`, { headers: { 'User-Agent': 'Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)' } });
+    expect(res.status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+  });
+
+  test('the legacy page records served evidence only on a counted customer view (source pattern; local max-effort review on #5434)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    expect(src).toMatch(/if \(rateReviewTermsRendered && countThisView\) \{/);
+    expect(src).toMatch(/const countThisView = shouldCountView\(req, requestIp, estimate\);/);
+  });
+
+  test('GET /:token/pdf: when the row freezes between the read and the evidence write, the document is rendered from the frozen row (no line, no marker)', async () => {
+    // GH Codex r7 P1: the marker must be durable BEFORE a document carrying
+    // the line exists. An accept that lands first turns the write into a
+    // zero-row no-op; the route must then render the CURRENT (frozen) row
+    // rather than the stale open snapshot it read.
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-race', token: 'tok-pdf-race-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      // Second touch = the evidence UPDATE; the accept from another tab
+      // committed just before it.
+      if (estimateTouches === 2) {
+        const row = storedEstimate();
+        row.status = 'accepted';
+        row.price_locked_at = '2026-10-01T06:00:00.000Z';
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pdf-race-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(estimateTouches).toBeGreaterThanOrEqual(3);
+    // The guarded evidence UPDATE was attempted (one raw stamp issued) but
+    // matched zero rows (frozen-status guards): the stored row carries no marker.
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'))).toHaveLength(1);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // The renderer received the frozen row, not the open snapshot.
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('accepted');
+    expect(renderedEstimate.price_locked_at).toBe('2026-10-01T06:00:00.000Z');
+    expect(renderedBilling.withholdRateReviewTerms).toBeUndefined();
+  });
+
+  test('GET /:token/pdf: when the evidence write FAILS, the document is served with the line withheld (GH Codex r8 P0)', async () => {
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    seed({
+      id: 'est-pdf-fail',
+      token: 'tok-pdf-fail-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      if (estimateTouches === 2) throw new Error('db down'); // the evidence UPDATE
+    };
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
+    const res = await fetch(`${base}/api/estimates/tok-pdf-fail-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // Withholding: the browser renderer (which cannot be told) is skipped.
+    expect(renderDoc).not.toHaveBeenCalled();
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('sent');
+    expect(renderedBilling.withholdRateReviewTerms).toBe(true);
+  });
+
+  test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const est = (extra = {}) => ({ id: 'e', monthly_total: 60, annual_total: 720, onetime_total: 0, ...extra });
+    const data = (services, oneTime = []) => ({ result: { recurring: { services }, oneTime: { items: oneTime, membershipFee: 0 } } });
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    // Rodent anywhere: no estimate-wide plan terms.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    // One-time-only: no rate to review.
+    expect(acceptanceTermsScopeFor(est({ monthly_total: 0, annual_total: 0, onetime_total: 150 }), data([], [{ name: 'One-Time Pest Control', service: 'pest_one_time', price: 150 }]), {})).toBe('base');
+    // Termite / unclassifiable rows, commercial marks, malformed data: fail closed.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }], [{ name: 'WDO Inspection', service: 'wdo_inspection', price: 125 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60, isCommercial: true }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), null, {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), 'not an object', {})).toBe('base');
   });
 
   test('a termite/WDO estimate (own signed agreement) never gets a record, even when a version is sent', async () => {
@@ -1571,7 +1968,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       }),
     });
     conversionOk();
-    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT });
+    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(res.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
@@ -1667,7 +2064,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
     conversionOk();
-    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
+    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(gateOff.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
@@ -1676,6 +2073,65 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     conversionOk();
     const gateOffStale = await putAccept('tok-terms-6-x0123456789', { termsVersion: 'v2000-01' });
     expect(gateOffStale.status).toBe(200);
+  });
+});
+
+describe('Payment consent attestation on consent-bearing accepts (codex #5434 r1 P1)', () => {
+  // The inline Auto Pay capture / capture modal render the bundle's own copy
+  // of the saved-payment-method consent text; the accept that records that
+  // consent (post-commit) must attest the version the tab rendered.
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  const spies = [];
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+      recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    });
+  }
+
+  beforeEach(() => {
+    resetStore(recurringPestEstimate({ id: 'est-consent-1', token: 'tok-consent-1-x012345678' }));
+    // A recurring plan whose Auto Pay card capture is REQUIRED and verified.
+    spies.push(
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_1', paymentMethodId: 'pm_cof_1', methodType: 'card' }),
+      jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true, paymentMethodRowId: 'pm-row-1' }),
+    );
+  });
+  afterEach(() => { while (spies.length) spies.pop().mockRestore(); });
+
+  test('the current version passes the attestation (the accept proceeds past the capture gate)', async () => {
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion: CONSENT_VERSION });
+    expect(res.data.code).not.toBe('CONSENT_VERSION_STALE');
+    expect(RecurringCards.verifyRecurringCardIntent).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'si_cof_1' }));
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test.each([
+    ['a stale version', 'v11_2026-08-25'],
+    ['no version (a bundle that predates the attestation)', undefined],
+  ])('a verified Auto Pay capture attesting %s → 409 CONSENT_VERSION_STALE before any mutation', async (_name, consentTextVersion) => {
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VERSION_STALE');
+    expect(res.data.error).toMatch(/refresh the page/i);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('an accept that captures no consent (no card owed) ignores the attestation entirely', async () => {
+    RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue({ enforced: true, required: false, exemptReason: 'not_required' });
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', {});
+    expect(res.status).toBe(200);
+    expect(RecurringCards.verifyRecurringCardIntent).not.toHaveBeenCalled();
   });
 });
 
@@ -2745,6 +3201,21 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
     });
 
+    test('a lone STALE recurringCardConsentVersion (no variant, no tender) is refused — it must not bypass the bundle-version fence (pre-push Codex on the merge)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentVersion: 'v11_2026-08-25' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).not.toBe('accepted');
+    });
+
+    test('a tender attested WITHOUT a version is an incomplete attestation and is refused', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
     test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
       conversion('ss-first');
       const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
@@ -2800,7 +3271,13 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   // A capture-required policy sends the captured SetupIntent with the accept.
   const accept = async (token, body = {}) => {
     const policy = await policySpy.getMockImplementation()?.();
-    return putAccept(token, policy?.required === true ? { recurringCardSetupIntentId: 'seti_paf_default', ...body } : body);
+    // A capture tab attests the consent text version it rendered (#5434's
+    // bundle-level fence); a per-capture attestation in `body` supersedes it.
+    return putAccept(token, policy?.required === true ? {
+      recurringCardSetupIntentId: 'seti_paf_default',
+      consentTextVersion: require('../services/payment-method-consent-text').CONSENT_VERSION,
+      ...body,
+    } : body);
   };
   // A tab showing the promise attests it, and its capture rendered the
   // after_visit_card authorization for a card (the accept's one collection

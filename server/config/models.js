@@ -191,6 +191,10 @@ const DEFAULTS = Object.freeze({
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
+  // App Photo ID pest engine (owner 2026-10-01, "lets just use Gemini"): on
+  // the owner's chinch bug photo 3.6 Flash named it 4/4 in ~1.7 s through
+  // the engine; 3.8 Flash gave chinch, seed bug and carpenter ant.
+  GEMINI_PHOTO_ID_PEST: 'gemini-3.6-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
   OPENAI_EMBEDDING: 'text-embedding-3-small',
@@ -204,6 +208,10 @@ const DEFAULTS = Object.freeze({
   // free text). Production PINS a dated version: the `jev-latest` alias moves
   // under us, so the adapter refuses any model that is not jev-N.N.N.
   TYPESAFE_JEV: 'jev-1.13.0',
+  // Cloudflare Clef (Workers AI): decision-only models with Jev-compatible
+  // answers. Cloudflare publishes no dated ids, so the pin is the id itself
+  // plus the model the provider reports serving, recorded on every ledger row.
+  CLOUDFLARE_CLEF: 'clef-flash',
 });
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
@@ -251,13 +259,16 @@ const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
-const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini', TYPESAFE: 'typesafe' });
+const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini', TYPESAFE: 'typesafe', CLOUDFLARE: 'cloudflare' });
 
 // Cross-provider model defaults (env-overridable; same convention as the #1834
 // lawn pipeline's LAWN_WRITER_MODEL / LAWN_VISION_MODEL). NOT Anthropic IDs, so
 // scripts/check-models.js intentionally skips them (it validates Anthropic only).
 // TypeSafe Jev typed-decision model (ROUTES.typedDecision). Pinned version.
 const TYPESAFE_JEV = process.env.MODEL_TYPESAFE_JEV || DEFAULTS.TYPESAFE_JEV;
+// Cloudflare Clef typed-decision model (ROUTES.typedDecisionClef): a second
+// provider for the same decision packages. clef-flash (9B) or clef (27B).
+const CLOUDFLARE_CLEF = process.env.MODEL_CLOUDFLARE_CLEF || DEFAULTS.CLOUDFLARE_CLEF;
 
 const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
   || process.env.MODEL_OPENAI_BEST
@@ -304,6 +315,7 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
+const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
 // experimental third leg drafts with it so Gemini can be ranked against the
@@ -412,6 +424,7 @@ const MODEL_CATALOG = {
   'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
+  'gemini-3.6-flash': { label: 'Gemini 3.6 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.5-flash': { label: 'Gemini 3.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
   'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
   'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'legacy' },
@@ -419,6 +432,10 @@ const MODEL_CATALOG = {
   // writes text, so its only cap is 'decision' and no text/vision picker may
   // offer it.
   'jev-1.13.0': { label: 'TypeSafe Jev 1.13', provider: 'typesafe', caps: ['decision'], status: 'current' },
+  // Cloudflare Clef on Workers AI: decision-only, same question and answer
+  // shapes as Jev. Never a text or vision picker option.
+  'clef-flash': { label: 'Cloudflare Clef-flash', provider: 'cloudflare', caps: ['decision'], status: 'current' },
+  'clef': { label: 'Cloudflare Clef', provider: 'cloudflare', caps: ['decision'], status: 'current' },
   'muse-spark-1.3': { label: 'Muse Spark 1.3', provider: 'unknown', caps: ['text'], status: 'unavailable' },
 };
 
@@ -454,6 +471,10 @@ const ROUTES = Object.freeze({
   // fallback: nothing else answers typed questions, so callers fall back to
   // their existing path on `ok:false`. Never a TEXT_POLICIES leg.
   typedDecision: Object.freeze({ provider: PROVIDER.TYPESAFE, model: TYPESAFE_JEV }),
+  // The same decision packages on Cloudflare Clef (Workers AI), recorded
+  // beside Jev for comparison. Single-leg like typedDecision; dark behind
+  // GATE_TYPED_DECISIONS_CLEF (which also needs GATE_TYPED_DECISIONS).
+  typedDecisionClef: Object.freeze({ provider: PROVIDER.CLOUDFLARE, model: CLOUDFLARE_CLEF }),
 });
 
 // Generated-text policies always cross providers. The shared LLM dispatcher
@@ -567,6 +588,15 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
   }),
+  photoIdPestV2: Object.freeze({
+    name: 'photoIdPestV2',
+    // The customer app's Photo ID pest engine (photo-id-v2/pest-engine.js)
+    // only. Owner 2026-10-01: Gemini's one read answers; OpenAI stands in
+    // only when Gemini returns nothing. photoIdVision above keeps the v1
+    // surfaces (website funnel, SMS triage, admin) on 3.8 Flash.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -663,11 +693,13 @@ module.exports = {
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   TYPESAFE_JEV,
+  CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,
   SMS_SONNET,
   GEMINI_VISION_BEST,
+  GEMINI_PHOTO_ID_PEST,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,
   GEMINI_IMAGE_PRO,
