@@ -130,6 +130,15 @@
 .tech-note-photo-confirm { display: grid; gap: 8px; }
 .tech-note-photo-confirm p { margin: 0; }
 .tech-note-photo-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Lane voice fill (GATE_LANE_VOICE_FILL): "<Lane> record heard from you",
+   one row per field with what was heard and a Change. */
+.tech-lane-record { display: grid; gap: 12px; }
+.tech-lane-row { display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--tech-border); }
+.tech-lane-row .tech-visit-section-head { margin: 0; }
+.tech-lane-label { color: var(--tech-muted); font-size: 14px; font-weight: 600; }
+.tech-lane-value { margin: 0; color: var(--tech-text); font-size: 16px; }
+.tech-lane-value--empty { color: var(--tech-muted); }
+.tech-lane-value--empty.tech-visit-status--warn { color: #fcd34d; }
 /* Fast Complete tip options: label over one line of the customer copy. */
 .tech-visit-tip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .ui-action.tech-visit-tip { justify-content: flex-start; height: auto; min-height: 56px; padding: 8px 12px; text-align: left; white-space: normal; }

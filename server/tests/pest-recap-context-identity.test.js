@@ -85,3 +85,36 @@ test('the context says whether the visit is a free callback', async () => {
   expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_callback: true }))).service.isCallback).toBe(true);
   expect((await buildRecapContext(visit.id, contextDb(visit))).service.isCallback).toBe(false);
 });
+
+describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => {
+  const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+  const saved = process.env.GATE_LANE_VOICE_FILL;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_LANE_VOICE_FILL; else process.env.GATE_LANE_VOICE_FILL = saved;
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'pest_control' });
+  });
+  const bedBug = { ...visit, service_type: 'Bed Bug Treatment' };
+
+  test('gate on: a lane visit carries its lane; the recap\'s own eligibility stays pest control only', async () => {
+    process.env.GATE_LANE_VOICE_FILL = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });
+    const result = await buildRecapContext(bedBug.id, contextDb(bedBug));
+    expect(result).toMatchObject({ ok: true, eligible: false, lane: 'bed_bug_treatment' });
+  });
+
+  test('never for a visit that completes through a project, a typed form, or a pest visit', async () => {
+    process.env.GATE_LANE_VOICE_FILL = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment', requiresProject: true });
+    expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'mosquito', serviceKey: 'mosquito_one_time', findingsType: 'mosquito_event' });
+    expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'pest_control', serviceKey: 'pest_general_quarterly' });
+    expect((await buildRecapContext(visit.id, contextDb(visit))).lane).toBeNull();
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no lane', async (value) => {
+    if (value === undefined) delete process.env.GATE_LANE_VOICE_FILL; else process.env.GATE_LANE_VOICE_FILL = value;
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });
+    expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).lane).toBeNull();
+  });
+});
