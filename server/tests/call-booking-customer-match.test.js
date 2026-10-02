@@ -31,7 +31,7 @@ const gates = require('../config/feature-gates');
 const { _test } = require('../services/call-recording-processor');
 
 const {
-  validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall,
+  validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
   backfillCustomerFromAppointmentContact, prelinkedBackfillGate,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
@@ -119,9 +119,11 @@ describe('FIX 1 + FIX 2 wiring in processRecording (structural pin)', () => {
     expect(lookupStep).toContain('!v2ThirdPartyCallNature');
     const branch = source.slice(source.indexOf('} else if (householdMatch?.customer) {'), source.indexOf('} else if (sharedPhoneAmbiguity.candidates) {'));
     expect(lookupStep).toContain('addressValidation: effectiveAddressValidation');
-    expect(branch).toContain('persistCallSecondaryContact(customerId, householdContact');
-    expect(branch).toContain("flag: 'household_contact_linked'");
     expect(branch).not.toContain('backfillLinkedCustomerFromExtraction');
+    const completion = source.slice(source.indexOf('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
+    expect(completion).toContain('persistCallSecondaryContact(customerId, householdContact');
+    expect(completion).toContain("flag: 'household_contact_linked'");
+    expect(completion).not.toContain('backfillLinkedCustomerFromExtraction');
     expect(source).toContain('phoneMatchedThisPass: phoneMatchedThisPass || householdLinkedThisPass');
     expect(source).toContain('householdContact: householdLinkedThisPass');
   });
@@ -173,6 +175,23 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
     await backfillCustomerFromAppointmentContact(ACCOUNT, account, extracted, '+19415550177', {}).catch(() => {});
     expect(mockApplyUpdates).toHaveBeenCalled();
     expect(mockCaptured).toMatchObject({ first_name: 'Sally', phone: '+19415550177', email: 'sally@example.com' });
+  });
+
+  test('RETRY: a persisted link whose contact/card writes never finished is resumed; a completed one is not repeated', () => {
+    const half = { customer_id: ACCOUNT, ...stamped() };
+    expect(householdLinkFromCall(half, ACCOUNT)).toBe(true);
+    expect(householdLinkCompleted(half)).toBe(false);
+    const done = { metadata: { household_link: { customer_id: ACCOUNT, completed_at: '2026-10-02T00:00:00.000Z' } } };
+    expect(householdLinkCompleted(done)).toBe(true);
+    expect(householdLinkCompleted({ metadata: JSON.stringify(done.metadata) })).toBe(true);
+    expect(householdLinkCompleted({ metadata: {} })).toBe(false);
+    expect(householdLinkCompleted(null)).toBe(false);
+    // The completion block runs for ANY household-linked pass that is not yet complete (first pass or retry),
+    // checks the card exists before inserting, and only stamps completed_at when the contact write did not error.
+    expect(source).toContain('if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {');
+    expect(source).toContain("{household_link,completed_at}");
+    expect(source).toContain("if (householdPersist !== 'error') {");
+    expect(source).toContain("reason_code: 'household_contact_linked' }).first('id')");
   });
 
   test('wiring: stamp + customer link are one token-fenced write, a retry that re-finds the account by the saved slot phone is still protected, and the drip enroll is skipped', () => {
@@ -288,6 +307,20 @@ const SKIP = !process.env.DATABASE_URL;
     // a stored unit-first twin cannot hide from a clean call line
     await trx('customers').insert(member({ id: randomUUID(), phone: '+19415550109', address_line1: 'Apt 4 1083 Example Shell Loop', address_line2: null }));
     expect((await lookup({ address_line1: '1083 Example Shell Loop', address_line2: 'Unit 4' })).reason).toBe('multiple_customers_at_address');
+  });
+
+  test('the sole candidate needs positive EXACT ZIP evidence: a missing or malformed stored ZIP is refused', async () => {
+    const noZip = member({ zip: null });
+    await trx('customers').insert(noZip);
+    expect((await lookup()).reason).toBe('zip_unconfirmed');
+    await trx('customers').update({ zip: 'n/a' });
+    expect((await lookup()).reason).toBe('zip_unconfirmed');
+    await trx('customers').update({ zip: '34240-9999' });
+    expect((await lookup()).customer?.id).toBe(noZip.id);
+    // a primary line with an unknown ZIP is accepted only when another source of the SAME account carries the exact ZIP
+    await trx('customers').update({ zip: null });
+    await trx('customer_properties').insert({ customer_id: noZip.id, address_line1: '1083 Example Shell Loop', zip: '34240', active: true, address_key: 'k2' });
+    expect((await lookup()).customer?.id).toBe(noZip.id);
   });
 
   test('more than one customer at the address -> refused', async () => {

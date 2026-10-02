@@ -3729,6 +3729,14 @@ async function avAddressUniqueOwner(matches, opts) {
 // and read by every customer-field backfill, so a reprocess, a retry or a
 // later pass that only sees call_log.customer_id can never write the caller's
 // phone, email or name onto the account holder (codex pre-push P1). Pure.
+function householdLinkCompleted(call) {
+  let meta = call?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  return !!(meta && typeof meta === 'object' && meta.household_link?.completed_at);
+}
+
 function householdLinkFromCall(call, customerId) {
   if (!call || !customerId) return false;
   let meta = call.metadata;
@@ -3813,21 +3821,24 @@ async function findHouseholdCustomerByAddress({ phone, address = {}, commercialC
     if (!wantStreet) return refuse('no_phone_or_address');
     const wantUnit = want.unit;
     const zipFits = (z) => { const z5 = normalizeZip(z); return !z5 || z5 === zip5; };
-    const sourcesById = new Map(); // customer id -> [{ line1, line2 }]
-    const addSource = (id, line1, line2) => {
+    const sourcesById = new Map(); // customer id -> [{ line1, line2, zipExact }]
+    // An unknown / malformed stored ZIP keeps its row a candidate (an ambiguity
+    // blocker) but is never positive evidence: the match needs a source whose
+    // ZIP is exactly the call's.
+    const addSource = (id, line1, line2, zip) => {
       if (!sourcesById.has(id)) sourcesById.set(id, []);
-      sourcesById.get(id).push({ line1, line2 });
+      sourcesById.get(id).push({ line1, line2, zipExact: normalizeZip(zip) === zip5 });
     };
     const addressRows = await conn('customers').whereRaw('address_line1 ~* ?', [houseRe])
       .select('id', 'address_line1', 'address_line2', 'zip');
     for (const r of addressRows) {
-      if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.id, r.address_line1, r.address_line2);
+      if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.id, r.address_line1, r.address_line2, r.zip);
     }
     if (await conn.schema.hasTable('customer_properties')) {
       const propRows = await conn('customer_properties').where({ active: true }).whereRaw('address_line1 ~* ?', [houseRe])
         .select('customer_id', 'address_line1', 'address_line2', 'zip');
       for (const r of propRows) {
-        if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.customer_id, r.address_line1, r.address_line2);
+        if (peel(r.address_line1, null).key === wantStreet && zipFits(r.zip)) addSource(r.customer_id, r.address_line1, r.address_line2, r.zip);
       }
     }
     if (sourcesById.size === 0) return refuse('no_address_match');
@@ -3841,6 +3852,7 @@ async function findHouseholdCustomerByAddress({ phone, address = {}, commercialC
     if (live.length > 1) return refuse('multiple_customers_at_address');
     const match = live[0];
     if (match.active !== true) return refuse('not_active');
+    if (!sourcesById.get(match.id).some((src) => src.zipExact)) return refuse('zip_unconfirmed');
     // Every address source of the match must carry the call's unit (a unit on
     // one side only is a different door).
     if (sourcesById.get(match.id).some((src) => peel(src.line1, src.line2).unit !== wantUnit)) {
@@ -12165,7 +12177,9 @@ const CallRecordingProcessor = {
       } else if (householdMatch?.customer) {
         // Link only: NO email/address/phone backfill onto the account holder
         // from a different person's call. The caller's name + number go to a
-        // service-contact slot through the shared secondary-contact writer.
+        // service-contact slot and the office card is filed by the idempotent
+        // household completion step below, which a retry re-runs until its
+        // completed_at marker lands.
         // The link and its household stamp are ONE token-fenced write: a lost
         // claim links nothing, and a crash after this point still leaves the
         // stamp for the retry (see householdLinkFromCall).
@@ -12183,48 +12197,8 @@ const CallRecordingProcessor = {
         if (!stamped) {
           logger.warn(`[call-proc] household link skipped for ${maskSid(callSid)} — processing claim lost`);
         } else {
-        customerId = householdMatch.customer.id;
-        householdLinkedThisPass = true;
-        const householdContact = {
-          first_name: extracted.first_name || null,
-          last_name: extracted.last_name || null,
-          phone,
-          email: null,
-          role: ['tenant', 'spouse_partner', 'family_member'].includes(v2CanonicalExtraction?.caller?.relationship_to_property)
-            ? v2CanonicalExtraction.caller.relationship_to_property : null,
-          wants_notifications: true,
-        };
-        let householdPersist = 'not_attempted';
-        try {
-          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
-        } catch (persistErr) {
-          householdPersist = 'error';
-          logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
-        }
-        logger.info(`[call-proc] Linked ${maskSid(callSid)} to customer ${customerId} by service address (household contact: ${householdPersist})`);
-        const accountName = [householdMatch.customer.first_name, householdMatch.customer.last_name].filter(Boolean).join(' ') || null;
-        if (!bridgeNeedsConfirmation.includes('household_contact_linked')) bridgeNeedsConfirmation.push('household_contact_linked');
-        await db('triage_items')
-          .insert(buildTriageItem({
-            callLogId: call.id,
-            flag: 'household_contact_linked',
-            onFileAddress,
-            extraction: v2CanonicalExtraction || undefined,
-            severity: 'advisory',
-            extraPayload: {
-              note: `New household contact booked on ${accountName || 'the account at this address'}`,
-              matched_customer_id: String(customerId),
-              matched_customer_name: accountName,
-              household_contact: {
-                name: [householdContact.first_name, householdContact.last_name].filter(Boolean).join(' ') || null,
-                phone,
-              },
-              contact_saved: householdPersist,
-            },
-          }))
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore()
-          .catch((triageErr) => logger.warn(`[call-proc] household-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
+          customerId = householdMatch.customer.id;
+          householdLinkedThisPass = true;
         }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
@@ -12453,6 +12427,77 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Household completion (GATE_CALL_HOUSEHOLD_ADDRESS_MATCH): save the caller as
+    // a service contact and file the "new household contact" card. Idempotent and
+    // RESUMABLE — it runs for the first pass AND for any retry / reprocess of a
+    // call carrying the household_link stamp until completed_at lands, so a crash
+    // between the link write and these writes (or a caught contact-write failure)
+    // never leaves the account without its contact or the office without its
+    // card. The contact writer no-ops on a number already on record; the card
+    // is checked for existence first (a resolved card is not re-opened).
+    if (householdLinkedThisPass && customerId && !householdLinkCompleted(call)) {
+      try {
+        const householdContact = {
+          first_name: extracted.first_name || null,
+          last_name: extracted.last_name || null,
+          phone,
+          email: null,
+          role: ['tenant', 'spouse_partner', 'family_member'].includes(v2CanonicalExtraction?.caller?.relationship_to_property)
+            ? v2CanonicalExtraction.caller.relationship_to_property : null,
+          wants_notifications: true,
+        };
+        let householdPersist = 'not_attempted';
+        try {
+          householdPersist = await persistCallSecondaryContact(customerId, householdContact, { smsConsentExplicit: false });
+        } catch (persistErr) {
+          householdPersist = 'error';
+          logger.warn(`[call-proc] household contact write failed for ${maskSid(callSid)}: ${persistErr.code || persistErr.name || 'db_error'}`);
+        }
+        logger.info(`[call-proc] ${maskSid(callSid)} household contact on customer ${customerId}: ${householdPersist}`);
+        if (!bridgeNeedsConfirmation.includes('household_contact_linked')) bridgeNeedsConfirmation.push('household_contact_linked');
+        const cardExists = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'household_contact_linked' }).first('id');
+        if (!cardExists) {
+          const account = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+          const accountName = [account?.first_name, account?.last_name].filter(Boolean).join(' ') || null;
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'household_contact_linked',
+              onFileAddress,
+              extraction: v2CanonicalExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                note: `New household contact booked on ${accountName || 'the account at this address'}`,
+                matched_customer_id: String(customerId),
+                matched_customer_name: accountName,
+                household_contact: {
+                  name: [householdContact.first_name, householdContact.last_name].filter(Boolean).join(' ') || null,
+                  phone,
+                },
+                contact_saved: householdPersist,
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+        }
+        if (householdPersist !== 'error') {
+          await db('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .update({
+              metadata: db.raw(
+                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{household_link,completed_at}', ?::jsonb, true)",
+                [JSON.stringify(new Date().toISOString())],
+              ),
+            });
+        }
+      } catch (householdErr) {
+        // Left un-marked: the next pass resumes. Code/name only (bound payloads carry the caller's number).
+        logger.warn(`[call-proc] household completion incomplete for ${maskSid(callSid)}: ${householdErr.code || householdErr.name || 'db_error'}`);
       }
     }
 
@@ -22523,6 +22568,7 @@ CallRecordingProcessor._test = {
   findCustomerForCallContact,
   findHouseholdCustomerByAddress,
   householdLinkFromCall,
+  householdLinkCompleted,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
