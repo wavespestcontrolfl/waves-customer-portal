@@ -75,6 +75,19 @@ describe('LawnLeadCard layout', () => {
     expect(region).toHaveTextContent(LEAD.yourPart[0]);
   });
 
+  it('renders What to expect and Watching blocks only when the v6 writer supplied them', () => {
+    const { unmount } = renderLead();
+    expect(screen.queryByTestId('lawn-lead-expect')).toBeNull();
+    expect(screen.queryByTestId('lawn-lead-watching')).toBeNull();
+    unmount();
+    renderLead({ lead: { ...LEAD, whatToExpect: 'Weeds usually start to yellow or curl within about 3 to 7 days.', watching: 'Thin areas along the driveway edge.' } });
+    const expectBlock = screen.getByTestId('lawn-lead-expect');
+    expect(expectBlock).toHaveTextContent('What to expect');
+    expect(expectBlock).toHaveTextContent('Weeds usually start to yellow or curl within about 3 to 7 days.');
+    expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Watching');
+    expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Thin areas along the driveway edge.');
+  });
+
   it('leaves out Today’s focus, the driving box, the watching list, "What Waves will do next" and the seasonal note', () => {
     renderLead();
     const region = screen.getByTestId('lawn-lead-region');
