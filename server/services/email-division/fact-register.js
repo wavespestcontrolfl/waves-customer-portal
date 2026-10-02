@@ -711,6 +711,11 @@ const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|f
 // A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
 // 85 Fahrenheit.
 const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius))?\\b|\\s*(?:fahrenheit|celsius)\\b)';
+// A degree figure followed by a geometry noun is an angle, not a temperature:
+// "a 90-degree arc around a sprinkler head", "at a 90° angle" (codex #5414
+// round 3). Only the bare-unit trigger needs this; a folded range or bound
+// ("between 85 and 95 degrees") already carries temperature context.
+const NOT_AN_ANGLE = '(?!\\s*(?:arcs?|angles?|turns?|rotations?|bends?|corners?|elbows?|sweeps?|curves?|slopes?|pitch|of\\s+(?:arc|rotation|sweep|turn))\\b)';
 const TEMP_TENS = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
 const TEMP_UNITS_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TEMP_NUM = `(?<![\\d.,])(?:\\d{1,3}(?!\\d|,\\d{3}|\\.\\d)|(?:${TEMP_TENS})(?:[-\\s](?:${TEMP_UNITS_WORD}))?(?![a-z])|(?:one|a)\\s+hundred)`;
@@ -743,11 +748,12 @@ const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\
 // is a ceiling, so the claim is about the cool side): comparators ("below",
 // "no higher than", "not above", "doesn't exceed"), ceilings ("a maximum of",
 // "max temperature of", "a ceiling of", "capped at", "tops out at") and "at
-// most" / "up to". A phrase that merely NAMES a figure ("peaks at 90°F", "a
+// most" / "up to", and the compound forms "less than or equal to" / "at or
+// below" / "equal to or lower than" (codex #5414 round 3). A phrase that merely NAMES a figure ("peaks at 90°F", "a
 // minimum of 85°F", "a high of 90°F") is not here: the lawn is active AT the
 // peak, so those stay hot through the bare temperature-unit trigger. "a high
 // of 80°F or less" is cool through the trailing "or less" fold.
-const DOWNWARD_BOUND = '(?:below|under|beneath|less\\s+than|lower\\s+than|cooler\\s+than|colder\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
+const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
 const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
@@ -782,7 +788,7 @@ const PATCH_TRIGGER = new RegExp(
   // enumerated. The cool side of the line (a downward comparator, "or
   // lower", a range that starts below 80) was folded away first, see
   // foldTemperatures.
-  + `|(?<![\\d.,])\\b(?:${HOT_FIGURE})${TEMP_UNIT}`
+  + `|(?<![\\d.,])\\b(?:${HOT_FIGURE})${TEMP_UNIT}${NOT_AN_ANGLE}`
   // (v) a phrase foldTemperatures judged hot: a range, "or higher" / "and up".
   + '|\\bhottemp\\d+\\b',
   'i',
@@ -793,8 +799,12 @@ const PATCH_TRIGGER = new RegExp(
 // clause — "Large patch thrives in summer as the grass slows down" is
 // still the claim — and must not itself be negated: "Large patch doesn't
 // slow down in summer" asserts the claim, whatever a negation elsewhere
-// would otherwise clear.
-const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|rare|rarely|seldom|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem))';
+// would otherwise clear. "rarely" / "seldom" recede only when they modify
+// an activity or uncommon predicate ("rarely a problem", "seldom spreads");
+// bare, they are a negation — "rarely absent in summer", "seldom quiet",
+// "rarely lets up" assert the claim (codex #5414 round 3 P1), which
+// NEGATED_RECEDE catches because absent / quiet / lets up are receding terms.
+const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:\\w+\\s+){0,2}?(?:(?:a|an)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
 const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');

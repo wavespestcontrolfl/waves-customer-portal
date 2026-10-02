@@ -648,6 +648,21 @@ describe('findUnverifiedClaims', () => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
     });
 
+    // "rarely" / "seldom" before a receding word is a negation of the
+    // receding, so the summer-disease claim stands (codex #5414 round 3 P1).
+    test.each([
+      'Large patch is rarely absent in summer.',
+      'Large patch is seldom quiet in summer.',
+      'Large patch rarely lets up in summer.',
+      'Large patch is rarely dormant in summer.',
+      'Large patch is hardly ever inactive in summer.',
+      'Large patch rarely slows down once temperatures are above 85°F.',
+      // a degree figure with real temperature context is still hot, even near a geometry word
+      'Large patch thrives when temperatures are 90 degrees, forming arcs around sprinkler heads.',
+    ])('a negated receding word is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
     test.each([
       'Large patch is active when temperatures are 75°F.',
       'Large patch is active when temperatures are 80°F or lower.',
@@ -730,8 +745,22 @@ describe('findUnverifiedClaims', () => {
       'Large patch rings can be 85 inches across.',
       'Large patch rings can be 90 cm across.',
       'Large patch rings can reach 90 meters across.',
-      // "rarely" recedes
+      // "rarely" / "seldom" recede only when they modify an uncommon or activity predicate
       'Large patch is rarely a problem in summer.',
+      'Large patch is seldom an issue in summer.',
+      'Large patch rarely spreads in summer.',
+      'Large patch is hardly ever seen in summer.',
+      'Large patch is absent in summer.',
+      'Large patch goes quiet in summer.',
+      // compound downward comparators cap the temperature
+      'Large patch is active when temperatures are less than or equal to 80°F.',
+      'Large patch is active when temperatures are lower than or equal to 80 degrees.',
+      'Large patch is active when temperatures are at or below 80°F.',
+      'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
+      // angular degrees are not temperatures
+      'Large patch often appears as a 90-degree arc around a sprinkler head.',
+      'Large patch rings can meet at a 90° angle along a sidewalk.',
+      'Large patch can follow a 90 degree turn in the irrigation line.',
       // ceiling-style downward bounds cap the temperature (one shared DOWNWARD_BOUND list)
       'Large patch is active when temperatures have a maximum of 80°F.',
       'Large patch is active when temperatures have a max of 80 degrees.',
