@@ -16733,15 +16733,28 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
-  // Lane voice fill: reads the tech's own words (the notes without the
-  // marker lines a tap writes, as the report writer gets them) and fills
-  // only what nobody picked, the way a tap does (the
+  // The tech's OWN notes, as the report writer and the lane fill read them:
+  // regeneration grounds in them, so when the notes box still holds the
+  // installed draft the pre-generation notes are the grounding (codex r43;
+  // pre-push P1 on the lane fill: a second Generate never reads the AI's
+  // own report as the tech's words); a hand-edited draft is the tech's copy
+  // and grounds itself. Never the marker lines a tap writes.
+  function groundingNotes() {
+    return stripChipTagLines(
+      generatedReportTextRef.current
+        && notes.trim() === String(generatedReportTextRef.current).trim()
+        ? (preGenerationNotesRef.current || "")
+        : notes,
+    );
+  }
+  // Lane voice fill: reads the tech's own words (groundingNotes, as the
+  // report writer gets them) and fills only what nobody picked, the way a tap does (the
   // [Found] marker and the label; the areas while none are picked), never a
   // value that clashes with a pick (the lane's exclusions, the selected
   // actions): a clash is left for a person to pick. Best effort: a failed
   // read fills nothing and Generate carries on.
   async function fillLaneFromNotes() {
-    const words = stripChipTagLines(notes);
+    const words = groundingNotes();
     if (!words) return;
     let heard;
     try {
@@ -17022,16 +17035,7 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      // Regeneration grounds in the tech's OWN notes: when the notes box
-      // still holds the installed draft, the pre-generation notes are the
-      // grounding (codex r43) — a hand-edited draft is the tech's copy and
-      // grounds itself.
-      serviceNotes: stripChipTagLines(
-        generatedReportTextRef.current
-          && notes.trim() === String(generatedReportTextRef.current).trim()
-          ? (preGenerationNotesRef.current || "")
-          : notes,
-      ),
+      serviceNotes: groundingNotes(),
       productsApplied,
       areasServiced: completionAreasServiced,
       actionsCompleted,

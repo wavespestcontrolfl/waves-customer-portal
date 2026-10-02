@@ -108,6 +108,16 @@ describe('lane voice fill on Generate', () => {
     expect(screen.getByText('The notes didn’t make this clear. Pick one.')).toBeTruthy();
   });
 
+  it('a second Generate reads the tech\'s notes, never the report the first one wrote (pre-push P1)', async () => {
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
+    const reads = calls.filter((call) => call.kind === 'lane');
+    expect(reads[1].body).toEqual({ note: NOTE });
+  });
+
   it('a failed read fills nothing and the report is still written', async () => {
     laneAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
     await openForm(BED_BUG);
