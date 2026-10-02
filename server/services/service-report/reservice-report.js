@@ -35,7 +35,7 @@
 
 const crypto = require('crypto');
 const { detectServiceLine } = require('./service-line-configs');
-const { reserviceReportCardGateOn, activityLabelFor } = require('./reservice-report-card');
+const { reserviceReportCardGateOn, activityLabelFor, pestPressureShownToCustomers } = require('./reservice-report-card');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
 // report gates (cockroach-report-v2.js / termite-report-v2.js) and the
@@ -287,8 +287,12 @@ async function reserviceReportPdfSignature(service = {}, { serviceLine = null, k
   if (cardIncluded) {
     // This record's persisted score row, as the payload builder reads it:
     // the printed "Activity seen" word is that row's label.
+    // With Pest Pressure hidden from customers the payload carries no word.
     try {
-      const scoreRow = await require('../pest-pressure/store').loadScoreForServiceRecord(knex || require('../../models/db'), service?.id);
+      const db = knex || require('../../models/db');
+      const store = require('../pest-pressure/store');
+      const config = await store.loadActiveConfig(db);
+      const scoreRow = pestPressureShownToCustomers(config) ? await store.loadScoreForServiceRecord(db, service?.id) : null;
       activityLabel = activityLabelFor(service, block, scoreRow || null);
     } catch { activityLabel = null; }
   }

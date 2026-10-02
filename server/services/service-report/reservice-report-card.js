@@ -262,6 +262,14 @@ function activityLabelFor(service, block, scoreRow) {
   return foundActivity(service, block.serviceLine, scoreRow)?.label || null;
 }
 
+// Pest Pressure's global customer switches (the same two the gauge honors
+// first, and part of the PDF key's visibility signature): with either off,
+// the card prints no pressure word either (pre-push P1 after r11).
+function pestPressureShownToCustomers(config) {
+  const effective = config || require('../pest-pressure/config').DEFAULT_CONFIG;
+  return Boolean(effective && effective.enabled && effective.showOnCustomerReport);
+}
+
 // PDF render fence: what the card prints that can change OUTSIDE the record
 // between the server payload and the browser's own /data fetch — the gate,
 // and the score row the "Activity seen" word reads. Snapshot before the
@@ -412,4 +420,5 @@ module.exports = {
   buildReserviceReportCard,
   activityLabelFor,
   reserviceCardRenderFence,
+  pestPressureShownToCustomers,
 };

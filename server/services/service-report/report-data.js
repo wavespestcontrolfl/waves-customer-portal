@@ -61,7 +61,7 @@ const {
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
-const { buildReserviceReportCard } = require('./reservice-report-card');
+const { buildReserviceReportCard, pestPressureShownToCustomers } = require('./reservice-report-card');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
@@ -6447,7 +6447,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const reserviceReportCardBlock = buildReserviceReportCard(service, {
     block: reserviceReportBlock,
     products,
-    pestPressureScore: pestPressureRow || null,
+    pestPressureScore: pestPressureShownToCustomers(pestPressureConfig) ? (pestPressureRow || null) : null,
   });
 
   // The four-section report's "What's next" visit: the next booking on this
