@@ -16,6 +16,7 @@ const {
   OVERALL_BAND,
   buildLawnProgress,
   deriveAssessmentConfidence,
+  photoQualityForConfidence,
   scoresFromAssessmentRow,
 } = require('../services/service-report/lawn-progress');
 const { judgeProgress, buildLawnExpectations } = require('../services/service-report/lawn-expectations');
@@ -607,6 +608,39 @@ describe('band direction (why the replay never says "widen")', () => {
     const at = (band) => buildLawnProgress({ ...input, band }).items.find((i) => i.metric === 'weed_suppression').state;
     expect(at(8)).toBe('on_track');
     expect(at(10)).toBe('behind');
+  });
+});
+
+describe('photo quality provenance (legacy health blend is never photo quality)', () => {
+  it('a one-call row keeps its model quality read', () => {
+    expect(photoQualityForConfidence({ quality_score: '82.00', quality_gate_passed: true })).toBe('82.00');
+  });
+
+  it('a legacy row (per-photo lawn scores) is judged by its gate, never by the health blend', () => {
+    // A clear photo of a struggling lawn: blend 31 would read as poor quality.
+    expect(photoQualityForConfidence({ quality_score: 31, turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true })).toBe('adequate');
+    expect(photoQualityForConfidence({ quality_score: 95, turf_density: 95, quality_gate_passed: false })).toBe('poor');
+    const rows = [{ quality_score: 31, turf_density: 20, quality_gate_passed: true }, { quality_score: 35, color_health: 3, quality_gate_passed: true }];
+    expect(deriveAssessmentConfidence({ photos: rows.map(photoQualityForConfidence) }).level).toBe('moderate');
+  });
+
+  it('a failed gate is poor on either path; no row is null', () => {
+    expect(photoQualityForConfidence({ quality_score: 90, quality_gate_passed: false })).toBe('poor');
+    expect(photoQualityForConfidence(null)).toBeNull();
+  });
+});
+
+describe('prior divergence flags', () => {
+  it('a metric the two models disagreed on at the PRIOR visit is unclear even when this visit is clean', () => {
+    const input = {
+      current: { date: '2026-09-30', scores: { weed_suppression: 90, overall: 75 }, confidence: 'high' },
+      prior: { date: '2026-08-31', scores: { weed_suppression: 70, overall: 70 }, divergentMetrics: ['weed_suppression'] },
+      sinceLast: { priorDate: '2026-08-31', applied: [{ name: 'Celsius WG', kind: 'herbicide', tag: 'weed control', targets: [] }], checks: [] },
+    };
+    const weed = buildLawnProgress(input).items.find((i) => i.metric === 'weed_suppression');
+    expect(weed).toMatchObject({ state: 'unclear', gate: 'low_confidence' });
+    const clean = buildLawnProgress({ ...input, prior: { ...input.prior, divergentMetrics: [] } }).items.find((i) => i.metric === 'weed_suppression');
+    expect(clean.state).not.toBe('unclear');
   });
 });
 

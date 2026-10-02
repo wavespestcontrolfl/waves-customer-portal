@@ -18,7 +18,9 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
-const { buildLawnProgress, deriveAssessmentConfidence, scoresFromAssessmentRow } = require('./lawn-progress');
+const {
+  buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
+} = require('./lawn-progress');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -3254,6 +3256,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         date,
         season: row.season || null,
         scores: scoresFromAssessmentRow(row),
+        divergentMetrics: divergentMetricsFrom(parseJsonArray(row.divergence_flags)),
       };
     };
     visitMemoryOut.progressInput = {
@@ -3263,7 +3266,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         isBaseline: !!assessment.is_baseline,
         scores: scoresFromAssessmentRow(assessment),
         confidence: deriveAssessmentConfidence({
-          photos: photos.map((photo) => photo.qualityScore),
+          photos: latestPhotos.map(photoQualityForConfidence),
           divergenceFlags: parseJsonArray(assessment.divergence_flags),
         }),
       },

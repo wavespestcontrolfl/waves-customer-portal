@@ -219,7 +219,16 @@ describe('loadReplayRows', () => {
             }],
           };
         }
-        if (/FROM lawn_assessment_photos/.test(sql)) return { rows: [{ assessment_id: 'a1', quality_score: '80.00' }, { assessment_id: 'a1', quality_score: null }] };
+        if (/FROM lawn_assessment_photos/.test(sql)) {
+          return {
+            rows: [
+              { assessment_id: 'a1', quality_score: '80.00' },
+              { assessment_id: 'a1', quality_score: null },
+              // Legacy row: quality_score is a lawn-health blend, judged by its gate.
+              { assessment_id: 'a1', quality_score: '31.00', turf_density: 20, quality_gate_passed: true },
+            ],
+          };
+        }
         if (/FROM service_products/.test(sql)) return { rows: [{ service_record_id: 'r1', product_name: 'Celsius WG', targets: ['Clover'] }] };
         return { rows: [] };
       }),
@@ -241,7 +250,7 @@ describe('loadReplayRows', () => {
       season: 'peak',
       isBaseline: false,
       scores: { turf_density: 80, weed_suppression: 60, color_health: 70, stress_damage: 40, overall: expect.any(Number) },
-      photos: [80, null],
+      photos: ['80.00', null, 'adequate'],
       divergenceFlags: [{ metric: 'color_health', gap: 30 }],
       applied: [{ name: 'Celsius WG', targets: ['Clover'] }],
       order: '2026-05-01T12:00:00.000000',

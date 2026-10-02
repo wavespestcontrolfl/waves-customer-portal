@@ -575,6 +575,14 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
   });
 
+  test('legacy photos (health-blend quality_score) count by their gate, not the blend', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const legacy = (id) => ({ ...photo(id, '30.00'), turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true });
+    const data = await render(records(), { lawn_assessment_photos: [legacy('p1'), legacy('p2')] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
+  });
+
   test('a frozen sinceLast pins the prior: a visit added between them later never supplies the scores', async () => {
     live();
     const MID = assessmentRow('la-mid', '2026-09-01', 'svc-mid');

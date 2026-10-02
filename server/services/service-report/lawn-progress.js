@@ -139,10 +139,33 @@ function qualityBucket(value) {
  * @param {string} [input.scoreConfidence]
  * @returns {{level:string, usablePhotos:number|null, adequatePhotos:number|null, divergentMetrics:string[], source:string}}
  */
-function deriveAssessmentConfidence({ photos, divergenceFlags, scoreConfidence } = {}) {
-  const divergentMetrics = [...new Set((Array.isArray(divergenceFlags) ? divergenceFlags : [])
+/** The categories an assessment's divergence flags make unreliable. */
+function divergentMetricsFrom(divergenceFlags) {
+  return [...new Set((Array.isArray(divergenceFlags) ? divergenceFlags : [])
     .map((flag) => DIVERGENCE_METRIC[String(flag?.metric || '').toLowerCase()])
     .filter(Boolean))].sort();
+}
+
+/**
+ * What one lawn_assessment_photos row says about READABILITY, for
+ * deriveAssessmentConfidence. quality_score has two meanings in the table:
+ * the legacy multi-call path stores a lawn-HEALTH blend (turf density, weed
+ * cover, color) and fills the row's per-photo turf_density / weed_coverage /
+ * color_health, while the one-call path stores the model's photo-quality
+ * read and leaves those null. A health blend must never read as photo
+ * quality (a clear photo of a sick lawn would look unusable), so a legacy
+ * row is judged by its quality gate alone: passed = adequate, failed = poor.
+ */
+function photoQualityForConfidence(row) {
+  if (!row || typeof row !== 'object') return null;
+  if (row.quality_gate_passed === false) return 'poor';
+  const legacyHealthBlend = row.turf_density != null || row.weed_coverage != null || row.color_health != null;
+  if (legacyHealthBlend) return 'adequate';
+  return row.quality_score ?? null;
+}
+
+function deriveAssessmentConfidence({ photos, divergenceFlags, scoreConfidence } = {}) {
+  const divergentMetrics = divergentMetricsFrom(divergenceFlags);
 
   if (CONFIDENCE_LEVELS.includes(scoreConfidence)) {
     return { level: scoreConfidence, usablePhotos: null, adequatePhotos: null, divergentMetrics, source: 'stored' };
@@ -319,7 +342,7 @@ function seasonOf(side) {
 /**
  * @param {object} input
  * @param {{date, season?, isBaseline?, scores, confidence}} input.current this visit's assessment
- * @param {{assessmentId?, date, season?, scores, confidence?}} input.prior the prior visit's assessment
+ * @param {{assessmentId?, date, season?, scores, confidence?, divergentMetrics?}} input.prior the prior visit's assessment
  * @param {object|null} [input.sinceLast] reportV2.sinceLast (P12): { priorAssessmentId, priorDate, applied[], checks[] }
  *   When both name an assessment and they differ, the scores belong to another
  *   visit than the frozen treatments: nothing is judged (reason 'prior_mismatch').
@@ -363,7 +386,13 @@ function buildLawnProgress({
   const priorConfidence = prior.confidence == null ? null : normalizeConfidence(prior.confidence);
   const comparable = COMPARABLE_LEVELS.has(confidence.level)
     && (priorConfidence == null || COMPARABLE_LEVELS.has(priorConfidence.level));
-  const divergent = new Set([...confidence.divergentMetrics, ...(priorConfidence?.divergentMetrics || [])]);
+  // The prior's own divergence flags (no photo read needed) make those
+  // categories as unreliable as the current visit's.
+  const divergent = new Set([
+    ...confidence.divergentMetrics,
+    ...(priorConfidence?.divergentMetrics || []),
+    ...(Array.isArray(prior.divergentMetrics) ? prior.divergentMetrics : []),
+  ]);
 
   const priorSeason = seasonOf(prior);
   const curSeason = seasonOf(current);
@@ -407,6 +436,8 @@ function buildLawnProgress({
 }
 
 module.exports = {
+  divergentMetricsFrom,
+  photoQualityForConfidence,
   ENGINE_VERSION,
   PROGRESS_VERSION,
   STATES,

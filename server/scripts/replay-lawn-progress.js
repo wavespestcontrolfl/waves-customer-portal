@@ -33,7 +33,9 @@
 const fs = require('fs');
 const {
   buildLawnProgress, deriveAssessmentConfidence, scoresFromAssessmentRow, STATES, CATEGORY_BAND, OVERALL_BAND,
+  divergentMetricsFrom, photoQualityForConfidence,
 } = require('../services/service-report/lawn-progress');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { selectPriorVisit } = require('../services/service-report/lawn-visit-memory');
 const { createAuditKnex } = require('./audit-lawn-expectation-products');
 
@@ -120,8 +122,12 @@ function sideOf(row) {
 function progressFor({ current, prior }, { band, overallBand }) {
   const cur = sideOf(current);
   const pri = prior ? sideOf(prior) : null;
-  // The report path only has the CURRENT confidence (no extra read for the prior's photos).
-  if (pri) delete pri.confidence;
+  // The report path only has the CURRENT confidence (no extra read for the
+  // prior's photos), but the prior row's own divergence flags do count.
+  if (pri) {
+    delete pri.confidence;
+    pri.divergentMetrics = divergentMetricsFrom(prior.divergenceFlags);
+  }
   return buildLawnProgress({
     current: cur,
     prior: pri,
@@ -307,9 +313,9 @@ async function loadReplayRows(db) {
     const recordIds = assessments.map((a) => a.service_record_id).filter(Boolean);
 
     const photoRows = ids.length ? (await trx.raw(
-      `SELECT assessment_id, quality_score
+      `SELECT assessment_id, quality_score, quality_gate_passed, turf_density, weed_coverage, color_health
          FROM lawn_assessment_photos
-        WHERE assessment_id = ANY(?::uuid[]) AND customer_visible IS NOT FALSE
+        WHERE assessment_id = ANY(?::uuid[]) AND customer_visible = true
         ORDER BY assessment_id, is_best_photo DESC NULLS LAST, quality_score DESC NULLS LAST, photo_order ASC NULLS LAST`,
       [ids],
     )).rows : [];
@@ -324,7 +330,8 @@ async function loadReplayRows(db) {
     const photosBy = new Map();
     for (const p of photoRows) {
       const list = photosBy.get(p.assessment_id) || [];
-      if (list.length < TOP_PHOTOS) list.push(p.quality_score == null ? null : Number(p.quality_score));
+      // Same reading as the report: a legacy health blend is never photo quality.
+      if (list.length < TOP_PHOTOS) list.push(photoQualityForConfidence(p));
       photosBy.set(p.assessment_id, list);
     }
     const productsBy = new Map();
@@ -409,7 +416,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       rows = await loadReplayRows(db);
     }
     // The cutoff is a calendar day, so it takes the clock only here at the edge.
-    const since = sinceDays ? new Date(Date.now() - sinceDays * 86400000).toISOString().slice(0, 10) : null;
+    // Eastern calendar, like service_date (a UTC slice is a day ahead after 8 PM ET).
+    const since = sinceDays ? etDateString(addETDays(new Date(), -sinceDays)) : null;
     const result = replayLawnProgress(rows, { band, overallBand, since });
     console.log(json ? JSON.stringify(result, null, 2) : formatReport(result));
     if (result.oddities.invariantViolations.length) process.exitCode = 1;
