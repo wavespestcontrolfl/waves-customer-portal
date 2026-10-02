@@ -281,30 +281,56 @@ async function threadOwnerRefusal(dbh, { customerId, fromPhone, toPhone }) {
 }
 
 // The customer's records a reply's facts are read from (VISITS, PENDING
-// ESTIMATE, BILLING) and that change without touching the SMS thread.
-const ACCOUNT_TABLES = Object.freeze([
-  ['scheduled_services', 'visit_changed'],
-  ['estimates', 'estimate_changed'],
-  ['invoices', 'invoice_changed'],
+// ESTIMATE, BILLING) and that change without touching the SMS thread. Writers
+// do not all bump updated_at (declining an estimate stamps only declined_at),
+// so each record's EVENT columns count, and a deadline that passed during the
+// wait (an estimate expiring) is a change too.
+const ACCOUNT_RECORDS = Object.freeze([
+  {
+    table: 'scheduled_services', reason: 'visit_changed',
+    events: ['updated_at', 'cancelled_at', 'completed_at', 'confirmed_at', 'en_route_at', 'arrived_at',
+      'actual_start_time', 'actual_end_time', 'check_in_time', 'check_out_time', 'date_exception_at', 'field_confirmed_at'],
+    deadlines: ['reservation_expires_at'],
+  },
+  {
+    table: 'estimates', reason: 'estimate_changed',
+    events: ['updated_at', 'sent_at', 'viewed_at', 'last_viewed_at', 'accepted_at', 'declined_at', 'disposition_at',
+      'archived_at', 'scheduled_at', 'price_locked_at', 'extension_requested_at', 'extension_auto_granted_at',
+      'annual_plan_activated_at', 'last_follow_up_at'],
+    deadlines: ['expires_at'],
+  },
+  {
+    table: 'invoices', reason: 'invoice_changed',
+    events: ['updated_at', 'sent_at', 'viewed_at', 'paid_at', 'payment_recorded_at', 'ach_processing_notified_at',
+      'reconciled_at', 'archived_at'],
+    deadlines: [],
+  },
 ]);
 
 /**
  * Which of the customer's visits, estimates or invoices changed after the
  * reply's facts were read, in one statement. Returns a reason or null; an
- * unreadable facts time fails closed.
+ * unreadable facts time fails closed. Column names are the constants above.
  */
-async function accountChangedSince(dbh, { customerId, factsAt }) {
+async function accountChangedSince(dbh, { customerId, factsAt, now = new Date() }) {
   if (!(factsAt instanceof Date) || Number.isNaN(factsAt.getTime())) return 'visit_changed';
-  const probes = ACCOUNT_TABLES.map(([table]) => dbh(table)
-    .where({ customer_id: customerId })
-    .where('updated_at', '>', factsAt)
-    .select(dbh.raw('1')));
+  const probes = ACCOUNT_RECORDS.map(({ table, events, deadlines }) => {
+    const event = `GREATEST(${events.map((c) => `"${c}"`).join(', ')}) > ?`;
+    const deadline = deadlines.map((c) => `("${c}" > ? AND "${c}" <= ?)`);
+    return dbh(table)
+      .where({ customer_id: customerId })
+      .where(function changed() {
+        this.whereRaw(event, [factsAt]);
+        for (const clause of deadline) this.orWhereRaw(clause, [factsAt, now]);
+      })
+      .select(dbh.raw('1'));
+  });
   const { rows: [changed] } = await dbh.raw(
-    `SELECT ${ACCOUNT_TABLES.map((_, i) => `EXISTS (?) AS c${i}`).join(', ')}`,
+    `SELECT ${ACCOUNT_RECORDS.map((_, i) => `EXISTS (?) AS c${i}`).join(', ')}`,
     probes,
   );
-  const hit = ACCOUNT_TABLES.find((_, i) => changed?.[`c${i}`] !== false);
-  return hit ? hit[1] : null;
+  const hit = ACCOUNT_RECORDS.find((_, i) => changed?.[`c${i}`] !== false);
+  return hit ? hit.reason : null;
 }
 
 /** Did anyone call this customer, or the customer call in, since the text? */

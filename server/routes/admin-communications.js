@@ -569,7 +569,7 @@ router.post('/sms', async (req, res, next) => {
     // Coordination follows claim possibility, not the live gate: during a
     // rolling disable an older instance can still claim until the activation
     // stamp is cleared.
-    const providerCoordinationEnabled = gratitudeClaimsPossible();
+    const providerCoordinationEnabled = gratitudeClaimsPossible() || unansweredClaimsPossible();
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {

@@ -553,7 +553,8 @@ async function sendCustomerMessageCore(input) {
     ...inputRest
   } = input;
   const providerCoordination = require('./provider-handoff-reservation');
-  if (require('../sms-gratitude-context').gratitudeClaimsPossible()
+  if ((require('../sms-gratitude-context').gratitudeClaimsPossible()
+    || require('../sms-unanswered-reply').unansweredClaimsPossible())
     && providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)) {
     providerHandoffReservation = suppliedProviderHandoffReservation;
   }

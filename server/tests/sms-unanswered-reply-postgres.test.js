@@ -321,6 +321,23 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await expectUntouched(s, totals, reason);
   });
 
+  test.each([
+    ['declined (only declined_at stamped)', { status: 'declined', declined_at: at('2026-10-06T16:00:00Z'), updated_at: at('2026-10-06T14:00:00Z') }],
+    ['viewed (only last_viewed_at stamped)', { last_viewed_at: at('2026-10-06T16:30:00Z'), updated_at: at('2026-10-06T14:00:00Z') }],
+    ['expired during the wait', { expires_at: at('2026-10-06T17:00:00Z'), updated_at: at('2026-10-06T14:00:00Z') }],
+  ])('an estimate %s blocks the send', async (_label, fields) => {
+    const s = await waitingSuggestion({ inboundText: 'Is the proposal still available?' });
+    await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, ...fields });
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'estimate_changed');
+  });
+
+  test('an estimate that expires later, untouched since the facts, does not block', async () => {
+    await waitingSuggestion({ inboundText: 'Is the proposal still available?' });
+    await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, expires_at: at('2026-10-20T17:00:00Z'), updated_at: at('2026-10-06T14:00:00Z') });
+    expect((await sweep()).sent).toBe(1);
+  });
+
   test('an estimate that changes after the claim is caught at the provider boundary', async () => {
     const s = await waitingSuggestion();
     sendCustomerMessage.mockImplementation(async (input) => {
