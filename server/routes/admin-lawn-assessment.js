@@ -906,13 +906,17 @@ router.post('/assess', async (req, res, next) => {
     let visitRun = null;
     const [assessment] = visitAssessmentEnabled
       ? await db.transaction(async (trx) => {
-        await assertVisitStillOwned(req, trx, serviceId);
+        // No serviceId: fenced on a current visit for the customer (r11 pre-push P1).
+        if (serviceId) await assertVisitStillOwned(req, trx, serviceId);
+        else await assertCustomerVisitStillOwned(req, trx, customerId);
         const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
         visitRun = await visitRuns.recordRun({ assessment: rows[0], analysis: visitAnalysis, adjustedScores }, trx);
         return rows;
       })
       : await db.transaction(async (trx) => {
-        await assertVisitStillOwned(req, trx, serviceId);
+        // No serviceId: fenced on a current visit for the customer (r11 pre-push P1).
+        if (serviceId) await assertVisitStillOwned(req, trx, serviceId);
+        else await assertCustomerVisitStillOwned(req, trx, customerId);
         // Legacy (property history off): the baseline decision and the insert
         // under the customer's baseline lock — the one a run-backed confirm's
         // legacy baseline check takes — so a legacy row replacing a pending

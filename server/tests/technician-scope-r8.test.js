@@ -59,3 +59,11 @@ describe('legacy confirmation fence (codex #5568 r11)', () => {
     expect(fn.slice(0, 600)).toMatch(/where\('scheduled_services\.customer_id', customerId\),\s*\)\.forUpdate\(\)\.first\('scheduled_services\.id'\)/);
   });
 });
+
+describe('assess fence without a serviceId (r11 pre-push)', () => {
+  test('both insert transactions fall back to the customer fence', () => {
+    const src = read('routes/admin-lawn-assessment.js');
+    const fence = /if \(serviceId\) await assertVisitStillOwned\(req, trx, serviceId\);\s*else await assertCustomerVisitStillOwned\(req, trx, customerId\);/g;
+    expect(src.match(fence)).toHaveLength(2);
+  });
+});
