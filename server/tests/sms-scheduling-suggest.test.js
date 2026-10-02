@@ -87,3 +87,27 @@ describe('resolveDeliveryMode for scheduling drafts', () => {
     await expect(suggest.resolveDeliveryMode({ ...BASE, schedulingIntent: false, openTimesSnapshot: snapshot })).resolves.toBe('shadow');
   });
 });
+
+describe('excludeGatedSchedulingSuggestions (rollback fails closed)', () => {
+  const fakeQuery = () => { const q = { whereRaw: jest.fn(() => q) }; return q; };
+
+  test('gate on: the query is untouched', () => {
+    process.env[GATE] = 'true';
+    const q = fakeQuery();
+    expect(suggest.excludeGatedSchedulingSuggestions(q, 'ad')).toBe(q);
+    expect(q.whereRaw).not.toHaveBeenCalled();
+  });
+
+  test('gate off: published scheduling cards (suggest workflow + scheduling draft) are excluded', () => {
+    const q = fakeQuery();
+    suggest.excludeGatedSchedulingSuggestions(q, 'ad');
+    const [sql, bindings] = q.whereRaw.mock.calls[0];
+    expect(sql).toMatch(/NOT \(ad\.workflow = \? AND EXISTS/);
+    expect(sql).toMatch(/gated_md\.id = ad\.entity_id AND gated_md\.scheduling_intent = true/);
+    expect(bindings).toEqual([suggest.SUGGEST_WORKFLOW]);
+  });
+
+  test('an alias that is not a plain identifier is refused', () => {
+    expect(() => suggest.excludeGatedSchedulingSuggestions(fakeQuery(), 'ad; drop')).toThrow(/bad alias/);
+  });
+});

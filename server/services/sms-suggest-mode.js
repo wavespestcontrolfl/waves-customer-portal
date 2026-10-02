@@ -270,6 +270,23 @@ function schedulingOfferSuggestible({ schedulingIntent, openTimesSnapshot }) {
   return Boolean(schedulingIntent) && isPickerOfferSnapshot(openTimesSnapshot) && schedulingSuggestLive();
 }
 
+/**
+ * Rollback fails closed: with GATE_SMS_SCHEDULING_SUGGEST off, a scheduling
+ * card already published stops surfacing and can no longer be sent, not just
+ * stops being created. Adds the exclusion to a knex query over
+ * agent_decisions aliased `alias`; a no-op while the gate is on. A suggestion
+ * decision's entity_id is its message_drafts row.
+ */
+function excludeGatedSchedulingSuggestions(query, alias = 'ad') {
+  if (schedulingSuggestLive()) return query;
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error('excludeGatedSchedulingSuggestions: bad alias');
+  return query.whereRaw(
+    `NOT (${alias}.workflow = ? AND EXISTS (SELECT 1 FROM message_drafts gated_md
+      WHERE gated_md.id = ${alias}.entity_id AND gated_md.scheduling_intent = true))`,
+    [SUGGEST_WORKFLOW],
+  );
+}
+
 function suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent, openTimesSnapshot = null }) {
   if (!reply || !String(reply).trim()) return false;
   if (!customerId || !smsLogId) return false;
@@ -1367,6 +1384,7 @@ module.exports = {
   suggestionEligible,
   isPickerOfferSnapshot,
   schedulingOfferSuggestible,
+  excludeGatedSchedulingSuggestions,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
