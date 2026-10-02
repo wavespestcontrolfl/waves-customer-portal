@@ -42,6 +42,12 @@ describe("grouped workspaces", () => {
     // The gate-code directory is a view of Customers but admin only on its own.
     expect(techIds).not.toContain('gateCodes');
     expect(adminIds).toContain('gateCodes');
+    // The nested route is Gate codes' alone: Customers is not active there too.
+    const gatePath = '/admin/customers/gate-codes';
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.gateCodes, gatePath)).toBe(true);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, gatePath)).toBe(false);
+    expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, '/admin/customers/abc')).toBe(true);
+    expect(getAdminWorkspaceSelection({ pathname: gatePath }).itemId).toBe('gateCodes');
   });
 
   it("resolves actual rendered tabs, proposal links, and redirected Schedule", () => {

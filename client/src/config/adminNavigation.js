@@ -561,5 +561,13 @@ export function isAdminNavItemActive(item, pathname, search = "") {
       );
     });
   }
-  return pathname.startsWith(`${itemPathname}/`);
+  if (!pathname.startsWith(`${itemPathname}/`)) return false;
+  // A nested route that is its own destination (Customers → Gate codes)
+  // belongs to that destination alone, never to its parent as well.
+  return !Object.values(ADMIN_NAV_ITEMS).some((other) => {
+    const otherPathname = pathnameFor(other.path);
+    return otherPathname
+      && otherPathname.startsWith(`${itemPathname}/`)
+      && (pathname === otherPathname || pathname.startsWith(`${otherPathname}/`));
+  });
 }
