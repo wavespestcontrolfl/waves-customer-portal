@@ -3872,6 +3872,12 @@ async function trustedCustomerForScheduledSms(customerId, to) {
 
 router.post('/schedule-sms', async (req, res, next) => {
   try {
+    // Deferred sends are office-only. The scheduler replays a queued row later
+    // from the stored admin_user_id with no re-check of the sender's route, so a
+    // technician's route-scoped authorization at enqueue time would outlive the
+    // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
+    // lookup or insert, with the staff default-deny gate on or off.
+    if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
     const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {

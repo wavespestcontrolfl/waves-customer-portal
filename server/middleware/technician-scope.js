@@ -32,6 +32,11 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'session', methods: ANY, pattern: /^\/api\/admin\/push(\/.*)?$/ },
   { bucket: 'session', methods: ANY, pattern: /^\/api\/admin\/notifications(\/.*)?$/ },
   { bucket: 'session', methods: ANY, pattern: /^\/api\/tech\/notifications(\/.*)?$/ },
+  // Portal usage: the admin shell fires /track on every route change for any
+  // staff role (navigation slugs only, validated server-side); /summary is
+  // read by a technician as scope=me only (scope=all is a 403 in the router).
+  { bucket: 'session', methods: ['POST'], pattern: /^\/api\/admin\/usage\/track$/ },
+  { bucket: 'session', methods: READ, pattern: /^\/api\/admin\/usage\/summary$/ },
   // The flag read every staff screen boots from (useFeatureFlag fails closed
   // on a 403 and would switch field features off). The admin-only flag
   // routes under it carry their own requireAdmin.
@@ -96,7 +101,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // stats, the compliance export, outbound calls from the business line,
   // auto-reply and link library configuration.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|schedule-sms|rewrite-sms|ai-draft|customer-link)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // The single-draft read the SMS tab uses (the router scopes it to the
   // technician's customers); list and stats are admin-only in the router.

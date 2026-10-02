@@ -811,6 +811,42 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
   return customer;
 }
 
+// Locked revalidation at the write boundary (codex #5568 r14 P1). The scope
+// check in validateProjectCreateScope runs on unlocked reads well before the
+// insert (profile resolution, duplicate lookup in between), so a reassignment
+// or cancellation landing in that gap would still let the former technician
+// mint a project (and with it created_by_tech_id access). Inside the insert
+// transaction this locks the linked scheduled_services row FOR UPDATE and
+// re-judges the SAME authorization: the visit row in scope for this technician
+// (technicianVisitRowInScope), or the linked service record assigned to them
+// (the other path validateProjectCreateScope accepts, unchanged). Any non-admin
+// role is judged as a technician, as validateProjectCreateScope does.
+async function assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id }) {
+  if (isAdmin(req)) return;
+  const refuse = () => {
+    const err = new Error('Technician projects must be linked to an assigned visit');
+    err.status = 403;
+    throw err;
+  };
+  const actor = { techRole: 'technician', technicianId: req.technicianId };
+  if (scheduled_service_id) {
+    const scheduled = await trx('scheduled_services')
+      .where({ id: scheduled_service_id })
+      .forUpdate()
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+    if (scheduled
+      && String(scheduled.technician_id || '') === String(req.technicianId || '')
+      && technicianVisitRowInScope(actor, scheduled)) return;
+  }
+  if (service_record_id) {
+    const service = await trx('service_records')
+      .where({ id: service_record_id })
+      .first('id', 'technician_id');
+    if (service && String(service.technician_id || '') === String(req.technicianId || '')) return;
+  }
+  refuse();
+}
+
 async function resolveProjectDate({ project_date, service_record_id, scheduled_service_id }) {
   const explicit = normalizeDateOnly(project_date);
   if (explicit) return explicit;
@@ -1751,7 +1787,9 @@ router.post('/', async (req, res, next) => {
       : [];
     let row;
     try {
-      [row] = await db('projects').insert({
+      row = await db.transaction(async (trx) => {
+      await assertTechnicianProjectLinkStillAssigned(trx, req, { service_record_id, scheduled_service_id });
+      const [inserted] = await trx('projects').insert({
         customer_id,
         project_type,
         project_date: projectDate,
@@ -1776,6 +1814,8 @@ router.post('/', async (req, res, next) => {
         status: 'draft',
         created_by_tech_id: req.technicianId,
       }).returning('*');
+      return inserted;
+      });
     } catch (insertErr) {
       // Unique-violation on the partial index (migration 20260714000010) =
       // we lost a same-visit create race — same 409 contract as the
@@ -5982,6 +6022,7 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
 });
 
 router._private = {
+  assertTechnicianProjectLinkStillAssigned,
   canAccessProject,
   hasProjectAccess,
   detectedImageMime,

@@ -163,6 +163,23 @@ async function technicianMayCollectInvoice(req, invoice) {
   return technicianServicesCustomer(req, invoice.customer_id);
 }
 
+// The same predicate as technicianMayCollectInvoice, re-judged INSIDE the mint
+// transaction with the qualifying visit row locked FOR UPDATE (codex #5568 r14
+// P1): the unlocked check above runs before credit-apply and the separate mint
+// transaction, so a reassignment landing in between could still let the former
+// technician mint a collection token. Holding the row lock to commit means the
+// reassignment either lands first (this finds no row) or waits for the mint.
+async function technicianMayCollectInvoiceLocked(trx, req, invoice) {
+  if (req.techRole !== 'technician') return true;
+  if (!invoice?.customer_id) return false;
+  const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+  const assigned = await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where({ customer_id: invoice.customer_id }),
+  ).forUpdate().first('scheduled_services.id');
+  return !!assigned;
+}
+
 router.post('/handoff', adminAuthenticate, async (req, res) => {
   // Hoisted so the generic catch below can reverse seam-applied credit when no
   // handoff token ends up minted (any abort after the credit-apply).
@@ -231,8 +248,16 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let rateLimitedRetryAfter = 3600;
     let mintedJti = null;
     let mintedExpiresAt = null;
+    let ownershipLostAtMint = false;
 
     await db.transaction(async (trx) => {
+      // Locked re-validation of the technician's assignment BEFORE anything
+      // else in the mint (no token row, no rate-limit write on a miss).
+      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+        ownershipLostAtMint = true;
+        return;
+      }
+
       // Serialize concurrent mints for this tech. Two int4 args give us a
       // namespace + key pair; the lock is held until the transaction ends.
       // Different techs get different keys and proceed in parallel.
@@ -298,6 +323,21 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedJti = jti;
       mintedExpiresAt = expires_at;
     });
+
+    if (ownershipLostAtMint) {
+      // Same refusal as the pre-check above. Reverse the credit this seam
+      // applied so the customer's credit is not consumed (and the invoice not
+      // edit-locked) for a collection the technician is no longer assigned to.
+      if (handoffCreditResult?.applied > 0) {
+        try {
+          const { reverseAppliedCredit } = require('../services/customer-credit');
+          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_not_assigned' });
+        } catch (e) {
+          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
+        }
+      }
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
 
     if (rateLimited) {
       auditTerminalHandoffRateLimited({
@@ -1170,6 +1210,7 @@ module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
   technicianMayCollectInvoice,
+  technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,
   terminalHandoffNeedsReissue,
 };
