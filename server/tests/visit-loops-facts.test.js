@@ -127,90 +127,76 @@ describe('loadVisitLoops basics', () => {
   });
 });
 
-describe("today's visits", () => {
-  test("yesterday's 23:00 visit stays in today's facts until its window ends at 01:00 ET", async () => {
-    const late = todayRow({ id: 'v-late', scheduled_date: '2026-09-30', window_start: '23:00:00', window_end: '23:45:00' });
-    const alert = { type: 'tech_late', severity: 'warn', job_id: 'v-late', payload: { scheduled_date: '2026-09-30', window_start: '23:00:00' } };
-    const at = (iso) => loadVisitLoops({ customerId: 'c1', now: new Date(iso), conn: fakeConn({ scheduled_services: (ops) => (hasOp(ops, 'leftJoin') ? [late] : []), dispatch_alerts: () => [alert] }) });
-    expect((await at('2026-10-01T04:30:00Z')).lateAlert).toMatchObject({ visitId: 'v-late' }); // 00:30 ET: still live
-    expect((await at('2026-10-01T05:30:00Z')).lateAlert).toBeNull(); // 01:30 ET: no longer today's
-  });
-});
-
 describe('lateAlert', () => {
-  const run = (alert) => loadVisitLoops({
-    customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow,
-    conn: fakeConn({
-      scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin') ? [todayRow({ status: 'en_route' })] : (kind === 'first' ? null : [])),
-      dispatch_alerts: () => (alert ? [].concat(alert) : []),
-    }),
+  // the read joins each open alert to its visit: a fixture is the alert + the visit's columns
+  const alertRow = (alert, visit = {}) => ({ type: 'tech_late', severity: 'warn', ...alert, ...todayRow({ status: 'en_route', ...visit }) });
+  const run = (rows, now = NOW) => loadVisitLoops({
+    customerId: 'c1', now, deriveWindow,
+    conn: fakeConn({ scheduled_services: () => [], dispatch_alerts: () => [].concat(rows || []) }),
   });
+  const STAMP = { scheduled_date: '2026-10-01', window_start: '09:00:00' };
+  const which = { visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
 
   test('an open alert carries type and severity, never the frozen payload minutes (string or object payload)', async () => {
-    const which = { visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35, scheduled_date: '2026-10-01', window_start: '09:00:00' }) })).lateAlert)
+    expect((await run(alertRow({ payload: JSON.stringify({ delay_minutes: 35, ...STAMP }) }))).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', missingTracking: false, ...which });
-    expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12', scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert)
+    expect((await run(alertRow({ type: 'unassigned_overdue', severity: 'critical', payload: { delay_minutes: '12', ...STAMP } }))).lateAlert)
       .toEqual({ type: 'unassigned_overdue', severity: 'critical', missingTracking: false, ...which });
   });
 
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
-    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
-      .toEqual({ type: 'tech_late', severity: 'warn', missingTracking: true, visitId: 'visit-1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+    expect((await run(alertRow({ payload }))).lateAlert).toEqual({ type: 'tech_late', severity: 'warn', missingTracking: true, ...which });
   });
 
-  test('with two visits today the alert names the visit it was raised on', async () => {
-    const out = await loadVisitLoops({
-      customerId: 'c1', now: NOW, deriveWindow,
-      upcomingServices: [todayEntry(), todayEntry({ scheduledServiceId: 'visit-2', type: 'Lawn Care' })],
-      conn: fakeConn({
-        scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin')
-          ? [todayRow(), todayRow({ id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]
-          : (kind === 'first' ? null : [])),
-        dispatch_alerts: () => [{ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20, scheduled_date: '2026-10-01', window_start: '14:00:00' } }],
-      }),
-    });
+  test('the promised window holds after an uncommunicated internal move (the detector\'s promisedIds path)', async () => {
+    // promised 9 AM today; staff moved the row to 3 PM today, or to next week, without telling the customer
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+    for (const visit of [{ window_start: '15:00:00' }, { scheduled_date: '2026-10-08' }]) {
+      expect((await run(alertRow({ payload }, visit))).lateAlert).toMatchObject({ visitId: 'visit-1', scheduledDate: '2026-10-01', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
+    }
+    // a promise for another day is not today's
+    expect((await run(alertRow({ payload: { promised_window: { start_at: '2026-10-03T13:00:00.000Z' } } }))).lateAlert).toBeNull();
+  });
+
+  test('with two visits the alert names the visit it was raised on', async () => {
+    const out = await run([alertRow({ payload: { scheduled_date: '2026-10-01', window_start: '14:00:00' } }, { id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]);
     expect(out.lateAlert).toMatchObject({ visitType: 'Lawn Care', visitId: 'visit-2' });
   });
 
-  test('an alert left over from before a same-day reschedule is not current lateness', async () => {
-    // the visit is now 09:00; the alert recorded the old 13:00 window (tech-late) or old promise (no-show)
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-10-01', window_start: '13:00:00' } })).lateAlert).toBeNull();
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-09-30', window_start: '09:00:00' } })).lateAlert).toBeNull();
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T17:00:00.000Z' } } })).lateAlert).toBeNull();
-    // matching occurrence: kept
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert).toMatchObject({ missingTracking: false });
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T13:00:00.000Z' } } })).lateAlert).toMatchObject({ missingTracking: true });
+  test('a schedule-stamped alert left over from before a reschedule is not current lateness', async () => {
+    expect((await run(alertRow({ payload: { scheduled_date: '2026-10-01', window_start: '13:00:00' } }))).lateAlert).toBeNull();
+    expect((await run(alertRow({ payload: { scheduled_date: '2026-09-30', window_start: '09:00:00' } }))).lateAlert).toBeNull();
+    expect((await run(alertRow({ payload: STAMP }))).lateAlert).toMatchObject({ missingTracking: false });
   });
 
   test('an arrived, finished, cancelled or skipped visit never carries a delay, even with a lagging status', async () => {
-    const stamped = { type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { scheduled_date: '2026-10-01', window_start: '09:00:00' } };
-    const at = (row) => loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: fakeConn({ scheduled_services: (ops) => (hasOp(ops, 'leftJoin') ? [todayRow(row)] : []), dispatch_alerts: () => [stamped] }) });
-    for (const row of [{ status: 'confirmed', track_state: 'on_property' }, { status: 'confirmed', track_state: 'complete' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'cancelled' }]) {
-      expect((await at(row)).lateAlert).toBeNull();
+    for (const visit of [{ status: 'confirmed', track_state: 'on_property' }, { status: 'confirmed', track_state: 'complete' }, { status: 'on_site' }, { status: 'confirmed', track_state: 'cancelled' }]) {
+      expect((await run(alertRow({ payload: STAMP }, visit))).lateAlert).toBeNull();
     }
-    expect((await at({ status: 'confirmed', track_state: 'en_route' })).lateAlert).toMatchObject({ visitId: 'visit-1' });
+    expect((await run(alertRow({ payload: STAMP }, { status: 'confirmed', track_state: 'en_route' }))).lateAlert).toMatchObject({ visitId: 'visit-1' });
   });
 
-  test('a stamped alert with no minutes still reads; an unstamped one or none: null', async () => {
-    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: { scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert).not.toHaveProperty('minutesLate');
-    // an unstamped alert (null or empty payload) cannot be shown to be about this occurrence
-    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: null })).lateAlert).toBeNull();
-    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: { delay_minutes: 30 } })).lateAlert).toBeNull();
-    expect((await run(null)).lateAlert).toBeNull();
+  test('an unstamped alert (null or empty payload) or none: null', async () => {
+    expect((await run(alertRow({ payload: null }))).lateAlert).toBeNull();
+    expect((await run(alertRow({ payload: { delay_minutes: 30 } }))).lateAlert).toBeNull();
+    expect((await run([])).lateAlert).toBeNull();
   });
 
-  test('queries only unresolved alerts of the two overdue types for today\'s visit ids', async () => {
-    const conn = fakeConn({
-      scheduled_services: (ops) => (hasOp(ops, 'leftJoin') ? [todayRow()] : null),
-      dispatch_alerts: () => null,
-    });
-    await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
+  test('yesterday\'s 23:00 occurrence stays live until its window ends at 01:00 ET', async () => {
+    const row = alertRow({ payload: { scheduled_date: '2026-09-30', window_start: '23:00:00' } }, { scheduled_date: '2026-09-30', window_start: '23:00:00' });
+    expect((await run(row, new Date('2026-10-01T04:30:00Z'))).lateAlert).toMatchObject({ visitId: 'visit-1' }); // 00:30 ET
+    expect((await run(row, new Date('2026-10-01T05:30:00Z'))).lateAlert).toBeNull(); // 01:30 ET
+  });
+
+  test('reads the customer\'s unresolved alerts of the two overdue types, joined to their visits', async () => {
+    const conn = fakeConn({ scheduled_services: () => [], dispatch_alerts: () => [] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, conn });
     const q = conn.calls.find((c) => c.table === 'dispatch_alerts');
-    expect(hasOp(q.ops, 'whereNull', (a) => a[0] === 'resolved_at')).toBe(true);
-    expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'type' && a[1].join() === 'tech_late,unassigned_overdue')).toBe(true);
-    expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'job_id' && a[1].join() === 'visit-1')).toBe(true);
+    expect(hasOp(q.ops, 'join', (a) => a[0] === 'scheduled_services as ss')).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'ss.customer_id' && a[1] === 'c1')).toBe(true);
+    expect(hasOp(q.ops, 'whereNull', (a) => a[0] === 'a.resolved_at')).toBe(true);
+    expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'a.type' && a[1].join() === 'tech_late,unassigned_overdue')).toBe(true);
   });
 });
 
@@ -278,6 +264,16 @@ describe('pastWindow', () => {
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', technician_id: null }, [{ technician_id: null, scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
   });
 
+  test('an uncleared street-level address hold is never "passed" (never dispatched)', async () => {
+    const conn = (held) => fakeConn({ scheduled_services: (ops) => {
+      if (hasOp(ops, 'leftJoin')) return [todayRow({ status: 'confirmed' })];
+      if (hasOp(ops, 'whereExists')) return held;
+      return [];
+    } });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ id: 'visit-1' }]) })).pastWindow).toBeNull();
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+  });
+
   test('a window that crosses midnight (23:00-01:00) is not passed in the evening', async () => {
     const out = await run({ status: 'confirmed', window_start: '23:00:00', window_end: '23:30:00' }, new Date('2026-10-02T02:00:00Z')); // 22:00 ET
     expect(out.pastWindow).toBeNull();
@@ -337,6 +333,8 @@ describe('missedVisit', () => {
     const dq = dst.calls.find((c) => c.table === 'scheduled_services' && isUnfinishedQuery(c.ops));
     expect(hasOp(dq.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-03-02')).toBe(true);
     expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
+    // a service record, and an uncleared street-level address hold, each exclude the row
+    expect(q.ops.filter((o) => o.op === 'whereNotExists')).toHaveLength(2);
     // only an unset / 'scheduled' tracker is not started (live, complete, cancelled, skipped are excluded)
     const seen = [];
     const stub = { whereNull: (...a) => { seen.push(['whereNull', ...a]); return stub; }, orWhereIn: (...a) => { seen.push(['orWhereIn', ...a]); return stub; } };

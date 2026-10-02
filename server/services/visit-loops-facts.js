@@ -157,23 +157,23 @@ function crossesIntoNow(row, nowMin) {
   return end != null && end > 1440 && nowMin < end - 1440;
 }
 
-// Does an alert's own record of the window (tech-late-detector: scheduled_date +
-// window_start; no-show-detector: promised_window.start_at) still describe the
-// visit's current occurrence? An alert that records NONE is rejected: reschedules
-// do not resolve alerts, so an unstamped one cannot be shown to be about today's slot.
+// The occurrence an alert was raised for, from its own record — or null when it
+// records none (reschedules do not resolve alerts, so an unstamped one cannot be
+// shown to be about a current slot):
+//  - no-show-detector: promised_window.start_at, the IMMUTABLE promise the customer
+//    was given — it holds even after an uncommunicated internal move of the row;
+//  - tech-late-detector: scheduled_date + window_start, which must still be the
+//    row's current schedule (a same-day reschedule leaves the old alert behind).
+// Returns { date, startHms }.
 const ET_HHMM = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
-function alertMatchesOccurrence(payload, visit) {
+function alertOccurrence(payload, visit) {
   const p = payload && typeof payload === 'object' ? payload : {};
-  if (!p.scheduled_date && !p.window_start && !(p.promised_window && p.promised_window.start_at)) return false;
-  if (p.scheduled_date && calendarDay(p.scheduled_date) !== calendarDay(visit.scheduled_date)) return false;
-  const visitStart = hhmmToMinutes(visit.window_start);
-  if (p.window_start && hhmmToMinutes(p.window_start) !== visitStart) return false;
   const promised = toDate(p.promised_window && p.promised_window.start_at);
-  if (promised) {
-    if (etDateString(promised) !== calendarDay(visit.scheduled_date)) return false;
-    if (hhmmToMinutes(promised.toLocaleTimeString('en-US', ET_HHMM)) !== visitStart) return false;
-  }
-  return true;
+  if (promised) return { date: etDateString(promised), startHms: `${promised.toLocaleTimeString('en-US', ET_HHMM)}:00` };
+  if (!p.scheduled_date || !p.window_start) return null;
+  if (calendarDay(p.scheduled_date) !== calendarDay(visit.scheduled_date)) return null;
+  if (hhmmToMinutes(p.window_start) !== hhmmToMinutes(visit.window_start)) return null;
+  return { date: calendarDay(visit.scheduled_date), startHms: String(visit.window_start) };
 }
 
 // A delay is only news before arrival: a visit the tracker (or status) shows
@@ -182,41 +182,43 @@ function alertMatchesOccurrence(payload, visit) {
 const PRE_ARRIVAL_STATUSES = ['pending', 'confirmed', 'en_route'];
 const PRE_ARRIVAL_TRACK_STATES = ['scheduled', 'en_route'];
 const preArrival = (r) => PRE_ARRIVAL_STATUSES.includes(r.status) && (r.track_state == null || PRE_ARRIVAL_TRACK_STATES.includes(r.track_state));
-async function loadLateAlert(allTodayRows, { conn, deriveWindow }) {
-  const todayRows = allTodayRows.filter(preArrival);
-  const ids = todayRows.map((r) => r.id);
-  if (!ids.length) return null;
-  const alerts = await conn('dispatch_alerts')
-    .whereIn('job_id', ids).whereIn('type', LATE_ALERT_TYPES).whereNull('resolved_at')
-    .orderBy('created_at', 'desc')
-    .select('type', 'severity', 'payload', 'job_id');
-  // Bound to the visit AND the occurrence it was raised on: with two visits today a
-  // delay on the afternoon stop must not read as the morning one, and an alert left
-  // over from before a same-day reschedule (reschedules do not resolve it) must not
-  // read as the new window running late.
-  let visit = null;
-  let payload = null;
-  const alert = (alerts || []).find((a) => {
-    visit = todayRows.find((r) => String(r.id) === String(a.job_id)) || null;
-    payload = parseJson(a.payload);
-    return visit && alertMatchesOccurrence(payload, visit);
-  });
-  if (!alert) return null;
-  const where = { visitId: String(visit.id), windowStart: visit.window_start || null, scheduledDate: calendarDay(visit.scheduled_date), visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
-  // no-show-detector raises the same two types on missing tracking alone (stage 1
-  // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
-  if (payload?.evidence === 'missing_tracking') {
-    return { type: alert.type, severity: alert.severity || null, missingTracking: true, ...where };
+// The customer's open delay alerts, read through their visits — not only today's
+// schedule: an uncommunicated move can take the row off today while its promised
+// window is still today (the no-show detector's promisedIds path). Each alert must
+// be for an occurrence live now: today's, or yesterday's still running past midnight.
+async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
+  const alerts = await conn('dispatch_alerts as a')
+    .join('scheduled_services as ss', 'ss.id', 'a.job_id')
+    .where('ss.customer_id', customerId)
+    .whereIn('a.type', LATE_ALERT_TYPES).whereNull('a.resolved_at')
+    .orderBy('a.created_at', 'desc')
+    .select('a.type', 'a.severity', 'a.payload', 'ss.id', 'ss.status', 'ss.track_state', 'ss.scheduled_date',
+      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type');
+  const today = etDateString(now);
+  const yesterday = etDateString(addETDays(now, -1));
+  const nowMin = nowEtMinutes(now);
+  const liveNow = (occ) => occ.date === today || (occ.date === yesterday && crossesIntoNow({ window_start: occ.startHms }, nowMin));
+  for (const row of alerts || []) {
+    if (!preArrival(row)) continue;
+    const payload = parseJson(row.payload);
+    const occ = alertOccurrence(payload, row);
+    if (!occ || !liveNow(occ)) continue;
+    return {
+      type: row.type,
+      severity: row.severity || null,
+      // no-show-detector raises the same two types on missing tracking alone (stage 1
+      // is 45 min into an open window): a tracking gap, not confirmed lateness. No
+      // minutes either way: payload.delay_minutes is frozen at insert and measured
+      // from the internal job block, never the customer's promised window.
+      missingTracking: payload?.evidence === 'missing_tracking',
+      visitId: String(row.id),
+      windowStart: occ.startHms,
+      scheduledDate: occ.date,
+      visitType: row.service_type || null,
+      windowDisplay: windowLabel({ ...row, window_start: occ.startHms }, deriveWindow),
+    };
   }
-  // No minutes: payload.delay_minutes is frozen at insert and measured from the
-  // internal job block (GREATEST(window_end, start + 2h)), never the customer's
-  // promised window, so it is not customer-facing lateness.
-  return {
-    type: alert.type,
-    severity: alert.severity || null,
-    missingTracking: false,
-    ...where,
-  };
+  return null;
 }
 
 // One physical stop = the same tech, day, customer and window start (the sibling
@@ -247,11 +249,16 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }
   // 'scheduled'), plus the service-record and sibling checks below
   const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
   if (!candidates.length) return null;
-  const [recorded, startedStops] = await Promise.all([
-    conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id'),
+  const ids = candidates.map((r) => r.id);
+  const [recorded, held, startedStops] = await Promise.all([
+    conn('service_records').whereIn('scheduled_service_id', ids).select('scheduled_service_id'),
+    // an uncleared street-level address hold was never dispatched: no passed window
+    conn('scheduled_services as ss').whereIn('ss.id', ids)
+      .whereExists(function unclearedAddressHold() { require('./street-level-hold').heldVisitSubquery(this, 'ss'); })
+      .select('ss.id'),
     startedStopKeys(conn, customerId, candidates),
   ]);
-  const done = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
+  const done = new Set([...(recorded || []).map((r) => String(r.scheduled_service_id)), ...(held || []).map((r) => String(r.id))]);
   for (const row of candidates) {
     const key = stopKey(row);
     if (done.has(String(row.id)) || (key && startedStops.has(key))) continue;
@@ -301,6 +308,11 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
     .where((b) => b.whereNull('track_state').orWhereIn('track_state', NOT_STARTED_TRACK_STATES))
     .whereNotExists(function serviceRecorded() {
       this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
+    })
+    // an uncleared street-level address hold was never dispatched: not a miss (the
+    // same exclusion the missed-appointment sweep and the no-show detector use)
+    .whereNotExists(function unclearedAddressHold() {
+      require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
     })
     .orderBy('scheduled_date', 'desc').orderBy('id', 'asc')
     .offset(offset).limit(MISSED_SCAN_MAX)
@@ -524,7 +536,7 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const pastWindow = await read('past window', null, () => findPastWindow(todayRows, ctx));
 
   const [lateAlert, missedVisit, commitments] = await Promise.all([
-    read('late alert', null, () => loadLateAlert(todayRows, ctx)),
+    read('late alert', null, () => loadLateAlert(ctx)),
     read('missed visit', null, () => loadMissedVisit(ctx)),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
