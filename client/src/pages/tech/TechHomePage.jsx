@@ -62,10 +62,11 @@ import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
+import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
@@ -160,10 +161,15 @@ function completesOnOwnRecord(service) {
 // form as before, and so does a visit closed out as a whole visit (its
 // packet completes every service on it), a visit that completes through a
 // project, a row whose profile or form could not be read, or a closed visit.
-function isTypedReportEligible(service) {
+// A station visit (termite or rodent bait stations, a trap check) opens the
+// sheet only once the tech's station map (station-map-v1) is known to be off:
+// with it on, the typed form records a check for every station and the sheet
+// carries no map (Codex P1 on #5638).
+function isTypedReportEligible(service, { stationMapOff = false } = {}) {
   const type = service?.completionProfile?.findingsType;
   return service?.typedReportFlowEnabled === true
     && !!type && service?.findingsSchema?.type === type
+    && (stationMapOff || !Object.hasOwn(STATION_TYPE_PROGRAM, type))
     && !service?.visitCloseoutPacket && !closesOutAsVisit(service)
     && completesOnOwnRecord(service);
 }
@@ -185,9 +191,9 @@ const laneKeyOf = (service) => resolveSpecialtyServiceKey({
 // a lane visit its lane and for a typed visit its form (each read from the
 // note), and no trace on the sheet for either (a trace stays on the full
 // form).
-function reportFlowFields(service) {
+function reportFlowFields(service, { stationMapOff = false } = {}) {
   const laneFlow = isLaneReportEligible(service);
-  const typedFlow = isTypedReportEligible(service);
+  const typedFlow = isTypedReportEligible(service, { stationMapOff });
   return {
     reportFlow: isFastCompleteReportEligible(service) || laneFlow || typedFlow,
     laneFlow,
@@ -464,6 +470,10 @@ export default function TechHomePage({ section = 'today' }) {
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
+  // The tech's station map: a station visit opens the sheet only once the
+  // flag has loaded and is off (isTypedReportEligible).
+  const stationMap = useFeatureFlagReady('station-map-v1');
+  const stationMapOff = stationMap.ready && !stationMap.enabled;
   // The verified profile's name first: the greeting and the timecard
   // signature pre-fill must not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
@@ -877,9 +887,9 @@ export default function TechHomePage({ section = 'today' }) {
   const openTypedVisit = useCallback((service) => {
     if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
     else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
-    else if (isTypedReportEligible(service)) setFastCompleteService(service);
+    else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
     else openTypedCompletion(service);
-  }, []);
+  }, [stationMapOff]);
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
@@ -1406,7 +1416,7 @@ export default function TechHomePage({ section = 'today' }) {
             // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
-            ...reportFlowFields(fastCompleteService),
+            ...reportFlowFields(fastCompleteService, { stationMapOff }),
             // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).

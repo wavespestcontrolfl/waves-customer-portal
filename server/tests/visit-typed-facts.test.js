@@ -61,7 +61,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readTypedFacts, validateTypedFacts, currentValuesFor, voiceFieldsFor, voiceTypeFor, typedSchema, typedSystemPrompt, VOICE_TYPES, NOT_SAID,
+  readTypedFacts, validateTypedFacts, currentValuesFor, voiceFieldsFor, voiceTypeFor, scoreOf, typedSchema, typedSystemPrompt, VOICE_TYPES, NOT_SAID,
 } = require('../services/visit-typed-facts');
 const { PROJECT_TYPES } = require('../services/project-types');
 const router = require('../routes/admin-dispatch');
@@ -69,7 +69,11 @@ const router = require('../routes/admin-dispatch');
 const answer = (json) => ({ ok: true, json });
 const ROACH_NOTE = 'German roaches, heavy, behind the fridge and under the sink. Saw live ones and droppings.';
 // Every field of a type answered as the model answers "not said".
-const nothingSaid = (type) => Object.fromEntries(voiceFieldsFor(type).map((field) => [field.key, field.type === 'select' ? { value: NOT_SAID, quote: '' } : []]));
+const notSaid = (field) => {
+  if (field.type === 'count') return { said: false, value: 0, quote: '' };
+  return field.type === 'select' ? { value: NOT_SAID, quote: '' } : [];
+};
+const nothingSaid = (type) => Object.fromEntries(voiceFieldsFor(type).map((field) => [field.key, notSaid(field)]));
 const fieldsOf = (type, fields) => ({ fields: { ...nothingSaid(type), ...fields } });
 
 beforeEach(() => {
@@ -79,22 +83,55 @@ beforeEach(() => {
 });
 
 describe('the forms, the schema and the prompt', () => {
-  test('every form read is a typed form the completion defines; counts, termite, tree and lawn forms are other steps', () => {
+  test('every form read is a typed form the completion defines; step 4 adds the trap and station checks; termite work, tree and lawn forms are other steps', () => {
     for (const type of Object.keys(VOICE_TYPES)) expect(PROJECT_TYPES[type]?.findingsFields?.length).toBeGreaterThan(0);
-    for (const type of ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station', 'termite_treatment', 'wdo_inspection', 'tree_shrub', 'one_time_lawn_treatment', 'palm_injection']) {
+    for (const type of ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station']) expect(VOICE_TYPES).toHaveProperty(type);
+    for (const type of ['termite_treatment', 'wdo_inspection', 'tree_shrub', 'one_time_lawn_treatment', 'palm_injection']) {
       expect(VOICE_TYPES).not.toHaveProperty(type);
     }
   });
 
-  test('only pick fields are read: free text, counts and the product-filled work list never are', () => {
+  test('pick fields and counts are read: free text and the product-filled work list never are', () => {
     const roach = voiceFieldsFor('cockroach').map((field) => field.key);
     expect(roach).toEqual(['species', 'activity_level', 'activity_locations', 'evidence_observed', 'conducive_conditions', 'areas_treated', 'customer_prep']);
     expect(roach).not.toContain('work_completed');
     expect(voiceFieldsFor('german_roach_knockdown').map((field) => field.key)).not.toContain('rooms_treated');
     expect(voiceFieldsFor('pest_inspection').map((field) => field.key)).not.toContain('pests_identified');
     const wildlife = voiceFieldsFor('wildlife_trapping').map((field) => field.key);
-    expect(wildlife).not.toContain('traps_checked');
-    expect(wildlife).not.toContain('captures');
+    expect(wildlife).toEqual(expect.arrayContaining(['traps_checked', 'captures']));
+    // A required internal field (the trap visit) is the technician's to say.
+    expect(voiceFieldsFor('rodent_trapping').map((field) => field.key)).toContain('trap_visit_type');
+    expect(voiceFieldsFor('termite_bait_station').map((field) => field.key)).not.toContain('active_station_location');
+  });
+
+  test('the fields are the form as served for the visit\'s service key: a combined rodent service\'s module fields only where its key shows them', () => {
+    const own = voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' }).map((field) => field.key);
+    const all = voiceFieldsFor('rodent_trapping').map((field) => field.key);
+    expect(all.length).toBeGreaterThan(own.length);
+    for (const key of own) expect(all).toContain(key);
+  });
+
+  test('a count is a number the note gives or not, every key required; only a form whose score the technician sets asks for the rating', () => {
+    const fields = voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' });
+    const schema = typedSchema(fields, { scored: true });
+    expect(schema.properties.fields.properties.traps_checked).toEqual({
+      type: 'object',
+      properties: { said: { type: 'boolean' }, value: { type: 'integer' }, quote: { type: 'string' } },
+      required: ['said', 'value', 'quote'],
+      additionalProperties: false,
+    });
+    expect(schema.required).toEqual(['fields', 'score']);
+    expect(typedSchema(fields).properties).not.toHaveProperty('score');
+    expect(scoreOf('rodent_trapping')).toEqual({ label: 'Rodent Activity' });
+    expect(scoreOf('wildlife_trapping')).toEqual({ label: 'Wildlife Activity' });
+    // A score derived from a field is never read from the note.
+    expect(scoreOf('rodent_bait_station')).toBeNull();
+    expect(scoreOf('termite_bait_station')).toBeNull();
+    expect(scoreOf('cockroach')).toBeNull();
+    const prompt = typedSystemPrompt('rodent_trapping', fields, { score: scoreOf('rodent_trapping') });
+    expect(prompt).toContain('traps_checked (Traps checked; a count)');
+    expect(prompt).toContain('Never rate it yourself.');
+    expect(typedSystemPrompt('cockroach', voiceFieldsFor('cockroach'))).not.toContain('the score');
   });
 
   test('the schema offers each field only its own options: one value (or not said) for a select, a list for chips', () => {
@@ -121,7 +158,8 @@ describe('the forms, the schema and the prompt', () => {
 
   test('the form is the profile\'s own findings type, only when this step reads it', () => {
     expect(voiceTypeFor({ findingsType: 'cockroach' })).toBe('cockroach');
-    expect(voiceTypeFor({ findingsType: 'termite_bait_station' })).toBeNull();
+    expect(voiceTypeFor({ findingsType: 'termite_bait_station' })).toBe('termite_bait_station');
+    expect(voiceTypeFor({ findingsType: 'termite_treatment' })).toBeNull();
     expect(voiceTypeFor({ serviceKey: 'fire_ant' })).toBeNull();
     expect(voiceTypeFor(null)).toBeNull();
   });
@@ -272,6 +310,122 @@ describe('the form\'s present values (slice 2: the office form sends them)', () 
   });
 });
 
+describe('counts and the technician\'s rating (step 4)', () => {
+  const TRAPS = voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' });
+  const TRAP_NOTE = 'Follow-up check on the roof rats. Checked all eight traps in the attic, 2 caught by the AC chase. Reset and re-baited all of them. Activity is down, I\'d call it a 2.';
+  const trapAnswer = (fields, score = { said: false, value: 0, quote: '' }) => ({ ...fieldsOf('rodent_trapping', fields), score });
+  const read = (json, note = TRAP_NOTE, current = {}) => validateTypedFacts('rodent_trapping', json, note, current, { fields: TRAPS });
+
+  test('a count stands on a quote that states it, in digits or in words', () => {
+    const facts = read(trapAnswer({
+      traps_checked: { said: true, value: 8, quote: 'Checked all eight traps' },
+      captures: { said: true, value: 2, quote: '2 caught by the AC chase' },
+    }));
+    expect(facts.values).toMatchObject({ traps_checked: '8', captures: '2' });
+    expect(facts.heard.traps_checked).toEqual([{ value: '8', quote: expect.stringMatching(/checked all eight traps/i) }]);
+    expect(facts.unclearFields).toEqual([]);
+  });
+
+  test.each([
+    ['states another number', { said: true, value: 3, quote: 'Checked all eight traps' }],
+    ['states no number ("none caught")', { said: true, value: 0, quote: 'None caught out back' }],
+    ['is not in the note', { said: true, value: 8, quote: 'Checked all 8 traps out back' }],
+    ['is out of range', { said: true, value: 10000, quote: 'Checked all eight traps' }],
+    ['is not a whole number', { said: true, value: 2.5, quote: '2 caught by the AC chase' }],
+  ])('a count whose quote %s is left for a person', (_label, entry) => {
+    const facts = read(trapAnswer({ captures: entry }), `${TRAP_NOTE} None caught out back.`);
+    expect(facts.values).not.toHaveProperty('captures');
+    expect(facts.unclearFields).toContain('captures');
+  });
+
+  test.each([
+    ['a fraction never states its whole part', 'Checked 2.5 traps worth of the attic.', 2, 'Checked 2.5 traps worth', false],
+    ['"one hundred" states 100, never 1', 'Checked one hundred traps.', 1, 'Checked one hundred traps', false],
+    ['"one hundred" states 100', 'Checked one hundred traps.', 100, 'Checked one hundred traps', true],
+    ['an ordinal states no count', 'The 2nd trap had a capture.', 2, 'The 2nd trap had a capture', false],
+    ['a compound number in words', 'Checked twenty-one traps.', 21, 'Checked twenty-one traps', true],
+    ['an ambiguous run of number words states nothing', 'Checked one fifty traps.', 150, 'Checked one fifty traps', false],
+  ])('the number a quote states is read whole (pre-push P1): %s', (_label, note, value, quote, fills) => {
+    const facts = read(trapAnswer({ traps_checked: { said: true, value, quote } }), note);
+    if (fills) expect(facts.values.traps_checked).toBe(String(value));
+    else expect(facts.unclearFields).toContain('traps_checked');
+  });
+
+  test.each([
+    ['in digits', 'Activity rating 2.5'],
+    ['as a spoken decimal', 'Activity rating two point five'],
+    ['as a spoken fraction', 'Activity rating two and a half'],
+    ['as a written fraction', 'Activity rating 2 1/2'],
+  ])('a rating stated as a fraction %s waits for a person (pre-push P1)', (_label, quote) => {
+    const facts = read(trapAnswer({}, { said: true, value: 2, quote }), `${TRAP_NOTE} ${quote}.`);
+    expect(facts).not.toHaveProperty('score');
+    expect(facts.scoreUnclear).toBe(true);
+  });
+
+  test('"entry point" is no decimal: the count beside it still stands', () => {
+    const note = 'Sealed the entry point by the AC chase and set 6 traps.';
+    const facts = read(trapAnswer({ traps_checked: { said: true, value: 6, quote: 'Sealed the entry point by the AC chase and set 6 traps' } }), note);
+    expect(facts.values.traps_checked).toBe('6');
+  });
+
+  test('a count not said fills nothing and asks nothing; one already on the form is never filled over', () => {
+    expect(read(trapAnswer({})).unclearFields).toEqual([]);
+    const facts = read(trapAnswer({ traps_checked: { said: true, value: 8, quote: 'Checked all eight traps' } }), TRAP_NOTE, { traps_checked: '6' });
+    expect(facts.values).not.toHaveProperty('traps_checked');
+  });
+
+  test('an initial setup stands with the trap count heard beside it, and waits for a person with none', () => {
+    const note = 'Initial setup in the attic. Set 6 traps along the AC chase. Roof rats.';
+    const setup = { trap_visit_type: { value: 'Initial setup', quote: 'Initial setup in the attic' }, species: { value: 'Roof rat', quote: 'Roof rats' } };
+    const withCount = read(trapAnswer({ ...setup, traps_checked: { said: true, value: 6, quote: 'Set 6 traps along the AC chase' } }), note);
+    expect(withCount.values).toEqual({ trap_visit_type: 'Initial setup', traps_checked: '6', species: 'Roof rat' });
+    const noCount = read(trapAnswer(setup), note);
+    expect(noCount.values).toEqual({ species: 'Roof rat' });
+    expect(noCount.unclearFields).toEqual(['trap_visit_type']);
+  });
+
+  test('an initial setup heard beside work on traps already out: both sides wait for a person, the count and the rest stay', () => {
+    const note = 'Initial setup, set 6 traps. Roof rats. Traps reset.';
+    const facts = read(trapAnswer({
+      trap_visit_type: { value: 'Initial setup', quote: 'Initial setup, set 6 traps' },
+      traps_checked: { said: true, value: 6, quote: 'Initial setup, set 6 traps' },
+      species: { value: 'Roof rat', quote: 'Roof rats' },
+      trap_actions: [{ value: 'Traps reset', quote: 'Traps reset' }],
+    }), note);
+    expect(facts.values).toEqual({ traps_checked: '6', species: 'Roof rat' });
+    expect(facts.unclearFields).toEqual(['trap_visit_type', 'trap_actions']);
+  });
+
+  test('an initial setup picked by hand: its count fills, and a fill that contradicts it waits for a person', () => {
+    const note = 'Set 6 traps. Roof rats. Traps reset.';
+    const facts = read(trapAnswer({
+      traps_checked: { said: true, value: 6, quote: 'Set 6 traps' },
+      species: { value: 'Roof rat', quote: 'Roof rats' },
+      trap_actions: [{ value: 'Traps reset', quote: 'Traps reset' }],
+    }), note, { trap_visit_type: 'Initial setup' });
+    expect(facts.values).toEqual({ traps_checked: '6', species: 'Roof rat' });
+    expect(facts.unclearFields).toEqual(['trap_actions']);
+  });
+
+  test('the technician\'s rating fills only where they set the score, on a quote that states it', () => {
+    const facts = read(trapAnswer({}, { said: true, value: 2, quote: 'I\'d call it a 2' }));
+    expect(facts.score).toEqual({ value: 2, quote: expect.stringMatching(/i'd call it a 2/i) });
+    // A score derived from a field is never read from the note.
+    const bait = validateTypedFacts('rodent_bait_station', { ...fieldsOf('rodent_bait_station', {}), score: { said: true, value: 2, quote: 'I\'d call it a 2' } }, TRAP_NOTE);
+    expect(bait).not.toHaveProperty('score');
+    expect(bait).not.toHaveProperty('scoreUnclear');
+  });
+
+  test.each([
+    ['states no number', { said: true, value: 2, quote: 'Activity is down' }],
+    ['is out of range', { said: true, value: 7, quote: 'I\'d call it a 2' }],
+  ])('a rating whose quote %s waits for a person', (_label, score) => {
+    const facts = read(trapAnswer({}, score));
+    expect(facts).not.toHaveProperty('score');
+    expect(facts.scoreUnclear).toBe(true);
+  });
+});
+
 describe('readTypedFacts', () => {
   test('reads the note through the fast structured lane with the form\'s own schema', async () => {
     dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', { species: { value: 'German', quote: 'German roaches' } })));
@@ -279,13 +433,13 @@ describe('readTypedFacts', () => {
     expect(facts).toMatchObject({ status: 'read', type: 'cockroach', values: { species: 'German' }, unclearFields: [] });
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy.name).toBe('fastStructured');
-    expect(payload).toMatchObject({ laneId: 'visit_typed_facts', promptVersion: 'visit-typed-facts-v1' });
+    expect(payload).toMatchObject({ laneId: 'visit_typed_facts', promptVersion: 'visit-typed-facts-v2' });
     expect(payload.jsonSchema.properties.fields.required).toEqual(voiceFieldsFor('cockroach').map((field) => field.key));
     expect(options).toEqual({ reserveFallbackBudget: true });
   });
 
   test('a form this step does not read, an empty note, or a note past the cap never calls the model', async () => {
-    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'termite_bait_station' })).toMatchObject({ status: 'no_type', values: {} });
+    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'termite_treatment' })).toMatchObject({ status: 'no_type', values: {} });
     expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: undefined })).toMatchObject({ status: 'no_type' });
     expect(await readTypedFacts({ note: '   ', findingsType: 'cockroach' })).toMatchObject({ status: 'empty_note' });
     const { MAX_NOTE_CHARS } = require('../services/visit-voice-facts');
@@ -304,6 +458,25 @@ describe('readTypedFacts', () => {
     const { species, ...open } = current;
     expect(species).toBeTruthy();
     expect((await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach', current: open })).status).toBe('read');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('the schema is the form as served for the visit\'s service key, with the rating where the technician sets it', async () => {
+    dispatchWithFallback.mockResolvedValue(answer({ ...fieldsOf('rodent_trapping', {}), score: { said: false, value: 0, quote: '' } }));
+    await readTypedFacts({ note: 'Checked the traps.', findingsType: 'rodent_trapping', serviceKey: 'rodent_trapping' });
+    const { jsonSchema } = dispatchWithFallback.mock.calls[0][1];
+    expect(jsonSchema.properties.fields.required).toEqual(voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' }).map((field) => field.key));
+    expect(jsonSchema.required).toEqual(['fields', 'score']);
+  });
+
+  test('a form whose score the technician sets is read for it until they hold one, every field set or not', async () => {
+    const fields = voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' });
+    const current = Object.fromEntries(fields.map((field) => [field.key, field.type === 'count' ? '4' : field.options[1] || field.options[0]]));
+    dispatchWithFallback.mockResolvedValue(answer({ ...fieldsOf('rodent_trapping', {}), score: { said: false, value: 0, quote: '' } }));
+    expect((await readTypedFacts({ note: 'Checked the traps.', findingsType: 'rodent_trapping', serviceKey: 'rodent_trapping', current })).status).toBe('read');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(await readTypedFacts({ note: 'Checked the traps.', findingsType: 'rodent_trapping', serviceKey: 'rodent_trapping', current, scoreSet: true }))
+      .toMatchObject({ status: 'nothing_to_fill' });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
@@ -394,7 +567,7 @@ describe('POST /:serviceId/typed-facts', () => {
     mockDbCurrent = serviceDb(SERVICE, []);
     mockProfile = { serviceKey: 'fire_ant', findingsType: null };
     expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
-    mockProfile = { serviceKey: 'termite_active_bait_quarterly', findingsType: 'termite_bait_station' };
+    mockProfile = { serviceKey: 'termite_liquid', findingsType: 'termite_treatment' };
     expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
@@ -411,6 +584,20 @@ describe('POST /:serviceId/typed-facts', () => {
     expect(res.body).toMatchObject({ available: true, status: 'read', values: { activity_level: 'Heavy' } });
     expect(res.body.values).not.toHaveProperty('species');
     expect(JSON.stringify(res.body)).not.toContain('American');
+  });
+
+  test('the route reads the form as served for the visit\'s own service key and passes whether the client holds a score', async () => {
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    mockProfile = { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' };
+    mockDbCurrent = serviceDb(SERVICE, []);
+    const fields = voiceFieldsFor('rodent_trapping', { serviceKey: 'rodent_trapping' });
+    dispatchWithFallback.mockResolvedValue(answer({ ...fieldsOf('rodent_trapping', {}), score: { said: false, value: 0, quote: '' } }));
+    await invoke({ serviceId: 'svc-1' }, { note: 'Checked the traps.' });
+    expect(dispatchWithFallback.mock.calls[0][1].jsonSchema.properties.fields.required).toEqual(fields.map((field) => field.key));
+    const current = Object.fromEntries(fields.map((field) => [field.key, field.type === 'count' ? '4' : field.options[1] || field.options[0]]));
+    const res = await invoke({ serviceId: 'svc-1' }, { note: 'Checked the traps.', current, scoreSet: true });
+    expect(res.body).toMatchObject({ available: true, status: 'nothing_to_fill' });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
   test('the assigned technician gets the visit\'s own form read, whatever form the client names', async () => {

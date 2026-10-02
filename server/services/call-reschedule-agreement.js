@@ -1082,7 +1082,11 @@ function evaluateSpokenRun(words) {
   return total + group;
 }
 
-function spokenFiguresIn(text) {
+// Every run of number words in the text, each read whole: its value (under
+// 20 too), or NaN for a malformed or ambiguous run. The typed visit reader
+// (visit-typed-facts.js) grounds a count on it; spokenFiguresIn keeps the
+// runs a price can be.
+function spokenNumbersIn(text) {
   const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
   const out = [];
   for (let i = 0; i < tokens.length;) {
@@ -1097,10 +1101,13 @@ function spokenFiguresIn(text) {
       if (tokens[i] === 'and' && (last === 'hundred' || last === 'thousand') && isSpokenNumberWord(tokens[i + 1]) && tokens[i + 1] !== 'hundred' && tokens[i + 1] !== 'thousand') { i += 1; continue; }
       break;
     }
-    const value = evaluateSpokenRun(words);
-    if (Number.isNaN(value) || value >= 20) out.push(value);
+    out.push(evaluateSpokenRun(words));
   }
   return out;
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn } };
+function spokenFiguresIn(text) {
+  return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
+}
+
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn } };

@@ -16,7 +16,7 @@ import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
 import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
 import { reconcileDependentFindingSelections, specialtyCompletedWorkWithoutAction } from '../../lib/service-completion-presets';
-import { typedFieldRequiredNow } from '../../lib/typed-findings-rules';
+import { typedFieldLabel, typedFieldRequiredNow } from '../../lib/typed-findings-rules';
 import { formatETDateOnly } from '../../lib/timezone';
 import '../../styles/tech-workflow.css';
 
@@ -727,7 +727,7 @@ export function LaneRecordCard({ lane, preset, record, unclear = [], readFailed 
 // the tech sets. A read fills only a field still empty that nobody picked
 // (the server judged each fill beside the record's values); Change is the
 // tech's own pick and the words it came from no longer show beside it.
-export const EMPTY_TYPED_RECORD = Object.freeze({ values: {}, heard: {}, picked: [], score: null });
+export const EMPTY_TYPED_RECORD = Object.freeze({ values: {}, heard: {}, picked: [], score: null, heardScore: null });
 
 // The fields the card shows, as the office form shows them: never one
 // filled from the products (autoFilled) or a companion's. A pesticide
@@ -746,10 +746,19 @@ export function mergeTypedRecord(record, facts) {
   for (const [key, value] of Object.entries(facts.values || {})) {
     if (typeof value !== 'string' || !value || picked.has(key) || String(values[key] ?? '').trim()) continue;
     values[key] = value;
-    heard[key] = { value, quotes: (facts.heard?.[key] || []).map((entry) => entry?.quote).filter(Boolean) };
+    // One quote per words heard: two values said in the same words show them once.
+    heard[key] = { value, quotes: [...new Set((facts.heard?.[key] || []).map((entry) => entry?.quote).filter(Boolean))] };
   }
-  return { ...record, values, heard };
+  // The technician's own rating, heard on a form whose score they set
+  // (step 4), fills only while they have set none.
+  const heardScore = Number.isInteger(facts.score?.value) && record.score == null && !picked.has('score')
+    ? { value: facts.score.value, quote: facts.score.quote }
+    : null;
+  return { ...record, values, heard, ...(heardScore ? { score: heardScore.value, heardScore } : {}) };
 }
+
+// The tech's own rating (or none): the words a heard rating stood on go.
+export const scoreTypedRecord = (record, score) => ({ ...record, score, heardScore: null, picked: [...new Set([...record.picked, 'score'])] });
 
 // The tech's own pick: a field set, or cleared (''). The words a fill stood
 // on go with it, even when the filled value is picked again (Codex P2 r3 on
@@ -772,12 +781,14 @@ function toggleChip(field, current, option) {
   return field.options.filter((item) => chosen.has(item)).join(', ');
 }
 
-function TypedRecordRow({ field, record, unclear, readFailed, locked, open, onOpen, onChange }) {
+function TypedRecordRow({ schemaType, field, record, unclear, readFailed, locked, open, onOpen, onChange }) {
   const value = record.values[field.key] ?? '';
   const required = typedFieldRequiredNow(field, record.values);
   const heard = record.heard[field.key];
   const quotes = heard && heard.value === value ? heard.quotes : [];
-  const label = `${field.label}${required ? ' (required)' : ''}`;
+  const name = typedFieldLabel(schemaType, field, record.values);
+  const label = `${name}${required ? ' (required)' : ''}`;
+  const heardLine = quotes.length > 0 && <p className="tech-visit-muted">{quotes.map((quote) => `“${quote}”`).join(' · ')}</p>;
   if (field.type === 'text' || field.type === 'count') {
     return (
       <div className="tech-lane-row">
@@ -790,6 +801,8 @@ function TypedRecordRow({ field, record, unclear, readFailed, locked, open, onOp
             onChange={(event) => onChange(field.key, field.type === 'count' ? event.target.value.replace(/\D/g, '').slice(0, 4) : event.target.value)}
           />
         </Field>
+        {!value && unclear.includes(field.key) && <p className="tech-visit-muted tech-visit-status--warn">Not clear from your note. Enter the number.</p>}
+        {heardLine}
       </div>
     );
   }
@@ -806,7 +819,7 @@ function TypedRecordRow({ field, record, unclear, readFailed, locked, open, onOp
         </Button>
       </div>
       {shown}
-      {quotes.length > 0 && <p className="tech-visit-muted">{quotes.map((quote) => `“${quote}”`).join(' · ')}</p>}
+      {heardLine}
       {open && (
         <div className="tech-visit-tile-grid" role="group" aria-label={field.label}>
           {field.options.map((option) => {
@@ -833,7 +846,7 @@ function TypedRecordRow({ field, record, unclear, readFailed, locked, open, onOp
 // heard, a Change (or a box for a count or free text), the optional ones
 // behind "More detail" unless they hold a value, are required now or the
 // note left them unclear, and the activity score when it is the tech's.
-export function TypedRecordCard({ schema, record, unclear = [], readFailed = false, locked, onChange, onScore }) {
+export function TypedRecordCard({ schema, record, unclear = [], scoreUnclear = false, readFailed = false, locked, onChange, onScore }) {
   const [open, setOpen] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   const titleId = useId();
@@ -849,6 +862,7 @@ export function TypedRecordCard({ schema, record, unclear = [], readFailed = fal
       {fields.filter((field) => showDetail || primary(field)).map((field) => (
         <TypedRecordRow
           key={field.key}
+          schemaType={schema?.type}
           field={field}
           record={record}
           unclear={unclear}
@@ -881,6 +895,8 @@ export function TypedRecordCard({ schema, record, unclear = [], readFailed = fal
               />
             ))}
           </div>
+          {record.score == null && scoreUnclear && <p className="tech-visit-muted tech-visit-status--warn">Not clear from your note. Pick one.</p>}
+          {record.heardScore && record.heardScore.value === record.score && <p className="tech-visit-muted">{`“${record.heardScore.quote}”`}</p>}
         </div>
       )}
     </section>

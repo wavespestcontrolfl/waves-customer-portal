@@ -141,7 +141,7 @@ describe('the typed record on the sheet', () => {
     expect(screen.queryByRole('group', { name: 'Pest activity' })).toBeNull();
     addProduct('Example Roach Gel', '1');
     await generate();
-    expect(request.bodies('/typed-facts')).toEqual([{ note: NOTE, current: {} }]);
+    expect(request.bodies('/typed-facts')).toEqual([{ note: NOTE, current: {}, scoreSet: false }]);
     const written = request.bodies('generate-report')[0];
     expect(written.structuredFindings).toEqual({ type: 'cockroach', values: READ.values });
     expect(written.typedActivityScore).toBeNull();
@@ -509,5 +509,170 @@ describe('after sending: the follow-up a completion suggests (step 3)', () => {
     const request = makeRequest(options);
     await sendIt(request);
     expect(screen.queryByTestId('fast-complete-followup')).toBeNull();
+  });
+});
+
+describe('counts and the technician\'s rating (step 4)', () => {
+  const TRAP_SCHEMA = {
+    type: 'rodent_trapping',
+    label: 'Rodent Trapping',
+    fields: [
+      { key: 'species', label: 'Species', type: 'select', required: true, options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
+      { key: 'trap_visit_type', label: 'This visit', type: 'select', required: true, internal: true, options: ['Initial setup', 'Follow-up check'] },
+      { key: 'traps_checked', label: 'Traps checked', type: 'count' },
+      { key: 'captures', label: 'Captures', type: 'count' },
+      { key: 'trap_actions', label: 'Trap actions', type: 'chips', detail: true, options: ['Traps reset', 'Traps moved', 'Bait/lure refreshed'] },
+    ],
+    activity: { label: 'Rodent Activity', deriveField: null, techScoreLabels: TECH_SCORE_LABELS },
+  };
+  const TRAP_READ = {
+    available: true,
+    status: 'read',
+    type: 'rodent_trapping',
+    values: { species: 'Roof rat', trap_visit_type: 'Follow-up check', traps_checked: '8', captures: '2' },
+    heard: {
+      species: [{ value: 'Roof rat', quote: 'the roof rats' }],
+      trap_visit_type: [{ value: 'Follow-up check', quote: 'follow-up check on the roof rats' }],
+      traps_checked: [{ value: '8', quote: 'checked all 8 traps' }],
+      captures: [{ value: '2', quote: '2 caught by the ac chase' }],
+    },
+    unclearFields: [],
+    score: { value: 2, quote: "i'd call it a 2" },
+  };
+  const trapRequest = (typedFacts = TRAP_READ, extra = {}) => makeRequest({
+    visit: { ...VISIT, serviceType: 'Rodent Trapping Follow-up', serviceKey: 'rodent_trapping' }, typedType: 'rodent_trapping', typedFacts, ...extra,
+  });
+  const TRAPS = { ...SERVICE, serviceType: 'Rodent Trapping Follow-up', typedType: 'rodent_trapping', typedSchema: TRAP_SCHEMA };
+  const TRAP_NOTE = 'Follow-up check on the roof rats. Checked all 8 traps in the attic, 2 caught by the AC chase. I\'d call it a 2.';
+  const trapCard = () => recordCard('Rodent Trapping');
+  const scoreButton = (label) => within(within(trapCard()).getByRole('group', { name: 'Rodent Activity' })).getByRole('button', { name: label });
+
+  test('a rodent trap check: the counts and the technician\'s rating fill from the note, each with its words, and go on the completion as theirs', async () => {
+    const request = trapRequest();
+    await openSheet(request, TRAPS);
+    await generate(TRAP_NOTE);
+    expect(request.bodies('/typed-facts')).toEqual([{ note: TRAP_NOTE, current: {}, scoreSet: false }]);
+    expect(within(trapCard()).getByLabelText('Traps checked').value).toBe('8');
+    expect(within(trapCard()).getByText('“checked all 8 traps”')).toBeTruthy();
+    expect(scoreButton('2 Low').getAttribute('aria-pressed')).toBe('true');
+    expect(within(trapCard()).getByText('“i\'d call it a 2”')).toBeTruthy();
+    expect(request.bodies('generate-report')[0].typedActivityScore).toBe(2);
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+    fireEvent.click(sendButton());
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).toMatchObject({
+      structuredFindings: { type: 'rodent_trapping', values: TRAP_READ.values },
+      activityScore: 2,
+      activityScoreSource: 'technician',
+    });
+  });
+
+  test('a rating picked by hand is the tech\'s: its words go, the reader is told it is set, and it is never filled over', async () => {
+    const request = trapRequest();
+    await openSheet(request, TRAPS);
+    await generate(TRAP_NOTE);
+    fireEvent.click(scoreButton('4 High'));
+    expect(within(trapCard()).queryByText('“i\'d call it a 2”')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    expect(request.bodies('/typed-facts')[1].scoreSet).toBe(true);
+    expect(scoreButton('4 High').getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(scoreButton('2 Low'));
+    expect(within(trapCard()).queryByText('“i\'d call it a 2”')).toBeNull();
+  });
+
+  test('two values heard in the same words show those words once', async () => {
+    const request = trapRequest({
+      ...TRAP_READ,
+      values: { ...TRAP_READ.values, trap_actions: 'Traps reset, Bait/lure refreshed' },
+      heard: {
+        ...TRAP_READ.heard,
+        trap_actions: [{ value: 'Traps reset', quote: 'reset and re-baited all of them' }, { value: 'Bait/lure refreshed', quote: 'reset and re-baited all of them' }],
+      },
+    });
+    await openSheet(request, TRAPS);
+    await generate(TRAP_NOTE);
+    expect(within(fieldRow('Trap actions', trapCard())).getByText('“reset and re-baited all of them”')).toBeTruthy();
+  });
+
+  test('a count the note left unclear asks for the number', async () => {
+    const request = trapRequest({ ...TRAP_READ, values: { species: 'Roof rat', trap_visit_type: 'Follow-up check' }, unclearFields: ['traps_checked'] });
+    await openSheet(request, TRAPS);
+    await generate(TRAP_NOTE);
+    expect(within(trapCard()).getByText('Not clear from your note. Enter the number.')).toBeTruthy();
+  });
+
+  test('an initial setup holds the send until its trap count is set, the count named as the traps set', async () => {
+    const request = trapRequest({
+      ...TRAP_READ, values: { species: 'Roof rat', trap_visit_type: 'Initial setup' }, heard: {}, score: { value: 2, quote: "i'd call it a 2" },
+    });
+    await openSheet(request, TRAPS);
+    await generate('Initial setup for the roof rats. I\'d call it a 2.');
+    expect(screen.getByText('An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"')).toBeTruthy();
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.change(within(trapCard()).getByLabelText('Traps set'), { target: { value: '6' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+  });
+
+  test('a bait station visit whose consumption says nothing was found keeps the standard wording, which only the Full form sends', async () => {
+    const schema = {
+      type: 'rodent_bait_station',
+      label: 'Rodent Bait Station Check',
+      fields: [
+        { key: 'stations_checked', label: 'Stations checked', type: 'count', required: true },
+        { key: 'bait_consumption', label: 'Bait consumption', type: 'select', required: true, options: ['None', 'Light', 'Moderate', 'Heavy', 'Empty'] },
+      ],
+      activity: { label: 'Bait Station Activity', deriveField: 'bait_consumption', deriveScores: { None: 0, Light: 2, Moderate: 3, Heavy: 4, Empty: 5 } },
+    };
+    const request = makeRequest({
+      visit: { ...VISIT, serviceType: 'Rodent Bait Stations', serviceKey: 'rodent_bait_quarterly' },
+      typedType: 'rodent_bait_station',
+      typedFacts: { available: true, status: 'read', type: 'rodent_bait_station', values: { stations_checked: '12', bait_consumption: 'None' }, heard: {}, unclearFields: [] },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Rodent Bait Stations', typedType: 'rodent_bait_station', typedSchema: schema });
+    await generate('Checked all 12 stations, no bait taken.');
+    expect(screen.getByText('Nothing was found on this record, so the customer’s report uses its standard wording, not this one. Use the Full form.')).toBeTruthy();
+    expect(sendButton().disabled).toBe(true);
+  });
+
+  describe('a termite bait station visit\'s places', () => {
+    const schema = {
+      type: 'termite_bait_station',
+      label: 'Termite Bait Station Inspection',
+      fields: [
+        { key: 'stations_checked', label: 'Stations checked', type: 'count', required: true },
+        { key: 'termite_activity', label: 'Termite activity', type: 'select', required: true, options: ['None observed', 'Active termites present', 'Previous feeding noted'] },
+        { key: 'bait_consumption', label: 'Bait consumption', type: 'select', required: true, options: ['None — bait intact', 'Light feeding', 'Moderate feeding', 'Heavy feeding'] },
+      ],
+      activity: { label: 'Termite Activity', deriveField: 'termite_activity', deriveScores: { 'None observed': 0, 'Previous feeding noted': 1, 'Active termites present': 4 } },
+    };
+    const termiteRequest = () => makeRequest({
+      visit: { ...VISIT, serviceType: 'Termite Monitoring', serviceKey: 'termite_monitoring' },
+      typedType: 'termite_bait_station',
+      typedFacts: {
+        available: true, status: 'read', type: 'termite_bait_station', heard: {}, unclearFields: [],
+        values: { stations_checked: '14', termite_activity: 'Previous feeding noted', bait_consumption: 'Light feeding' },
+      },
+    });
+    const TERMITE = { ...SERVICE, serviceType: 'Termite Monitoring', typedType: 'termite_bait_station', typedSchema: schema };
+
+    test('bait placed in the stations needs no place', async () => {
+      const request = termiteRequest();
+      await openSheet(request, TERMITE);
+      addProduct('Example Roach Gel', '1');
+      await generate('Checked all 14 stations, light feeding, previous feeding noted.');
+      await waitFor(() => expect(sendButton().disabled).toBe(false));
+    });
+
+    test('a product sprayed as well: where it went is picked on the Full form', async () => {
+      const request = termiteRequest();
+      await openSheet(request, TERMITE);
+      addProduct('Taurus SC', '1');
+      await generate('Checked all 14 stations, light feeding, previous feeding noted. Spot treated the garage.');
+      expect(screen.getByText('Where you applied the product is picked on the Full form. Use the Full form.')).toBeTruthy();
+      expect(sendButton().disabled).toBe(true);
+    });
   });
 });
