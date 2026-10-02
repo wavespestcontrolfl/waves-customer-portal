@@ -826,6 +826,8 @@ postgres('annual prepay charged after the first visit', () => {
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect((await jobOf(f)).status).not.toBe('paid');
+      // …and no authorization the customer never gave is recorded first.
+      expect(await trx('payment_method_consents').where({ customer_id: f.customerId })).toEqual([]);
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

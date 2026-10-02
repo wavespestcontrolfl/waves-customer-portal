@@ -1710,6 +1710,23 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           continue;
         }
       }
+      // A year routed to a payer at approval, authorized for a charge only
+      // AFTER the first visit (pre-push audit P0/P1): before ANY consent
+      // record or enrollment, a payer that still resolves gets the bill; with
+      // the payer gone, the homeowner's card is never charged (nor a
+      // charge-now authorization recorded) — pay link and office alert.
+      if (job.after_visit_attested === true && !deferredToFirstVisit) {
+        const livePayer = await require('./payer').resolveForInvoice({
+          customerId: invoice.customer_id,
+          scheduledServiceId: job.payer_scope_scheduled_service_id || null,
+          throwOnError: true,
+        });
+        if (livePayer?.payerId) {
+          await deliverToPayerAndResolve();
+          continue;
+        }
+        throw new Error('after-visit authorization only and no payer — delivering pay link');
+      }
       if (!chargingOn) throw new Error('gate_disabled — charging suppressed, resolving via pay link');
       let pmRow = job.payment_method_row_id
         ? await db('payment_methods').where({ id: job.payment_method_row_id }).first('id', 'customer_id', 'stripe_payment_method_id', 'method_type')
@@ -1841,13 +1858,6 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // method off-session would park again, so route straight to the
       // deterministic pay-link fallback (the customer authenticates by
       // paying on-session).
-      // A year routed to a payer at approval, authorized for a charge only
-      // AFTER the first visit (pre-push audit P0): with the payer gone, the
-      // homeowner's card is never charged at approval timing — pay link and
-      // office alert instead.
-      if (job.after_visit_attested === true && !deferredToFirstVisit) {
-        throw new Error('after-visit authorization only and no payer — delivering pay link');
-      }
       if (job.authentication_required === true) {
         throw new Error('authentication_required — off-session charge cannot complete; delivering pay link');
       }
