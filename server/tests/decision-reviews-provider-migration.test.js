@@ -105,3 +105,47 @@ describe('decision_reviews provider rollback lock (supersedes the first provider
   });
 });
 
+
+describe('decision_reviews provider rollback guard (20261002030000; owns only its comment and guard)', () => {
+  const guard = require('../models/migrations/20261002030000_decision_reviews_provider_rollback_guard');
+
+  test('up drops its guard if present and writes its comment; it never touches the column, CHECK or key', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await guard.up(knex);
+    expect(state.raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_provider_rollback_guard',
+      expect.stringMatching(/^COMMENT ON COLUMN decision_reviews\.provider IS 'Provider that answered/),
+    ]);
+    expect(state.ops).toEqual([]);
+  });
+
+  test('down locks the table, refuses while another provider has rows, and alters nothing', async () => {
+    const { knex, state } = buildKnex({ column: true, otherProviderRow: { id: 'r1' } });
+    await expect(guard.down(knex)).rejects.toThrow(/rows from a provider other than typesafe/);
+    expect(state.raw).toEqual(['LOCK TABLE decision_reviews IN ACCESS EXCLUSIVE MODE']);
+    expect(state.wheres).toEqual([['whereNot', { provider: 'typesafe' }]]);
+    expect(state.ops).toEqual([]);
+  });
+
+  test('down with only default-provider rows installs the guard CHECK and removes the comment; the column, CHECK and key stay', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await guard.down(knex);
+    expect(state.raw).toEqual([
+      'LOCK TABLE decision_reviews IN ACCESS EXCLUSIVE MODE',
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_provider_rollback_guard',
+      "ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_provider_rollback_guard CHECK (provider = 'typesafe')",
+      'COMMENT ON COLUMN decision_reviews.provider IS NULL',
+    ]);
+    expect(state.ops).toEqual([]);
+    expect(state.raw.some((q) => /DROP COLUMN|subject_question_uniq/.test(q))).toBe(false);
+  });
+
+  test('both directions no-op without the table or the column', async () => {
+    for (const opts of [{ table: false }, { column: false }]) {
+      const { knex, state } = buildKnex(opts);
+      await guard.up(knex); await guard.down(knex);
+      expect(state.raw).toEqual([]);
+      expect(state.ops).toEqual([]);
+    }
+  });
+});

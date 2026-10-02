@@ -15,9 +15,9 @@ const label = (verdict, correct_value = null) => JSON.stringify({ verdict, corre
 const status = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
 
 // One labeled sms_courtesy row (a yes/no question in a registered package).
-function row({ verdict = 'jev_right', p = 0.9, confident = true, sampled = 'random_audit', correct = null, question = 'is_courtesy_only', pkg = 'sms_courtesy.v1', capability = 'sms_courtesy', model = 'jev-1.13.0' } = {}) {
+function row({ verdict = 'jev_right', p = 0.9, confident = true, sampled = 'random_audit', correct = null, question = 'is_courtesy_only', pkg = 'sms_courtesy.v1', capability = 'sms_courtesy', model = 'jev-1.13.0', provider = 'typesafe' } = {}) {
   return {
-    capability, package_id: pkg, question_id: question, served_model: model, sampled_for: sampled,
+    capability, package_id: pkg, provider, question_id: question, served_model: model, sampled_for: sampled,
     label_status: status[verdict], jev_answer: noul(p, confident), label: label(verdict, correct),
   };
 }
@@ -144,6 +144,15 @@ describe('scoreRows — tiers from the representative set only', () => {
     expect(m.precision).toMatchObject({ numerator: 20, denominator: 20 });
     expect(m.acceptedCorrect).toMatchObject({ numerator: 10, denominator: 10 });
     expect(m.actionableRecall).toMatchObject({ numerator: 10, denominator: 20 });
+  });
+
+  test('two providers answering the same cases report side by side, each on its own labels (one row per provider, migration 20261002010000)', () => {
+    const caps = scoreRows([...rows(70, { provider: 'typesafe', model: 'jev-1.13.0', p: 0.95 }), ...rows(10, { provider: 'cloudflare', model: 'clef-flash', p: 0.95 })], []);
+    expect(caps.map((c) => [c.provider, c.servedModel, c.tier])).toEqual([['cloudflare', 'clef-flash', 0], ['typesafe', 'jev-1.13.0', 2]]);
+    expect(caps.every((c) => c.questions[0].provider === c.provider)).toBe(true);
+    // a row from before the provider column is Jev's
+    const [legacy] = scoreRows([{ ...row(), provider: undefined }], []);
+    expect(legacy.provider).toBe('typesafe');
   });
 
   test('a newly pinned model version earns its tier on its own labels (§9: per capability, per version)', () => {
@@ -287,7 +296,8 @@ describe('evaluateCapabilities — the read-only status query', () => {
     const since = new Date('2026-09-02T00:00:00Z');
     expect(conn.calls.filter(([m]) => m === 'where')).toEqual([['where', ['created_at', '>=', since]], ['where', ['created_at', '>=', since]]]);
     expect(conn.calls).toContainEqual(['whereIn', ['label_status', ['confirmed_correct', 'confirmed_error', 'disagreement']]]);
-    expect(conn.calls).toContainEqual(['groupBy', ['capability', 'package_id', 'question_id', 'served_model']]);
+    expect(conn.calls).toContainEqual(['groupBy', ['capability', 'package_id', 'provider', 'question_id', 'served_model']]);
+    expect(conn.calls).toContainEqual(['select', ['capability', 'package_id', 'provider', 'question_id', 'served_model', 'sampled_for', 'label_status', 'jev_answer', 'label']]);
     expect(conn.calls.some(([m, a]) => m === 'select' && a[0] && /FILTER \(WHERE \(jev_answer->>'confident'\)::boolean\)/.test(a[0].sql))).toBe(true);
     // reads only
     expect(conn.calls.some(([m]) => ['insert', 'update', 'delete'].includes(m))).toBe(false);

@@ -22,14 +22,12 @@
  * correct_value (a yes/no row without one is read as the opposite answer);
  * unclear (label_status disagreement) → excluded from every rate and counted.
  *
- * Rows are grouped by package version and served model, so a new package
- * version, or a newly pinned model version, earns its tier on its own labels
- * (§9 rule 1: per capability, per version) and a retired version's weak
- * question never holds the current one back. Comparing two PROVIDERS on the
- * same subjects is NOT possible from this table yet: decision_reviews keeps
- * one row per subject and question, whichever model answered, so that needs a
- * provider column in its unique key and ships with the second provider's
- * adapter (Codex r1 on #5546).
+ * Rows are grouped by package version, provider and served model, so a new
+ * package version, a second provider, or a newly pinned model version earns
+ * its tier on its own labels (§9 rule 1: per capability, per version) and a
+ * retired version's weak question never holds the current one back. Two
+ * providers answering the same subjects (one row each, migration
+ * 20261002010000) report side by side here on the same label set.
  * Rows carry ids and answers only; no message text is read here.
  */
 const db = require('../../models/db');
@@ -98,7 +96,8 @@ const parse = (value) => {
   try { return JSON.parse(value); } catch { return null; }
 };
 
-const groupKey = (row) => `${row.capability}|${row.package_id}|${row.question_id}|${row.served_model || ''}`;
+const providerOf = (row) => row.provider || 'typesafe'; // rows from before the column are Jev's
+const groupKey = (row) => `${row.capability}|${row.package_id}|${providerOf(row)}|${row.question_id}|${row.served_model || ''}`;
 
 // The question's type from the registered package; a package that has since
 // left the registry still scores, read from the shape of its stored answer.
@@ -266,6 +265,7 @@ function scoreRows(labeledRows = [], coverageRows = []) {
         capability: row.capability,
         packageId: row.package_id,
         questionId: row.question_id,
+        provider: providerOf(row),
         servedModel: row.served_model || null,
         type: questionType(row),
         representative: emptyStats(),
@@ -297,7 +297,7 @@ function scoreRows(labeledRows = [], coverageRows = []) {
   // by one strong question (pre-push audit P1). Missing questions sit at tier 0.
   const packages = new Map();
   for (const g of groups.values()) {
-    packages.set(`${g.capability}|${g.packageId}|${g.servedModel || ''}`, { capability: g.capability, package_id: g.packageId, served_model: g.servedModel });
+    packages.set(`${g.capability}|${g.packageId}|${g.provider}|${g.servedModel || ''}`, { capability: g.capability, package_id: g.packageId, provider: g.provider, served_model: g.servedModel });
   }
   for (const ref of packages.values()) {
     const registered = packageFor(ref.package_id);
@@ -316,6 +316,7 @@ function scoreRows(labeledRows = [], coverageRows = []) {
       capability: g.capability,
       packageId: g.packageId,
       questionId: g.questionId,
+      provider: g.provider,
       servedModel: g.servedModel,
       type: g.type,
       representative: { counts: g.representative, metrics: displayMetrics(representative) },
@@ -333,7 +334,7 @@ function scoreRows(labeledRows = [], coverageRows = []) {
     });
   }
   questions.sort((a, b) => a.capability.localeCompare(b.capability) || a.packageId.localeCompare(b.packageId)
-    || a.questionId.localeCompare(b.questionId) || String(a.servedModel).localeCompare(String(b.servedModel)));
+    || a.provider.localeCompare(b.provider) || a.questionId.localeCompare(b.questionId) || String(a.servedModel).localeCompare(String(b.servedModel)));
 
   // One status per capability, PACKAGE VERSION and served model: its tier is
   // the lowest of that package's questions (one weak question holds the whole
@@ -341,8 +342,8 @@ function scoreRows(labeledRows = [], coverageRows = []) {
   // retired version still in the window cannot drag the current one to 0.
   const byCapability = new Map();
   for (const q of questions) {
-    const key = `${q.capability}|${q.packageId}|${q.servedModel || ''}`;
-    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, packageId: q.packageId, servedModel: q.servedModel, questions: [], weakest: null });
+    const key = `${q.capability}|${q.packageId}|${q.provider}|${q.servedModel || ''}`;
+    if (!byCapability.has(key)) byCapability.set(key, { capability: q.capability, packageId: q.packageId, provider: q.provider, servedModel: q.servedModel, questions: [], weakest: null });
     const c = byCapability.get(key);
     c.questions.push(q);
     // The weakest question: lowest tier, then fewest representative labels
@@ -355,6 +356,7 @@ function scoreRows(labeledRows = [], coverageRows = []) {
     packageId: c.packageId,
     // false = the package has left the registry: history, not what runs now.
     registered: Boolean(packageFor(c.packageId)),
+    provider: c.provider,
     servedModel: c.servedModel,
     tier: c.weakest ? c.weakest.tier : 0,
     nextTier: c.weakest ? c.weakest.nextTier : null,
@@ -385,11 +387,11 @@ async function evaluateCapabilities({ days = DEFAULT_WINDOW_DAYS, now = new Date
   const labeledRows = await conn(TABLE)
     .where('created_at', '>=', since)
     .whereIn('label_status', LABELED)
-    .select('capability', 'package_id', 'question_id', 'served_model', 'sampled_for', 'label_status', 'jev_answer', 'label');
+    .select('capability', 'package_id', 'provider', 'question_id', 'served_model', 'sampled_for', 'label_status', 'jev_answer', 'label');
   const coverageRows = await conn(TABLE)
     .where('created_at', '>=', since)
-    .groupBy('capability', 'package_id', 'question_id', 'served_model')
-    .select('capability', 'package_id', 'question_id', 'served_model')
+    .groupBy('capability', 'package_id', 'provider', 'question_id', 'served_model')
+    .select('capability', 'package_id', 'provider', 'question_id', 'served_model')
     .count('* as answered')
     .select(conn.raw("COUNT(*) FILTER (WHERE (jev_answer->>'confident')::boolean)::int as confident"));
   return {
