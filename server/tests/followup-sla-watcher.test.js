@@ -28,15 +28,17 @@ jest.mock('../services/call-commitments', () => {
     // mockRejectedValueOnce to prove a failure propagates rather than
     // silently reading as "no renewal".
     obligationRenewedAt: jest.fn(actual.obligationRenewedAt),
+    // Callback promises ask whether an estimate is the call's OWN quote.
+    directEstimatesSentAfter: jest.fn(async () => new Map()),
   };
 });
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt, directEstimatesSentAfter } = require('../services/call-commitments');
 const {
-  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, ROLLING_KEY,
+  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, scopePromise, quoteHintIds, quoteEstimateIds, callbackOwnQuoteIds, ROLLING_KEY,
 } = require('../services/followup-sla-watcher');
 
 // ET is UTC-4 in late September.
@@ -132,6 +134,12 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
     };
     q.select = async (...cols) => {
       if (table === 'call_log' && cols.includes('duration_seconds')) return call ? [call] : [];
+      if (table === 'call_log' && cols.includes('twilio_call_sid') && !cols.includes('duration_seconds')) {
+        // The promise calls the callback quote check reads (SID, linkage, number).
+        const ids = entry.calls.filter(([m, col]) => m === 'whereIn' && col === 'id').flatMap(([, , v]) => v);
+        return ids.map((id) => ({ id, twilio_call_sid: `CA${id}`, created_at: et('14:00').toISOString(), customer_id: null,
+          from_phone: '+19415550123', to_phone: '+19415550100', direction: 'inbound' }));
+      }
       if (['scheduled_services', 'call_log', 'sms_log'].includes(table)) {
         const on = typeof activity[table] === 'function' ? activity[table]() : activity[table];
         if (!on) return [];
@@ -144,6 +152,19 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         const phones = entry.calls.filter(([m, sql]) => (m === 'whereRaw' || m === 'orWhereRaw') && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
         return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z', ...fields })),
           ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z', ...fields }))];
+      }
+      if (table === 'estimates') {
+        const on = typeof activity.estimates === 'function' ? activity.estimates() : activity.estimates;
+        if (!on) return [];
+        // One estimate with a real handoff long after the promise; the
+        // unowned-phone read gets the number it asked about.
+        const phones = entry.calls.filter(([m, sql]) => m === 'whereRaw' && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
+        const fields = typeof on === 'object' ? on : {};
+        // The canonical ownership fence binds the customer id (five times).
+        const custs = entry.calls.filter(([m, sql]) => m === 'whereRaw' && /estimates\.customer_id = \?/.test(sql)).map(([, , v]) => v[0]);
+        const base = { handed_off_at: '2100-01-01T00:00:00Z', ...fields };
+        if (custs.length) return [...new Set(custs)].map((c) => ({ id: `est-${c}`, customer_id: c, owner_customer_id: c, customer_phone: null, ...base }));
+        return [{ id: 'est-1', customer_id: null, customer_phone: phones[0] || null, ...base }];
       }
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
         const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
@@ -169,6 +190,7 @@ beforeEach(() => {
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n1', deduped: false });
   refreshFulfillment.mockResolvedValue({ fulfilled: 0 });
   stillOpenIds.mockImplementation(async (_conn, ids) => new Set(ids));
+  directEstimatesSentAfter.mockResolvedValue(new Map());
 });
 
 const rollingCall = () => NotificationService.notifyAdmin.mock.calls.find((c) => c[3].dedupeKey.startsWith(`${ROLLING_KEY}:`));
@@ -713,4 +735,171 @@ test('an anonymous caller ID gives no contact to match on — unrelated activity
   listOpenCommitments.mockResolvedValue([row('anon', { customer_id: null, from_phone: 'anonymous' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   expect(queriesOn('sms_log')).toHaveLength(0);
+});
+
+describe('an estimate sent to the customer keeps a quote promise; a callback only by its own call\'s quote', () => {
+  test('a delivered estimate for the same customer after the promise drops a send_estimate promise, read through the canonical ownership fence (so a live lead-owned estimate sent by email only counts)', async () => {
+    mockDb({ activity: { estimates: true } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    const fence = argsOf('estimates', 'whereRaw').find(([sql]) => /estimates\.customer_id = \?/.test(sql));
+    expect(fence).toBeDefined();
+    expect(fence[0]).toMatch(/estimates\.customer_id IS NULL/);
+    expect(fence[0]).toMatch(/l\.deleted_at IS NULL/);
+    expect(fence[1]).toEqual(Array(5).fill('cust-a'));
+  });
+
+  test('N linked customers cost ONE estimates query per pass (it can run under the publishing lock), each matched to its own owner', async () => {
+    const estimateQueries = async (ids, activity = { estimates: true }) => {
+      mockDb({ activity });
+      listOpenCommitments.mockResolvedValue(ids.map((id) => row(id, { kind: 'send_estimate' })));
+      const result = await runFollowUpSlaWatcher({ now: NOW });
+      return { result, count: queriesOn('estimates').length, fences: argsOf('estimates', 'whereRaw').filter(([sql]) => /estimates\.customer_id = \?/.test(sql)).length };
+    };
+    const one = await estimateQueries(['a']);
+    const many = await estimateQueries(['a', 'b', 'c', 'd', 'e']);
+    expect(many.result.missed).toBe(0);
+    expect(one.count).toBeGreaterThan(0);
+    // Same number of estimates queries for five customers as for one; five fences inside each.
+    expect(many.count).toBe(one.count);
+    expect(many.fences).toBe(5 * many.count);
+    // Another customer's estimate never clears the promise: only the matched owner counts.
+    const foreign = await estimateQueries(['a', 'b'], { estimates: { owner_customer_id: 'someone-else' } });
+    expect(foreign.result.missed).toBe(2);
+  });
+
+  test('a callback is NOT closed by an unrelated estimate to the customer ("we will call back with availability")', async () => {
+    mockDb({ activity: { estimates: true } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'callback' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    // No customer-wide estimate read at all for a callback.
+    expect(queriesOn('estimates')).toHaveLength(0);
+  });
+
+  test('a callback IS closed by its own call\'s quote (the estimate on the lead the call created), asked through the canonical direct proof', async () => {
+    mockDb();
+    directEstimatesSentAfter.mockImplementation(async (_conn, probes) => new Map(probes.map((p) => [p.key, { kind: 'estimate_sent' }])));
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'callback' }), row('b', { kind: 'callback' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    const probes = directEstimatesSentAfter.mock.calls[0][1];
+    expect(probes.map((p) => p.callId).sort()).toEqual(['call-a', 'call-b']);
+    expect(probes[0]).toMatchObject({ twilioCallSid: 'CAcall-a', key: 'a' });
+    // The evidence boundary is the call's end.
+    expect(new Date(probes[0].after).toISOString()).toBe(et('14:00').toISOString());
+    // Only the call's own quote closes it: the proof finds nothing for 'b', so it stays.
+    directEstimatesSentAfter.mockImplementation(async () => new Map([['a', { kind: 'estimate_sent' }]]));
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['b']);
+  });
+
+  test('a delivered estimate_sent text keeps a quote promise, and only a quote promise', async () => {
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'delivered' } } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    // A queued/failed text is no delivery; the same text never clears a callback or a visit promise.
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'queued' } } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    mockDb({ activity: { sms_log: { message_type: 'estimate_sent', operator_sent: false, status: 'delivered' } } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'callback' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'schedule_visit' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
+  test('an estimate does not keep a schedule_visit promise', async () => {
+    mockDb({ activity: { estimates: true } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'schedule_visit' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    expect(queriesOn('estimates')).toHaveLength(0);
+  });
+
+  test('an unlinked caller is matched only by an UNOWNED estimate on the same number', async () => {
+    mockDb({ activity: { estimates: { customer_phone: '(941) 555-0123' } } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', customer_id: null, direction: 'inbound', from_phone: '+19415550123' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    expect(argsOf('estimates', 'whereNull')).toContainEqual(['customer_id']);
+    // Another number's estimate never clears it.
+    mockDb({ activity: { estimates: { customer_phone: '(941) 555-0999' } } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
+  test('an estimate sent while UNOWNED (its estimate_sent text has no customer_id) keeps a LINKED customer\'s promise through the promise\'s phone', async () => {
+    mockDb();
+    const base = db.getMockImplementation();
+    let smsQuery;
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') {
+        smsQuery = q;
+        const baseSelect = q.select;
+        q.select = async (...cols) => {
+          await baseSelect(...cols);
+          // Only the unowned row exists, as admin-estimates logs it.
+          return [{ id: 'sms-x', customer_id: null, to_phone: '+19415550123', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+            message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+        };
+      }
+      return q;
+    });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', from_phone: '+19415550123', to_phone: '+19415550100' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    expect(smsQuery).toBeDefined();
+    // The unowned arm rides the same query, scoped to estimate_sent rows with no customer.
+    const calls = queriesOn('sms_log')[0].calls.map(([m, ...a]) => [m, ...a.filter((v) => typeof v !== 'function')]);
+    expect(calls).toContainEqual(['whereNull', 'customer_id']);
+    expect(calls).toContainEqual(['where', 'message_type', 'estimate_sent']);
+    // Another number's unowned estimate text never clears it, and only for these kinds.
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') q.select = async () => [{ id: 'sms-y', customer_id: null, to_phone: '+19415550999', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+        message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+      return q;
+    });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'callback', from_phone: '+19415550123', to_phone: '+19415550100' })]);
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') q.select = async () => [{ id: 'sms-x', customer_id: null, to_phone: '+19415550123', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+        message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+      return q;
+    });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
+  test('the evidence boundary is the call end: a handoff before the promise does not keep it', async () => {
+    mockDb({ activity: { estimates: { handed_off_at: et('13:00').toISOString() } } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', call_started_at: et('14:00').toISOString() })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+});
+
+describe('followedUpIds evidence decisions, one per evidence kind', () => {
+  test('scopePromise: a renewal after the call moves both evidence floors; before it, neither', () => {
+    const r = row('a', { kind: 'schedule_visit', call_started_at: et('14:00').toISOString() });
+    expect(scopePromise(r, null).since.toISOString()).toBe(et('14:00').toISOString());
+    expect(scopePromise(r, et('15:00')).since.toISOString()).toBe(et('15:00').toISOString());
+    expect(scopePromise(r, et('15:00')).slotFloor.toISOString()).toBe(et('15:00').toISOString());
+    expect(scopePromise(r, et('13:00')).since.toISOString()).toBe(et('14:00').toISOString());
+    // A linked caller matches by customer; an unlinked one only by a usable number.
+    expect(scopePromise(r, null).phone).toBeNull();
+    expect(scopePromise(row('u', { customer_id: null, from_phone: '+19415550123' }), null).phone).toBe('9415550123');
+  });
+
+  test('quoteHintIds: a stored estimate_sent hint keeps a quote promise only after the evidence floor', async () => {
+    mockDb({ hints: {
+      fresh: JSON.stringify({ kind: 'estimate_sent', matched_at: et('15:00').toISOString() }),
+      stale: JSON.stringify({ kind: 'estimate_sent', matched_at: et('13:00').toISOString() }),
+      other: JSON.stringify({ kind: 'sms_sent', matched_at: et('15:00').toISOString() }),
+    } });
+    const scoped = ['fresh', 'stale', 'other'].map((id) => scopePromise(row(id, { kind: 'send_estimate' }), null));
+    expect([...await quoteHintIds(db, scoped)]).toEqual(['fresh']);
+  });
+
+  test('quoteEstimateIds reads nothing for callbacks; callbackOwnQuoteIds reads nothing for quote promises', async () => {
+    mockDb();
+    expect((await quoteEstimateIds(db, [scopePromise(row('a', { kind: 'callback' }), null)])).size).toBe(0);
+    expect((await callbackOwnQuoteIds(db, [scopePromise(row('b', { kind: 'send_estimate' }), null)])).size).toBe(0);
+    expect(queriesOn('estimates')).toHaveLength(0);
+    expect(directEstimatesSentAfter).not.toHaveBeenCalled();
+  });
 });
