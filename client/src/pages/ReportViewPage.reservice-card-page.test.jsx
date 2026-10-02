@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 // Full-page guard for the re-service report card: with the server payload key
 // present the live report shows the glass sections (above the plan card, below
-// the status hero); with the key absent — gate dark, older cache, not a
+// the status hero — and, on a lawn callback, below the watering banner and lawn
+// lead, which keep their top-of-report place); with the key absent — gate dark, older cache, not a
 // callback — the rendered page is identical to the page without the feature.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';

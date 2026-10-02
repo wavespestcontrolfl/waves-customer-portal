@@ -216,6 +216,15 @@ function foundActivity(service, lane, labels) {
   return name ? { rating, label: name.charAt(0).toUpperCase() + name.slice(1) } : null;
 }
 
+// The "Activity seen" label the card would print for this record under the
+// given label set — the PDF cache key carries it (reservice-report.js), so a
+// relabel of the active Pest Pressure bands re-renders a cached document.
+// Mirrors buildWhatWeDid: performed visits only.
+function activityLabelFor(service, block, labels) {
+  if (!block || block.outcome !== 'treated') return null;
+  return foundActivity(service, block.serviceLine, labels)?.label || null;
+}
+
 function buildWhatWeDid(service, block, { products, areas, pestPressureLabels }) {
   if (block.outcome !== 'treated' || NOT_PERFORMED_OUTCOMES.has(block.outcome)) return null;
   const rows = productRows(products);
@@ -298,4 +307,5 @@ module.exports = {
   freezeReserviceRequest,
   readFrozenReserviceRequest,
   buildReserviceReportCard,
+  activityLabelFor,
 };

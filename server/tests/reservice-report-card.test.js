@@ -371,6 +371,15 @@ describe('PDF cache key component', () => {
     expect(reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1 } }, member)).toBe('-rs2nt-rcd1');
   });
 
+  test('the printed activity label is part of the key: a Pest Pressure relabel re-renders the PDF (Codex r4)', () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    process.env.GATE_RESERVICE_REPORT_CARD = 'true';
+    const withLabel = (label) => reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1, whatWeDid: { found: { rating: 3, label } } } }, member);
+    expect(withLabel('Moderate')).toMatch(/^-rs2nt-rcd1-a[0-9a-f]{8}$/);
+    expect(withLabel('Moderate')).not.toBe(withLabel('Medium'));
+    expect(reserviceReportRenderedSignature({ reserviceReport: block, reserviceReportCard: { version: 1, whatWeDid: null } }, member)).toBe('-rs2nt-rcd1');
+  });
+
   test('store side keys off the card the render actually carried', () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     process.env.GATE_RESERVICE_REPORT_CARD = 'true';
@@ -503,7 +512,8 @@ describe('Codex r3 (#5542)', () => {
   test('project completion freezes on the existing-record branch too, only when it performs the completion', () => {
     const project = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'project-completion.js'), 'utf8');
     expect((project.match(/'customer_request', 'customer_request_source', 'customer_request_pests'\)/g) || []).length).toBe(2);
-    expect(project).toMatch(/String\(serviceRecord\.status \|\| ''\) !== 'completed'\) \{\s*const currentData/);
+    expect(project).toMatch(/String\(lockedVisit\.status \|\| ''\) !== 'completed'\) \{\s*const currentData/);
+    expect(project).toMatch(/&& String\(lockedVisit\.status \|\| ''\) !== 'completed'\s*\? require\('\.\/service-report\/reservice-report-card'\)\.freezeReserviceRequest\(lockedVisit\)/);
     expect(project).toContain("if (frozenRequest) update.service_data = serializeJsonb({ ...currentData, reserviceRequest: frozenRequest });");
   });
 });

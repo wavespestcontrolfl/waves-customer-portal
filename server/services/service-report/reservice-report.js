@@ -35,7 +35,7 @@
 
 const crypto = require('crypto');
 const { detectServiceLine } = require('./service-line-configs');
-const { reserviceReportCardGateOn } = require('./reservice-report-card');
+const { reserviceReportCardGateOn, activityLabelFor } = require('./reservice-report-card');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
 // report gates (cockroach-report-v2.js / termite-report-v2.js) and the
@@ -255,7 +255,13 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
 // PDF carries the "You told us" / "What we did" card, so documents cached
 // before the flip re-render once under '-rcd1'. False (gate dark) appends
 // nothing — every existing key stays byte-identical.
-function signatureFor(block, cardIncluded = false) {
+// The card's printed activity label, as a short stable key part.
+function activityKey(label) {
+  if (!label) return '';
+  return `-a${crypto.createHash('sha1').update(String(label)).digest('hex').slice(0, 8)}`;
+}
+
+function signatureFor(block, cardIncluded = false, activityLabel = null) {
   if (!block) return '';
   const outcomeKey = block.outcome === 'inspection_only' ? 'i'
     : block.outcome === 'customer_declined' ? 'd'
@@ -265,7 +271,7 @@ function signatureFor(block, cardIncluded = false) {
   // PDFs cached under '-rs1…' would keep serving the schematic on
   // permanent links. Bump this version whenever the CALLBACK report
   // composition changes — each callback PDF re-renders once on next view.
-  return `${block.includedWithWaveGuard ? '-rs2m' : '-rs2n'}${outcomeKey}${cardIncluded ? '-rcd1' : ''}`;
+  return `${block.includedWithWaveGuard ? '-rs2m' : '-rs2n'}${outcomeKey}${cardIncluded ? `-rcd1${activityKey(activityLabel)}` : ''}`;
 }
 
 /**
@@ -276,7 +282,17 @@ function signatureFor(block, cardIncluded = false) {
  */
 async function reserviceReportPdfSignature(service = {}, { serviceLine = null, knex = null } = {}) {
   const block = await buildReserviceReport(service, { serviceLine, knex });
-  return signatureFor(block, Boolean(block) && reserviceReportCardGateOn());
+  const cardIncluded = Boolean(block) && reserviceReportCardGateOn();
+  let activityLabel = null;
+  if (cardIncluded) {
+    // The ACTIVE label set, as the payload builder reads it: a relabel
+    // changes the printed "Activity seen" word, so it changes the key.
+    try {
+      const config = await require('../pest-pressure/store').loadActiveConfig(knex || require('../../models/db'));
+      activityLabel = activityLabelFor(service, block, config?.labels || null);
+    } catch { activityLabel = null; }
+  }
+  return signatureFor(block, cardIncluded, activityLabel);
 }
 
 /**
@@ -294,7 +310,7 @@ function reserviceReportRenderedSignature(data, service = {}) {
   // alone), same contract as the block above.
   const cardIncluded = Boolean(block) && reserviceReportCardGateOn()
     && Boolean(data?.reserviceReportCard) && typeof data.reserviceReportCard === 'object';
-  return signatureFor(block, cardIncluded);
+  return signatureFor(block, cardIncluded, data?.reserviceReportCard?.whatWeDid?.found?.label || null);
 }
 
 // Payload marker: TRUE means the server ran the gated composer, so a null

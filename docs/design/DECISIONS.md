@@ -2967,8 +2967,10 @@ unless exactly `true`, read at call time, dark in every environment). Gate off: 
 payload has no `reserviceReportCard` key, the page renders as before and the PDF
 cache key is unchanged. On: the key `reserviceReportCard` joins the payload, the web
 report renders two glass sections (card, soft rows, chip pills, glass type sheet)
-right under the status hero, the PDF prints the same two sections, and callback PDFs
-re-render once under `-rcd1`. Kill switch: unset the gate.
+right under the status hero (on a lawn callback, under the lawn watering banner and
+lawn lead, which `GATE_LAWN_WATERING_RULE` keeps ahead of everything else the customer
+reads), the PDF prints the same two sections, and callback PDFs re-render once under
+`-rcd1` (plus the printed activity label's key, so a Pest Pressure relabel re-renders). Kill switch: unset the gate.
 
 The report is a permanent record, so the words are FROZEN: complete-scheduled-service
 copies `scheduled_services.customer_request` / `_source` / `_pests` from the LOCKED
