@@ -18,7 +18,7 @@ const { randomUUID } = require('crypto');
 const incidentsMigration = require('../models/migrations/20261002170000_ai_incidents');
 const proposalsMigration = require('../models/migrations/20261002190000_ai_fix_proposals');
 const migration = require('../models/migrations/20261002210000_ai_replay_runs');
-const { proposeFromIncidents } = require('../services/ai-incidents/fix-proposals');
+const { proposeFromIncidents, transitionProposal } = require('../services/ai-incidents/fix-proposals');
 const replay = require('../services/ai-incidents/replay-runs');
 const cli = require('../../ops/agents/correction-replay');
 const report = require('../../ops/agents/correction-loop-report');
@@ -148,6 +148,15 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await expect(holdout({ codeRef: 'abcdef1234' })).rejects.toMatchObject({ code: 'dev_not_passed' });
     // Same commit, different gates: a different prompt version is a different candidate.
     await expect(holdout({ promptVersion: V13 })).rejects.toMatchObject({ code: 'dev_not_passed' });
+    // A later failing dev run on the same code replaces the pass.
+    await record({ results: results(proposal.dev_incident_keys, 'reproduces') });
+    await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
+    await record();
+    // A closed PR clears the dev run with the rest of its evidence.
+    await transitionProposal({ dbi: database, id: proposal.id, to: 'pr_open', fields: { pr_number: 7001 }, by: 'test' });
+    await transitionProposal({ dbi: database, id: proposal.id, to: 'accepted', by: 'test' });
+    await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
+    await record();
     const { run } = await holdout();
     // Two clean holdout cases are not enough to call it proof.
     expect(run).toMatchObject({ status: 'underpowered', case_count: 2 });

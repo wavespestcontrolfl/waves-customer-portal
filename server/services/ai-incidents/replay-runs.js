@@ -145,13 +145,13 @@ async function recordReplayRun({
       throw new TransitionError('needs_holdout', 'a recurrence check replays the holdout cases');
     }
     if (purpose === 'fix' && split === 'holdout') {
-      // The candidate must clear its dev cases first, on the same code AND
-      // the same prompt version (gates change the prompt without a commit).
-      const dev = await trx('ai_replay_runs')
-        .where({ proposal_id: proposalId, split: 'dev', status: 'passed', code_ref: codeRef })
-        .modify((q) => (promptVersion == null ? q.whereNull('prompt_version') : q.where('prompt_version', promptVersion)))
-        .first();
-      if (!dev) throw new TransitionError('dev_not_passed', 'a holdout run needs a passed dev run on the same code_ref and prompt version');
+      // The candidate must clear its dev cases first: the proposal's CURRENT
+      // dev run (a later failed run, or a closed or replaced PR, replaces or
+      // clears it) must have passed on the same code AND prompt version
+      // (gates change the prompt without a commit).
+      const dev = proposal.dev_run_id ? await trx('ai_replay_runs').where({ id: proposal.dev_run_id }).first() : null;
+      const matches = dev && dev.status === 'passed' && dev.code_ref === codeRef && (dev.prompt_version ?? null) === (promptVersion ?? null);
+      if (!matches) throw new TransitionError('dev_not_passed', "a holdout run needs the proposal's current dev run passed on the same code_ref and prompt version");
     }
 
     const rows = keys.map((k) => {
