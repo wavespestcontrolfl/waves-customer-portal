@@ -105,7 +105,11 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
   // never close (or put its error under) a form opened meanwhile.
   const busy = busyKey !== "";
   const retired = entry.status === "retired";
-  const unconfirmed = !retired && (!entry.lastConfirmedAt || entry.status === "needs_confirm");
+  // The badge means the entry is waiting on the office (status needs_confirm),
+  // the same rule as the Needs confirm filter. A live code nobody has
+  // confirmed yet only reads "Never confirmed" below, and turns Stale after
+  // 6 months from when it was filed (owner ruling D2).
+  const unconfirmed = !retired && entry.status === "needs_confirm";
   if (editing) {
     return (
       <EntryForm

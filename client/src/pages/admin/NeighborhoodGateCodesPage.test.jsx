@@ -46,6 +46,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("a live code nobody has confirmed yet says so but carries no Unconfirmed badge", async () => {
+  // Only an entry waiting on the office (needs_confirm) is "Unconfirmed", the
+  // Needs confirm filter's rule; a code filed from a profile turns Stale later.
+  const fresh = { total: 1, neighborhoods: [{ id: "n9", name: "Fresh Grove", county: "Manatee", propertyCount: 1, hasConflict: false,
+    entries: [entry({ id: "e9", code: "2468", source: "profile", lastConfirmedAt: null })] }] };
+  rawAdminFetch.mockImplementation(() => response(fresh));
+  renderPage();
+  expect(await screen.findByText("Fresh Grove")).toBeInTheDocument();
+  expect(screen.getByText("Never confirmed")).toBeInTheDocument();
+  expect(screen.queryByText("Unconfirmed")).toBeNull();
+});
+
 it("renders neighborhoods, entries and the stale / unconfirmed / conflict markers", async () => {
   rawAdminFetch.mockImplementation(() => response(ALL));
   renderPage();
