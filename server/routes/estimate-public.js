@@ -13624,9 +13624,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // payer, or a payer the customer or visit resolves to now, keeps the
       // normal job, whose post-commit flow routes the bill to that payer.
       // An unreadable payer also keeps the normal job (it fails closed there).
+      // The year bill's pre-credit amount as approved (GitHub Codex #5567 r18):
+      // the deferred charge caps the locked invoice against it, so a later
+      // increase can never spend customer credit nobody approved.
+      let deferredAuthorizedSubtotalCents = null;
       if (prepayDeferredToFirstVisitResult) {
         try {
-          const mintedPayer = await trx('invoices').where({ id: invoiceIdResult }).first('payer_id', 'customer_id');
+          const mintedPayer = await trx('invoices').where({ id: invoiceIdResult }).first('payer_id', 'customer_id', 'subtotal', 'total', 'discount_amount');
+          deferredAuthorizedSubtotalCents = Math.round(Number(mintedPayer?.subtotal != null ? mintedPayer.subtotal : mintedPayer?.total || 0) * 100)
+            - Math.max(0, Math.round(Number(mintedPayer?.discount_amount || 0) * 100));
           const livePayer = mintedPayer?.payer_id ? null : await require('../services/payer').resolveForInvoice({
             database: trx,
             customerId: mintedPayer?.customer_id || null,
@@ -13674,7 +13680,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // attested (GitHub Codex #5567 r11): recovery re-records that
               // text only while it is still current.
               ...(prepayDeferredToFirstVisitResult
-                ? { consent_variant_version: String(req.body?.prepayChargeConsentVersion || '').trim() } : {}),
+                ? {
+                  consent_variant_version: String(req.body?.prepayChargeConsentVersion || '').trim(),
+                  ...(Number.isInteger(deferredAuthorizedSubtotalCents) ? { authorized_subtotal_cents: deferredAuthorizedSubtotalCents } : {}),
+                } : {}),
               // First prepay visit — the recovery sweep re-runs the
               // promised inspection-credit redemption against THIS booking
               // before charging or delivering a pay link (Codex r9 P0: the
@@ -20912,7 +20921,12 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && !prepaySweepPending
+  // A deferred year whose charge failed after the first visit delivered its
+  // pay link (delivered_fallback): that link stays visible on a retry, even on
+  // a card-lane accept (GitHub Codex #5567 r18).
+  const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
+    && String(prepayJobStamp?.status || '') === 'delivered_fallback';
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
     && !prepayAwaitingFirstVisit && invoice.token
     ? `/pay/${invoice.token}`
     : null;

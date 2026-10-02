@@ -4254,25 +4254,30 @@ async function annualCoverageVerdictForPrediction(visit, conn = db, { deferredCu
   if (visit?.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
     return annualPrepayCoversVisit(visit, conn, { throwOnError: true });
   }
-  // A visit completion stamped as held keeps its coverage after the year is
-  // paid (the payment_pending prefilter below no longer matches it).
-  if (await pafHeldStampCovers(visit, conn)) return true;
+  // The batch prefilter covers every customer a stamp can belong to (any
+  // after-visit year, activated included), so it runs first: no per-visit
+  // read for anyone else (GitHub Codex #5567 r18). A visit completion
+  // stamped as held keeps its coverage after the year is paid.
   if (deferredCustomerIds && !deferredCustomerIds.has(String(visit?.customer_id))) return null;
+  if (await pafHeldStampCovers(visit, conn)) return true;
   return (await pafDeferredPrepayCoversVisit(visit || {}, conn, { throwOnError: true })) ? true : null;
 }
 
-// The customers (of `customerIds`) that have a year whose charge waits for
-// the first visit: a payment_pending, undisputed term whose estimate carries a
-// deferred job. One query, so a schedule board checks only those customers'
-// visits one by one. A failure throws; callers keep their own posture.
+// The customers (of `customerIds`) that have an after-visit prepay year: a
+// non-cancelled term whose estimate carries a deferred job, waiting or
+// already paid (a stamped visit keeps coverage past activation). One query,
+// so a schedule board checks only those customers' visits one by one; the
+// per-visit check still decides. A failure throws; callers keep their own
+// posture.
 async function deferredPrepayHoldCustomerIds(conn, customerIds) {
   const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
   if (!ids.length) return new Set();
   const rows = await conn('annual_prepay_terms as t')
     .join('estimates as e', 'e.id', 't.source_estimate_id')
     .whereIn('t.customer_id', ids)
-    .where('t.status', 'payment_pending')
-    .whereNull('t.dispute_suspended_at')
+    // Any after-visit year, not only one still waiting: a visit completion
+    // stamped keeps its coverage after the year is paid and activated.
+    .whereNot('t.status', 'cancelled')
     .whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
     .distinct('t.customer_id');
   return new Set(rows.map((r) => String(r.customer_id)));
