@@ -1,7 +1,9 @@
+import { useEffect } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import { isNativeApp } from '../../native/platform';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
+import { FIELD_BOOKMARK_META } from '../../lib/adminBookmarkMeta';
 
 // The standalone /tech portal shell is retired: the field workspace lives at
 // /admin/today. Installed PWAs, push notifications and old bookmarks still open
@@ -11,8 +13,37 @@ export function techToTodayPath(pathname) {
   return `/admin/today${rest}`;
 }
 
+// While the signed-out landing is mounted the document carries the Field Tools
+// identity, so Add to Home Screen installs the field app even after a Back
+// from the sign-in page restored the customer defaults (Codex #5573 r16).
+function useFieldInstallIdentity(active) {
+  useEffect(() => {
+    if (!active || typeof document === 'undefined') return undefined;
+    const manifest = document.querySelector('link[rel="manifest"]');
+    const meta = (name) => document.querySelector(`meta[name="${name}"]`);
+    const before = {
+      manifest: manifest?.getAttribute('href'),
+      appTitle: meta('apple-mobile-web-app-title')?.getAttribute('content'),
+      themeColor: meta('theme-color')?.getAttribute('content'),
+      title: document.title,
+    };
+    manifest?.setAttribute('href', FIELD_BOOKMARK_META.manifest);
+    meta('apple-mobile-web-app-title')?.setAttribute('content', FIELD_BOOKMARK_META.appTitle);
+    meta('theme-color')?.setAttribute('content', FIELD_BOOKMARK_META.themeColor);
+    document.title = FIELD_BOOKMARK_META.documentTitle;
+    return () => {
+      if (before.manifest != null) manifest?.setAttribute('href', before.manifest);
+      if (before.appTitle != null) meta('apple-mobile-web-app-title')?.setAttribute('content', before.appTitle);
+      if (before.themeColor != null) meta('theme-color')?.setAttribute('content', before.themeColor);
+      document.title = before.title;
+    };
+  }, [active]);
+}
+
 export default function TechPortalRedirect() {
   const { pathname, search, hash } = useLocation();
+  const signedOutLanding = !isNativeApp() && !getAdminAuthToken();
+  useFieldInstallIdentity(signedOutLanding);
   if (isNativeApp()) return <Navigate to="/" replace />;
   const target = `${techToTodayPath(pathname)}${search}${hash}`;
   // Signed out: stay on this field-branded page (the server renders the

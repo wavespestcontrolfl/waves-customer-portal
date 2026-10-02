@@ -5,7 +5,7 @@
 // plain verification behavior.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -306,6 +306,39 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     await act(async () => { answerOld(); });
     expect(window.location.href).toBe(hrefBefore);
     expect(localStorage.getItem("waves_admin_token")).toBe(NEW_TOKEN);
+  });
+
+  it("moving into Today, a first-request 401 from the page ends the session (guard installed before child effects; Codex #5573 r16)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    let revoked = false;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).includes("/admin/auth/me")) return response(200, TECH);
+      if (String(url).includes("/fixture/today-data")) return response(revoked ? 401 : 200, revoked ? { error: "revoked" } : {});
+      return response(200, {});
+    }));
+    function TodayChild() {
+      React.useEffect(() => { fetch("/api/fixture/today-data", { headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` } }); }, []);
+      return <div>Today content</div>;
+    }
+    function Go() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/today")}>to today</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/schedule"]}>
+          <Go />
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+              <Route path="/admin/today" element={<TodayChild />} />
+            </Route>
+            <Route path="/admin/login" element={<LoginProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByText("Schedule content");
+    revoked = true;
+    await act(async () => { screen.getByRole("button", { name: "to today" }).click(); });
+    await waitFor(() => expect(localStorage.getItem("waves_admin_token")).toBeNull());
   });
 
   it("treats a 2xx whose body cannot be read as weak signal", async () => {

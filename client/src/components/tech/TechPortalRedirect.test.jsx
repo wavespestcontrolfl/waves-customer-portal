@@ -49,4 +49,16 @@ describe('retired /tech portal redirect', () => {
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Waves Field Tools' }).parentElement.style.paddingTop).toContain('safe-area-inset-top');
   });
+
+  it('the signed-out landing carries the Field Tools install identity while mounted (Codex #5573 r16)', () => {
+    localStorage.clear();
+    document.head.innerHTML = '<link rel="manifest" href="/manifest.json"><meta name="apple-mobile-web-app-title" content="Waves"><meta name="theme-color" content="#111111">';
+    document.title = 'Waves Customer Portal';
+    const view = renderAt('/tech');
+    expect(document.querySelector('link[rel="manifest"]').getAttribute('href')).toBe('/manifest.tech.json');
+    expect(document.title).toBe('Waves Tech');
+    view.unmount();
+    expect(document.querySelector('link[rel="manifest"]').getAttribute('href')).toBe('/manifest.json');
+    expect(document.title).toBe('Waves Customer Portal');
+  });
 });

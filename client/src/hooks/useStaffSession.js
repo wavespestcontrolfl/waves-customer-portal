@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   clearStaffDeviceData,
@@ -161,8 +161,10 @@ export default function useStaffSession() {
 
   // Field workspace only: a 401 from ANY staff API call for the current token
   // ends the session here, so an offline reopen cannot unlock from a session
-  // the server already refused.
-  useEffect(() => {
+  // the server already refused. A layout effect, so it is installed before
+  // Today's children run their first requests (passive effects) when moving
+  // in from another admin page (Codex #5573 r16).
+  useLayoutEffect(() => {
     if (!onField) return undefined;
     return installStaffSessionGuard({
       getToken: getAdminAuthToken,
