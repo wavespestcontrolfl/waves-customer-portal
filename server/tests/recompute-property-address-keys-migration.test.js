@@ -160,4 +160,22 @@ describe('20261001200100 locked reconcile', () => {
     expect(db.scheduled_services.find((v) => v.id === 'v-late').property_id).toBe('late-a');
     expect(db.system_settings.find((r) => r.key === reconcile.STATE_KEY)).toBeUndefined();
   });
+
+  test('undoes a first-pass fold when the copy was edited into a different house while it ran', async () => {
+    const db = seed();
+    await migration.up(fakeKnex(db));
+    expect(row(db, 'dup-a').active).toBe(false);
+    // the office corrected the copy's address while the first pass ran
+    row(db, 'dup-a').address_line1 = '210 Example Glen';
+    await reconcile.up(fakeKnex(db));
+    expect(row(db, 'dup-a')).toMatchObject({ active: true, address_key: addressKey(row(db, 'dup-a')) });
+    expect(db.scheduled_services.find((v) => v.id === 'v1').property_id).toBe('dup-a');
+    expect(db.estimates[0].property_id).toBe('dup-a');
+    // the other first-pass fold still holds
+    expect(row(db, 'dup-b').active).toBe(false);
+
+    await reconcile.down(fakeKnex(db));
+    expect(row(db, 'dup-a').active).toBe(false);
+    expect(db.scheduled_services.find((v) => v.id === 'v1').property_id).toBe('keep-a');
+  });
 });
