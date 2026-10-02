@@ -189,6 +189,20 @@ test('gap mode lists every start in a multi-hour gap, vetoing only the occupied 
   expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '10:00', '11:00', '12:00']);
 });
 
+test('a gap ending at an after-hours stop lists no hour past the day close', async () => {
+  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
+  // Next anchor is an 18:30 stop, so latest_start_min (17:00) runs past the
+  // 17:00 close; the last hour a one-hour visit can hold is 16:00.
+  findAvailableSlots.mockResolvedValue({
+    slots: [slot('2026-09-01', '15:00', 4, { latest_start_min: 17 * 60, day_close_min: 17 * 60 })], evaluated: 1,
+  });
+  loadOccupancy.mockResolvedValue(emptyOccupancy());
+  const body = await (await post({ ...BASE, dateTo: '2026-09-01', summary: true, pickedDate: '2026-09-01', pickedStart: '17:00' })).json();
+  expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['15:00', '16:00']);
+  // Picking that 17:00 hour is refused before any gap is consulted.
+  expect(body.picked).toEqual({ start: '17:00', fits: null, reason: 'not_checkable' });
+});
+
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {
   process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const body = await (await post({ ...BASE, hint: undefined, summary: true })).json();

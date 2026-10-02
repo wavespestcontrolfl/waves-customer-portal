@@ -762,7 +762,7 @@ function toPackingBoundAnchor(stop) {
 // `geo` carries the invariants resolved once per findAvailableSlots call:
 // { newStop, dateFrom, stopBuffer, candidateExpectedMinutes, durationMinutes,
 //   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin }.
-function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
+function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
   const {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
@@ -860,6 +860,11 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
       // disappeared from the self-serve booking surfaces (2026-08-05
       // field report).
       latest_start_min: latestStartFloor,
+      // The day's close. latest_start_min is bounded by the NEXT anchor,
+      // which can be a stop booked after hours, so a surface that walks a
+      // gap to latest_start_min also stops where start + duration passes
+      // this (the single-candidate path below already refuses that start).
+      day_close_min: dayClose,
       insertion: {
         after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
         before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
@@ -925,7 +930,7 @@ function candidatesForDay(date, tech, params) {
   // Evaluate each gap between anchor[i] and anchor[i+1]
   for (let i = 0; i < anchors.length - 1; i++) {
     evaluatedGaps++;
-    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo });
+    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo, dayClose });
 
     if (wantsPackedEnds && dayStops.length > 0) {
       for (const startMin of packedEndsStarts(gap, durationMinutes, dayClose)) {

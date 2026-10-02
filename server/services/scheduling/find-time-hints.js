@@ -112,7 +112,9 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
     const baseMin = toMin(s.start_time);
     if (baseMin == null) return [];
     if (s.route_mode === 'arrival_windows') return baseMin >= floorFor(s.date) ? [baseMin] : [];
-    const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
+    let latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
+    // A gap ending at an after-hours stop runs past the day's close.
+    if (Number.isFinite(s.day_close_min)) latest = Math.min(latest, s.day_close_min - spanMin);
     const starts = [];
     for (let m = Math.max(baseMin, Math.ceil(floorFor(s.date) / step) * step); m <= latest; m += step) starts.push(m);
     return starts;
