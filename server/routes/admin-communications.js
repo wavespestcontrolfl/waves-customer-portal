@@ -2198,6 +2198,11 @@ router.get('/log', async (req, res, next) => {
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
         customerId: recipientCustomerId, customerName,
+        // The row's linked customer even when the contact is one of their
+        // service-contact numbers (customerId above is the REPLY recipient and
+        // stays null then). Call actions send it as a soft customerIdHint,
+        // which /call re-validates against that customer's known numbers.
+        linkedCustomerId: m.customer_id || fallbackCustomer?.id || null,
         createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,

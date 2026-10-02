@@ -573,7 +573,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
               variant="secondary"
               onClick={(e) => {
                 e.stopPropagation();
-                callViaBridge(contactPhone, contactLabel, ourNumber, null, m.customerId);
+                callViaBridge(contactPhone, contactLabel, ourNumber, null, m.linkedCustomerId || m.customerId);
               }}
             >
               <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -674,7 +674,7 @@ function ConversationViewV2({
             size="sm"
             variant="secondary"
             className="flex-1 md:flex-none"
-            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, null, thread.customerId)}
+            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, null, thread.linkedCustomerId || thread.customerId)}
           >
             <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
             Call back
@@ -2787,6 +2787,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           ourNumber,
           customerName: m.customerName || null,
           customerId: m.customerId || null,
+          linkedCustomerId: m.linkedCustomerId || null,
           messages: [],
           lastMessage: null,
           lastTimestamp: null,
@@ -2798,6 +2799,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       thread.messages.push(m);
       if (m.customerName) thread.customerName = m.customerName;
       if (m.customerId) thread.customerId = m.customerId;
+      if (m.linkedCustomerId) thread.linkedCustomerId = m.linkedCustomerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
       thread.lastMessage =
         m.body ||
