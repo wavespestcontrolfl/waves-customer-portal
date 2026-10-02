@@ -79,13 +79,14 @@ function presentBaselines(baselines) {
 }
 
 /**
- * Why a row is in the review set: 'disagreement' when the Jev yes/no (or
- * choice) differs from ANY present baseline value; otherwise 'random_audit'
+ * Why a row is in the review set: 'disagreement' when the answer's yes/no (or
+ * choice) differs from ANY present baseline value or from another provider's
+ * answer to the same subject and question (`siblings`); otherwise 'random_audit'
  * with probability RANDOM_AUDIT_RATE; otherwise null. `rand` is a number in
  * [0, 1) or a function returning one; it is read only when there is no
  * disagreement.
  */
-function sampleFor(jevAnswer, baselines, rand = Math.random) {
+function sampleFor(jevAnswer, baselines, rand = Math.random, siblings = []) {
   const jev = comparable(jevAnswer);
   if (jev !== undefined) {
     for (const value of Object.values(presentBaselines(baselines))) {
@@ -93,6 +94,11 @@ function sampleFor(jevAnswer, baselines, rand = Math.random) {
       if (base !== undefined && base !== jev) return 'disagreement';
     }
   }
+  // Another provider's different answer to the same case is a disagreement on
+  // exactly the same footing as a baseline's: decided here, with the baseline
+  // check, so both sibling rows always land in the SAME cohort whatever the
+  // draw (a post-hoc promotion left one in the audit and one in the queue).
+  if (siblingDisagrees(jevAnswer, siblings)) return 'disagreement';
   const draw = typeof rand === 'function' ? rand() : rand;
   return typeof draw === 'number' && draw < RANDOM_AUDIT_RATE ? 'random_audit' : null;
 }
@@ -145,10 +151,7 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
       baseline_answers: jsonOrNull(cleanBaselines(baselines && baselines[questionId])),
       subject_hash: typeof subjectHash === 'string' && HEX64.test(subjectHash) ? subjectHash : null,
     };
-    row.sampled_for = sampleFor(answer, baselines && baselines[questionId], random || (() => stableDraw(row)));
-    // The audit draw is shared by key; a difference between providers pulls an
-    // otherwise unsampled row into the disagreement queue with its sibling.
-    if (row.sampled_for === null && siblingDisagrees(answer, siblingAnswers && siblingAnswers[questionId])) row.sampled_for = 'disagreement';
+    row.sampled_for = sampleFor(answer, baselines && baselines[questionId], random || (() => stableDraw(row)), siblingAnswers && siblingAnswers[questionId]);
     rows.push(row);
   }
   return rows;

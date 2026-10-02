@@ -191,12 +191,27 @@ describe('provider (one row per provider per subject and question; Codex r1 on #
 describe('review cohort is paired across provider siblings (Codex r1 on #5555)', () => {
   const sms = packageFor('sms_courtesy.v1');
   const result = (p, servedModel) => ({ ok: true, packageHash: packageHash(sms), servedModel, answers: { is_courtesy_only: noul(p) } });
-  const record = async ({ provider, p, sibling, baselines }) => {
+  const record = async ({ provider, p, sibling, baselines, draw = 0.99 }) => {
     const { conn, calls } = stubConn();
     await recordDecisions({ capability: 'sms_courtesy', pkg: sms, provider, subjectType: 'sms_log', subjectId: 's-pair', result: result(p),
-      baselines, siblingAnswers: sibling === undefined ? {} : { is_courtesy_only: noul(sibling) }, random: () => 0.99, conn });
+      baselines, siblingAnswers: sibling === undefined ? {} : { is_courtesy_only: noul(sibling) }, random: () => draw, conn });
     return calls.inserted[0].sampled_for;
   };
+
+  test('a low audit draw never splits the pair: the sibling that agrees with the baseline is a disagreement too, not a spot check (pre-push audit P1)', async () => {
+    const baselines = { is_courtesy_only: { rules: true } };
+    expect(await record({ provider: 'typesafe', p: 0.9, sibling: 0.1, baselines, draw: 0.01 })).toBe('disagreement');
+    expect(await record({ provider: 'cloudflare', p: 0.1, sibling: 0.9, baselines, draw: 0.01 })).toBe('disagreement');
+    // and with no difference anywhere the low draw is an ordinary spot check for both
+    expect(await record({ provider: 'typesafe', p: 0.9, sibling: 0.95, baselines, draw: 0.01 })).toBe('random_audit');
+    expect(await record({ provider: 'cloudflare', p: 0.95, sibling: 0.9, baselines, draw: 0.01 })).toBe('random_audit');
+  });
+
+  test('sampleFor takes the siblings directly and treats a difference like a baseline disagreement', () => {
+    expect(sampleFor(noul(0.9), { rules: true }, 0.99, noul(0.1))).toBe('disagreement');
+    expect(sampleFor(noul(0.9), { rules: true }, 0.01, [noul(0.1)])).toBe('disagreement');
+    expect(sampleFor(noul(0.9), { rules: true }, 0.99, noul(0.8))).toBeNull();
+  });
 
   test('one provider disagrees with the baseline, the other agrees: BOTH rows enter the disagreement queue', async () => {
     const baselines = { is_courtesy_only: { rules: true } };
