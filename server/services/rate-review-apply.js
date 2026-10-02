@@ -368,10 +368,10 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, t
 // unlabeled term takes its family from the caller (the notice's family /
 // the family its applied notice named): the admin prepay routes mint a
 // labeled successor with no renewed_from link.
-async function successorTermExists(dbh, term, fallbackFamily = null) {
+async function successorTermExists(dbh, term, fallbackFamily = null, ignoreTermId = null) {
   const rows = await dbh('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
-    .whereNot('id', term.id)
+    .whereNotIn('id', [term.id, ignoreTermId].filter(Boolean))
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded'])
     .select('id', 'term_start', 'coverage_service_type', 'renewed_from_term_id');
   const family = familyOfCoverage(term.coverage_service_type) || fallbackFamily;
@@ -764,10 +764,14 @@ async function applyMonthly(trx, ctx) {
 
 // Flat-visit rule — the structure this reprice understands. Anything else
 // is the Edit-appointment modal's job (its "this and following" save).
-function flatVisitRefusal(visit, addonCount, noticedCurrentCents) {
+// Prepaid = money stamped on the visit, or a term link whose coverage is
+// still live (liveTermIds, from coveredTermsAsOf): a voided/refunded prepay
+// keeps annual_prepay_term_id on the visit for audit, and that link alone
+// is not money held.
+function flatVisitRefusal(visit, addonCount, noticedCurrentCents, liveTermIds = new Set()) {
   if (visit.is_callback) return 'visit_price_structure';
   if (String(visit.status) === 'rescheduled') return 'visit_in_reschedule';
-  if (visit.annual_prepay_term_id || Number(visit.prepaid_amount) > 0) return 'visit_prepaid';
+  if (Number(visit.prepaid_amount) > 0 || liveTermIds.has(String(visit.annual_prepay_term_id))) return 'visit_prepaid';
   const stamped = cents(visit.estimated_price);
   if (stamped == null) return 'visit_unpriced';
   if (stamped !== noticedCurrentCents) return 'rate_moved_since_notice';
@@ -826,11 +830,16 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
 
 // Every target must be a FLAT visit at the noticed current price, and the
 // modal's own derivation must land it on the noticed new price.
-async function assertFlatTargets(trx, { locked, addonRows, fields, noticedCurrent, noticedNew, schedule }) {
+async function assertFlatTargets(trx, { locked, addonRows, fields, noticedCurrent, noticedNew, schedule, today }) {
   const addonCounts = new Map();
   for (const a of addonRows) addonCounts.set(String(a.scheduled_service_id), (addonCounts.get(String(a.scheduled_service_id)) || 0) + 1);
+  const linkedTermIds = [...new Set(locked.map((v) => v.annual_prepay_term_id).filter(Boolean))];
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const liveTermIds = new Set(linkedTermIds.length
+    ? (await coveredTermsAsOf(trx, today).whereIn('t.id', linkedTermIds).select('t.id')).map((t) => String(t.id))
+    : []);
   for (const visit of locked) {
-    const refusal = flatVisitRefusal(visit, addonCounts.get(String(visit.id)) || 0, noticedCurrent);
+    const refusal = flatVisitRefusal(visit, addonCounts.get(String(visit.id)) || 0, noticedCurrent, liveTermIds);
     if (refusal) throw hold(refusal, { visitId: visit.id, scheduledDate: ymd(visit.scheduled_date) });
     const scope = await schedule.loadStoredDiscountScope(trx, { ...visit, ...fields }, []);
     const derived = schedule.calculateStoredVisitFinancials({ ...visit, ...fields }, [], [], scope);
@@ -928,7 +937,7 @@ async function applyPerApplication(trx, ctx) {
   const { parentId, locked, lockedIds } = await lockPerApplicationTargets(trx, { notice, customer, effectiveDate, schedule });
   const cols = await trx('scheduled_services').columnInfo();
   const addonRows = await trx('scheduled_service_addons').whereIn('scheduled_service_id', [...lockedIds, parentId]).select('*');
-  await assertFlatTargets(trx, { locked, addonRows, fields, noticedCurrent, noticedNew, schedule });
+  await assertFlatTargets(trx, { locked, addonRows, fields, noticedCurrent, noticedNew, schedule, today: ctx.today });
   const parentAddons = addonRows.filter((a) => String(a.scheduled_service_id) === String(parentId));
   await assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fields, noticedNew, schedule });
   await repriceTargets(trx, { notice, parentId, lockedIds, effectiveDate, fields, noticedNew, cols, schedule });
@@ -1214,10 +1223,11 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // `lock` (inside the caller's write transaction): the candidate rows are
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
-async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today, lock = false }) {
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType, termStart, today, lock, editingTermId }) {
   // $0 is a price (a different amount than the one noticed), never an
   // absent one: only a missing or invalid amount skips the check.
-  if (!customerId || amount == null || amount === '' || !Number.isFinite(Number(amount)) || Number(amount) < 0) return null;
+  const chargedCents = cents(amount);
+  if (!customerId || chargedCents == null || chargedCents < 0) return null;
   const start = ymd(termStart) || today;
   const family = familyOfCoverage(coverageServiceType);
   // The predecessor's row is locked WHATEVER its noticed amount is right
@@ -1239,24 +1249,16 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
     .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents');
   const familyByTerm = new Map();
-  const deliveredCentsByTerm = new Map();
+  const deliveredCents = new Map();
   for (const n of prepayNotices) {
     const termId = parseMetadata(n.metadata).term_id;
-    if (!termId) continue;
-    if (n.applied_at) familyByTerm.set(String(termId), n.family_key);
-    else if (wasDelivered(n)) {
-      const noticedCents = Number(n.noticed_new_cents ?? n.new_amount_cents);
-      if (Number.isFinite(noticedCents) && noticedCents > 0) {
-        familyByTerm.set(String(termId), n.family_key);
-        deliveredCentsByTerm.set(String(termId), noticedCents);
-      }
-    }
+    const told = !n.applied_at && wasDelivered(n) && Number(n.noticed_new_cents ?? n.new_amount_cents);
+    if (told > 0) deliveredCents.set(String(termId), told);
+    if (termId && (n.applied_at || told > 0)) familyByTerm.set(String(termId), n.family_key);
   }
-  const frozen = (t) => t.next_term_prepay_amount != null && t.next_term_prepay_amount !== '';
-  const noticed = terms.filter((t) => (frozen(t) || deliveredCentsByTerm.has(String(t.id)))
-    && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')));
-  if (!noticed.length) return null;
-  const candidates = noticed
+  const noticedCentsOf = (t) => cents(t.next_term_prepay_amount) ?? deliveredCents.get(String(t.id)) ?? null;
+  const term = terms
+    .filter((t) => noticedCentsOf(t) != null && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => {
       const labeled = familyOfCoverage(t.coverage_service_type);
       const noticedFamily = familyByTerm.get(String(t.id)) || null;
@@ -1266,15 +1268,16 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
       const attributed = noticedFamily || labeled;
       return family ? attributed === family : !attributed;
     })
-    .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
-  const term = candidates[0];
+    .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)))[0];
   if (!term) return null;
   // A successor already on the books (whatever its amount) settles the
-  // term: the guard protected the renewal that created it.
-  if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
-  const noticedCents = frozen(term) ? cents(term.next_term_prepay_amount) : deliveredCentsByTerm.get(String(term.id));
-  if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
-  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(Math.round(Number(amount) * 100)) };
+  // term: the guard protected the renewal that created it. The term being
+  // edited (editingTermId) is never that successor — an edit of it is
+  // judged like the renewal itself.
+  if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family, editingTermId)) return null;
+  const noticedCents = noticedCentsOf(term);
+  if (noticedCents === chargedCents) return null;
+  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(chargedCents) };
 }
 
 // The 409 every renewal writer returns when noticedRenewalAmountConflict
