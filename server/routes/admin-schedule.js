@@ -5124,6 +5124,11 @@ async function loadProjectCompletionContextByServiceId(services) {
       reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       // Tree & Shrub Fast Complete: gate AND the requesting tech's user flag.
       treeShrubFastCompleteEnabled,
+      // GATE_NOTE_BOX_PHOTOS: the completion form puts the visit's photos and
+      // their descriptions inside the notes box. Never lawn or tree, shrub &
+      // palm: another lane owns those completions and their photo steps.
+      noteBoxPhotosEnabled: require('../config/feature-gates').noteBoxPhotosLive()
+        && !['lawn', 'tree_shrub', 'palm'].includes(detectServiceLine(service.service_type)),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6256,6 +6261,7 @@ router.get('/', async (req, res, next) => {
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+        noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6848,6 +6854,7 @@ router.get('/week', async (req, res, next) => {
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
+          noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
