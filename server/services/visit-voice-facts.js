@@ -180,10 +180,15 @@ function areaAssertion(area) {
     const place = spanOf(AREA_PLACE_RE[area].exec(quote));
     if (!place) return treatmentAssertion(quote);
     const { from, to } = clauseBounds(quote, place.offset);
+    // The action that governs the place (a phrase's head: "apply" in "did
+    // not apply bait inside"), else any treatment word ("glue boards in the
+    // garage").
+    const actions = governingWords(quote, from, to).filter((w) => w.kind === 'treatment')
+      .map((w) => ({ offset: w.at, length: w.end - w.at }));
     const words = [...quote.slice(from, to).matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))]
       .map((m) => ({ offset: from + m.index, length: m[0].length }));
-    const before = words.filter((w) => w.offset < place.offset).pop();
-    return before || words[0] || treatmentAssertion(quote);
+    const nearest = (list) => list.filter((w) => w.offset < place.offset).pop() || list[0];
+    return nearest(actions) || nearest(words) || treatmentAssertion(quote);
   };
 }
 
@@ -271,10 +276,13 @@ function isActionWord(text, at, word) {
 function governingWords(text, from, to) {
   const scan = (re, kind) => [...text.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
     .map((m) => ({ kind, at: from + m.index, end: from + m.index + m[0].length, word: m[0] }));
-  return [
-    ...scan(TREATMENT_WORD_RE, 'treatment').filter((w) => isActionWord(text, w.at, w.word)),
-    ...scan(OBSERVATION_WORDS_RE, 'observation'),
-  ].sort((a, b) => a.at - b.at);
+  const treatments = scan(TREATMENT_WORD_RE, 'treatment');
+  // A treatment word right after another in one phrase is that action's
+  // object, under its negation: "did not apply bait inside" never baited
+  // (codex local r30 on #5538).
+  const actions = treatments.filter((w, i) => isActionWord(text, w.at, w.word)
+    && !(i > 0 && PHRASE_GAP_RE.test(text.slice(treatments[i - 1].end, w.at))));
+  return [...actions, ...scan(OBSERVATION_WORDS_RE, 'observation')].sort((a, b) => a.at - b.at);
 }
 function treatedInSentence(name, note, others) {
   const breaksOf = (re) => [...note.matchAll(re)].map((m) => m.index);

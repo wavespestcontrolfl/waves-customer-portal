@@ -570,6 +570,17 @@ describe('validateVoiceFacts', () => {
     expect(read('Found ants outside. No sign of roaches. Sprayed outside.').unclearPests).toEqual([]);
   });
 
+  test('a treatment word in another\'s phrase stays under its negation (codex local r30 on #5538)', () => {
+    const note = 'Sprayed outside for ants. Did not apply bait inside.';
+    const facts = validateVoiceFacts({ areas: [{ area: 'outside', quote: 'Sprayed outside for ants' }], pests: [{ name: 'ants', quote: 'Sprayed outside for ants' }], spray: { method: 'not_said', quote: '' } }, note);
+    expect(facts.unclearAreas).toEqual([]);
+    const inside = validateVoiceFacts({ areas: [{ area: 'inside', quote: 'Did not apply bait inside' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    expect(placeIn(inside, 'Inside')).toBe('unclear');
+    // A phrase not denied still treats: "applied granular bait in the yard".
+    expect(placeIn(validateVoiceFacts({ areas: [{ area: 'outside', quote: 'Applied granular bait in the yard' }], pests: [], spray: { method: 'not_said', quote: '' } },
+      'Applied granular bait in the yard.'), 'Outside')).toBe('heard');
+  });
+
   test('a spray reading needs its own grounded quote that says it sprayed (pre-push P1 on #5538)', () => {
     const note = 'Did not spray today; placed bait inside for ants.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
