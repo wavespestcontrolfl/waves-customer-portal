@@ -580,7 +580,18 @@ function paoParcelIdFrom(parcelId) {
   return /^\d+$/.test(raw) ? raw : null;
 }
 
-async function queryCountyLayer(county, lat, lng, timeoutMs) {
+function recordGisDiagError(diag, county, err, aborted) {
+  if (!diag) return;
+  if (!Array.isArray(diag.errors)) diag.errors = [];
+  diag.errors.push({ county, aborted, error: err?.message || String(err) });
+}
+
+// `diag` is an optional out-param ({ errors: [] }) for read-only tooling
+// (scripts/property-lookup-replay.js): every failure mode here returns null,
+// the same as "no parcel at this point", so without it a replay cannot tell a
+// county outage / WAF rejection from a genuine roll miss. Never read by the
+// live lookup.
+async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
   const layer = COUNTY_LAYERS[county];
   if (!layer) return null;
 
@@ -682,6 +693,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
     return parcel;
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+    recordGisDiagError(diag, county, err, aborted);
     logger.warn('[county-parcel-gis] lookup failed', {
       county,
       latApprox: coarseCoord(lat),
@@ -767,7 +779,7 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
       });
       break;
     }
-    const parcel = await queryCountyLayer(county, lat, lng, remainingMs).catch(() => null);
+    const parcel = await queryCountyLayer(county, lat, lng, remainingMs, options.diag).catch(() => null);
     if (parcel) return parcel;
   }
   return null;
@@ -910,6 +922,7 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
     return { situs, zips, truncated };
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+    recordGisDiagError(options?.diag, county, err, aborted);
     // County + error only — no street/address values in logs (PII rule).
     logger.warn('[county-parcel-gis] street situs query failed', {
       county, aborted, error: err?.message || String(err), elapsedMs: Date.now() - t0,
