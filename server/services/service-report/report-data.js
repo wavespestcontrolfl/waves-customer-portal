@@ -4690,7 +4690,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
         .catch(() => null);
-      if (tracedRow?.snapshot_s3_key && PhotoService) {
+      // A report-flow record shows only the trace it was judged against.
+      if (tracedRow?.snapshot_s3_key && PhotoService
+        && require('../treatment-zone-maps').traceJudgedAllows(structured, tracedRow)) {
         const tracedSnapshotUrl = await PhotoService.getViewUrl(
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS

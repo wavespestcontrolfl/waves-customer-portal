@@ -293,6 +293,21 @@ async function deleteTreatmentZoneMap({ scheduledServiceId, actor, expectedPrope
   return removed;
 }
 
+// A visit completed through the Fast Complete report flow froze the trace its
+// record was judged against (structured_notes.traceJudged.seen: that trace's
+// updated_at, or null for none): its report shows only that trace, never
+// one saved or replaced after (another tracer after completion, a save that
+// waited behind the completion) nor one the record never saw (a trace kept
+// while the map gate was dark). Any other record shows its trace as before
+// (Codex #5538).
+function traceJudgedAllows(structuredNotes, row) {
+  const judged = structuredNotes?.traceJudged;
+  if (!judged || typeof judged !== 'object' || !Object.prototype.hasOwnProperty.call(judged, 'seen')) return true;
+  const stamp = (value) => (value == null ? null : new Date(value).getTime());
+  const seen = stamp(judged.seen);
+  return seen !== null && Number.isFinite(seen) && seen === stamp(row?.updated_at);
+}
+
 async function getTreatmentZoneMapForScheduledService(scheduledServiceId, { knex = db } = {}) {
   if (!scheduledServiceId) return null;
   return (
@@ -367,6 +382,7 @@ async function treatmentZonePdfSignature(service, knex = db) {
 }
 
 module.exports = {
+  traceJudgedAllows,
   saveTreatmentZoneMap,
   deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,

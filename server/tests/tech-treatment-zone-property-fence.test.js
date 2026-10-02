@@ -180,15 +180,21 @@ describe('the completion re-checks the trace the report was judged against (Code
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   const block = source.slice(source.indexOf('async function completeScheduledService('));
 
-  test('traceSeen is compared under the locked visit row, before any record write', () => {
+  test('traceSeen is compared under the locked visit row, before any record write, while the map gate is on', () => {
     const lock = block.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
-    const check = block.indexOf('if (traceSeen !== undefined && lockedSvcRow) {');
+    const check = block.indexOf("if (traceSeen !== undefined && lockedSvcRow && isEnabled('treatmentZoneMap')) {");
     expect(lock).toBeGreaterThan(0);
     expect(check).toBeGreaterThan(lock);
     expect(check).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     const body = block.slice(check, check + 700);
     expect(body).toMatch(/sp\('treatment_zone_maps'\)[\s\S]*\.where\(\{ scheduled_service_id: svc\.id \}\)/);
     expect(body).toMatch(/code: 'trace_changed'/);
+  });
+
+  test('the record freezes the trace it was judged against, and the report shows only that trace', () => {
+    expect(block).toContain('...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),');
+    const report = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+    expect(report).toMatch(/if \(tracedRow\?\.snapshot_s3_key && PhotoService\s*\n\s*&& require\('\.\.\/treatment-zone-maps'\)\.traceJudgedAllows\(structured, tracedRow\)\) \{/);
   });
 
   test('a changed trace answers 409 trace_changed and marks the attempt failed', () => {

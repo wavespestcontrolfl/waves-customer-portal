@@ -5671,7 +5671,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // treatments). Read under this row lock, which every trace save
           // takes too (treatment-zone-maps.js), so a save either committed
           // first and is seen here, or waits for this completion.
-          if (traceSeen !== undefined && lockedSvcRow) {
+          // With the map gate dark the sheet cannot see a trace, so nothing is
+          // compared; the record still freezes what it was judged against
+          // (traceJudged below), and its report never shows a trace it
+          // never saw.
+          if (traceSeen !== undefined && lockedSvcRow && isEnabled('treatmentZoneMap')) {
             const traceNow = await trx.transaction(async (sp) => sp('treatment_zone_maps')
               .where({ scheduled_service_id: svc.id })
               .first('updated_at'));
@@ -6065,6 +6069,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
+            // The trace the report flow judged this record against (its
+            // updated_at, or null for none): the report shows only that one
+            // (treatment-zone-maps.js traceJudgedAllows).
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
             // Frozen with the record itself, so no reader (recap-delivery's
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.

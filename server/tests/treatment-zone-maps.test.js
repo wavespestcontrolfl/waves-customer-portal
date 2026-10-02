@@ -12,6 +12,7 @@ jest.mock('../config', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
+  traceJudgedAllows,
   saveTreatmentZoneMap,
   deleteTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
@@ -442,6 +443,21 @@ describe('deleteTreatmentZoneMap (Remove the trace)', () => {
     const knex = removalKnex({ visit: { ...OPEN, property_id: null, status: 'confirmed' } });
     expect(await deleteTreatmentZoneMap({ scheduledServiceId: 'svc-1', actor: TECH, expectedPropertyId: null, knex })).toBeNull();
     expect(mockS3Send).not.toHaveBeenCalled();
+  });
+});
+
+// A report-flow record shows only the trace it was judged against (Codex
+// #5538): never one saved after completion, nor one the record never saw.
+describe('traceJudgedAllows', () => {
+  const row = { updated_at: new Date('2026-10-02T05:00:00.123Z') };
+  test('a record that judged no trace shows the trace as before', () => {
+    expect(traceJudgedAllows({}, row)).toBe(true);
+    expect(traceJudgedAllows(null, row)).toBe(true);
+  });
+  test('a report-flow record shows only the trace it was judged against', () => {
+    expect(traceJudgedAllows({ traceJudged: { seen: '2026-10-02T05:00:00.123Z' } }, row)).toBe(true);
+    expect(traceJudgedAllows({ traceJudged: { seen: '2026-10-02T05:09:00.000Z' } }, row)).toBe(false);
+    expect(traceJudgedAllows({ traceJudged: { seen: null } }, row)).toBe(false);
   });
 });
 

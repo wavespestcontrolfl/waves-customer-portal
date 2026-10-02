@@ -723,12 +723,13 @@ describe('complete and send', () => {
     expect(untraced.bodies('/complete')[0]).toHaveProperty('traceSeen', null);
     cleanup();
 
+    // A map gate that hides traces: the sheet saw none, and says so.
     const off = makeRequest({ trace: { enabled: false, treatmentZone: null } });
     await openSheet(off);
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(off.bodies('/complete')[0]).not.toHaveProperty('traceSeen');
+    expect(off.bodies('/complete')[0]).toHaveProperty('traceSeen', null);
   });
 
   test('a trace changed on another device stops the send with the reason', async () => {

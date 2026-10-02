@@ -781,9 +781,10 @@ function reportCompletionBody({
   return {
     visitOutcome: 'completed',
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
-    // The saved trace this report was judged against (null: none), for the
-    // server to re-check under the visit lock; only while tracing is on.
-    ...(trace.enabled ? { traceSeen: trace.zone?.updated_at ?? null } : {}),
+    // The saved trace this report was judged against (null: none, or a map
+    // gate that hides traces), for the server to re-check under the visit
+    // lock and freeze: the report shows only this trace.
+    traceSeen: trace.zone?.updated_at ?? null,
     products: rows.filter((row) => row.active).map((row) => {
       const application = recordedApplication(row, draft.facts);
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
