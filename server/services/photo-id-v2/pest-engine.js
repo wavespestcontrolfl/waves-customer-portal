@@ -481,9 +481,17 @@ function candidateContextFor(candidates) {
 
 // ── model calls (sequential, no Claude leg) ────────────────────────────────
 
+// thinkingLevel is a Gemini 3.x setting; any other route (an override to
+// another provider or an older Gemini) never receives it (Codex #5560 r1).
+function supportsThinkingLevel(route) {
+  return route.provider === 'gemini' && /^gemini-3/.test(String(route.model));
+}
+
 async function callWithProvider(route, payload) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route', provider: route?.provider || null, model: route?.model || null };
-  const result = await dispatch(route, payload);
+  const { thinkingLevel, ...rest } = payload;
+  const sent = thinkingLevel && supportsThinkingLevel(route) ? { ...rest, thinkingLevel } : rest;
+  const result = await dispatch(route, sent);
   return { ...result, provider: route.provider, model: result.model || route.model };
 }
 
