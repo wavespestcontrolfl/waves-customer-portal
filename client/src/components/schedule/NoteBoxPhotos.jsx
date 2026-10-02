@@ -25,6 +25,7 @@ export default function NoteBoxPhotos({
   disabled,
   palette,
   dictationServiceId,
+  addLockedWhileEditing = false,
   onAdd,
   onRemove,
   onCaption,
@@ -128,6 +129,7 @@ export default function NoteBoxPhotos({
         max={max}
         disabled={disabled}
         editing={editing != null}
+        addLocked={addLockedWhileEditing && editing != null}
         button={button}
         palette={palette}
         onAdd={onAdd}
@@ -349,9 +351,9 @@ function PhotoSummary({ summary, label, disabled, palette, button, onSummary, on
 
 // The notes box's photo actions: Add photo (up to the visit's limit),
 // "Describe with AI" once there are photos, and the tap-to-describe hint.
-function PhotoActions({ count, max, disabled, editing, button, palette, onAdd, onDescribeWithAi, describing }) {
+function PhotoActions({ count, max, disabled, editing, addLocked, button, palette, onAdd, onDescribeWithAi, describing }) {
   const limited = Number.isFinite(max);
-  const addOff = disabled || (limited && count >= max);
+  const addOff = disabled || addLocked || (limited && count >= max);
   const describeOff = disabled || describing;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>

@@ -85,16 +85,18 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 
 // The visit's photos (staged against the visit by the photo manager), read
 // again each time the manager closes. Their captions go to the report
-// writer, so the report waits for the first read (`loaded`); a failed first
-// read counts as no photos, never a hold. A failed later read keeps the
-// photos last read, so a dropped connection never empties the note's box
-// under an open description (codex local r1 on #5624); the sheet mounts once
-// per visit, so they are always this visit's. `update` applies a change the
-// server already took (a description saved, a photo removed) to the photos
-// at once, so a read that fails after it never leaves the report writing
-// from the old ones (pre-push P1 on #5624).
-export function useVisitPhotos({ serviceId, request, version }) {
-  const [state, setState] = useState({ photos: [], loaded: false });
+// writer, so the report waits for the first read (`loaded`); a failed read
+// counts as no photos, never a hold.
+// With the photos in the note's box (`keepOnFailure`), a failed read after
+// one that landed keeps the photos last read on screen, so a dropped
+// connection never empties the box under an open description (codex local
+// r1 on #5624), but it is no confirmed answer: `failed` holds the report
+// until a read lands (codex local r2: a photo the manager added must reach
+// the report). The sheet mounts once per visit, so the photos kept are
+// always this visit's. `update` applies a change the server already took (a
+// description saved, a photo removed) to the photos at once (pre-push P1).
+export function useVisitPhotos({ serviceId, request, version, keepOnFailure = false }) {
+  const [state, setState] = useState({ photos: [], loaded: false, failed: false, read: false });
   // Only the latest read may land: a read still in flight when the manager
   // closes must not overwrite the refreshed one.
   const readSequence = useRef(0);
@@ -105,12 +107,19 @@ export function useVisitPhotos({ serviceId, request, version }) {
     setState((prev) => (prev.loaded ? { ...prev, loaded: false } : prev));
     request(`/tech/services/${serviceId}/photos`)
       .then((data) => {
-        if (sequence === readSequence.current) setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true });
+        if (sequence === readSequence.current) {
+          setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true, failed: false, read: true });
+        }
       })
       // The photo manager reports its own errors.
-      .catch(() => { if (sequence === readSequence.current) setState((prev) => ({ photos: prev.photos, loaded: true })); });
+      .catch(() => {
+        if (sequence !== readSequence.current) return;
+        setState((prev) => (keepOnFailure && prev.read
+          ? { ...prev, loaded: true, failed: true }
+          : { photos: [], loaded: true, failed: false, read: prev.read }));
+      });
     return () => { readSequence.current += 1; };
-  }, [request, serviceId, version]);
+  }, [request, serviceId, version, keepOnFailure]);
   const update = useCallback((change) => setState((prev) => ({ ...prev, photos: change(prev.photos) })), []);
   return { ...state, update };
 }
@@ -170,7 +179,7 @@ const NOTE_PHOTO_ERRORS = {
   photo_not_found: 'That photo is no longer on this visit.',
 };
 
-export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd, onUpdate, onChanged, onHold }) {
+export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, readFailed, onAdd, onUpdate, onChanged, onRetry, onHold }) {
   const [describing, setDescribing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(null);
@@ -207,6 +216,9 @@ export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd,
         disabled={disabled || saving || !!removing}
         palette={NOTE_PHOTO_PALETTE}
         dictationServiceId={serviceId}
+        // The photo manager covers the sheet: it never opens over a
+        // description, whose mic may be recording (codex local r2).
+        addLockedWhileEditing
         onAdd={onAdd}
         onEditingChange={setDescribing}
         onCaption={(index, caption) => {
@@ -219,8 +231,16 @@ export function TechNoteBoxPhotos({ serviceId, request, photos, disabled, onAdd,
         }}
         onRemove={(index) => { setError(''); setRemoving(photos[index] || null); }}
       />
-      {(removing || error) && (
+      {(removing || error || readFailed) && (
         <div className="tech-note-photo-after">
+          {readFailed && (
+            <div className="tech-note-photo-confirm">
+              <ActionFeedback error className="tech-visit-feedback">Couldn’t read the visit’s photos. Check the connection.</ActionFeedback>
+              <div className="tech-note-photo-confirm-actions">
+                <Button type="button" variant="secondary" className="tech-visit-action" onClick={onRetry} disabled={disabled}>Read the photos again</Button>
+              </div>
+            </div>
+          )}
           {removing && (
             <div className="tech-note-photo-confirm" role="group" aria-label="Remove photo">
               <p className="tech-visit-muted">Remove this photo? It’s deleted from the visit for good.</p>

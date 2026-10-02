@@ -823,13 +823,14 @@ function reportCompletionBody({
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, promisesLoaded, stage, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
     [!photosLoaded, 'Loading photos…'],
+    [photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
     [!active.length, 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
@@ -999,7 +1000,8 @@ function ReportFlowForm({
   const [photoReloads, setPhotoReloads] = useState(0);
   const reloadPhotos = useCallback(() => setPhotoReloads((n) => n + 1), []);
   const [photoHold, setPhotoHold] = useState('');
-  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads });
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
+  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
   const report = useReportDraft({ request, base });
   const { draft, writing } = report;
@@ -1015,7 +1017,9 @@ function ReportFlowForm({
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
-  const holdInputs = { form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, promisesLoaded: visitPromises.loaded };
+  const holdInputs = {
+    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded,
+  };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
@@ -1158,7 +1162,8 @@ function ReportFlowForm({
       visitPromises={visitPromises}
       photos={visitPhotos.photos}
       onPhotos={photos.open}
-      noteBoxPhotos={service.noteBoxPhotosEnabled === true}
+      noteBoxPhotos={noteBoxPhotos}
+      photosReadFailed={visitPhotos.failed}
       request={request}
       photoHold={photoHold}
       onPhotoHold={setPhotoHold}
@@ -1172,7 +1177,9 @@ function ReportFlowForm({
       onAddProduct={addProduct}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
-        : { reason: '', label: 'Back to the report', onAction: () => setStep('report') }}
+        // A photo change in hand (a description open, a change saving, a
+        // removal to answer) holds the way back too (codex local r2).
+        : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
       writing={writing}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}
@@ -1247,7 +1254,7 @@ function ReportStep({
 function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
-  noteBoxPhotos, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
+  noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -1285,9 +1292,11 @@ function VisitStep({
                 request={request}
                 photos={photos}
                 disabled={locked || dictationPending}
+                readFailed={photosReadFailed}
                 onAdd={onPhotos}
                 onUpdate={onPhotosUpdate}
                 onChanged={onPhotosChanged}
+                onRetry={onPhotosChanged}
                 onHold={onPhotoHold}
               />
             ) : null}
