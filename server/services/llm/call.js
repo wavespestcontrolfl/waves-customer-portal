@@ -70,6 +70,42 @@ const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
 const geminiUrl = (model, key) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
+// ── Cloudflare AI Gateway passthrough (GATE_AI_GATEWAY_PASSTHROUGH) ──────
+// Read at CALL time, per leg, so a flip needs no redeploy. A listed lane's
+// provider request goes to the gateway's provider path instead of the
+// provider host, carrying the SAME provider key (no BYOK / Unified Billing),
+// so response bodies, served model, usage and the ledger row are byte-
+// identical — the gateway only logs, and `cf-aig-metadata` carries the lane /
+// prompt version / policy label so its per-lane view lines up with
+// llm_dispatch_log. Explicit laneId only (dispatch() passes the payload's): a
+// call with no laneId, an unlisted lane, or a missing base URL / token stays
+// direct. The base URL must be the gateway host itself — a provider key is
+// never sent to whatever a mistyped variable names. Not a fallback path: a
+// gateway error fails the leg exactly as a provider error does and the
+// caller's own ladder runs; the kill is the gate. Direct-SDK sites and
+// Managed Agents never pass through here.
+const AI_GATEWAY_BASE_RE = /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/;
+let aiGatewayBaseWarned = false;
+function aiGatewayFor(laneId, { promptVersion, policyLabel } = {}) {
+  if (!laneId) return null;
+  if (!require('../../config/feature-gates').gateEnvValue('GATE_AI_GATEWAY_PASSTHROUGH')) return null;
+  const lanes = String(process.env.AI_GATEWAY_LANES || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!lanes.includes(laneId)) return null;
+  const base = String(process.env.AI_GATEWAY_BASE_URL || '').trim().replace(/\/+$/, '');
+  const token = String(process.env.AI_GATEWAY_TOKEN || '').trim();
+  if (!AI_GATEWAY_BASE_RE.test(base) || !token) {
+    if (!aiGatewayBaseWarned) {
+      aiGatewayBaseWarned = true;
+      logger.warn('[llm] GATE_AI_GATEWAY_PASSTHROUGH is on but AI_GATEWAY_BASE_URL is not a gateway.ai.cloudflare.com/v1/<account>/<gateway> URL or AI_GATEWAY_TOKEN is unset — calls stay direct');
+    }
+    return null;
+  }
+  const meta = { lane: laneId };
+  if (promptVersion) meta.prompt_version = String(promptVersion);
+  if (policyLabel) meta.policy_label = String(policyLabel);
+  return { base, headers: { 'cf-aig-authorization': `Bearer ${token}`, 'cf-aig-metadata': JSON.stringify(meta) } };
+}
+
 // Minimal OpenAI Responses-API text extractor (from lawn-diagnostic-prompt.js).
 function extractOpenAIText(data) {
   if (typeof data?.output_text === 'string') return data.output_text;
@@ -393,9 +429,10 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
   const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   const t0 = nowMs();
   try {
-    const resp = await fetch(OPENAI_RESPONSES_API, {
+    const gw = aiGatewayFor(laneId, { promptVersion, policyLabel });
+    const resp = await fetch(gw ? `${gw.base}/openai/responses` : OPENAI_RESPONSES_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, ...(gw ? gw.headers : {}) },
       body: JSON.stringify(openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort })),
       ...abortAfter(timeoutMs),
     });
@@ -540,9 +577,12 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   const t0 = nowMs();
   try {
-    const resp = await fetch(geminiUrl(model, key), {
+    // Through the gateway the key rides the x-goog-api-key header, never the
+    // URL the gateway logs.
+    const gw = aiGatewayFor(laneId, { promptVersion, policyLabel });
+    const resp = await fetch(gw ? `${gw.base}/google-ai-studio/v1beta/models/${model}:generateContent` : geminiUrl(model, key), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(gw ? { 'x-goog-api-key': key, ...gw.headers } : {}) },
       body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
       ...abortAfter(timeoutMs),
     });
@@ -642,7 +682,14 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
   // row can span several attempts — the row is the CALL as the caller saw it.
   const t0 = nowMs();
   try {
-    const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // A caller-supplied client keeps its own base URL (its timeout / retry /
+    // mock config is the point of passing it); only the adapter's own client
+    // is pointed at the gateway.
+    const gw = anthropicClient ? null : aiGatewayFor(laneId, { promptVersion, policyLabel });
+    const client = anthropicClient || new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      ...(gw ? { baseURL: `${gw.base}/anthropic`, defaultHeaders: gw.headers } : {}),
+    });
     const req = anthropicRequest({
       model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort,
     });

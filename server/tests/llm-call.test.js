@@ -209,6 +209,118 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   });
 });
 
+// Cloudflare AI Gateway passthrough (GATE_AI_GATEWAY_PASSTHROUGH): a listed
+// lane's leg goes to the gateway's provider path with the same provider key
+// plus the gateway headers; everything else — gate off, unlisted or absent
+// lane, a non-gateway base URL, no token, a caller-supplied Anthropic client
+// — stays on the provider host. Guards the provider keys: a mistyped base URL
+// must never receive them.
+describe('AI Gateway passthrough', () => {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const BASE = 'https://gateway.ai.cloudflare.com/v1/acct_123/waves-portal';
+  const VARS = ['GATE_AI_GATEWAY_PASSTHROUGH', 'AI_GATEWAY_BASE_URL', 'AI_GATEWAY_TOKEN', 'AI_GATEWAY_LANES', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(VARS.map((k) => [k, process.env[k]]));
+    process.env.ANTHROPIC_API_KEY = 'a-key';
+    process.env.OPENAI_API_KEY = 'o-key';
+    process.env.GEMINI_API_KEY = 'g-key';
+    delete process.env.GOOGLE_API_KEY;
+    process.env.GATE_AI_GATEWAY_PASSTHROUGH = 'true';
+    process.env.AI_GATEWAY_BASE_URL = BASE;
+    process.env.AI_GATEWAY_TOKEN = 'cf-token';
+    process.env.AI_GATEWAY_LANES = 'sms_intent, parse_when';
+    mockAnthropicCreate.mockReset();
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    Anthropic.mockClear();
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    for (const k of VARS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
+  // Plain assignment + restore (the PDF test's pattern above), not spyOn:
+  // a spy left on a later describe's own jest.fn would share its call count.
+  const originalFetch = global.fetch;
+  const okFetch = (body) => { global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => body }); return global.fetch; };
+  const openAIBody = { output_text: '{"ok":true}' };
+  const geminiBody = { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] }, finishReason: 'STOP' }] };
+
+  test('a listed lane: Anthropic client gets the gateway base URL + headers; the provider key still goes as apiKey', async () => {
+    const r = await callAnthropic({ model: FLAGSHIP, text: 'hi', laneId: 'sms_intent', promptVersion: 'v3', policyLabel: 'fastStructured' });
+    expect(r.ok).toBe(true);
+    expect(Anthropic).toHaveBeenCalledWith({
+      apiKey: 'a-key',
+      baseURL: `${BASE}/anthropic`,
+      defaultHeaders: {
+        'cf-aig-authorization': 'Bearer cf-token',
+        'cf-aig-metadata': JSON.stringify({ lane: 'sms_intent', prompt_version: 'v3', policy_label: 'fastStructured' }),
+      },
+    });
+  });
+
+  test('a listed lane: OpenAI posts to <base>/openai/responses with the gateway headers and the same bearer', async () => {
+    const fetchSpy = okFetch(openAIBody);
+    expect((await callOpenAI({ model: OPENAI_BEST, text: 'hi', laneId: 'parse_when' })).ok).toBe(true);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe(`${BASE}/openai/responses`);
+    expect(init.headers).toEqual(expect.objectContaining({
+      Authorization: 'Bearer o-key',
+      'cf-aig-authorization': 'Bearer cf-token',
+      'cf-aig-metadata': JSON.stringify({ lane: 'parse_when' }),
+    }));
+  });
+
+  test('a listed lane: Gemini posts to the gateway path with the key in x-goog-api-key, never in the URL', async () => {
+    const fetchSpy = okFetch(geminiBody);
+    expect((await callGemini({ model: GEMINI_VISION_BEST, text: 'hi', laneId: 'sms_intent' })).ok).toBe(true);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe(`${BASE}/google-ai-studio/v1beta/models/${GEMINI_VISION_BEST}:generateContent`);
+    expect(url).not.toMatch(/g-key/);
+    expect(init.headers).toEqual(expect.objectContaining({ 'x-goog-api-key': 'g-key', 'cf-aig-authorization': 'Bearer cf-token' }));
+  });
+
+  test('gate off: every leg stays on the provider host with no gateway header', async () => {
+    delete process.env.GATE_AI_GATEWAY_PASSTHROUGH;
+    const fetchSpy = okFetch(openAIBody);
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', laneId: 'sms_intent' });
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://api.openai.com/v1/responses');
+    expect(fetchSpy.mock.calls[0][1].headers['cf-aig-authorization']).toBeUndefined();
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', laneId: 'sms_intent' });
+    expect(Anthropic).toHaveBeenCalledWith({ apiKey: 'a-key' });
+  });
+
+  test('an unlisted lane, or no lane, stays direct even with the gate on', async () => {
+    const fetchSpy = okFetch(openAIBody);
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', laneId: 'lead_synopsis' });
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi' });
+    for (const [url, init] of fetchSpy.mock.calls) {
+      expect(url).toBe('https://api.openai.com/v1/responses');
+      expect(init.headers['cf-aig-authorization']).toBeUndefined();
+    }
+  });
+
+  test('a base URL off the gateway host, or a missing token, keeps the provider key on the provider host', async () => {
+    const fetchSpy = okFetch(openAIBody);
+    process.env.AI_GATEWAY_BASE_URL = 'https://evil.example.com/v1/acct/gw';
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', laneId: 'sms_intent' });
+    process.env.AI_GATEWAY_BASE_URL = BASE;
+    delete process.env.AI_GATEWAY_TOKEN;
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', laneId: 'sms_intent' });
+    for (const [url, init] of fetchSpy.mock.calls) {
+      expect(url).toBe('https://api.openai.com/v1/responses');
+      expect(init.headers['cf-aig-authorization']).toBeUndefined();
+    }
+  });
+
+  test('a caller-supplied Anthropic client is used as given — never re-pointed at the gateway', async () => {
+    const create = jest.fn().mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const r = await callAnthropic({ model: FLAGSHIP, text: 'hi', laneId: 'sms_intent', anthropicClient: { messages: { create } } });
+    expect(r.ok).toBe(true);
+    expect(create).toHaveBeenCalled();
+    expect(Anthropic).not.toHaveBeenCalled();
+  });
+});
+
 // Prompt caching: callAnthropic sends system as a single text block carrying
 // an ephemeral cache_control breakpoint (tools render before system, so the
 // one marker caches both for every dispatch() caller).

@@ -65,6 +65,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
+ *   GATE_AI_GATEWAY_PASSTHROUGH=true (llm/call.js legs for the lanes in AI_GATEWAY_LANES go to the Cloudflare AI Gateway at AI_GATEWAY_BASE_URL with AI_GATEWAY_TOKEN — same provider keys, logging only; dark in dev AND prod)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
@@ -3272,6 +3273,19 @@ const gates = {
   // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
   // CALL time via gateEnvValue.
   llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
+
+  // Cloudflare AI Gateway passthrough — services/llm/call.js aiGatewayFor.
+  // ON: the OpenAI / Gemini / Anthropic legs of call.js, for a call whose
+  // explicit laneId is in AI_GATEWAY_LANES (comma list; empty = nothing),
+  // send the same request with the same provider key to the gateway at
+  // AI_GATEWAY_BASE_URL (https://gateway.ai.cloudflare.com/v1/<account>/
+  // <gateway>, nothing else accepted) with AI_GATEWAY_TOKEN, tagged with the
+  // lane for the gateway's per-lane log. Responses, served model, usage and
+  // the ledger row are unchanged. Direct-SDK sites and Managed Agents are
+  // never routed. OFF (default, dev AND prod): every call goes to the
+  // provider host as before. Kill switch: unset. This entry is for
+  // logGateStatus; the adapter reads gateEnvValue at CALL time.
+  aiGatewayPassthrough: gateEnvValue('GATE_AI_GATEWAY_PASSTHROUGH'),
 
   // Agent-control hub read — routes/admin-agents.js /control/areas +
   // /control/lanes via services/agent-control/hub-read.js. ON: the Control
