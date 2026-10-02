@@ -1279,7 +1279,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // no notice attribution yet → a named request does not match an unlabeled term
     expect(await renew(468)).toBeNull();
     // the apply recorded the notice for this term under the pest line → the pest renewal is guarded
-    mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), metadata: { term_id: TERM(1) } })] });
+    mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), effective_date: '2027-05-15', metadata: { term_id: TERM(1) } })] });
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull(); // another family's renewal is not blocked
   });
@@ -1339,10 +1339,13 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(route).toContain('const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };');
     const call = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount })');
     expect(call).toBeGreaterThan(0);
-    // what the customer actually pays is judged too: the LOCKED invoice's total, whenever it differs from the term amount
+    // what the customer actually pays is judged too, FIRST (so the prompt and the override log name the real charge):
+    // the LOCKED invoice's total, whenever it differs from the term amount
     expect(route).toMatch(/\.where\(\{ id: invoice\.id \}\)\.forUpdate\(\)\.first\('id', 'customer_id', 'total'\)/);
     expect(route).toContain('const chargedTotal = Number(lockedInvoiceRow.total);');
-    expect(route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal })')).toBeGreaterThan(call);
+    const totalCall = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal })');
+    expect(totalCall).toBeGreaterThan(0);
+    expect(totalCall).toBeLessThan(call);
     // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
     // preserves them when no start is sent), so the guard judges the preserved start, never today
     expect(route).toMatch(/const linkedTermForNotice = await trx\('annual_prepay_terms'\)\s*\.where\(\{ prepay_invoice_id: invoice\.id \}\)/);
@@ -1374,6 +1377,16 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // holds that notice (renewal_window_changed), so it guards the July 1 renewal no more than it would be applied to it
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null, term_end: '2027-06-30' })], price_change_notices: [pending()] });
     expect(await renew(468, { termStart: '2027-07-01', today: '2027-06-30' })).toBeNull();
+  });
+  test('an APPLIED notice\'s frozen amount guards only the window it named: the term end moved since (the date editor keeps the amount) → it guards nothing', async () => {
+    const applied = fixture.noticeRow(1, {
+      billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-15T07:10:00Z'), status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), email_sent: true,
+      new_amount_cents: 48400, noticed_new_cents: 48400, effective_date: '2027-05-15', metadata: { term_id: TERM(1), next_term_amount_cents: 48400 },
+    });
+    mockDb.reset({ annual_prepay_terms: [term()], price_change_notices: [applied] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
+    mockDb.reset({ annual_prepay_terms: [term({ term_end: '2027-04-09' })], price_change_notices: [applied] });
+    expect(await renew(468, { termStart: '2027-04-10', today: '2027-04-09' })).toBeNull();
   });
   test('editing the successor term itself (the invoice route on its own term) is still guarded: that term is not a successor that settles the guard', async () => {
     const successor = { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) };

@@ -2219,15 +2219,16 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
             .where({ prepay_invoice_id: invoice.id })
             .first('id', 'term_start', 'coverage_service_type');
           const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };
-          // Both amounts must match the notice: the term's prepay amount (an
-          // editable field) AND what the customer actually pays — the locked
-          // invoice's total. A $468 invoice marked with prepayAmount 484 still
-          // charges $468, so it needs the same acknowledgement.
+          // Both amounts must match the notice: what the customer actually
+          // pays — the locked invoice's total, judged FIRST so the prompt and
+          // the override log name the real charge — AND the term's prepay
+          // amount (an editable field). A $468 invoice marked with
+          // prepayAmount 484 still charges $468, so it needs the same
+          // acknowledgement.
           const chargedTotal = Number(lockedInvoiceRow.total);
-          let noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount });
-          if (!noticed && Number.isFinite(chargedTotal) && Math.round(chargedTotal * 100) !== Math.round(resolvedAmount * 100)) {
-            noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal });
-          }
+          const totalDiffers = Number.isFinite(chargedTotal) && Math.round(chargedTotal * 100) !== Math.round(resolvedAmount * 100);
+          let noticed = totalDiffers ? await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal }) : null;
+          if (!noticed) noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
           if (noticed) {
             await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: termCustomerId, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'invoice_annual_prepay', invoiceId: invoice.id });
