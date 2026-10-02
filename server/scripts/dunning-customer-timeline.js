@@ -10,7 +10,8 @@
 //   - every overdue-reminder attempt on the collections contact ledger (the
 //     sources and purposes the spacing rule counts), with its time (UTC and
 //     Eastern), source, channel, whether it was delivered, and the gap in days
-//     since the previous DELIVERED reminder, flagging any gap under 7 days;
+//     since the previous reminder the 7-day spacing rule counts (its own
+//     collapseDunningReminderEvents), flagging any gap under 7 days;
 //   - the customer's per-invoice follow-up sequences,
 //   - the customer's reminder schedule rows (customer_dunning_schedules),
 //   - the customer's collections holds,
@@ -24,7 +25,9 @@
 //   railway run --service Postgres -- node server/scripts/dunning-customer-timeline.js --customer <uuid> [--days 120]
 
 const path = require('path');
-const { OVERDUE_SOURCES, OVERDUE_PURPOSES, isOverdueReminderRow } = require(path.join(__dirname, '..', 'services', 'collections', 'dunning-spacing'));
+const {
+  OVERDUE_SOURCES, OVERDUE_PURPOSES, isOverdueReminderRow, collapseDunningReminderEvents,
+} = require(path.join(__dirname, '..', 'services', 'collections', 'dunning-spacing'));
 
 const TAG = '[dunning-customer-timeline]';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -182,49 +185,48 @@ function groupTouches(sortedRows) {
 
 /**
  * Annotate overdue-reminder ledger rows with their delivery state, touch, and
- * the gap in days since the previous DELIVERED touch (strictly delivered rows;
- * the first delivered leg of a touch is the touch's time). A gap under 7 days
- * is flagged. Pure: rows in, annotated rows out, in time order.
+ * the gap in days since the previous reminder THE SPACING RULE COUNTS. The
+ * events and their times come from dunning-spacing.js's own
+ * collapseDunningReminderEvents (Codex #5599 r1 P1), never a second reading of
+ * it here: a row counts unless it is stamped failed (an unstamped send counts),
+ * and a touch with several legs is timed by its latest counted leg. A gap under
+ * 7 days is flagged. Pure: rows in, annotated rows out, in time order.
  */
 function annotateAttempts(rows) {
   const sorted = [...(rows || [])].filter((row) => validDate(row.occurred_at) && isOverdueReminderRow(row)).sort(compareRows);
   const touches = groupTouches(sorted);
-  const annotated = new Map();
+  const touchOf = new Map();
   for (const [index, touch] of touches.entries()) {
-    const delivered = touch.rows.filter((row) => deliveryState(row) === 'delivered');
     touch.number = index + 1;
-    touch.delivered = delivered.length > 0;
-    touch.at = touch.delivered ? new Date(delivered[0].occurred_at) : null;
-    touch.leadRow = touch.delivered ? delivered[0] : null;
+    for (const row of touch.rows) touchOf.set(row, touch);
   }
-  // Gaps follow DELIVERY order, not attempt order: a touch whose first attempt failed and whose later leg
-  // delivered after a newer touch did is measured from that newer touch (never a negative gap).
-  const gapByTouch = new Map();
+  const gapByLead = new Map();
   let previousAt = null;
-  for (const touch of touches.filter((t) => t.delivered).sort((a, b) => a.at.getTime() - b.at.getTime() || a.number - b.number)) {
-    gapByTouch.set(touch, previousAt ? (touch.at.getTime() - previousAt.getTime()) / DAY_MS : null);
-    previousAt = touch.at;
+  for (const event of collapseDunningReminderEvents(sorted)) {
+    const eventAt = new Date(event.occurred_at);
+    gapByLead.set(event, previousAt ? (eventAt.getTime() - previousAt.getTime()) / DAY_MS : null);
+    previousAt = eventAt;
   }
-  for (const touch of touches) {
-    const gapDays = gapByTouch.get(touch) ?? null;
-    for (const row of touch.rows) {
-      const isLead = touch.leadRow === row;
-      annotated.set(row, {
-        row,
-        touch: touch.number,
-        state: deliveryState(row),
-        gapDays: isLead ? gapDays : null,
-        underSpacing: isLead && gapDays != null && gapDays < SPACING_DAYS,
-        sameTouch: touch.delivered && !isLead,
-      });
-    }
-  }
-  return sorted.map((row) => annotated.get(row));
+  const countedTouches = new Set([...gapByLead.keys()].map((row) => touchOf.get(row)));
+  return sorted.map((row) => {
+    const isLead = gapByLead.has(row);
+    const gapDays = isLead ? gapByLead.get(row) : null;
+    return {
+      row,
+      touch: touchOf.get(row).number,
+      state: deliveryState(row),
+      counted: isLead,
+      gapDays,
+      underSpacing: isLead && gapDays != null && gapDays < SPACING_DAYS,
+      sameTouch: !isLead && countedTouches.has(touchOf.get(row)),
+    };
+  });
 }
 
 const gapText = (a) => {
   if (a.sameTouch) return 'same touch';
-  if (a.gapDays == null) return a.state === 'delivered' ? 'first delivered' : '-';
+  if (!a.counted) return '-';
+  if (a.gapDays == null) return 'first counted';
   return `gap ${a.gapDays.toFixed(1)}d${a.underSpacing ? '  ** UNDER 7 DAYS **' : ''}`;
 };
 
@@ -238,8 +240,8 @@ function attemptLine(a) {
 }
 
 /**
- * One time-ordered list across every source: { at, kind, text }. Pure; rows with
- * no usable time are left out (they cannot be placed). Ties keep a stable order
+ * One time-ordered list across every source: { at, kind, text }, inside the
+ * report's window. Pure; rows with no usable time are left out (they cannot be placed). Ties keep a stable order
  * by kind then text.
  */
 function buildEvents(report) {
@@ -260,7 +262,13 @@ function buildEvents(report) {
   for (const c of report.controls || []) {
     push(c.created_at, 'staff', `staff press  ${codeOnly(c.action) || '-'}  admin ${c.admin_user_id || '-'}`);
   }
-  return events.sort((a, b) => a.at.getTime() - b.at.getTime() || a.kind.localeCompare(b.kind) || a.text.localeCompare(b.text));
+  // Only the requested window (Codex #5599 r1 P2): sequences, schedules and active holds are read with no
+  // lower bound for their own sections, so their older events are left out here.
+  const from = validDate(report.windowStart);
+  const to = validDate(report.now);
+  return events
+    .filter((e) => (!from || e.at >= from) && (!to || e.at <= to))
+    .sort((a, b) => a.at.getTime() - b.at.getTime() || a.kind.localeCompare(b.kind) || a.text.localeCompare(b.text));
 }
 
 const stamp = (value) => (validDate(value) ? validDate(value).toISOString() : '-');
@@ -284,9 +292,10 @@ function formatReport(report) {
   return [
     `${TAG} READ ONLY — customer ${report.customerId}  window ${stamp(report.windowStart)} .. ${stamp(report.now)} (${report.days}d)`,
     '',
-    'TIMELINE (UTC | Eastern). Gap = days since the previous DELIVERED reminder; a gap under 7 days is flagged.',
+    'TIMELINE (UTC | Eastern). Gap = days since the previous reminder the spacing rule counts (any send not stamped failed;',
+    '  a touch with several legs is timed by its latest one); a gap under 7 days is flagged.',
     ...(events.length ? events.map((e) => `  ${formatTimes(e.at)} | ${e.text}`) : ['  (no events in the window)']),
-    `  delivered touches under 7 days apart: ${flagged}`,
+    `  touches under 7 days apart: ${flagged}`,
     '',
     ...section('PER-INVOICE SEQUENCES', report.sequences || [], sequenceLine, '(none)'),
     ...section('REMINDER SCHEDULES (customer_dunning_schedules)', report.schedules || [], scheduleLine, '(none)'),
@@ -338,7 +347,7 @@ async function readTimeline(database, customerId, { now = new Date(), days = DEF
     .where('occurred_at', '>=', lookbackStart)
     .where('occurred_at', '<=', now)
     .orderBy([{ column: 'occurred_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .select('id', 'source', 'purpose', 'channel', 'occurred_at', 'metadata', 'invoice_ids'));
+    .select('id', 'customer_id', 'source', 'purpose', 'channel', 'occurred_at', 'metadata', 'invoice_ids'));
   const attempts = annotateAttempts(ledgerRows).filter((a) => new Date(a.row.occurred_at) >= windowStart);
 
   const sequences = await optionalRead(database, 'the per-invoice follow-up sequences', notes, (sp) => sp('invoice_followup_sequences')

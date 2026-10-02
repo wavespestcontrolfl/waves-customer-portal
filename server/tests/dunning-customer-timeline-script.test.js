@@ -89,7 +89,7 @@ describe('the command line', () => {
   });
 });
 
-describe('annotateAttempts: the gap since the previous delivered reminder', () => {
+describe('annotateAttempts: the gap since the previous reminder the spacing rule counts', () => {
   test('a gap under 7 days is flagged; exactly 7 days and longer are not; a failed attempt does not reset the clock', () => {
     const rows = [
       ledger({ when: '2026-07-08T14:16:00Z', meta: delivered('k1') }),
@@ -120,7 +120,7 @@ describe('annotateAttempts: the gap since the previous delivered reminder', () =
     expect(out.every((a) => a.gapDays == null || a.gapDays >= 0)).toBe(true);
   });
 
-  test('the legs of one touch are one touch: the gap is on the first delivered leg and the other leg says same touch', () => {
+  test('the legs of one touch are one touch: the gap is on the latest leg, as the spacing rule times it, and the other leg says same touch', () => {
     const rows = [
       ledger({ when: '2026-07-08T14:16:01Z', channel: 'sms', meta: delivered('k1') }),
       ledger({ when: '2026-07-08T14:16:00Z', channel: 'email', meta: delivered('k1') }),
@@ -130,12 +130,12 @@ describe('annotateAttempts: the gap since the previous delivered reminder', () =
     const out = Timeline.annotateAttempts(rows);
     expect(out.map((a) => a.row.channel)).toEqual(['email', 'sms', 'email', 'sms']);
     expect(out.map((a) => a.touch)).toEqual([1, 1, 2, 2]);
-    expect(out.map((a) => a.sameTouch)).toEqual([false, true, false, true]);
-    expect(out[0].gapDays).toBeNull();
-    expect(out[1].gapDays).toBeNull(); // the second leg never shows a 0-day gap to its own sibling
-    expect(out[2].gapDays).toBeCloseTo(6 + 2 / 86400, 5);
-    expect(out[2].underSpacing).toBe(true);
-    expect(out[3].underSpacing).toBe(false);
+    expect(out.map((a) => a.sameTouch)).toEqual([true, false, true, false]);
+    expect(out[0].gapDays).toBeNull(); // a leg never shows a 0-day gap to its own sibling
+    expect(out[1].gapDays).toBeNull();
+    expect(out[3].gapDays).toBeCloseTo(6 + 2 / 86400, 5);
+    expect(out[3].underSpacing).toBe(true);
+    expect(out[2].underSpacing).toBe(false);
   });
 
   test('keyless rows (an older rail) group by source and invoice set inside 15 minutes', () => {
@@ -146,19 +146,48 @@ describe('annotateAttempts: the gap since the previous delivered reminder', () =
     ];
     const out = Timeline.annotateAttempts(rows);
     expect(out.map((a) => a.touch)).toEqual([1, 1, 2]);
-    expect(out[2].gapDays).toBe(3);
+    expect(out[2].gapDays).toBeCloseTo(3 - 3 / 1440, 5); // from the touch's latest leg (14:03)
     expect(out[2].underSpacing).toBe(true);
   });
 
-  test('a reservation with no outcome stamp is shown as unconfirmed and never counts as the previous delivered reminder', () => {
+  // Codex #5599 r1 P1: the spacing rule counts a send with no outcome stamp; so does the timeline.
+  test('a reservation with no outcome stamp is shown as unconfirmed and counts, as the spacing rule counts it', () => {
     const out = Timeline.annotateAttempts([
       ledger({ when: '2026-07-08T14:16:00Z', meta: delivered('k1') }),
       ledger({ when: '2026-07-10T14:16:00Z', meta: { notificationEventKey: 'k-open' } }),
       ledger({ when: '2026-07-16T14:16:00Z', meta: delivered('k3') }),
     ]);
     expect(out.map((a) => a.state)).toEqual(['delivered', 'unconfirmed', 'delivered']);
-    expect(out[2].gapDays).toBe(8);
-    expect(out[2].underSpacing).toBe(false);
+    expect(out.map((a) => a.gapDays)).toEqual([null, 2, 6]);
+    expect(out.map((a) => a.underSpacing)).toEqual([false, true, true]);
+  });
+
+  // Codex #5599 r1 P1, its own example: an email delivered on day 0, its same-key replay text delivered on
+  // day 3, another reminder on day 8. The rule times the touch by its replay leg: a 5-day gap, flagged.
+  test('a replay leg times its touch: email day 0, same-key replay text day 3, next reminder day 8 is a 5-day gap', () => {
+    const out = Timeline.annotateAttempts([
+      ledger({ when: '2026-07-01T14:00:00Z', channel: 'email', meta: delivered('kA') }),
+      ledger({ when: '2026-07-04T14:00:00Z', source: 'invoice_followup_replay', purpose: 'invoice_followup', channel: 'sms', meta: delivered('kA') }),
+      ledger({ when: '2026-07-09T14:00:00Z', channel: 'email', meta: delivered('kB') }),
+    ]);
+    expect(out.map((a) => a.touch)).toEqual([1, 1, 2]);
+    expect(out.map((a) => a.sameTouch)).toEqual([true, false, false]);
+    expect(out[2].gapDays).toBe(5);
+    expect(out[2].underSpacing).toBe(true);
+  });
+
+  test('the counted touches and their times are exactly the spacing rule\'s own events', () => {
+    const { collapseDunningReminderEvents } = require('../services/collections/dunning-spacing');
+    const rows = [
+      ledger({ when: '2026-07-01T14:00:00Z', channel: 'email', meta: { notificationEventKey: 'k1', send_failed: true } }),
+      ledger({ when: '2026-07-01T14:00:05Z', channel: 'sms', meta: { notificationEventKey: 'k1' } }),
+      ledger({ when: '2026-07-03T14:00:00Z', channel: 'email', meta: delivered('k2') }),
+      ledger({ when: '2026-07-06T14:00:00Z', source: 'invoice_followup_replay', purpose: 'invoice_followup', channel: 'sms', meta: delivered('k2') }),
+      ledger({ when: '2026-07-20T14:00:00Z', source: 'late_payment_checker', channel: 'email', meta: { delivered: true } }),
+      ledger({ when: '2026-07-20T14:05:00Z', source: 'late_payment_checker', channel: 'sms', meta: { send_failed: true } }),
+    ];
+    const out = Timeline.annotateAttempts(rows);
+    expect(out.filter((a) => a.counted).map((a) => a.row)).toEqual(collapseDunningReminderEvents(rows));
   });
 
   test('only overdue-reminder rows are read: another purpose, an exempt source and a bank-verification nudge are dropped', () => {
@@ -210,6 +239,25 @@ describe('time ordering across every source', () => {
     ]);
   });
 
+  // Codex #5599 r1 P2: sequences, schedules and active holds are read with no lower bound for their own
+  // sections; the timeline keeps only what happened inside --days.
+  test('the timeline keeps only events inside the window; the sections still list the older rows', () => {
+    const old = at('2026-01-05T12:00:00Z');
+    const withOld = {
+      ...report,
+      sequences: [...report.sequences, { ...report.sequences[0], invoice_id: INVOICE_B, last_touch_at: old }],
+      schedules: [...report.schedules, { ...report.schedules[0], episode: 0, created_at: old, closed_at: old }],
+      holds: [...report.holds, { id: 'eeeeeeee-0000-4000-8000-000000000005', kind: 'collection_hold', created_at: old, released_at: null }],
+    };
+    const events = Timeline.buildEvents(withOld);
+    expect(events.every((e) => e.at >= report.windowStart && e.at <= report.now)).toBe(true);
+    expect(events).toHaveLength(Timeline.buildEvents(report).length);
+    const text = Timeline.formatReport(withOld).join('\n');
+    expect(text).toContain(`invoice ${INVOICE_B}  status completed`);
+    expect(text).toContain('episode 0  status completed');
+    expect(text).toContain('released ACTIVE');
+  });
+
   test('a row with no usable time is left out, never placed at the epoch', () => {
     const events = Timeline.buildEvents({ ...report, sequences: [{ ...report.sequences[0], last_touch_at: null }], holds: [{ id: 'x', kind: 'collection_hold', created_at: 'not a date', released_at: null }] });
     expect(events.every((e) => e.at.getTime() > 0)).toBe(true);
@@ -227,7 +275,7 @@ describe('time ordering across every source', () => {
     const text = lines.join('\n');
     expect(text).toContain('2026-07-08T14:16:00.000Z | 2026-07-08 10:16 EDT');
     expect(text).toContain('gap 6.0d  ** UNDER 7 DAYS **');
-    expect(text).toContain('delivered touches under 7 days apart: 1');
+    expect(text).toContain('touches under 7 days apart: 1');
     for (const heading of ['PER-INVOICE SEQUENCES', 'REMINDER SCHEDULES', 'COLLECTIONS HOLDS', 'STAFF PRESSES']) expect(text).toContain(heading);
     expect(text).toContain(`admin ${ADMIN}`);
     expect(text).toContain('released 2026-08-05T13:00:00.000Z');
