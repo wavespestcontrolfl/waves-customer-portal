@@ -12,7 +12,8 @@
 //                           Zelle and a send-time recheck of a Zelle offer cannot pass.
 // Pure: no I/O, so the draft, the persisted decision and the send-time recheck all use one resolver.
 
-const AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
+// Codex round-69 P2: "100 dollars" / "50 bucks" / "75 USD" are amounts too (the money detector's forms)
+const AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?(?=\s*(?:dollars?|bucks|usd)\b)/gi;
 const centsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
 
 // "WPC-2026-0123", "wpc 2026 0123", "invoice #0123", "invoice 123"
@@ -39,7 +40,7 @@ const stripZeros = (s) => String(s).replace(/^0+/, '') || '0';
 function invoiceAmountsNamed(text) {
   const t = String(text || '');
   const out = [];
-  for (const m of t.matchAll(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g)) {
+  for (const m of t.matchAll(AMOUNT_RE)) {
     // same SENTENCE only ("Zelle invoice X. I sent $95 last month" ties nothing)
     const before = t.slice(Math.max(0, m.index - 30), m.index).split(/[.!?;]\s/).pop();
     const after = t.slice(m.index + m[0].length, m.index + m[0].length + 30).split(/[.!?;]\s/)[0];

@@ -945,3 +945,35 @@ test.each([
   expect(c.copiesOffTarget(['We received your $100.00 card payment on Sep 12, 2026.'], inbound, { today: '2026-09-13' })).toBe(off);
 });
 
+// HOLD WHEN AMBIGUOUS, applied to named specifics (owner ruling 2026-10-02; Codex round-69 P2s): a customer who names WHICH payment
+// (number, amount, date, tender, card brand) gets a person; only a generic question auto-sends a copied receipt / invoice / balance line
+describe('auto-send holds copied payment lines when the customer names specifics', () => {
+  const R = 'We received your $100.00 card payment on Sep 12, 2026.';
+  const S = { sentences: [R], family_counts: { payment: 1 } };
+  const B = 'Your account has no balance due.';
+  const block = (inbound, reply = R, snapshot = S) => c.autoSendScopeBlock({ reply, inboundText: inbound, snapshot });
+  test.each(['Did my payment go through?', 'Just checking if you got my payment', 'Did you get it?'])('generic => may auto-send: %s', (i) => {
+    expect(block(i)).toBeNull();
+  });
+  test.each([
+    'Did my $100 payment go through?', 'Did my 100 dollar payment go through?', 'Did my JCB payment arrive?', 'Did my card payment go through?',
+    'Did you get the payment I sent yesterday?', 'Is invoice 0001 paid?', 'Did my Sep 12 payment post?',
+  ])('specific => held: %s', (i) => { expect(block(i)).toBe('payment_status_ambiguous'); });
+  test('a balance summary answering a named receipt is held; answering "do I owe anything?" is not', () => {
+    expect(block('Did you receive my $100 payment?', B, { sentences: [B] })).toBe('payment_status_ambiguous');
+    expect(block('Do I owe anything?', B, { sentences: [B] })).toBeNull();
+  });
+});
+
+// Codex round-69 P2s (filter): refund figures, every listed brand, conversational "checking"
+test.each([
+  [['We received your $85.00 card payment on Sep 3, 2026, and $30.00 of it was refunded.'], 'Did you receive my $30 payment?', true],
+  [['We received your $85.00 card payment on Sep 3, 2026, and $30.00 of it was refunded.'], 'Did you receive my $85 payment?', false],
+  [['We received your $100.00 card payment on Sep 12, 2026.'], 'Did my JCB payment arrive?', true],
+  [['We received your $100.00 card payment on Sep 12, 2026.'], 'Did my Diners Club payment arrive?', true],
+  [['We received your $100.00 card payment on Sep 12, 2026.'], 'Just checking if you got my payment', false],
+  [['We received your $100.00 payment on Sep 12, 2026.'], 'I paid from my checking account, did it arrive?', true],
+])('filter %j / %s => off target: %s', (copied, inbound, off) => {
+  expect(c.copiesOffTarget(copied, inbound, { today: '2026-09-13' })).toBe(off);
+});
+

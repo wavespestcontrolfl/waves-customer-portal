@@ -527,10 +527,12 @@ const INBOUND_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?/g;
 const amountCentsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) * 100);
 // Codex round-66 P2: the customer's own figure also comes as "100 dollars" / "50 bucks" / "75 USD" (the money detector's forms)
 const INBOUND_NAMED_AMOUNT_RE = /\$\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?(?=\s*(?:dollars?|bucks|usd)\b)/gi;
-const CARD_SUBTYPE_RE = /\b(?:visa|master\s?card|amex|american\s+express|discover|debit|credit\s+card|prepaid\s+card)\b/i;
+// Codex round-69 P2: every brand in the shared table (services/card-brands.js), plus funding types
+const CARD_SUBTYPE_RE = new RegExp(`\\b(?:${require('./card-brands').CARD_BRAND_WORD_ALT}|debit|credit\\s+card|prepaid\\s+card)\\b`, 'i');
 const INBOUND_TENDER_RES = [
   ['card', /\b(?:card|credit|debit|visa|mastercard|amex|discover|apple\s*pay|google\s*pay)\b/i],
-  ['ach', /\b(?:ach|bank(?:\s+(?:account|transfer|draft))?|e-?check|checking)\b/i],
+  // (Codex round-69 P2: "just checking if ..." is no tender - only a checking ACCOUNT is)
+  ['ach', /\b(?:ach|bank(?:\s+(?:account|transfer|draft))?|e-?check|checking\s+account)\b/i],
   ['zelle', /\bzelle\b/i],
   ['cash', /\bcash\b/i],
   ['check', /\b(?:paper\s+)?che(?:ck|que)s?\b(?!\s+(?:on|in|with|if|whether|that|to\s+see))/i],
@@ -627,7 +629,10 @@ function attributesOffTarget(t, { namedDates, namedTenders, amounts }) {
   }
   if (namedTenders.includes('card_subtype')) return true;
   if (namedTenders.length && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
-  return amounts.size > 0 && !(t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf).some((c) => amounts.has(c));
+  // Codex round-69 P2: a payment sentence is matched on its PRIMARY figure (the payment), never a refund figure that follows it
+  const figures = (t.match(INBOUND_AMOUNT_RE) || []).map(amountCentsOf);
+  const candidates = sentenceFamily(t) === 'payment' ? figures.slice(0, 1) : figures;
+  return amounts.size > 0 && !candidates.some((c) => amounts.has(c));
 }
 
 // MONEY CONTENT (owner 2026-10-01 ~23:58Z): once the verbatim copies are removed, an unedited AI reply carries no dollar figure, no price
@@ -685,7 +690,7 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   const scoped = isPaymentScoped({ reply, inboundText, scoped: snapshot?.scoped === true || sentences.length > 0 });
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
-  if (copiesAmbiguousFamily(copied, snapshot)) return 'payment_status_ambiguous';
+  if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
   return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
 }
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
@@ -698,6 +703,24 @@ function familyCounts(texts) {
   const counts = {};
   for (const t of texts) { const f = sentenceFamily(String(t)); if (f) counts[f] = (counts[f] || 0) + 1; }
   return counts;
+}
+// The same ruling applied to a customer who NAMES which payment they mean (an invoice number, an amount, a date, a tender or card brand):
+// matching that to a record is the guess the ruling stops making, so a copied receipt / invoice / balance line auto-sends only for a
+// generic question ("did my payment go through?"); otherwise a person picks (Codex round-69 P2s: worded amounts, brands, refund figures,
+// a balance summary answering a named receipt).
+const ACCOUNT_SUMMARY_RE = /^(?:Your account (?:balance is|has no balance due)|We don't see)\b/;
+function inboundNamesSpecifics(inboundText) {
+  const inbound = String(inboundText || '');
+  if (!inbound.trim()) return false;
+  const { invoiceNumbersNamed } = require('./zelle-target-invoice');
+  const named = invoiceNumbersNamed(inbound);
+  const today = dateParts(require('../utils/datetime-et').etDateString());
+  return named.full.length > 0 || named.tail.length > 0 || (inbound.match(INBOUND_NAMED_AMOUNT_RE) || []).length > 0
+    || inboundDates(inbound, today).length > 0 || INBOUND_TENDER_RES.some(([, re]) => re.test(inbound)) || CARD_SUBTYPE_RE.test(inbound);
+}
+function copiesAnswerNamedSpecifics(copied, inboundText) {
+  const answers = copied.some((t) => sentenceFamily(String(t)) || ACCOUNT_SUMMARY_RE.test(String(t)));
+  return answers && inboundNamesSpecifics(inboundText);
 }
 function copiesAmbiguousFamily(copied, snapshot) {
   const counts = snapshot?.family_counts && typeof snapshot.family_counts === 'object' ? snapshot.family_counts : {};

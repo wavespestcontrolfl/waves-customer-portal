@@ -398,8 +398,9 @@ async function zellePayerOwnership(inv, dbh) {
   return require('../services/invoice-payer-ownership').invoicePayerOwnership(inv, dbh);
 }
 
-// null when the freshly read invoice still passes every DB-side Zelle condition with no caller overrides; otherwise the withholding reason.
-// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row> }.
+// { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row>, projectedCredit }. Order: the fresh row, its DB-side
+// predicate (no caller overrides), the live payer, the projected (partial) credit, and LAST the active-collection guards (Codex round-69
+// P0: no read follows them).
 async function zelleFinalPass(inv, { dbh, readOnly }) {
   let fresh;
   try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return { reason: 'eligibility_unverifiable' }; }
@@ -414,13 +415,14 @@ async function zelleFinalPass(inv, { dbh, readOnly }) {
   } catch { return { reason: 'eligibility_unverifiable' }; }
   const owned = await zellePayerOwnership(fresh, dbh);
   if (owned) return { reason: owned };
-  // Codex round-68 P0: the active-collection guards close the pass - a saved-card charge claim (read-only: this pass never releases or
-  // promotes anything) and the attached PaymentIntent's live Stripe state, re-read after every other check
+  let projectedCredit;
+  try { projectedCredit = await invoiceProjectedCreditApplied(fresh, { database: dbh }); } catch { return { reason: 'credit_unverifiable' }; }
+  // a saved-card charge claim (read-only: this pass never releases or promotes anything) and the attached PaymentIntent's live state
   try {
     if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };
     if (await withTimeout(zelleDeniedByPaymentIntent(fresh), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
   } catch { return { reason: 'eligibility_unverifiable' }; }
-  return { reason: null, invoice: fresh };
+  return { reason: null, invoice: fresh, projectedCredit };
 }
 
 const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
@@ -490,24 +492,16 @@ async function payPageZelleVisibility({
     return { visible: false, reason: 'eligibility_unverifiable' };
   }
   if (!eligible) return { visible: false, reason: 'not_eligible' };
-  // Finding 4: any positive projected account credit (invoiceProjectedCreditApplied
-  // — partial coverage only; a credit that would fully cover already denied
-  // above via creditCovers) withholds Zelle, matching PayPageV2.jsx's own
-  // `creditPending && !stripeSetup` rule at the one instant this function can
-  // answer for (before any /setup call exists to resolve the post-credit
-  // amount).
   // ONE FINAL FULL PASS (owner ruling 2026-10-02, after Codex rounds 63-66 named one field at a time): after the credit / reconciliation /
-  // Stripe awaits, the invoice row is read again and the whole DB part of the predicate reruns on it with NO caller overrides - status /
-  // PaymentIntent / amount unchanged, collectible, not withdrawn, saved-method requirement, credit coverage, payer + siblings, live payer.
-  // A change after this final read is the accepted residual window. A failed read fails closed.
-  const final = await zelleFinalPass(inv, { dbh, readOnly });
+  // Stripe awaits, the invoice row is read again and the whole predicate reruns on it with NO caller overrides (zelleFinalPass), ending
+  // with the active-collection guards. A change after that is the accepted residual window. A failed read fails closed.
+  return finalZelleVerdict(await zelleFinalPass(inv, { dbh, readOnly }));
+}
+// Finding 4 / Codex round-13: any positive projected (partial) credit withholds Zelle (PayPageV2.jsx's `creditPending && !stripeSetup`),
+// and rides the verdict so GET /:token reuses it. Codex round-68 P0: one that covers the WHOLE invoice is full coverage, never pending.
+function finalZelleVerdict(final) {
   if (final.reason) return { visible: false, reason: final.reason };
-  // The projected (partial) credit is read LAST, from the fresh row (Codex round-67 P1: never a value read before the final pass).
-  // projectedCredit rides the verdict so GET /:token reuses it instead of another credit read (Codex round-13 P1).
-  let projectedCredit;
-  try { projectedCredit = await invoiceProjectedCreditApplied(final.invoice, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
-  // Codex round-68 P0: a credit that grew to cover the WHOLE invoice since the final pass's coverage check is full coverage, never
-  // "pending" (the GET exposes the transfer details only for a partial credit)
+  const { projectedCredit } = final;
   if (projectedCredit > 0 && projectedCredit >= invoiceAmountDue(final.invoice)) return { visible: false, reason: 'credit_covers' };
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
   return { visible: true, reason: null, projectedCredit };

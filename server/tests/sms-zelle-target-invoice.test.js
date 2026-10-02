@@ -522,3 +522,11 @@ test('one modeled open invoice + an unmodeled one: unreferenced => unresolved; a
   expect(resolveZelleTargetInvoice(both, 'Can I Zelle invoice WPC-2026-0202?').invoiceId).toBe('inv-2');
   expect(resolveZelleTargetInvoice(both, 'Can I Zelle the $120 invoice?').invoiceId).toBe('inv-2');
 });
+
+// Codex round-69 P2: worded amounts identify (or contradict) the Zelle target too
+test('"100 dollars" for an invoice contradicts the lone $120 open invoice; a matching worded amount selects it', () => {
+  const only = billing([MIDDLE]); // WPC-2026-0202, $120
+  expect(resolveZelleTargetInvoice(only, 'Can I Zelle 100 dollars for my invoice?')).toEqual({ invoiceId: null, reason: 'named_amount_differs' });
+  expect(resolveZelleTargetInvoice(only, 'Can I Zelle 120 dollars for my invoice?').invoiceId).toBe('inv-2');
+});
+
