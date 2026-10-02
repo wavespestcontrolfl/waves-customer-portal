@@ -129,9 +129,18 @@ async function releaseOne(row, now) {
   const settled = !dead && (['paid', 'prepaid'].includes(invStatus)
     || (invStatus === 'processing' && String(invoice.payment_method || '') === 'us_bank_account'));
   if (dead) {
-    // The year is dead, so nothing is held any more: any performed visit of
-    // the plan is work done while it was pending, for the office to bill.
-    const visit = invoice ? (await performedVisitCandidates(row.id, invoice.customer_id))[0] || null : null;
+    // The year is dead, so nothing is held any more: a performed visit the
+    // year HELD is work done while it was pending, for the office to bill. A
+    // callback, a visit past the sold count or a price-drifted visit was
+    // never held — it billed on its own (Codex r8).
+    let visit = null;
+    if (invoice) {
+      const deadTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('*');
+      if (deadTerm) {
+        const held = await require('./annual-prepay-renewals').pafDeferredHeldVisitIds(deadTerm, db);
+        visit = (await performedVisitCandidates(row.id, invoice.customer_id)).find((v) => held.has(String(v.id))) || null;
+      }
+    }
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
     const moved = await patchJob(row.id, {
       // Work already done was held, not billed: it must reach the office.
@@ -458,10 +467,35 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
     const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
     if (!(await pafDeferredPrepayCoversVisit(svc, conn, { throwOnError: true }))) return null;
+    // First visit only: another held visit already performed (two visits done
+    // before a release pass) already carried the announcement.
+    for (const other of await performedVisitCandidates(estimateId, svc.customer_id)) {
+      if (String(other.id) === String(svc.id)) continue;
+      if (await pafDeferredPrepayCoversVisit(other, conn, { throwOnError: true })) return null;
+    }
+    // "Being charged now" only when the sweep's automatic charge will really
+    // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
+    // it on the pay link, Auto Pay was not turned off or paused since the
+    // approval, and no collections hold stops off-session charges. Otherwise
+    // the regular text — the customer hears about the pay link separately.
+    if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
+    if (job.authentication_required === true || job.charge_returned === true) return null;
     const method = job.payment_method_row_id
-      ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('method_type')
-      : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('method_type');
-    const bank = ['us_bank_account', 'ach'].includes(String(method?.method_type || ''));
+      ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('customer_id', 'stripe_payment_method_id', 'method_type')
+      : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('customer_id', 'stripe_payment_method_id', 'method_type');
+    if (!method || String(method.customer_id) !== String(svc.customer_id)) return null;
+    if (job.stripe_payment_method_id && method.stripe_payment_method_id !== job.stripe_payment_method_id) return null;
+    const customer = await conn('customers').where({ id: svc.customer_id }).first('autopay_paused_until', 'deleted_at');
+    if (!customer || customer.deleted_at) return null;
+    if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) > new Date()) return null;
+    const authorizedAt = job.authorized_at || job.created_at;
+    const optedOut = await conn('autopay_log')
+      .where({ customer_id: svc.customer_id, event_type: 'autopay_disabled' })
+      .modify((q) => { if (authorizedAt) q.where('created_at', '>', new Date(authorizedAt)); })
+      .first('id');
+    if (optedOut) return null;
+    if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(svc.customer_id, conn)) return null;
+    const bank = ['us_bank_account', 'ach'].includes(String(method.method_type || ''));
     // The acknowledged total is a CEILING (owner R1): account credit the
     // charge will draw lowers it. Credit that covers the year means nothing
     // is charged, so the regular "nothing due today" text is the true one;

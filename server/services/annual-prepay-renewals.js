@@ -4179,6 +4179,19 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
   }
 }
 
+// The visits a deferred year HOLDS, read from its term whatever the term's
+// status now: the same sold selection and price-drift hold as
+// pafDeferredPrepayCoversVisit, without the live-year checks. For a year that
+// died unpaid, so only work it actually held goes to the office (callbacks,
+// visits past the sold count and price-drifted visits billed on their own).
+async function pafDeferredHeldVisitIds(term, conn = db) {
+  const sold = await coverageRowsForTerm(term, conn, { projectFirstActivationOn: etDateString() });
+  const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
+    includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
+  });
+  return new Set(sold.map((row) => String(row.id)).filter((id) => !heldIds.has(id)));
+}
+
 // The coverage verdict a billing PREDICTION (closeout status, appointment
 // sheet, card-expiry exemptions) passes as annualCoverageValidated: a stamped
 // visit is validated strictly against its term; an unstamped visit held by a
@@ -10977,6 +10990,7 @@ module.exports = {
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   pafDeferredPrepayCoversVisit,
+  pafDeferredHeldVisitIds,
   annualCoverageVerdictForPrediction,
   deferredPrepayHoldCustomerIds,
   PAF_PREPAY_HOLD_STATUSES,
