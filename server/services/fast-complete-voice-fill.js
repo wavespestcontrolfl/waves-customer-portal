@@ -98,14 +98,26 @@ const DRY_FORMULATION_RE = /\b(granul\w*|dust|bait|briquet|block|cartridge|pelle
 const LIQUID_FORMULATION_RE = /\b(sc|ec|ew|cs|me|mec|sl|se|aq|flowable|liquid|concentrate|suspension|emulsion|microemulsion|emulsifiable)\b/i;
 const DRY_NAME_RE = /\b(granul\w*|dust|baits?|blox|pellets?|wsg|wdg|wg|wp|df|sg)\b/i;
 
+// Ordered rules, the sheet's productDimension() order: [product fields read as one
+// text, matcher returning a measure or null]. The first measure wins; no rule
+// matching is a liquid.
+const regexRule = (re, measure) => (text) => (re.test(text) ? measure : null);
+const MEASURE_RULES = [
+  [['name', 'category', 'formulation'], regexRule(GEL_RE, 'weight')],
+  [['inventory_unit'], unitMeasure],
+  [['default_unit'], unitMeasure],
+  [['rate_unit'], unitMeasure],
+  [['formulation'], regexRule(DRY_FORMULATION_RE, 'weight')],
+  [['formulation'], regexRule(LIQUID_FORMULATION_RE, 'liquid')],
+  [['name', 'category'], regexRule(DRY_NAME_RE, 'weight')],
+];
+
 function productMeasure(product) {
-  if (GEL_RE.test(`${product?.name || ''} ${product?.category || ''} ${product?.formulation || ''}`)) return 'weight';
-  const fromUnits = unitMeasure(product?.inventory_unit) || unitMeasure(product?.default_unit) || unitMeasure(product?.rate_unit);
-  if (fromUnits) return fromUnits;
-  const formulation = String(product?.formulation || '');
-  if (DRY_FORMULATION_RE.test(formulation)) return 'weight';
-  if (LIQUID_FORMULATION_RE.test(formulation)) return 'liquid';
-  return DRY_NAME_RE.test(`${product?.name || ''} ${product?.category || ''}`) ? 'weight' : 'liquid';
+  for (const [fields, matcher] of MEASURE_RULES) {
+    const measure = matcher(fields.map((field) => product?.[field] || '').join(' '));
+    if (measure) return measure;
+  }
+  return 'liquid';
 }
 
 const UNIT_ALIASES = Object.freeze({
@@ -351,6 +363,43 @@ function sentenceOf(transcript, heard) {
   return String(transcript || '').split(/(?<=[.!?])\s+/).find((sentence) => ` ${norm(sentence)} `.includes(` ${first} `)) || '';
 }
 
+// A spoken number as the schema carries it: 0 / '' / missing is "not spoken"
+// (nothing to flag); otherwise { value } when it is positive, finite and was
+// said in `heard`, or { reason } for the one thing wrong with it.
+function spokenNumber(raw, heard) {
+  if (raw === 0 || raw === '' || raw == null) return {};
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return { reason: 'amount_invalid' };
+  return amountSpoken(heard, value) ? { value } : { reason: 'amount_not_spoken' };
+}
+
+// Why a product row cannot be applied at all, as { reason, text } (the words the
+// Check chip shows), or null. Checked in order; the first refusal wins.
+function productRefusal(raw, product, heard, normTranscript, seen) {
+  if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
+  if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
+  return seen.has(product.id) ? { reason: 'duplicate_product', text: heard } : null;
+}
+
+// The amount and unit that survive the checks: a spoken number in a unit the
+// sheet offers for this product, else none (and a Check for what was wrong).
+function productAmount(raw, product, heard, unclear) {
+  const spoken = spokenNumber(raw.amount, heard);
+  if (spoken.reason) pushUnclear(unclear, heard, spoken.reason);
+  if (spoken.value === undefined) return { amount: null, unit: '' };
+  const unit = sheetUnit(raw.unit, product.measure);
+  if (!unit) pushUnclear(unclear, heard, 'bad_unit');
+  return unit ? { amount: spoken.value, unit } : { amount: null, unit: '' };
+}
+
+function productSameAsLast(raw, amount, heard, transcript, unclear) {
+  // a spoken number wins over the flag
+  if (raw.sameAsLast !== true || amount !== null) return false;
+  if (SAME_AS_LAST_RE.test(heard) || SAME_AS_LAST_RE.test(sentenceOf(transcript, heard))) return true;
+  pushUnclear(unclear, heard, 'same_as_last_not_heard');
+  return false;
+}
+
 function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript = '') {
   const byId = new Map(ctx.products.map((p) => [p.id, p]));
   const seen = new Set();
@@ -359,95 +408,71 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = cleanText(raw.heard, CAPS.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    if (!product) {
-      pushUnclear(unclear, heard || raw.productId, 'not_on_sheet');
-      continue;
-    }
-    if (!heardInTranscript(heard, normTranscript)) {
-      pushUnclear(unclear, heard || product.name, 'not_heard');
-      continue;
-    }
-    if (seen.has(product.id)) {
-      pushUnclear(unclear, heard, 'duplicate_product');
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen);
+    if (refusal) {
+      pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
     }
     seen.add(product.id);
-
-    let amount = null;
-    let unit = '';
-    const rawAmount = typeof raw.amount === 'number' ? raw.amount : Number(raw.amount);
-    if (raw.amount === 0 || raw.amount === '' || raw.amount == null) {
-      // 0 is the schema's "no number spoken": nothing to drop or flag.
-    } else if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
-      pushUnclear(unclear, heard, 'amount_invalid');
-    } else if (!amountSpoken(heard, rawAmount)) {
-      pushUnclear(unclear, heard, 'amount_not_spoken');
-    } else {
-      const sheetUnitValue = sheetUnit(raw.unit, product.measure);
-      if (sheetUnitValue) {
-        amount = rawAmount;
-        unit = sheetUnitValue;
-      } else {
-        pushUnclear(unclear, heard, 'bad_unit');
-      }
-    }
-
-    let sameAsLast = raw.sameAsLast === true;
-    if (sameAsLast && amount !== null) sameAsLast = false; // a spoken number wins
-    if (sameAsLast && !SAME_AS_LAST_RE.test(heard) && !SAME_AS_LAST_RE.test(sentenceOf(transcript, heard))) {
-      sameAsLast = false;
-      pushUnclear(unclear, heard, 'same_as_last_not_heard');
-    }
+    const { amount, unit } = productAmount(raw, product, heard, unclear);
+    const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear);
     const method = ctx.productMethods.includes(raw.method) ? raw.method : '';
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
   }
-  if (out.length > CAPS.products) {
-    for (const dropped of out.splice(CAPS.products)) pushUnclear(unclear, dropped.heard, 'too_many_products');
-  }
+  for (const dropped of out.splice(CAPS.products)) pushUnclear(unclear, dropped.heard, 'too_many_products');
   return out;
 }
+
+// Per-field rules for the visit: which sheet list each field must come from and
+// whether it is a list (deduplicated, off-list values flagged, capped) or a
+// single pick (off-list becomes empty).
+const VISIT_FIELD_RULES = [
+  { key: 'pests', allowed: 'pests', cap: CAPS.pests },
+  { key: 'areas', allowed: 'areas', cap: CAPS.areas },
+  { key: 'method', allowed: 'visitMethods' },
+  { key: 'activity', allowed: 'activity' },
+];
+
+function pickVisitField(value, allowed, dropped, isList) {
+  if (!isList) return allowed.includes(value) ? value : '';
+  const picked = [];
+  for (const item of Array.isArray(value) ? value : []) {
+    if (!allowed.includes(item)) dropped.push(item);
+    else if (!picked.includes(item)) picked.push(item);
+  }
+  return picked;
+}
+
+// pests / areas / method / activity / otherPest, checked against the sheet's lists.
+function pickVisitFields(visit, ctx, heard, unclear) {
+  const dropped = [];
+  const picked = {};
+  for (const rule of VISIT_FIELD_RULES) picked[rule.key] = pickVisitField(visit[rule.key], ctx[rule.allowed], dropped, rule.cap !== undefined);
+  for (const value of dropped) pushUnclear(unclear, heard || value, 'not_on_sheet');
+  const hadOther = picked.pests.includes('Other');
+  const otherPest = hadOther ? cleanText(visit.otherPest, CAPS.otherPest) : '';
+  if (hadOther && !otherPest) {
+    // "Other" with no name would leave the sheet asking "Name the other pest.".
+    picked.pests.splice(picked.pests.indexOf('Other'), 1);
+    pushUnclear(unclear, heard, 'other_pest_unnamed');
+  }
+  return { ...picked, otherPest };
+}
+
+const EMPTY_VISIT = Object.freeze({ pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' });
 
 function validateVisit(rawVisit, ctx, normTranscript, unclear) {
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
   const heard = cleanText(visit.heard, CAPS.heard);
-  const pests = [];
-  const dropped = [];
-  for (const pest of Array.isArray(visit.pests) ? visit.pests : []) {
-    if (!ctx.pests.includes(pest)) dropped.push(pest);
-    else if (!pests.includes(pest)) pests.push(pest);
-  }
-  const areas = [];
-  for (const area of Array.isArray(visit.areas) ? visit.areas : []) {
-    if (!ctx.areas.includes(area)) dropped.push(area);
-    else if (!areas.includes(area)) areas.push(area);
-  }
-  for (const value of dropped) pushUnclear(unclear, heard || value, 'not_on_sheet');
-  let otherPest = cleanText(visit.otherPest, CAPS.otherPest);
-  const otherIdx = pests.indexOf('Other');
-  if (otherIdx >= 0 && !otherPest) {
-    // "Other" with no name would leave the sheet asking "Name the other pest.".
-    pests.splice(otherIdx, 1);
-    pushUnclear(unclear, heard, 'other_pest_unnamed');
-  }
-  if (otherIdx < 0) otherPest = '';
-  const method = ctx.visitMethods.includes(visit.method) ? visit.method : '';
-  const activity = ctx.activity.includes(visit.activity) ? visit.activity : '';
-  let linearFt = null;
-  const rawFeet = Number(visit.linearFt);
-  if (visit.linearFt === 0 || visit.linearFt == null || visit.linearFt === '') {
-    // not spoken
-  } else if (!Number.isFinite(rawFeet) || rawFeet <= 0) {
-    pushUnclear(unclear, heard, 'amount_invalid');
-  } else if (!(digitValues(heard).some((value) => Math.abs(value - rawFeet) < 1e-6) || NUMBER_WORD_RE.test(heard))) {
-    pushUnclear(unclear, heard, 'amount_not_spoken');
-  } else {
-    linearFt = rawFeet;
-  }
+  const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear);
+  const feet = spokenNumber(visit.linearFt, heard);
+  if (feet.reason) pushUnclear(unclear, heard, feet.reason);
+  const linearFt = feet.value ?? null;
   const anyFilled = pests.length || areas.length || method || activity || linearFt !== null;
   if (anyFilled && !heardInTranscript(heard, normTranscript)) {
     // Nothing on the visit is applied without words that were really said.
     pushUnclear(unclear, heard || 'visit details', 'not_heard');
-    return { pests: [], otherPest: '', areas: [], method: '', linearFt: null, activity: '', heard: '' };
+    return { ...EMPTY_VISIT, pests: [], areas: [] };
   }
   return {
     pests: pests.slice(0, CAPS.pests),
