@@ -8965,6 +8965,8 @@ const InvoiceService = {
     sort = "newest",
     // Optional connection (a read-only snapshot transaction a reader holds); defaults to the pool.
     database = db,
+    // Optional: end the ordering with invoices.id so tied rows page deterministically (default off).
+    stableOrder = false,
   } = {}) {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
@@ -9136,6 +9138,7 @@ const InvoiceService = {
         .orderBy("invoices.created_at", "desc");
     }
 
+    if (stableOrder) query.orderBy("invoices.id", "asc");
     const invoices = await query.limit(safeLimit).offset(safeOffset);
     const [{ count }] = await applyFilters(
       database("invoices").leftJoin(

@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N; let T; let R2; let TIED;
   const inv = {};
   const tokens = [];
 
@@ -79,7 +79,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('voided', A, { total: 77, status: 'void' });
     await invoice('processing', A, { total: 55, status: 'processing', payment_method: 'us_bank_account' });
     // Ordinary collectible invoices.
-    const credited = await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15) });
+    const credited = await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15), service_date: day(-2) });
     await db('payment_plans').insert({ customer_id: A, invoice_id: credited.id, total_balance: 100, payment_amount: 25, payment_frequency: 'weekly', plan_start_date: day(0), next_payment_date: day(7) });
     await invoice('draft', A, { total: 40, status: 'draft', due_date: null });
     await invoice('archived', A, { total: 33, archived_at: new Date() });
@@ -166,6 +166,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('payments').insert({ customer_id: R2, payment_date: day(-9), amount: 15, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`, description: 'Own payment', metadata: json({ invoice_id: flood.id }), created_at: new Date(Date.now() - 86400e3) });
     await db.batchInsert('payments', Array.from({ length: 55 }, (_, n) => ({ customer_id: R2, payment_date: day(-1), amount: 1, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`,
       description: `Sibling share ${n}`, metadata: json({ invoice_id: uid() }) })), 55);
+    // Invoices with identical dates and created_at (one transaction): tied rows must page deterministically.
+    TIED = await customer(`Tied${run}`, `Rows${run}`);
+    const tiedAt = new Date(Date.now() - 3 * 86400e3);
+    for (let n = 0; n < 5; n += 1) await invoice(`tied${n}`, TIED, { total: 10 + n, service_date: day(-3), created_at: tiedAt, due_date: day(5) });
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -564,6 +568,36 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.recorded_payments[0].funded_by_payer.name).toContain('[email]');
     expect(detail.payment_plan.active).toBeNull();
     expect(detail.payment_plan.history[0].payment_frequency).toContain('[email]');
+  });
+
+  test('an email whose local part is a UUID is masked whole, while a standalone UUID stays', async () => {
+    const Q = await customer(`Uuid${run}`, `Email${run}`);
+    await invoice('q_uuid_email', Q, { total: 5, title: 'Sent to 123e4567-e89b-12d3-a456-426614174000@example.com for id 123e4567-e89b-12d3-a456-426614174001 ok' });
+    const text = json(await read('get_customer_invoices', { customer_id: Q }));
+    expect(text).not.toMatch(/@|example\.com|426614174000/);
+    expect(text).toContain('Sent to [email] for id 123e4567-e89b-12d3-a456-426614174001 ok');
+  });
+
+  test('DATE columns round-trip to the same YYYY-MM-DD whatever the process time zone (the canonical datetime-et reader)', async () => {
+    const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
+    expect(by(list, 'credited')).toMatchObject({ due_date: inv.credited.due_date, service_date: inv.credited.service_date });
+    expect(by(list, 'credited').payment_plan).toMatchObject({ next_payment_date: day(7) });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+    expect(detail.invoice).toMatchObject({ due_date: inv.credited.due_date, service_date: inv.credited.service_date });
+    expect(detail.payment_plan.active).toMatchObject({ plan_start_date: day(0), next_payment_date: day(7) });
+    const prepay = await read('get_invoice_detail', { invoice_id: inv.t_prepay.id });
+    expect(prepay.annual_prepay).toMatchObject({ term_start: day(-30), term_end: day(335) });
+    expect(prepay.recorded_payments).toBeDefined();
+  });
+
+  test('invoices tied on every sort key page deterministically: no duplicate, no skip, id order', async () => {
+    const expected = (await db('invoices').where({ customer_id: TIED }).orderBy('id', 'asc').pluck('id'));
+    const seen = [];
+    for (let offset = 0; offset < 6; offset += 2) {
+      const page = await read('get_customer_invoices', { customer_id: TIED, limit: 2, offset });
+      seen.push(...page.invoices.map((i) => i.id));
+    }
+    expect(seen).toEqual(expected);
   });
 
   test('egress keeps digit-heavy record ids intact, so a listed id works in the follow-up read', async () => {

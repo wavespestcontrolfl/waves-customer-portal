@@ -43,7 +43,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
 const { invoiceAmountDue, assertInvoiceCollectible, invoiceWithdrawnFromCustomer } = require('../invoice-helpers');
 
 const DEFAULT_LIMIT = 20;
@@ -132,8 +132,9 @@ function maskCardNumbers(text) {
 }
 // Emails and card numbers are masked; record ids (UUIDs) pass through untouched, so a digit-heavy id still works in
 // the follow-up read, and the text around them is masked.
-const maskSensitive = (text) => String(text).split(UUID_IN_TEXT_RE)
-  .map((part, at) => (at % 2 ? part : maskCardNumbers(part.replace(EMAIL_RE, '[email]'))))
+// Complete emails are masked FIRST (an address may have a UUID local part), then standalone UUIDs are exempted.
+const maskSensitive = (text) => String(text).replace(EMAIL_RE, '[email]').split(UUID_IN_TEXT_RE)
+  .map((part, at) => (at % 2 ? part : maskCardNumbers(part)))
   .join('');
 // Free text (a decline message, a manual-payment note, a ledger note) can echo
 // an email or a card number: both are masked before anything leaves.
@@ -162,14 +163,10 @@ function iso(value) {
 // DATE columns come back as local-midnight Date objects (or strings).
 function dateOnly(value) {
   if (!value) return null;
-  if (typeof value === 'string') {
-    const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
-    return match ? match[1] : null;
-  }
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return [value.getFullYear(), String(value.getMonth() + 1).padStart(2, '0'), String(value.getDate()).padStart(2, '0')].join('-');
-  }
-  return null;
+  if (value instanceof Date && Number.isNaN(value.getTime())) return null;
+  // The canonical reader of a DATE column (datetime-et.js): a 'YYYY-MM-DD' string or a Date a pg DATE came back as is
+  // read as its calendar day, never shifted by the process time zone.
+  try { return etCalendarDayOf(value); } catch { return null; }
 }
 
 const phoneLast4 = (phone) => String(phone || '').replace(/\D/g, '').slice(-4) || null;
@@ -504,7 +501,7 @@ async function listAllInvoices(InvoiceService, params, { stopAbove = Infinity, d
   const rows = [];
   let total = 0;
   for (let page = 0; page < SUMMARY_MAX_PAGES; page += 1) {
-    const result = await InvoiceService.list({ ...params, database, limit: SUMMARY_PAGE, offset: page * SUMMARY_PAGE });
+    const result = await InvoiceService.list({ ...params, database, stableOrder: true, limit: SUMMARY_PAGE, offset: page * SUMMARY_PAGE });
     total = result.total;
     rows.push(...result.invoices);
     // Provably more rows than the caller can use: stop now (each page costs a joined query plus a count).
@@ -655,7 +652,7 @@ async function listForCustomer(customer, input, database) {
   const includeArchived = input.include_archived === true;
 
   const page = await InvoiceService.list({
-    customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest', database,
+    customerId: customer.id, status: statusFilter, limit, offset, archived: includeArchived ? 'all' : 'hide', sort: 'newest', database, stableOrder: true,
   });
   await attachTermSidePrepay(page.invoices, database);
   const summary = await accountSummary(InvoiceService, customer, today, database);
