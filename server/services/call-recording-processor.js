@@ -18806,7 +18806,8 @@ const CallRecordingProcessor = {
                       visit_id: svc.id,
                     }).onConflict(['customer_id', 'phone_key']).merge({
                       status: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END"),
-                      visit_id: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
+                      // A pending ask mid-dispatch (live lease) keeps its visit.
+                      visit_id: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' OR (recipient_optin.status = 'pending' AND (recipient_optin.dispatch_lease_at IS NULL OR recipient_optin.dispatch_lease_at < now() - interval '10 minutes')) THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
                       // Only a FAILED ask restarts as undispatched; a pending ask
                       // that already went out keeps its marker (never re-sent).
                       dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),

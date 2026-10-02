@@ -377,11 +377,12 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
         where: jest.fn((f) => { if (typeof f === 'function') f(q); else Object.assign(ctx.filter, f); return q; }),
         whereNull: jest.fn((c) => { ctx.nulls.push(c); return q; }),
         whereNotNull: jest.fn(() => q),
+        orWhere: jest.fn(() => q),
         first: jest.fn(async () => (table === 'scheduled_services' && visitState !== 'dead' ? { id: 'v1' } : null)),
         update: jest.fn(async (patch) => {
           writes.push({ table, filter: { ...ctx.filter }, nulls: [...ctx.nulls], patch });
-          // The lease CAS (dispatched_at set while still null) answers leaseCount.
-          if ('dispatched_at' in patch && patch.dispatched_at instanceof Date && ctx.nulls.includes('dispatched_at') && !patch.provider_sid) return leaseCount;
+          // The lease CAS (dispatch_lease_at taken while undispatched) answers leaseCount.
+          if (patch.dispatch_lease_at instanceof Date && ctx.nulls.includes('dispatched_at')) return leaseCount;
           return 1;
         }),
         insert: jest.fn(async (row) => { writes.push({ table, insert: row }); return [1]; }),
@@ -407,10 +408,14 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     const { requested } = await optin.dispatchRecipientOptins([claim], { id: 'c1' });
     expect(requested).toBe(1);
     expect(send).toHaveBeenCalledTimes(1);
-    const lease = writes.find((w) => w.patch && w.nulls.includes('dispatched_at'));
+    const lease = writes.find((w) => w.patch && w.patch.dispatch_lease_at instanceof Date);
+    // The lease is not proof of dispatch: dispatched_at is set only after the send.
+    expect(lease.patch).not.toHaveProperty('dispatched_at');
     expect(lease.filter).toMatchObject({ phone_key: '9415550123', customer_id: 'c1', status: 'pending', visit_id: 'v1' });
     const done = writes.find((w) => w.patch && w.patch.provider_sid === 'SM1');
-    expect(done.filter).toMatchObject({ visit_id: 'v1' });
+    expect(done.filter).toMatchObject({ visit_id: 'v1', dispatch_lease_at: lease.patch.dispatch_lease_at });
+    expect(done.patch.dispatched_at).toBeInstanceOf(Date);
+    expect(done.patch.dispatch_lease_at).toBeNull();
   });
 
   test('no lease (a newer booking owns the row) = nothing sent', async () => {
@@ -423,7 +428,7 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     const { optin, writes } = load({ sendResult: { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: new Date().toISOString() } });
     expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
     expect(writes.some((w) => w.table === 'sms_log' && w.insert)).toBe(false);
-    const returned = writes.filter((w) => w.patch && w.patch.dispatched_at === null);
+    const returned = writes.filter((w) => w.patch && w.patch.dispatch_lease_at === null);
     expect(returned.length).toBe(1);
     expect(returned[0].patch).not.toHaveProperty('status');
   });
@@ -432,7 +437,7 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     const { optin, writes, send } = load({ visitState: 'wait' });
     await optin.dispatchRecipientOptins([claim], { id: 'c1' });
     expect(send).not.toHaveBeenCalled();
-    expect(writes.some((w) => w.patch && w.patch.dispatched_at === null && !w.patch.status)).toBe(true);
+    expect(writes.some((w) => w.patch && w.patch.dispatch_lease_at === null && !w.patch.status)).toBe(true);
   });
 });
 
