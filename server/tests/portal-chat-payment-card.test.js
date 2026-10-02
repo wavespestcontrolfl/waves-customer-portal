@@ -56,7 +56,9 @@ test('renders the Billing tab rows as a card, adds Open Billing, and tells the m
 });
 
 test('a scheduled Auto Pay row is labeled Scheduled and never hides the card', async () => {
-  listPortalPayments.mockResolvedValue({ payments: [{ id: 'up', date: '2026-10-28', amount: 129, status: 'upcoming', description: 'Silver WaveGuard Monthly', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }, PAYMENTS[0]] });
+  // A date always in the future, so the fixture never ages into Processing.
+  const nextMonth = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  listPortalPayments.mockResolvedValue({ payments: [{ id: 'up', date: nextMonth, amount: 129, status: 'upcoming', description: 'Silver WaveGuard Monthly', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }, PAYMENTS[0]] });
   const cards = [];
   const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
   expect(result.shown).toBe(true);
