@@ -595,6 +595,11 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
       notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
       expect(Date.now() - started).toBeLessThan(1500); // ~200 ms in Jest; the quadratic scan this guards took 3.5–5 s
     }
+    for (const html of [`<h1>${'<'.repeat(80000)}</h1>`, `<title>${'<a'.repeat(100000)}</title>`, `<svg>${'<svg/>'.repeat(60000)}`]) {
+      const t0 = Date.now();
+      notFoundHeading(html);
+      expect(Date.now() - t0).toBeLessThan(1500);
+    }
     // deep nesting, then the matching closes (the exhausted-search case)
     const started = Date.now();
     notFoundHeading(`${'<template>'.repeat(30000)}${'</template>'.repeat(30000)}`);
@@ -616,6 +621,10 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<textarea><h1>Page not found</h1></textarea><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><textarea></template><h1>Not found</h1></textarea></template><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<iframe src="x"></iframe><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<title>Waves</title><svg><symbol><title>Not found</title></symbol></svg><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<svg><svg><title>x</title></svg><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<svg class="i"/><h1>Page not found</h1>')).toBe(true); // a self-closing svg is empty
+    expect(notFoundHeading('<math><title>Not found</title></math><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
     expect(notFoundHeading('<script>x</script\t><h1>Page not found</h1>')).toBe(true);

@@ -162,9 +162,14 @@ const HEADING_TAGS = new Set(['title', 'h1']);
 // Raw-text and RCDATA elements: the parser builds no elements inside them, so an <h1> written
 // in a script, iframe fallback or textarea is text, never a heading.
 const RAW_TEXT_TAGS = ['script', 'style', 'iframe', 'textarea', 'xmp', 'noembed', 'noframes'];
-const INERT_TAGS = new Set(['!--', 'template', ...RAW_TEXT_TAGS]);
+// Templates never render; SVG and MathML are foreign content, where <title> is an icon's
+// accessible name, not the document's. Each nests, so it ends at its matching close.
+const NESTING_INERT_TAGS = ['template', 'svg', 'math'];
+const INERT_TAGS = new Set(['!--', ...NESTING_INERT_TAGS, ...RAW_TEXT_TAGS]);
 const TAG_RE = /<(\/?)(!--|[a-z][a-z0-9-]*)/y;
-const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+// Inert regions are already cut out of `inner`, so only tags remain to strip. `[^<>]*` cannot run
+// past the next '<', so stray '<' characters keep this linear (visibleText's /<[^>]+>/ is not).
+const headingText = (inner) => decodeHTML(inner.replace(/<[^<>]*>/g, ' ')).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // indexOf that never searches the same stretch twice: each needle's last hit (Infinity once it
 // is exhausted) is reused until the caller moves past it, so a whole scan stays linear.
@@ -180,10 +185,11 @@ function forwardFinder(lower) {
 }
 
 // Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
-// "-->", a raw-text element (script, style, iframe, textarea…) at its close, a template just past its matching close tag (they nest).
-// Comments and raw-text bodies inside a template are skipped whole, so a "</template>"
-// written in one never closes it. A tag name counts only when a delimiter follows it, as in the
-// HTML tokenizer: "</scripture>" inside a script string does not end the script.
+// "-->", a raw-text element (script, style, iframe, textarea…) at its close, a template, svg or
+// math element just past its matching close tag (they nest; a self-closing <svg/> is empty).
+// Comments and raw-text bodies inside one are skipped whole, so a "</template>" written in one
+// never closes it. A tag name counts only when a delimiter follows it, as in the HTML
+// tokenizer: "</scripture>" inside a script string does not end the script.
 const TAG_DELIM_RE = /[\s/>]/;
 const tagAt = (lower, find, needle, from) => {
   let at = find(needle, from);
@@ -192,21 +198,29 @@ const tagAt = (lower, find, needle, from) => {
   }
   return at;
 };
-const TEMPLATE_INNER = ['<template', '</template', '<!--', ...RAW_TEXT_TAGS.map((t) => `<${t}`)];
+const RAW_TEXT_OPENS = RAW_TEXT_TAGS.map((t) => `<${t}`);
+const selfClosing = (lower, gt) => gt !== Infinity && lower[gt - 1] === '/';
 function inertEnd(lower, find, name, lt, gt) {
   if (name === '!--') return find('-->', lt + 4) + 3;
-  if (name !== 'template') return tagAt(lower, find, `</${name}`, gt + 1);
+  if (!NESTING_INERT_TAGS.includes(name)) return tagAt(lower, find, `</${name}`, gt + 1);
+  if (name !== 'template' && selfClosing(lower, gt)) return gt + 1;
+  const open = `<${name}`;
+  const close = `</${name}`;
+  const needles = [open, close, '<!--', ...RAW_TEXT_OPENS];
   let depth = 1;
   let at = gt + 1;
   while (depth > 0 && at !== Infinity) {
     let needle = null;
     let hit = Infinity;
-    for (const n of TEMPLATE_INNER) {
+    for (const n of needles) {
       const h = n === '<!--' ? find(n, at) : tagAt(lower, find, n, at);
       if (h < hit) { hit = h; needle = n; }
     }
     if (hit === Infinity) return Infinity;
-    if (needle === '<template') { depth += 1; at = hit + needle.length; } else if (needle === '</template') { depth -= 1; at = hit + needle.length; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
+    if (needle === open) {
+      at = hit + needle.length;
+      if (name === 'template' || !selfClosing(lower, find('>', at))) depth += 1;
+    } else if (needle === close) { depth -= 1; at = hit + needle.length; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
     else at = tagAt(lower, find, `</${needle.slice(1)}`, hit + needle.length) + 1;
   }
   return at === Infinity ? at : find('>', at) + 1; // past the whole closing tag
