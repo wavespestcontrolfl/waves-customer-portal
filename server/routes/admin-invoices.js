@@ -2204,6 +2204,24 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           }
         }
 
+        // Annual rate review (GATE_RATE_REVIEW): this route can write a
+        // same-family successor term too, so it honours the noticed renewal
+        // amount like the Customer 360 renewal routes — checked under the
+        // customer's annual-prepay lock (taken above), with the candidate
+        // term rows locked against the nightly apply; a different amount
+        // needs acknowledgeNoticedAmount. Gate off = no read.
+        if (require('../config/feature-gates').rateReviewLive()) {
+          const RateReviewApply = require('../services/rate-review-apply');
+          // An edit of this invoice's own term with no start sent keeps that
+          // term's dates (createTermForAnnualPrepay preserves them) — judge
+          // the preserved start, never today.
+          const linkedTermForNotice = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('term_start');
+          const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true });
+          if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+        }
+
         return AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: termCustomerId,
           prepayInvoiceId: invoice.id,
@@ -2220,6 +2238,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
       throw err;
     }
     if (!term) {

@@ -330,15 +330,41 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         // by (customer, effective date, current → new amount), not by
         // batch_id — a re-run of the same confirmed change after a partial
         // failure must not re-notice customers who already got theirs.
-        const existing = await db('price_change_notices')
-          .where({
+        // The lookup and the insert run under the shared notice-event lock
+        // (lockNoticeEvent — the annual rate review's scheduler takes the
+        // same one), so the two workflows never both insert one event.
+        const event = { customerId: row.customerId, effectiveDate: effective, currentCents: row.currentCents, newCents: row.newCents };
+        const found = await db.transaction(async (trx) => {
+          await lockNoticeEvent(trx, event);
+          const existingRow = await trx('price_change_notices')
+            .where({
+              customer_id: row.customerId,
+              effective_date: effective,
+              current_amount_cents: row.currentCents,
+              new_amount_cents: row.newCents,
+            })
+            .orderBy('created_at', 'desc')
+            .first();
+          if (existingRow) return { existing: existingRow };
+          // onConflict on the event tuple (unique index) stays the belt. The
+          // legacy event key is a PARTIAL unique index since 20261001190000
+          // (rate-review notices key per plan line), so the conflict target
+          // names its predicate.
+          const inserted = await trx('price_change_notices').insert({
+            batch_id: batchId,
             customer_id: row.customerId,
-            effective_date: effective,
             current_amount_cents: row.currentCents,
             new_amount_cents: row.newCents,
-          })
-          .orderBy('created_at', 'desc')
-          .first();
+            cadence_label: cadence,
+            effective_date: effective,
+            notice_token: crypto.randomBytes(16).toString('hex'),
+            status: 'draft',
+            created_by: actorId || null,
+            metadata: JSON.stringify({ increase: inc, location_id: loc }),
+          }).onConflict(trx.raw('(customer_id, effective_date, current_amount_cents, new_amount_cents) WHERE rate_review_row_id IS NULL')).ignore().returning('*');
+          return { existing: null, inserted };
+        });
+        const existing = found.existing;
         // An annual rate review notice for the same tuple belongs to the
         // rate review's own sender (its letter, its frozen page): this batch
         // never claims or stamps it — the customer is already being noticed.
@@ -352,32 +378,15 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         }
 
         let notice = existing;
-        let token = existing ? existing.notice_token : null;
         if (!notice) {
-          token = crypto.randomBytes(16).toString('hex');
-          // onConflict on the event tuple (unique index): if a concurrent
-          // /send won the insert race between our lookup and here, we get
-          // nothing back — the winner is already sending, so skip rather
-          // than double-text the customer.
-          const inserted = await db('price_change_notices').insert({
-            batch_id: batchId,
-            customer_id: row.customerId,
-            current_amount_cents: row.currentCents,
-            new_amount_cents: row.newCents,
-            cadence_label: cadence,
-            effective_date: effective,
-            notice_token: token,
-            status: 'draft',
-            created_by: actorId || null,
-            metadata: JSON.stringify({ increase: inc, location_id: loc }),
-          }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning('*');
-          if (!inserted.length) {
+          if (!found.inserted.length) {
             summary.alreadyNotified += 1;
             return;
           }
-          notice = inserted[0];
+          notice = found.inserted[0];
           summary.created += 1;
         }
+        const token = notice.notice_token;
 
         // Atomically claim the row for this attempt (draft → sending): two
         // admins retrying the same change can both pass the lookup above,
@@ -470,8 +479,20 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   return { ok: summary.failed === 0, batchId, ...summary };
 }
 
+// The per-EVENT advisory lock (customer, effective date, current → new
+// amount) both notice writers take around their check-and-insert: this
+// module's createAndSendBatch and the annual rate review's scheduler
+// (rate-review-apply.js scheduleRow). Their unique indexes are disjoint
+// (20261001190000), so this lock is what keeps one event to one notice
+// across the two. Transaction-scoped; `conn` must be a transaction.
+const NOTICE_EVENT_LOCK_NS = 0x5043;
+async function lockNoticeEvent(conn, { customerId, effectiveDate, currentCents, newCents }) {
+  await conn.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [NOTICE_EVENT_LOCK_NS, `${customerId}|${effectiveDate}|${currentCents}|${newCents}`]);
+}
+
 module.exports = {
   previewPriceChange,
+  lockNoticeEvent,
   createAndSendBatch,
   formatMoney,
   MIN_NOTICE_DAYS,

@@ -97,10 +97,10 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { rateReviewLive, isEnabled } = require('../config/feature-gates');
-const { MIN_NOTICE_DAYS } = require('./price-change-notices');
+const { rateReviewLive, isEnabled, alertEpisodesLive } = require('../config/feature-gates');
+const { MIN_NOTICE_DAYS, lockNoticeEvent } = require('./price-change-notices');
 const PlanRateLedger = require('./plan-rate-ledger');
-const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   PLAN_LINE_SQL, LEDGER_FAMILIES_FOR_LINE, anniversaryInWindow, familyOfCoverage, matchPrepayTerm, visitsPerYearFor, lockBatch,
@@ -138,6 +138,7 @@ const HOLD_COPY = Object.freeze({
   visit_price_structure: 'An upcoming visit has a structured price this review cannot move, so nothing was changed.',
   visit_prepaid: 'An upcoming visit is prepaid, so the series was not repriced.',
   visit_in_reschedule: 'An upcoming visit is parked in a reschedule request, so the series was not repriced.',
+  visit_status_missing: 'An upcoming visit of this plan has no status on file, so the series was not repriced.',
   multiple_series: 'The plan line runs as more than one series, so it needs a hand reprice.',
   series_template_complex: 'The series template carries add-ons or discounts, so later visits would not spawn at the new price.',
   template_overlay_gate_off: 'Series price overrides are switched off, so later visits would spawn at the old price.',
@@ -153,13 +154,17 @@ const HOLD_COPY = Object.freeze({
   renewal_before_review_date: 'The prepaid term renews before this review date, so it is left for the next review.',
   renewal_notice_already_sent: 'The renewal reminder already went out for this term, so its amount stays as noticed.',
   term_not_live: 'The prepaid term is no longer live, so the renewal amount was not recorded.',
+  term_family_changed: 'The prepaid term now covers a different plan than the notice named, so nothing was changed.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
   billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
   renewal_in_progress: 'A renewal of this prepaid plan is being recorded right now, so the amount is retried tonight.',
   successor_already_created: 'The next prepaid term was already created, so the noticed amount was not written to the old one.',
+  renewal_window_changed: 'The prepaid term now renews on a different day than the notice named, so nothing was changed.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
+  row_owner_changed: 'The ranking row moved to another customer record, so no notice was created.',
+  rate_moved_since_ranking: 'The rate on file changed since the ranking was approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
 
@@ -248,7 +253,8 @@ function laneForRow(row) {
 // never a callback or an included follow-up) so the notice targets exactly
 // the visits the snapshot priced. Includes 'rescheduled' rows (a parked
 // reschedule request) so the apply can refuse rather than leave one at the
-// old price.
+// old price; a legacy NULL-status row is live too (rate-review.js
+// LIVE_STATUS_SQL), and the apply refuses it the same way.
 async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, fromDate }) {
   const { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
@@ -259,7 +265,7 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, 
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ?
       AND s.scheduled_date >= ?
-      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND (s.status IS NULL OR s.status IN ('pending', 'confirmed', 'rescheduled'))
       AND ${PLAN_ROW_SQL}
       AND ${LINE_SQL} = ?
       AND (?::text IS NULL OR ${CADENCE_SQL} = ?)
@@ -274,13 +280,16 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, 
 // alone (a second line outside the batch is still a second line).
 async function loadAccountPlanLineCount(dbh, { customerId, fromDate }) {
   const { LINE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
+  // The ranking's live upcoming-row predicate (NULL or a counting status):
+  // the account's plan lines are counted the way the ranking counted them.
+  const { LIVE_STATUS_SQL } = require('./rate-review')._private;
   const { rows } = await dbh.raw(`
     SELECT count(DISTINCT ${LINE_SQL})::int AS n
     FROM scheduled_services s
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ?
       AND s.scheduled_date >= ?
-      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND ${LIVE_STATUS_SQL}
       AND ${PLAN_ROW_SQL}
   `, [customerId, fromDate]);
   return Math.max(1, Number(rows[0] && rows[0].n) || 0);
@@ -290,11 +299,12 @@ async function loadAccountPlanLineCount(dbh, { customerId, fromDate }) {
 // completion can still bill (pending, confirmed, a parked reschedule
 // request, en_route, on_site; the terminal set is
 // customer-lifecycle-guard.js TERMINAL_STATUSES plus the 'canceled'
-// spelling). These are the possible consumers of
+// spelling), and a legacy NULL-status row (rate-review.js LIVE_STATUS_SQL
+// counts it live; a bare NOT IN would drop it). These are the possible consumers of
 // customers.per_application_fee: billing-lane.js completionInvoiceAmount
 // bills a per-application visit at the fee whenever its own stamp is not a
 // price, whatever its family, cadence or date, one-off visits included.
-const UNFINISHED_VISIT_SQL = "s.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')";
+const UNFINISHED_VISIT_SQL = "(s.status IS NULL OR s.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show'))";
 async function loadCustomerOpenVisits(dbh, { customerId }) {
   const { LINE_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
@@ -335,7 +345,11 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, t
   const live = terms.filter((t) => Number(t.prepay_amount) > 0);
   if (termId) {
     const pinned = live.find((t) => String(t.id) === String(termId));
-    return pinned ? { term: pinned } : { term: null, reason: 'term_not_live' };
+    if (!pinned) return { term: null, reason: 'term_not_live' };
+    // Re-labelled for another plan line since the notice (pest → lawn):
+    // never the noticed plan's term any more. Unlabeled stays as matched.
+    const labeled = familyOfCoverage(pinned.coverage_service_type);
+    return labeled && labeled !== familyKey ? { term: null, reason: 'term_family_changed' } : { term: pinned };
   }
   const visits = await loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDate: today });
   const planLine = {
@@ -348,14 +362,17 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, t
 }
 
 // A live or pending term of the same coverage family that starts after
-// this term ends, or one minted as its renewal successor.
-async function successorTermExists(dbh, term) {
+// this term ends, or one minted as its renewal successor. A legacy
+// unlabeled term takes its family from the caller (the notice's family /
+// the family its applied notice named): the admin prepay routes mint a
+// labeled successor with no renewed_from link.
+async function successorTermExists(dbh, term, fallbackFamily = null) {
   const rows = await dbh('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
     .whereNot('id', term.id)
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded'])
     .select('id', 'term_start', 'coverage_service_type', 'renewed_from_term_id');
-  const family = familyOfCoverage(term.coverage_service_type);
+  const family = familyOfCoverage(term.coverage_service_type) || fallbackFamily;
   return rows.some((r) => String(r.renewed_from_term_id || '') === String(term.id)
     || (ymd(r.term_start) > ymd(term.term_end) && familyOfCoverage(r.coverage_service_type) === family));
 }
@@ -374,9 +391,10 @@ function termRenewalNoticed(term) {
 async function resolveLiveLane(dbh, { customer, familyKey, cadence = null, today }) {
   const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey, cadence, today });
   if (found.term || found.reason === 'prepay_term_ambiguous') return LANE_PREPAY;
-  if (customer.billing_mode === LANE_MONTHLY) return LANE_MONTHLY;
-  if (customer.billing_mode === LANE_PER_APPLICATION) return LANE_PER_APPLICATION;
-  return customer.billing_mode || null;
+  // The canonical lane (billing-lane.js — the ranking's own resolver): an
+  // explicit mode, else the legacy inference (a real tier + positive dues
+  // is monthly_membership).
+  return resolveBillingLane(customer).mode;
 }
 
 // The per-customer annual-prepay advisory lock every renewal writer takes
@@ -414,9 +432,11 @@ function effectiveDateFor(lane, { floor, visits = [], billingDay = 1, term = nul
     if (!term) throw hold('prepay_term_not_found');
     const renewalDay = addDaysYmd(ymd(term.term_end), 1);
     // The notice must precede the renewal reminder ladder (30/15/7 days
-    // before term_end): at least MIN_NOTICE_DAYS + 1 days before the
-    // successor starts = on or before term_end − 30.
-    if (daysBetweenYmd(plannedSend, renewalDay) < MIN_NOTICE_DAYS + 1) throw hold('renewal_too_soon', { renewalDay });
+    // before term_end) by an apply tick: delivered on the send day, the
+    // nightly apply (03:10) writes the successor amount the next morning,
+    // before that day's 10:12 reminder — so the send is on or before
+    // term_end − 31 (MIN_NOTICE_DAYS + 2 days before the successor starts).
+    if (daysBetweenYmd(plannedSend, renewalDay) < MIN_NOTICE_DAYS + 2) throw hold('renewal_too_soon', { renewalDay });
     // The same floors every lane honours: a term that renews before the
     // line's review date (its anniversary occurrence in the batch window)
     // is not this review's to reprice — it waits for the next one.
@@ -433,9 +453,13 @@ function cadenceLabelFor(lane) {
   return 'application';
 }
 
+function withoutNoticeHolds(rawFlags) {
+  const flags = Array.isArray(rawFlags) ? rawFlags : (() => { try { return JSON.parse(rawFlags || '[]'); } catch { return []; } })();
+  return flags.filter((f) => !String(f).startsWith('notice_hold:'));
+}
+
 async function flagSnapshotHold(dbh, row, code) {
-  const flags = Array.isArray(row.flags) ? row.flags : (() => { try { return JSON.parse(row.flags || '[]'); } catch { return []; } })();
-  const next = flags.filter((f) => !String(f).startsWith('notice_hold:'));
+  const next = withoutNoticeHolds(row.flags);
   next.push(`notice_hold:${code}`);
   await dbh('rate_review_snapshots').where({ id: row.id }).update({ flags: JSON.stringify(next), updated_at: new Date() });
 }
@@ -465,6 +489,13 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     term = found.term;
     const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : visitsPerYearFor(row.cadence, row.visits_per_year);
     if (!(visitsPerTerm > 0)) throw hold('prepay_term_not_found', 'no coverage visit count');
+    // The live term must still be the rate the ranking approved (the apply's
+    // own derivation, to the cent) and the noticed renewal a real increase —
+    // never a letter mixing a moved term amount with stale snapshot rates.
+    const livePerApplication = Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100);
+    if (livePerApplication !== Number(row.current_rate_cents) || !(Number(row.proposed_rate_cents) * visitsPerTerm > cents(term.prepay_amount))) {
+      throw hold('rate_moved_since_ranking', { termId: term.id, livePerApplication });
+    }
     Object.assign(metadata, {
       term_id: term.id, term_end: ymd(term.term_end), coverage_visits: visitsPerTerm,
       current_term_amount_cents: cents(term.prepay_amount),
@@ -490,29 +521,55 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     // read before this row's lock, and a concurrent schedule (a different
     // planned send → a different effective date) must find the link, not
     // race it. The partial UNIQUE index on rate_review_row_id is the belt.
-    const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status');
+    // The customer's comms fence first (the apply's lock order), then the
+    // row: a merge undo can repoint the ranking row after the candidate
+    // read, and a notice is only ever created for the owner the row still
+    // has under its lock.
+    await lockCustomerComms(sp, row.customer_id);
+    const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status', 'customer_id');
     if (!live || String(live.status) !== 'approved') throw hold('row_not_approved', { status: live ? live.status : null });
+    if (String(live.customer_id) !== String(row.customer_id)) throw hold('row_owner_changed', { customerId: live.customer_id });
     if (live.notice_id) return { alreadyScheduled: true, noticeId: live.notice_id };
-    const inserted = await sp('price_change_notices').insert({
-      batch_id: batchId,
-      customer_id: row.customer_id,
-      current_amount_cents: noticedCurrent,
-      new_amount_cents: noticedNew,
-      cadence_label: cadenceLabelFor(lane),
-      effective_date: effectiveDate,
-      notice_token: crypto.randomBytes(16).toString('hex'),
-      status: 'draft',
-      created_by: actorId || null,
-      metadata: JSON.stringify(metadata),
-      rate_review_row_id: row.id,
-      billing_lane: lane,
-      family_key: row.family_key,
-      noticed_current_cents: noticedCurrent,
-      noticed_new_cents: noticedNew,
-      apply_attempts: 0,
-    }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning(['id', 'effective_date']);
-    if (!inserted.length) throw hold('notice_event_collision', { effectiveDate });
-    await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
+    // One notice per change EVENT: a legacy notice with the same customer,
+    // date and amounts is the same event; another rate-review notice is
+    // only when it is the same plan line (two lines can share date and
+    // amounts and are two changes). Checked under the shared per-event lock
+    // the legacy send path also takes; the partial unique indexes of
+    // migration 20261001190000 are the belt.
+    await lockNoticeEvent(sp, { customerId: row.customer_id, effectiveDate, currentCents: noticedCurrent, newCents: noticedNew });
+    const sameEvent = await sp('price_change_notices')
+      .where({ customer_id: row.customer_id, effective_date: effectiveDate, current_amount_cents: noticedCurrent, new_amount_cents: noticedNew })
+      .where(function legacyOrSameLine() { this.whereNull('rate_review_row_id').orWhere('family_key', row.family_key); })
+      .first('id');
+    if (sameEvent) throw hold('notice_event_collision', { effectiveDate });
+    let inserted;
+    try {
+      inserted = await sp('price_change_notices').insert({
+        batch_id: batchId,
+        customer_id: row.customer_id,
+        current_amount_cents: noticedCurrent,
+        new_amount_cents: noticedNew,
+        cadence_label: cadenceLabelFor(lane),
+        effective_date: effectiveDate,
+        notice_token: crypto.randomBytes(16).toString('hex'),
+        status: 'draft',
+        created_by: actorId || null,
+        metadata: JSON.stringify(metadata),
+        rate_review_row_id: row.id,
+        billing_lane: lane,
+        family_key: row.family_key,
+        noticed_current_cents: noticedCurrent,
+        noticed_new_cents: noticedNew,
+        apply_attempts: 0,
+      }).returning(['id', 'effective_date']);
+    } catch (err) {
+      // the belt: a unique index caught what the event lock + check missed
+      if (err && err.code === '23505') throw hold('notice_event_collision', { effectiveDate });
+      throw err;
+    }
+    // An earlier scheduling hold is resolved now: its notice_hold flag goes,
+    // every other ranking flag stays.
+    await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, flags: JSON.stringify(withoutNoticeHolds(row.flags)), updated_at: new Date() });
     return { noticeId: inserted[0].id };
   });
   if (noticeId.alreadyScheduled) return { alreadyScheduled: true, rowId: row.id };
@@ -745,6 +802,10 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   // target set and would keep the old price — refuse instead.
   const parkedReschedule = visits.find((v) => String(v.status) === 'rescheduled');
   if (parkedReschedule) throw hold('visit_in_reschedule', { visitId: parkedReschedule.id });
+  // A legacy NULL-status visit is live (it bills at its own stamp when
+  // completed) but the series helper only reprices pending/confirmed rows.
+  const statusless = visits.find((v) => v.status == null);
+  if (statusless) throw hold('visit_status_missing', { visitId: statusless.id });
   const lockedIds = new Set(locked.map((v) => String(v.id)));
   const expected = new Set(visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status))).map((v) => String(v.id)));
   if (lockedIds.size !== expected.size || [...lockedIds].some((id) => !expected.has(id))) throw hold('target_set_changed', { locked: [...lockedIds], expected: [...expected] });
@@ -872,6 +933,13 @@ async function applyPrepay(trx, ctx) {
   const term = found.term;
   if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
   if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
+  // The notice named the renewal day (its effective_date = the term_end it
+  // was scheduled from + 1). A term whose dates were edited since is a
+  // different renewal window — the old notice (and its 30-day lead) never
+  // carries over to it.
+  if (addDaysYmd(ymd(term.term_end), 1) !== ymd(notice.effective_date)) {
+    throw hold('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
+  }
   // The notice carries the ANNUAL totals: the term's amount the customer
   // saw and the successor amount they were told — the renewal charges
   // exactly the latter.
@@ -890,7 +958,7 @@ async function applyPrepay(trx, ctx) {
   // A successor already on the books (a renewal recorded, at whatever
   // amount, or a termite successor minted) makes the predecessor's noticed
   // amount moot — never written after the fact.
-  if (await successorTermExists(trx, term)) throw hold('successor_already_created', { termId: term.id });
+  if (await successorTermExists(trx, term, notice.family_key)) throw hold('successor_already_created', { termId: term.id });
   const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
     throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
@@ -954,6 +1022,14 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
       if (!notice || notice.applied_at || !wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      // A merge undo can repoint the notice after the due scan: the locks
+      // above are the scanned owner's, so never write under them — the next
+      // run reads the live owner.
+      if (String(notice.customer_id) !== String(customer.id)) {
+        logger.warn(`[rate-review-apply] notice ${notice.id} changed owner since the due scan; retried next run`);
+        outcomeBox.skipped = true;
+        return;
+      }
       if (!LANES.includes(notice.billing_lane)) throw hold('lane_unknown', { lane: notice.billing_lane });
       // The 30-day rule is measured from the DELIVERY the customer actually
       // got, never from the day the owner planned to send.
@@ -992,10 +1068,27 @@ async function recordHold(dbh, noticeRow, code, detail, now) {
   });
 }
 
+// Every hold bell of a notice other than `keepCode`'s closes: all of them
+// once the notice applies, the earlier reasons' when a hold changes reason
+// (the bell copy is per reason, so a stale one would ask for the wrong fix).
+async function closeHoldAlerts(dbh, noticeRow, reason, keepCode = null) {
+  if (!alertEpisodesLive()) return;
+  try {
+    const keys = Object.keys(HOLD_COPY).filter((c) => c !== keepCode).map((c) => `rate-review-apply-hold:${noticeRow.id}:${c}`);
+    await require('./admin-alert-episodes').closeAdminAlertKeys(dbh, keys, reason);
+  } catch (err) {
+    logger.warn(`[rate-review-apply] hold alert close failed for notice ${noticeRow.id}: ${err.message}`);
+  }
+}
+
+// Episode-aware (ALERT_EPISODES): a reason whose bell closeHoldAlerts
+// auto-cleared (A → B → A) rings again through raiseAdminAlertWithReopen,
+// composed by the same rule-checked composer raiseAdminAlert uses; killed,
+// the plain raiseAdminAlert (no closes, no reopen).
 async function raiseHoldAlert(noticeRow, code) {
   try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('billing', {
+    const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+    const spec = {
       area: 'Billing',
       action: 'finish an annual rate change by hand',
       why: HOLD_COPY[code] || HOLD_COPY.apply_error,
@@ -1004,10 +1097,19 @@ async function raiseHoldAlert(noticeRow, code) {
       subject: { type: 'customer', id: String(noticeRow.customer_id) },
       doneWhen: 'rate_review_notice_applied',
       who: 'person',
-    }, {
+    };
+    const opts = {
       dedupeKey: `rate-review-apply-hold:${noticeRow.id}:${code}`,
       refreshOnDedupe: true,
       metadata: { noticeId: noticeRow.id, rateReviewRowId: noticeRow.rate_review_row_id, familyKey: noticeRow.family_key, reason: code },
+    };
+    if (!alertEpisodesLive()) {
+      await raiseAdminAlert('billing', spec, opts);
+      return;
+    }
+    const composed = composeAdminAlert(spec);
+    await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+      ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata },
     });
   } catch (err) {
     logger.warn(`[rate-review-apply] hold alert failed for notice ${noticeRow.id}: ${err.message}`);
@@ -1026,7 +1128,11 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
   const out = { ok: true, asOf: asOfDay, due: due.length, applied: 0, held: 0, skipped: 0, holds: [] };
   for (const noticeRow of due) {
     const result = await applyNotice(noticeRow, { now: at, dbh });
-    if (result.applied) { out.applied += 1; continue; }
+    if (result.applied) {
+      out.applied += 1;
+      await closeHoldAlerts(dbh, noticeRow, 'rate_review_notice_applied');
+      continue;
+    }
     if (result.skipped) { out.skipped += 1; continue; }
     out.held += 1;
     out.holds.push({ noticeId: noticeRow.id, customerId: noticeRow.customer_id, familyKey: noticeRow.family_key, reason: result.hold });
@@ -1036,6 +1142,7 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
       logger.error(`[rate-review-apply] could not record hold for notice ${noticeRow.id}: ${err.message}`);
     }
     await raiseHoldAlert(noticeRow, result.hold);
+    await closeHoldAlerts(dbh, noticeRow, 'rate_review_hold_reason_changed', result.hold);
   }
   logger.info(`[rate-review-apply] ${asOfDay}: ${out.due} due, ${out.applied} applied, ${out.held} held, ${out.skipped} skipped`);
   return out;
@@ -1137,18 +1244,36 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .filter((t) => {
       const labeled = familyOfCoverage(t.coverage_service_type);
       const noticedFamily = familyByTerm.get(String(t.id)) || null;
-      if (family) return labeled === family || (!labeled && noticedFamily === family);
-      return !labeled && !noticedFamily;
+      // The frozen amount is the noticed plan's: a term re-labelled for
+      // another plan since its notice applied carries it for neither.
+      if (noticedFamily && labeled && labeled !== noticedFamily) return false;
+      const attributed = noticedFamily || labeled;
+      return family ? attributed === family : !attributed;
     })
     .sort((a, b) => Math.abs(daysBetweenYmd(ymd(a.term_end), start)) - Math.abs(daysBetweenYmd(ymd(b.term_end), start)));
   const term = candidates[0];
   if (!term) return null;
   // A successor already on the books (whatever its amount) settles the
   // term: the guard protected the renewal that created it.
-  if (await successorTermExists(dbh, term)) return null;
+  if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family)) return null;
   const noticedCents = cents(term.next_term_prepay_amount);
   if (noticedCents == null || noticedCents === Math.round(Number(amount) * 100)) return null;
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };
+}
+
+// The 409 every renewal writer returns when noticedRenewalAmountConflict
+// finds a different amount (admin-customers.js's two prepay routes and
+// admin-invoices.js's mark-as-annual-prepay route): thrown inside the write
+// transaction, the handler's catch returns err.noticedRenewalAmount.
+function noticedRenewalAmountError(conflict) {
+  return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
+    noticedRenewalAmount: {
+      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+      code: 'RENEWAL_AMOUNT_NOTICED',
+      noticedAmount: conflict.noticedAmount,
+      termId: conflict.termId,
+    },
+  });
 }
 
 // Held rate-review notices (sent, not applied, with a recorded hold).
@@ -1191,6 +1316,7 @@ module.exports = {
   listApplyHolds,
   retireDraftNotices,
   noticedRenewalAmountConflict,
+  noticedRenewalAmountError,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,

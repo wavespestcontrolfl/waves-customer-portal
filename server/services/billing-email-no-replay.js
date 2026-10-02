@@ -27,6 +27,13 @@ const SENDER_RENDERED_TEMPLATES = new Set([
   // explicit-choice pre-visit email is a billing.notice row that re-quotes
   // the balance on retry (billing-email-provider-replay.js).
   'billing.previsit_balance',
+  // The annual rate review letter (rate-review-comms.js) is single-shot:
+  // its 30-day clock, eligibility and the GATE_RATE_REVIEW kill switch are
+  // judged at the send, and delivery is stamped on its notice by the
+  // sender — a provider retry or bounce resend of the stored copy would
+  // bypass all three. A blocked or bounced letter stays unsent for the
+  // owner (the notice holds; no rate changes).
+  'billing.rate_review_notice',
 ]);
 
 function isSenderRenderedEmail(message) {

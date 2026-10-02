@@ -28,6 +28,14 @@ const fixture = require('./helpers/rate-review-apply-fixture');
 const mockDb = fixture.createFakeDb();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The live-lane read (rate-review-apply.js resolveLiveLane) walks the
+// prepaid terms through this helper — the same stand-in the apply suite uses.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: (dbh, today) => dbh('annual_prepay_terms as t')
+    .whereIn('t.status', ['active', 'renewal_pending'])
+    .where('t.term_start', '<=', today)
+    .where('t.term_end', '>=', today),
+}));
 
 const migration = require('../models/migrations/20261001200000_rate_review_letter_email_template');
 
@@ -146,6 +154,13 @@ describe('sendPreview', () => {
     expect(b).not.toBe(a);
     mockDb.store.customers[0].first_name = 'Renamed';
     expect(await previewDigest()).not.toBe(b);
+  });
+
+  test('an account whose billing lane changed since the notice was prepared is held (lane_changed)', async () => {
+    mockDb.reset(book({ customers: [customer(1, { billing_mode: 'monthly_membership' })] }));
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].suppressedLines[0].reason).toBe('lane_changed');
+    expect(out.counts.letters).toBe(0);
   });
 
   test('the digest moves with the cost block, not only the list', async () => {
@@ -354,6 +369,11 @@ describe('the letter (real renderer over the seeded template)', () => {
     await expect(comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW })).rejects.toMatchObject({ status: 404 });
   });
 
+  test('the letter is never replayed from a stored copy (single-shot, gate-checked at the send)', () => {
+    const { isSenderRenderedEmail } = require('../services/billing-email-no-replay');
+    expect(isSenderRenderedEmail({ template_key: 'billing.rate_review_notice' })).toBe(true);
+  });
+
   test('the seeded template carries no banned wording', () => {
     const blob = JSON.stringify(migration._private.TEMPLATE);
     expect(blob).not.toMatch(/per visit|monthly|-approved|\p{Extended_Pictographic}/iu);
@@ -425,6 +445,10 @@ describe('customer surfaces', () => {
       { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: null, chargeDate: null, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
     ]);
     notices()[0].applied_at = new Date();
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+    // a change the nightly apply is holding is not a guaranteed rate
+    notices()[0].applied_at = null;
+    notices()[0].apply_hold_reason = 'rate_moved_since_notice';
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 

@@ -43,17 +43,22 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
   try {
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
-    return {
-      rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
-        // A pause covering the effective date skips that charge (billing
-        // cron isPaused) — nothing to announce for it.
-        const pausedThen = !!chargeDate && isPaused(customer, new Date(`${chargeDate}T16:00:00Z`));
-        // Only while the account still bills monthly dues (the lane the cron
-        // charges; a switch to prepay or per application stops them).
-        const charge = monthlyBilling && autopayEnabled && method && chargeCents > 0 && !pausedThen ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
-        return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
-      }),
-    };
+    const out = { rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
+      const at = chargeDate ? new Date(`${chargeDate}T16:00:00Z`) : null;
+      // Announced only when that debit will really run on this method: the
+      // account still bills monthly dues (the lane the cron charges), Auto
+      // Pay is on, no pause covers the date (the cron's isPaused) and the
+      // method is not a card expired by then (charge() refuses it).
+      const runs = monthlyBilling && autopayEnabled && method && chargeCents > 0 && at
+        && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
+      const charge = runs ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
+      return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
+    }) };
+    // The card's own "Next charge" is the same debit when the dates meet:
+    // it must state the new amount too, never two totals for one charge.
+    const sameDebit = out.rate_changes.map((c) => c.nextCharge).filter((c) => c && c.date === String(customer.next_charge_date || '').slice(0, 10)).pop();
+    if (sameDebit) Object.assign(out, { next_charge_amount: sameDebit.total, next_charge_base_amount: sameDebit.base, next_charge_surcharge_amount: sameDebit.surcharge });
+    return out;
   } catch (err) {
     logger.warn(`[customer-autopay] upcoming rate changes read failed: ${err.message}`);
     return {};

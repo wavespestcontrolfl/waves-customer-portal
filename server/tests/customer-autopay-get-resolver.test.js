@@ -194,6 +194,21 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
     } finally { mockLane = 'monthly_membership'; }
   });
 
+  test('a card expired by the charge date announces no charge', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.payment_methods.forEach((p) => { p.exp_month = 12; p.exp_year = 2026; });
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('the card\'s own next charge on the same date states the new amount too', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    state.customers[0].next_charge_date = '2027-01-01';
+    const { body } = await getAutopay();
+    expect(body.next_charge_amount).toBe(body.rate_changes[0].nextCharge.total);
+    expect(body.next_charge_base_amount).toBe(104);
+  });
+
   test('Auto Pay off: no charge is announced', async () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([change]);
     state.customers[0].autopay_enabled = false;

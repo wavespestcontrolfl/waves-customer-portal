@@ -78,6 +78,7 @@ const REASONS = Object.freeze({
   in_flight: 'A send for this customer is in progress',
   send_uncertain: 'An earlier send may have reached the customer — check the email log before anything else is sent',
   renewal_declined: 'Customer declined to renew the prepaid plan',
+  lane_changed: 'Billing changed since the notice was prepared — prepare it again',
 });
 
 function badInput(message, status = 400) {
@@ -242,6 +243,25 @@ function letterPayload({ customer, lines, costBlock, noticeUrl }) {
   return payload;
 }
 
+// The live lane per unsent notice; an unreadable lane reads as null (held).
+async function liveLanesFor(dbh, notices, { snapshots, customers, today }) {
+  const { resolveLiveLane } = require('./rate-review-apply')._private;
+  const snapshotByNotice = new Map(snapshots.map((s) => [String(s.notice_id), s]));
+  const customerById = new Map(customers.map((c) => [String(c.id), c]));
+  const out = new Map();
+  for (const n of notices) {
+    if (n.sent_at) continue;
+    const customer = customerById.get(String(n.customer_id));
+    try {
+      out.set(String(n.id), customer ? await resolveLiveLane(dbh, { customer, familyKey: n.family_key, cadence: snapshotByNotice.get(String(n.id))?.cadence || null, today }) : null);
+    } catch (err) {
+      logger.warn(`[rate-review-comms] live lane unreadable for notice ${n.id}: ${err.message}`);
+      out.set(String(n.id), null);
+    }
+  }
+  return out;
+}
+
 // ── batch read ─────────────────────────────────────────────────────────
 
 // Only a notice no attempt ever handed to a provider is sendable. A send
@@ -260,7 +280,7 @@ function hasContact(customer, prefs) {
   return { email: email.includes('@'), sms: !!String(customer?.phone || '').trim() };
 }
 
-async function loadBatch(dbh, batchKey) {
+async function loadBatch(dbh, batchKey, today) {
   const snapshots = await dbh('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id');
   const approvedUnscheduled = await dbh('rate_review_snapshots')
     .where({ batch_key: batchKey, status: 'approved' })
@@ -288,6 +308,7 @@ async function loadBatch(dbh, batchKey) {
     prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
     firstVisits,
     declinedTerms: await declinedPrepayTermIds(dbh, notices),
+    liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
     unscheduled: approvedUnscheduled.length,
   };
 }
@@ -298,6 +319,11 @@ const LINE_RULES = [
   ['not_approved', ({ snapshot }) => !snapshot || String(snapshot.status) !== 'approved'],
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
   ['renewal_declined', ({ notice, declinedTerms }) => declinedTerms.has(String(parseJson(notice.metadata, {}).term_id || ''))],
+  // The account's live billing lane (rate-review-apply.js resolveLiveLane
+  // — billing-lane.js resolveBillingLane plus the prepaid term) must still
+  // be the lane the notice was priced for; anything else would announce a
+  // change the apply refuses.
+  ['lane_changed', ({ notice, liveLanes }) => liveLanes.get(String(notice.id)) !== notice.billing_lane],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
   ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
@@ -319,7 +345,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
-    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -379,7 +405,7 @@ function assertBatchKey(batchKey) {
 async function sendPreview(batchKey, { dbh = db, now = new Date() } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh), letterTemplateHash()]);
+  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey, etDateString(now)), loadCostBlock(dbh), letterTemplateHash()]);
   const entries = planBatch(data, { today: etDateString(now), now });
   return {
     ok: true,
@@ -439,7 +465,7 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
   const row = await dbh('rate_review_snapshots').where({ id: rowId, batch_key: batchKey }).first();
   if (!row) throw badInput('Rate review row not found', 404);
   if (!row.notice_id) throw badInput('This row has no scheduled notice yet', 404);
-  const [data, costBlock] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh)]);
+  const [data, costBlock] = await Promise.all([loadBatch(dbh, batchKey, etDateString(now)), loadCostBlock(dbh)]);
   const entry = planBatch(data, { today: etDateString(now), now }).find((e) => e.customerId === String(row.customer_id));
   // A line already sent previews from its own (unsent) siblings; when none
   // is left to send, preview the row's own line so the owner still sees it.
@@ -462,11 +488,16 @@ function claimKeyFor(noticeIds) {
 async function claimLines(dbh, lines) {
   const claimed = [];
   for (const l of lines) {
-    const n = await dbh('price_change_notices')
-      .where({ id: l.noticeId })
-      .whereNull('sent_at')
-      .whereIn('status', SENDABLE_STATUSES)
-      .update({ status: 'sending', updated_at: new Date() });
+    // Under the shared notice-event lock (price-change-notices.js
+    // lockNoticeEvent — the legacy batch and the scheduler take it too).
+    const n = await dbh.transaction(async (trx) => {
+      await PriceChangeNotices.lockNoticeEvent(trx, { customerId: l.notice.customer_id, effectiveDate: l.effectiveDate, currentCents: l.notice.current_amount_cents, newCents: l.notice.new_amount_cents });
+      return trx('price_change_notices')
+        .where({ id: l.noticeId })
+        .whereNull('sent_at')
+        .whereIn('status', SENDABLE_STATUSES)
+        .update({ status: 'sending', updated_at: new Date() });
+    });
     if (!n) {
       if (claimed.length) await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
       return null;
@@ -566,7 +597,7 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
 async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, now = new Date() } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
-  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey), loadCostBlock(dbh), letterTemplateHash()]);
+  const [data, costBlock, templateHash] = await Promise.all([loadBatch(dbh, batchKey, etDateString(now)), loadCostBlock(dbh), letterTemplateHash()]);
   if (!costBlock) return { ok: false, reason: 'cost_block_missing' };
   if (!templateHash) throw badInput('The rate review letter template is not installed', 503);
   const entries = planBatch(data, { today: etDateString(now), now });
@@ -720,7 +751,9 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // drops off once the nightly apply writes the new rate.
   const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('monthly_rate', 'billing_day') : null;
   const declinedTerms = await declinedPrepayTermIds(dbh, rows);
-  const pending = rows.filter((n) => (!n.applied_at || n.billing_lane === 'annual_prepay')
+  // A change the nightly apply is holding (apply_hold_reason) is not a
+  // guaranteed rate — not shown until it applies or the hold clears.
+  const pending = rows.filter((n) => !n.apply_hold_reason && (!n.applied_at || n.billing_lane === 'annual_prepay')
     && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
   const monthly = await applicableMonthly(dbh, pending, customer);
   return pending.map((n) => ({
