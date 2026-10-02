@@ -306,43 +306,35 @@ function sameStreetLine(a, b) {
 
 // ---- runtime filing sweep (gate-code directory PR 2) --------------------------
 // Every 15 minutes, behind GATE_NEIGHBORHOOD_ACCESS: each customer whose
-// preferences changed since the last successful sweep and carry a
-// neighborhood gate code has it filed under their property's neighborhood
-// (the property is linked from the county roll first if it never was). One
-// sweep covers every writer — office, portal, call, text, Intelligence Bar —
-// and any added later, with no hook in each. A new code that differs from
-// the one on file flags both and rings ONE Customers bell per neighborhood.
-const SWEEP_WATERMARK_KEY = 'neighborhood_access.sweep_watermark';
+// current neighborhood gate code has not been filed yet — no
+// neighborhood_access_filings row, or one for a different value (compared by
+// sha256, the code itself is never stored there) — has it filed under their
+// property's neighborhood (the property is linked from the county roll first
+// if it never was). One sweep covers every writer — office, portal, call,
+// text, Intelligence Bar — and any added later, with no hook in each; it needs
+// no time watermark, so a save that commits mid-pass is simply seen next pass,
+// and an unrelated preference edit never re-files a code the office retired.
+// A new code that differs from the one on file flags both and rings ONE
+// Customers bell per neighborhood.
 const SOURCE = 'profile';
+const FINAL_OUTCOMES = new Set(['filed', 'duplicate', 'filed_conflict']);
+// The one hash expression, used by the candidate query and the ledger write
+// alike, so the two can never disagree on what "this value" is.
+const VALUE_HASH_SQL = "encode(sha256(convert_to(btrim(pp.neighborhood_gate_code), 'UTF8')), 'hex')";
 
-async function sweepWatermark(conn) {
-  const row = await conn('system_settings').where({ key: SWEEP_WATERMARK_KEY }).first('value');
-  return row?.value || null;
-}
-
-// The customers to look at, all with a non-empty neighborhood code and not
-// deleted: those whose preferences changed since the watermark (every coded
-// customer on the first run), PLUS — whatever the watermark says — those whose
-// property was never successfully checked against the county roll (a lookup
-// that timed out, a pin still missing), so a county outage or a late geocode is
-// retried every pass until the property is checked.
-async function changedGateCodeCustomers(conn, since) {
-  const coded = () => conn('property_preferences as pp')
+// The customers whose current code (non-empty, customer not deleted) has no
+// filing for that exact value yet. A filing that could not finish (lookup
+// failed, no pin, two properties) left no row, so it is retried every pass.
+async function unfiledGateCodeCustomers(conn) {
+  return conn('property_preferences as pp')
     .join('customers as c', 'c.id', 'pp.customer_id')
+    .leftJoin('neighborhood_access_filings as f', 'f.customer_id', 'pp.customer_id')
     .whereNull('c.deleted_at')
-    .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''");
-  const changed = since
-    ? await coded().where('pp.updated_at', '>=', conn.raw('?::timestamptz', [since])).pluck('pp.customer_id')
-    : await coded().pluck('pp.customer_id');
-  const unchecked = await coded()
-    .whereExists(conn('customer_properties as p').select(1)
-      .whereRaw('p.customer_id = pp.customer_id')
-      .where('p.active', true)
-      .whereNull('p.neighborhood_id')
-      .whereNull('p.neighborhood_checked_at')
-      .where((w) => w.whereNull('p.neighborhood_source').orWhereNot('p.neighborhood_source', 'office')))
+    .whereRaw("btrim(coalesce(pp.neighborhood_gate_code, '')) <> ''")
+    .where((w) => w.whereNull('f.customer_id')
+      .orWhereRaw(`f.value_hash <> ${VALUE_HASH_SQL}`))
+    .orderBy('pp.customer_id')
     .pluck('pp.customer_id');
-  return [...new Set([...changed, ...unchecked])].sort();
 }
 
 // File one customer's current code. Lock order matches every preference
@@ -380,6 +372,15 @@ async function fileOneSavedCode(customerId, lookup) {
     }
     if (!neighborhoodId) return { status: 'no_neighborhood' };
     const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId });
+    if (FINAL_OUTCOMES.has(filed.status)) {
+      // Ledger the value filed, in the same transaction as the filing.
+      // The hash is taken from the locked preferences row itself.
+      await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, neighborhood_id, outcome)
+        SELECT pp.customer_id, ${VALUE_HASH_SQL}, ?, ? FROM property_preferences pp WHERE pp.customer_id = ?
+        ON CONFLICT (customer_id) DO UPDATE SET value_hash = EXCLUDED.value_hash,
+          neighborhood_id = EXCLUDED.neighborhood_id, outcome = EXCLUDED.outcome, filed_at = now()`,
+      [neighborhoodId, filed.status, customerId]);
+    }
     return { ...filed, neighborhoodId, firstName: customer.first_name || null };
   });
 }
@@ -418,6 +419,10 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
     dedupeKey: `${CONFLICT_KEY_PREFIX}${neighborhoodId}`,
     dedupeVersion: 'v1',
     refreshOnDedupe: true,
+    // A standing conflict's refresh (a third code, a newer customer) never
+    // re-rings a bell a person read; a real comeback after the conflict was
+    // resolved still rings (raiseAdminAlertWithReopen overrides this).
+    ringOnRefresh: () => false,
     bellDefault: true,
     link: composed.link,
     metadata: { ...composed.metadata, neighborhoodId },
@@ -497,10 +502,7 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   const { neighborhoodAccessLive } = require('../config/feature-gates');
   if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
-  const { rows } = await db.raw('SELECT now()::text AS t');
-  const startedAt = rows[0].t;
-  const since = await sweepWatermark(db);
-  const customerIds = await changedGateCodeCustomers(db, since);
+  const customerIds = await unfiledGateCodeCustomers(db);
   const tally = {};
   let failed = 0;
   const conflicts = new Map(); // neighborhoodId → { customerId, firstName } of the newest update
@@ -516,13 +518,6 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
     }
   }
   await settleConflictBells(conflicts, logger);
-  // Advance only after a clean pass, so a failed customer is retried next tick.
-  if (!failed) {
-    await db('system_settings').insert({
-      key: SWEEP_WATERMARK_KEY, value: startedAt, category: 'neighborhood_access',
-      description: 'Start of the last clean neighborhood gate-code filing sweep; the next sweep re-reads preferences changed since.',
-    }).onConflict('key').merge({ value: startedAt, updated_at: db.fn.now() });
-  }
   return { customers: customerIds.length, tally, failed, conflicts: conflicts.size };
 }
 

@@ -62,9 +62,11 @@ postgres('neighborhood gate-code filing sweep', () => {
     process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     trx = await database.transaction();
     mockConnection = trx;
-    // Only this test's rows: everything already coded is behind the watermark.
-    await trx('system_settings').insert({ key: 'neighborhood_access.sweep_watermark', value: '2999-01-01 00:00:00+00' })
-      .onConflict('key').merge();
+    // Only this test's rows: every customer already coded counts as filed.
+    await trx.raw(`INSERT INTO neighborhood_access_filings (customer_id, value_hash, outcome)
+      SELECT customer_id, encode(sha256(convert_to(btrim(neighborhood_gate_code), 'UTF8')), 'hex'), 'filed'
+      FROM property_preferences WHERE btrim(coalesce(neighborhood_gate_code, '')) <> ''
+      ON CONFLICT (customer_id) DO NOTHING`);
   });
   afterEach(async () => {
     await trx.rollback();
@@ -73,33 +75,53 @@ postgres('neighborhood gate-code filing sweep', () => {
   });
   afterAll(() => database.destroy());
 
-  // Rows written in this transaction share its start time, so a watermark at
-  // that instant picks them (>=) and nothing older.
-  const openWindow = async () => {
-    const { rows } = await trx.raw('SELECT now()::text AS t');
-    await trx('system_settings').where({ key: 'neighborhood_access.sweep_watermark' }).update({ value: rows[0].t });
-  };
-
   test('off: nothing is read or written', async () => {
     process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
     expect(await sweepSavedGateCodes()).toEqual({ skipped: 'gate_off' });
   });
 
-  test('a saved code files under a linked property\'s neighborhood, and the watermark moves', async () => {
+  test('a saved code files once under a linked property\'s neighborhood, ledgered by hash', async () => {
     const n = await neighborhood('Oakwood Glen');
-    await customerWithCode('#1111', { neighborhoodId: n });
-    await openWindow();
+    const customerId = await customerWithCode('#1111', { neighborhoodId: n });
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ customers: 1, tally: { filed: 1 }, failed: 0, conflicts: 0 });
     expect(await accessRows(n)).toEqual([{ access_type: 'keypad', code: '#1111', instructions: null, status: 'active', source: 'profile' }]);
     expect(mockRaise).not.toHaveBeenCalled();
-    const { value } = await trx('system_settings').where({ key: 'neighborhood_access.sweep_watermark' }).first('value');
-    expect(value).not.toBe('2999-01-01 00:00:00+00');
+    const ledger = await trx('neighborhood_access_filings').where({ customer_id: customerId }).first();
+    expect(ledger).toMatchObject({ neighborhood_id: n, outcome: 'filed' });
+    expect(ledger.value_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(ledger)).not.toContain('1111');
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+  });
+
+  test('a code with trailing whitespace is filed once, not every pass', async () => {
+    const n = await neighborhood('Ashby Glen');
+    await customerWithCode('1515\n', { neighborhoodId: n });
+    expect((await sweepSavedGateCodes()).tally).toEqual({ filed: 1 });
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+  });
+
+  test('an unrelated preference edit never re-files a code the office retired', async () => {
+    const n = await neighborhood('Laurel North');
+    const customerId = await customerWithCode('1212', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('neighborhood_access').where({ neighborhood_id: n }).update({ status: 'retired' });
+    await trx('property_preferences').where({ customer_id: customerId }).update({ pet_count: 2, updated_at: trx.fn.now() });
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    expect((await accessRows(n)).map((r) => r.status)).toEqual(['retired']);
+  });
+
+  test('a new value for the same customer is filed again (a save that lands after a pass is seen next pass)', async () => {
+    const n = await neighborhood('Blue Tern Lagoons');
+    const customerId = await customerWithCode('1313', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: '1414' });
+    const r = await sweepSavedGateCodes();
+    expect(r.tally).toEqual({ filed_conflict: 1 });
   });
 
   test('a never-checked property is linked from the county roll first', async () => {
     await customerWithCode('2222#');
-    await openWindow();
     const lookup = jest.fn(async () => ({ county: 'Manatee', subdivision: 'HERON POINTE PH I PB1/1', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' }));
     const r = await sweepSavedGateCodes({ lookup });
     expect(lookup).toHaveBeenCalledTimes(1);
@@ -112,7 +134,6 @@ postgres('neighborhood gate-code filing sweep', () => {
     const n = await neighborhood('Willow Grande');
     await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '3333', status: 'active', source: 'backfill' });
     const customerId = await customerWithCode('4444', { neighborhoodId: n });
-    await openWindow();
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ tally: { filed_conflict: 1 }, conflicts: 1 });
     expect((await accessRows(n)).map((x) => [x.code, x.status])).toEqual([['3333', 'needs_confirm'], ['4444', 'needs_confirm']]);
@@ -128,7 +149,6 @@ postgres('neighborhood gate-code filing sweep', () => {
   test('free text files for the office to confirm, with no bell', async () => {
     const n = await neighborhood('Pinebrook Village');
     await customerWithCode('Text the owner on arrival; north gate only', { neighborhoodId: n });
-    await openWindow();
     await sweepSavedGateCodes();
     expect(await accessRows(n)).toEqual([expect.objectContaining({ access_type: 'instructions', status: 'needs_confirm' })]);
     expect(mockRaise).not.toHaveBeenCalled();
@@ -137,7 +157,6 @@ postgres('neighborhood gate-code filing sweep', () => {
   test('a profile with two properties is skipped — the code cannot say which one it belongs to', async () => {
     const n = await neighborhood('Stonefield');
     await customerWithCode('5555', { neighborhoodId: n, properties: 2 });
-    await openWindow();
     const r = await sweepSavedGateCodes();
     expect(r.tally).toEqual({ multi_property: 1 });
     expect(await accessRows(n)).toEqual([]);
@@ -150,7 +169,8 @@ postgres('neighborhood gate-code filing sweep', () => {
       { neighborhood_id: n, access_type: 'keypad', code: '7777', status: 'needs_confirm', source: 'profile', source_customer_id: customerId },
       { neighborhood_id: n, access_type: 'keypad', code: '8888', status: 'needs_confirm', source: 'backfill' },
     ]);
-    await sweepSavedGateCodes(); // nothing changed since the watermark
+    await trx('neighborhood_access_filings').insert({ customer_id: customerId, value_hash: require('node:crypto').createHash('sha256').update('7777').digest('hex'), neighborhood_id: n, outcome: 'filed_conflict' });
+    await sweepSavedGateCodes(); // the code is already filed; only the bell is missing
     expect(mockRaise).toHaveBeenCalledTimes(1);
     expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers?customerId=${customerId}` });
     // An open (or person-dismissed) bell for it is left alone.
@@ -161,13 +181,12 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
-  test('a county lookup that failed is retried on the next pass, whatever the watermark', async () => {
+  test('a county lookup that failed is retried on the next pass', async () => {
     const customerId = await customerWithCode('9999');
-    await openWindow();
     const lookup = jest.fn(async () => null);
     expect((await sweepSavedGateCodes({ lookup })).tally).toEqual({ no_neighborhood: 1 });
     lookup.mockResolvedValue({ county: 'Manatee', subdivision: 'MEADOW AT CEDAR RANCH PH II PB60/1', situsAddress: '100 SYNTHETIC WAY', situsZip: '34202' });
-    // Watermark has moved past the preferences; the unchecked property keeps it in.
+    // Nothing was ledgered, so the customer is still pending.
     const r = await sweepSavedGateCodes({ lookup });
     expect(r.tally).toEqual({ filed: 1 });
     expect(lookup).toHaveBeenCalledTimes(2);
