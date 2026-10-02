@@ -50,6 +50,8 @@ postgres('durable customer geocode review in PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.boolean('is_primary'); t.boolean('active');
       for (const field of ['address_line1', 'address_line2', 'city', 'state', 'zip']) t.string(field);
       t.decimal('latitude', 10, 7); t.decimal('longitude', 10, 7); t.timestamp('updated_at', { useTz: true });
+      // 20261001190000_neighborhood_access: syncPrimaryAddress clears these on a street move.
+      t.uuid('neighborhood_id'); t.string('neighborhood_source'); t.string('county_subdivision'); t.timestamp('neighborhood_checked_at', { useTz: true });
     });
     await mockConnection.schema.createTable('scheduled_services', t => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.string('status'); t.date('scheduled_date');
