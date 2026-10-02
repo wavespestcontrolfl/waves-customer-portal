@@ -825,7 +825,7 @@ describe('buildLawnExpectations', () => {
       expect(tiered).toEqual(plain);
     });
 
-    it('ships dark: no runtime file other than its own tests and audit script reads the engine or config', () => {
+    it('ships dark: no runtime file other than its own tests, the audit script and the dark progress engine reads the engine or config', () => {
       const root = path.join(__dirname, '..');
       const hits = [];
       const walk = (dir) => {
@@ -842,6 +842,8 @@ describe('buildLawnExpectations', () => {
       expect(hits.sort()).toEqual([
         'scripts/audit-lawn-expectation-products.js',
         'services/service-report/lawn-expectations.js',
+        // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.
+        'services/service-report/lawn-progress.js',
       ]);
     });
   });

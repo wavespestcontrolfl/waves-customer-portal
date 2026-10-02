@@ -1,0 +1,286 @@
+// Calibration replay for the lawn progress engine (P13). Synthetic fixture and
+// a fake knex; no database, never run against production.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  pairAssessments,
+  replayLawnProgress,
+  formatReport,
+  loadReplayRows,
+  main,
+} = require('../scripts/replay-lawn-progress');
+
+const S = (over = {}) => ({
+  turf_density: 70, weed_suppression: 70, color_health: 70, stress_damage: 70, overall: 70, ...over,
+});
+
+// Synthetic customers only (A..E).
+const FIXTURE = [
+  // A: baseline, then a good month, then a visit whose photos cannot support a comparison.
+  { id: 'a0000001', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-04-01', season: 'peak', isBaseline: true, scores: S(), photos: [80, 80], applied: [{ name: 'Celsius WG' }, { name: 'LESCO 24-0-11' }] },
+  { id: 'a0000002', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-05-01', season: 'peak', scores: S({ weed_suppression: 85, color_health: 85, overall: 78 }), photos: [80, 80, 55], applied: [] },
+  { id: 'a0000003', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-06-20', season: 'peak', scores: S({ color_health: 60, overall: 66 }), photos: [30], applied: [] },
+  // B: winter to spring, color down, granular applied in winter.
+  { id: 'b0000001', customerId: 'cust-b', propertyId: 'prop-b', date: '2026-01-10', season: 'dormant', scores: S(), photos: [80, 80], applied: [{ name: 'LESCO 24-0-11' }, { name: 'Brand New Product' }] },
+  { id: 'b0000002', customerId: 'cust-b', propertyId: 'prop-b', date: '2026-03-01', season: 'shoulder', scores: S({ color_health: 50, overall: 60 }), photos: [80, 80], applied: [] },
+  // C: two visits two days apart, no photo evidence on the second.
+  { id: 'c0000001', customerId: 'cust-c', propertyId: 'prop-c', date: '2026-05-01', season: 'peak', scores: S(), photos: [80, 80], applied: [{ name: 'Celsius WG' }] },
+  { id: 'c0000002', customerId: 'cust-c', propertyId: 'prop-c', date: '2026-05-03', season: 'peak', scores: S({ weed_suppression: 30, overall: 60 }), applied: [] },
+  // D: one assessment, nothing to compare.
+  { id: 'd0000001', customerId: 'cust-d', propertyId: 'prop-d', date: '2026-05-01', season: 'peak', scores: S(), photos: [80, 80], applied: [{ name: 'Celsius WG' }] },
+  // E: a month after a herbicide the weeds have not moved, a large swing in density, models disagreed on color.
+  { id: 'e0000001', customerId: 'cust-e', propertyId: 'prop-e', date: '2026-06-01', season: 'peak', scores: S(), photos: [80, 80, 80], applied: [{ name: 'Celsius WG' }, { name: 'LESCO K-Flow 0-0-25' }] },
+  { id: 'e0000002', customerId: 'cust-e', propertyId: 'prop-e', date: '2026-07-01', season: 'peak', scores: S({ turf_density: 35, overall: 55 }), photos: [80, 80, 80], divergenceFlags: [{ metric: 'color_health', gap: 40 }], applied: [] },
+];
+
+describe('pairAssessments', () => {
+  it('pairs each assessment with the latest strictly earlier one at the same customer and property', () => {
+    const pairs = pairAssessments(FIXTURE);
+    const prior = Object.fromEntries(pairs.map((p) => [p.current.id, p.prior?.id || null]));
+    expect(prior['a0000001']).toBeNull();
+    expect(prior['a0000002']).toBe('a0000001');
+    expect(prior['a0000003']).toBe('a0000002');
+    expect(prior['d0000001']).toBeNull();
+  });
+
+  it('never pairs across customers or properties, and a same-day row is not a prior', () => {
+    const rows = [
+      { id: 'x1', customerId: 'c1', propertyId: 'p1', date: '2026-05-01', scores: S() },
+      { id: 'x2', customerId: 'c1', propertyId: 'p2', date: '2026-06-01', scores: S() },
+      { id: 'x3', customerId: 'c2', propertyId: 'p1', date: '2026-06-01', scores: S() },
+      { id: 'x4', customerId: 'c1', propertyId: 'p1', date: '2026-05-01', order: 'b', scores: S() },
+    ];
+    const prior = Object.fromEntries(pairAssessments(rows).map((p) => [p.current.id, p.prior?.id || null]));
+    expect(prior).toEqual({ x1: null, x2: null, x3: null, x4: null });
+  });
+});
+
+describe('replayLawnProgress over the fixture', () => {
+  const result = replayLawnProgress(FIXTURE);
+  const { summary: s, oddities: o } = result;
+
+  it('counts assessments, first visits, baselines and compared pairs', () => {
+    expect(s.assessments).toBe(10);
+    expect(s.noPrior).toBe(4); // b1, c1, d1, e1 are first visits
+    expect(s.baseline).toBe(1); // a1
+    expect(s.pairs).toBe(5);
+  });
+
+  it('reports the distribution of states, confidence levels and directions', () => {
+    expect(Object.keys(s.itemStates)).toEqual(['improving', 'on_track', 'holding_steady', 'too_early', 'behind', 'unclear', 'seasonal']);
+    expect(s.confidence).toEqual({ moderate: 1, insufficient: 1, high: 2, unknown: 1 });
+    const total = Object.values(s.itemStates).reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThan(0);
+    expect(Object.values(s.overall).reduce((a, b) => a + b, 0)).toBe(5);
+  });
+
+  it('a2: a good month after the herbicide and feed is on track; density is judged on its own, longer window', () => {
+    const a2 = result.pairs.find((p) => p.assessment === 'a0000002');
+    expect(a2).toBeTruthy();
+    expect(a2.items.map((i) => `${i.item}=${i.state}`)).toEqual(expect.arrayContaining([
+      'herbicide_broadleaf:weed_suppression=on_track',
+      'granular_fertilizer:color_health=on_track',
+      'granular_fertilizer:turf_density=too_early',
+    ]));
+  });
+
+  it('a3: one poor photo cannot support a comparison, so everything is unclear and the direction unknown', () => {
+    const a3 = result.pairs.find((p) => p.date === '2026-06-20');
+    expect(a3.confidence).toBe('insufficient');
+    expect(a3.overall).toBe('unknown');
+  });
+
+  it('b2: winter color change is seasonal and the unmapped name is listed', () => {
+    const b2 = result.pairs.find((p) => p.date === '2026-03-01');
+    expect(b2.items.find((i) => i.item === 'granular_fertilizer:color_health').state).toBe('seasonal');
+    expect(o.unmappedProducts).toEqual({ 'Brand New Product': 1 });
+  });
+
+  it('flags the oddities a person should read before sign-off', () => {
+    expect(o.invariantViolations).toEqual([]);
+    expect(o.shortGap.map((r) => r.date)).toEqual(['2026-05-03']);
+    expect(o.confidenceUnknown.map((r) => r.date)).toEqual(['2026-05-03']);
+    expect(o.scoreSwing.map((r) => r.date)).toContain('2026-05-03'); // weed_suppression -40
+    expect(o.scoreSwing.map((r) => r.date)).toContain('2026-07-01'); // turf_density -35
+    expect(o.noMappedProducts.map((r) => r.date)).toEqual(['2026-06-20']);
+  });
+
+  it('a divergent metric is unclear while the rest of the pair compares (e2 color)', () => {
+    const e2 = result.pairs.find((p) => p.date === '2026-07-01');
+    // Celsius (weeds, 30 days, delta 0) is behind; the feed row has no windows (K-Flow) and is judged by its own metric
+    expect(e2.items.find((i) => i.item === 'herbicide_broadleaf:weed_suppression').state).toBe('behind');
+    expect(e2.items.find((i) => i.item === 'potassium_feed:color_health').state).toBe('unclear');
+  });
+
+  it('reports the behind share of judged items and warns above a quarter', () => {
+    expect(s.judgedItems).toBeGreaterThan(0);
+    expect(s.behindShare).toBeGreaterThan(0.25);
+    expect(s.widenBand).toBe(true);
+    expect(formatReport(result)).toMatch(/WARNING: behind is above 25% of judged items/);
+  });
+
+  it('the band sweep widens the band, and the share never grows with it', () => {
+    expect(result.bandSweep.map((b) => b.band)).toEqual([4, 6, 8, 10, 12]);
+    for (const b of result.bandSweep) expect(b.behindShare).toBeGreaterThanOrEqual(0);
+    expect(result.bandSweep.find((b) => b.band === 8).behindShare).toBe(s.behindShare);
+  });
+
+  it('a wider band is passed through', () => {
+    const wide = replayLawnProgress(FIXTURE, { band: 12, overallBand: 6 });
+    expect(wide.summary).toMatchObject({ band: 12, overallBand: 6 });
+  });
+
+  it('since limits which visits are judged but still uses earlier ones as priors', () => {
+    const recent = replayLawnProgress(FIXTURE, { since: '2026-06-15' });
+    expect(recent.summary.assessments).toBe(2); // a3 and e2
+    expect(recent.pairs.map((p) => p.date)).toEqual(['2026-06-20', '2026-07-01']);
+  });
+
+  it('an empty list is a clean empty report', () => {
+    const empty = replayLawnProgress([]);
+    expect(empty.summary).toMatchObject({ assessments: 0, pairs: 0, judgedItems: 0, behindShare: 0, widenBand: false });
+    expect(formatReport(empty)).toMatch(/Assessments 0/);
+  });
+
+  it('prints a readable report with states, gates and oddities, and names no customer', () => {
+    const text = formatReport(result);
+    expect(text).toMatch(/Lawn progress replay \(band 8 per category, 4 overall\)/);
+    expect(text).toMatch(/Item states \(\d+ items\)/);
+    expect(text).toMatch(/seasonal\s+\d+/);
+    expect(text).toMatch(/Band sweep/);
+    expect(text).toMatch(/unmapped product names 1: Brand New Product/);
+    expect(text).not.toMatch(/cust-[a-e]/);
+  });
+});
+
+describe('main with --fixture (no database)', () => {
+  let file;
+  beforeEach(() => {
+    file = path.join(os.tmpdir(), `lawn-progress-replay-${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ assessments: FIXTURE }));
+  });
+  afterEach(() => { try { fs.unlinkSync(file); } catch { /* already gone */ } });
+
+  const capture = async (argv) => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await main(argv, {});
+      return log.mock.calls.map((c) => c[0]).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+  };
+
+  it('prints the text report', async () => {
+    const out = await capture(['--fixture', file]);
+    expect(out).toMatch(/Lawn progress replay/);
+    expect(out).toMatch(/compared pairs 5/);
+  });
+
+  it('prints JSON with --json, and the band flags reach the engine', async () => {
+    const out = JSON.parse(await capture(['--fixture', file, '--json', '--band', '10', '--overall-band', '5']));
+    expect(out.summary).toMatchObject({ band: 10, overallBand: 5, pairs: 5 });
+    expect(out.bandSweep).toHaveLength(5);
+  });
+
+  it('accepts a bare array fixture', async () => {
+    fs.writeFileSync(file, JSON.stringify(FIXTURE));
+    expect(await capture(['--fixture', file])).toMatch(/compared pairs 5/);
+  });
+
+  it('an invariant violation would set a failing exit code (none here)', async () => {
+    const before = process.exitCode;
+    await capture(['--fixture', file]);
+    expect(process.exitCode).toBe(before);
+  });
+});
+
+describe('loadReplayRows', () => {
+  it('runs only SELECTs inside a READ ONLY transaction and shapes the rows', async () => {
+    const calls = [];
+    const trx = {
+      raw: jest.fn(async (sql, params) => {
+        calls.push({ sql, params });
+        if (/FROM lawn_assessments/.test(sql)) {
+          return {
+            rows: [{
+              id: 'a1', customer_id: 'c1', property_id: 'p1', date: '2026-05-01', season: 'peak', is_baseline: false,
+              service_record_id: 'r1', divergence_flags: '[{"metric":"color_health","gap":30}]',
+              turf_density: 80, weed_suppression: 60, color_health: 70, fungus_control: 50, thatch_level: 40, stress_damage: null,
+              overall_score: null, confirmed_order: '2026-05-01T12:00:00.000000',
+            }],
+          };
+        }
+        if (/FROM lawn_assessment_photos/.test(sql)) return { rows: [{ assessment_id: 'a1', quality_score: '80.00' }, { assessment_id: 'a1', quality_score: null }] };
+        if (/FROM service_products/.test(sql)) return { rows: [{ service_record_id: 'r1', product_name: 'Celsius WG', targets: ['Clover'] }] };
+        return { rows: [] };
+      }),
+    };
+    const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
+    const rows = await loadReplayRows(db);
+    expect(db.transaction.mock.calls[0][1]).toEqual({ readOnly: true });
+    expect(calls[0].sql).toMatch(/SET TRANSACTION READ ONLY/);
+    expect(calls.slice(1).every((c) => /^\s*SELECT/.test(c.sql))).toBe(true);
+    expect(calls.filter((c) => /\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i.test(c.sql))).toEqual([]);
+    expect(rows).toEqual([{
+      id: 'a1',
+      customerId: 'c1',
+      propertyId: 'p1',
+      date: '2026-05-01',
+      season: 'peak',
+      isBaseline: false,
+      scores: { turf_density: 80, weed_suppression: 60, color_health: 70, stress_damage: 40, overall: expect.any(Number) },
+      photos: [80, null],
+      divergenceFlags: [{ metric: 'color_health', gap: 30 }],
+      applied: [{ name: 'Celsius WG', targets: ['Clover'] }],
+      order: '2026-05-01T12:00:00.000000',
+    }]);
+  });
+});
+
+describe('connection handling', () => {
+  it('requiring the engine and the replay script never loads models/db.js or knexfile.js', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => { throw new Error('models/db.js must not be loaded'); });
+      jest.doMock('../knexfile', () => { throw new Error('knexfile.js must not be loaded'); });
+      expect(() => {
+        require('../services/service-report/lawn-progress');
+        require('../scripts/replay-lawn-progress');
+      }).not.toThrow();
+      const loaded = Object.keys(require.cache).filter((k) => /models[\\/]db\.js$|knexfile\.js$/.test(k));
+      expect(loaded).toEqual([]);
+    });
+  });
+
+  it('main builds its own connection from --database-url, ahead of DATABASE_URL, and always closes it', async () => {
+    const trx = { raw: jest.fn(async () => ({ rows: [] })) };
+    const instance = { transaction: jest.fn(async (fn) => fn(trx)), destroy: jest.fn(async () => {}) };
+    const knexFactory = jest.fn(() => instance);
+    let run;
+    jest.isolateModules(() => {
+      jest.doMock('knex', () => knexFactory);
+      jest.doMock('../models/db', () => { throw new Error('models/db.js must not be loaded'); });
+      ({ main: run } = require('../scripts/replay-lawn-progress'));
+    });
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await run(['--database-url', 'postgres://flag-host/flagdb'], { DATABASE_URL: 'postgres://env-host/envdb' });
+    } finally {
+      log.mockRestore();
+    }
+    expect(knexFactory).toHaveBeenCalledTimes(1);
+    expect(knexFactory.mock.calls[0][0].connection.connectionString).toBe('postgres://flag-host/flagdb');
+    expect(instance.destroy).toHaveBeenCalled();
+  });
+
+  it('refuses to run with no database at all', async () => {
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(main([], {})).rejects.toThrow(/No database/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+});

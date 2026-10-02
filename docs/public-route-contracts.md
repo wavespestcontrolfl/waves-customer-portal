@@ -2024,6 +2024,15 @@ first render (first writer wins per assessment, no migration) together with the
 `sinceLast` block it carried, and replayed byte for byte after, so a permanent
 token never changes when later visits are added. A render whose entry could not
 be frozen is marked uncacheable (`weekWeatherUncacheable`); delivery is not held.
+The same gate also builds the lawn progress engine's block
+(`server/services/service-report/lawn-progress.js`, P13: a state per prior applied
+row and prior check, and an overall direction, from `sinceLast` plus both visits'
+scores and this render's photo confidence). It adds NO public key: it rides the
+in-process report object as a non-enumerable `reportV2.progress`, so JSON, spread
+and `Object.keys` never see it and the `/api/reports/:token/data` payload is what
+it was (a test pins that), until P14 writes guarded copy from it and this section
+is updated with the key it then exposes. Pure, no read, no write, and a failure
+cannot break a render.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time

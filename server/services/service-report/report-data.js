@@ -18,6 +18,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
+const { buildLawnProgress, deriveAssessmentConfidence, scoresFromAssessmentRow } = require('./lawn-progress');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -3232,6 +3233,35 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     observations: photo.observations || '',
     takenAt: photo.taken_at || photo.created_at || null,
   })));
+  // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
+  // out through the same internal out-param (never the payload). The prior is
+  // the property-scoped history row selectPriorVisit chose; confidence is read
+  // from what this render already loaded (the visible photos' quality and the
+  // models' divergence flags), so there is no extra query.
+  if (visitMemoryOut && typeof visitMemoryOut === 'object') {
+    const priorRow = visitMemoryOut.priorVisit
+      ? historyRows.find((row) => String(row.id) === String(visitMemoryOut.priorVisit.assessmentId))
+      : null;
+    visitMemoryOut.progressInput = {
+      current: {
+        date: visitMemoryOut.serviceDate,
+        season: assessment.season || null,
+        isBaseline: !!assessment.is_baseline,
+        scores: scoresFromAssessmentRow(assessment),
+        confidence: deriveAssessmentConfidence({
+          photos: photos.map((photo) => photo.qualityScore),
+          divergenceFlags: parseJsonArray(assessment.divergence_flags),
+        }),
+      },
+      prior: priorRow
+        ? {
+          date: visitMemoryOut.priorVisit.date,
+          season: priorRow.season || null,
+          scores: scoresFromAssessmentRow(priorRow),
+        }
+        : null,
+    };
+  }
 
   let beforeAfter = null;
   if (historyRows.length >= 2) {
@@ -5396,6 +5426,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // after the narrative overlay so no rewrite can touch it. Failure only
       // marks the render uncacheable; it never breaks the report.
       let visitMemorySinceLast;
+      let lawnProgress = null;
       if (reportV2 && visitMemoryLive) {
         try {
           const outcome = await resolveVisitMemoryForRender({
@@ -5417,6 +5448,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
         } catch {
           lawnAssessment.weekWeatherUncacheable = true;
+        }
+        // P13 progress engine: pure over the inputs above, so it cannot
+        // fail a render. Server-internal until P14 writes copy from it.
+        try {
+          const input = visitMemoryOut.progressInput;
+          lawnProgress = buildLawnProgress({ current: input?.current, prior: input?.prior, sinceLast: visitMemorySinceLast || null });
+        } catch {
+          lawnProgress = null;
         }
       }
       // AI "What we applied today" narrative — same contract as the T&S path
@@ -5567,6 +5606,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.
       if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = visitMemorySinceLast;
+      // P13: the progress block rides the report object but NOT the public
+      // payload (non-enumerable: JSON, spread and Object.keys never see it), so
+      // no state word reaches a customer before P14's guarded copy does.
+      if (reportV2 && lawnProgress) {
+        Object.defineProperty(reportV2, 'progress', { value: lawnProgress, enumerable: false, writable: true, configurable: true });
+      }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
