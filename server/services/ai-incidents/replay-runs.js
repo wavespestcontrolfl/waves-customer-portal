@@ -120,7 +120,9 @@ async function exportCases({ dbi, proposalId, split }) {
  */
 async function assertCurrentDevPassed(trx, proposal, codeRef, promptVersion) {
   const dev = proposal.dev_run_id ? await trx('ai_replay_runs').where({ id: proposal.dev_run_id }).first() : null;
-  const matches = dev && dev.status === 'passed' && dev.code_ref === codeRef && (dev.prompt_version ?? null) === (promptVersion ?? null);
+  const matches = dev
+    && dev.proposal_id === proposal.id && dev.split === 'dev' && dev.purpose === 'fix'
+    && dev.status === 'passed' && dev.code_ref === codeRef && (dev.prompt_version ?? null) === (promptVersion ?? null);
   if (!matches) throw new TransitionError('dev_not_passed', "a holdout run needs the proposal's current dev run passed on the same code_ref and prompt version");
 }
 

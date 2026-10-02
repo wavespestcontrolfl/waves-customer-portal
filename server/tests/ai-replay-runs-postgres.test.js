@@ -161,6 +161,15 @@ test('export refuses a directory inside the repository, however it is spelled', 
     // Two clean holdout cases are not enough to call it proof.
     expect(run).toMatchObject({ status: 'underpowered', case_count: 2 });
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).holdout_run_id).toBe(run.id);
+    // A run that is not this proposal's own dev fix run never authorizes its holdout.
+    const recurrence = await record({ purpose: 'recurrence', split: 'holdout', results: results(proposal.holdout_incident_keys) });
+    await database('ai_fix_proposals').where({ id: proposal.id }).update({ dev_run_id: recurrence.run.id });
+    await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
+    const otherId = randomUUID();
+    await database('ai_fix_proposals').insert({ ...(await database('ai_fix_proposals').where({ id: proposal.id }).first()), id: otherId, failure_mode: 'invented_billing', supersedes: null, history: '[]', incident_keys: '[]', dev_incident_keys: JSON.stringify(proposal.dev_incident_keys), holdout_incident_keys: '[]' });
+    const foreign = await record({ proposalId: otherId });
+    await database('ai_fix_proposals').where({ id: proposal.id }).update({ dev_run_id: foreign.run.id });
+    await expect(holdout()).rejects.toMatchObject({ code: 'dev_not_passed' });
     // A new candidate's dev run takes the old candidate's holdout proof off the proposal.
     const next = await record({ codeRef: 'abcdef1234' });
     expect(await database('ai_fix_proposals').where({ id: proposal.id }).first()).toMatchObject({ dev_run_id: next.run.id, holdout_run_id: null });
