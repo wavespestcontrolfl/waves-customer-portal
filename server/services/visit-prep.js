@@ -139,19 +139,14 @@ function visitPrepEligibility({
   if (visitUnknown) return { eligible: false, reason: 'visit_unknown' };
   if (state !== 'upcoming') return { eligible: false, reason: 'not_upcoming' };
   if (!svc || svc.customer_active !== true) return { eligible: false, reason: 'customer_inactive' };
-  if (reserviceCallback === true) {
-    return dispatchOwnedUnreviewed
-      ? { eligible: false, reason: 'dispatch_owned_unreviewed' }
-      : { eligible: true, reason: null };
-  }
-  if (!isRecurringLineageVisit(svc)) return { eligible: false, reason: 'one_time_visit' };
+  if (reserviceCallback !== true && !isRecurringLineageVisit(svc)) return { eligible: false, reason: 'one_time_visit' };
   // `one_time` is the explicit not-a-series sentinel (the seeder, the
   // recurring-schedule audit and admin-schedule's plan alerts all refuse
   // it), but the shared lineage predicate reads any non-empty pattern as
   // recurring — so it is refused here, whatever else the row carries
   // (Codex #5176 r3 P0). Not folded into utils/recurring-lineage.js:
   // estimate-card-holds.js shares that predicate for card holds.
-  if (svc.recurring_pattern === 'one_time') return { eligible: false, reason: 'one_time_visit' };
+  if (reserviceCallback !== true && svc.recurring_pattern === 'one_time') return { eligible: false, reason: 'one_time_visit' };
   if (dispatchOwnedUnreviewed) return { eligible: false, reason: 'dispatch_owned_unreviewed' };
   return { eligible: true, reason: null };
 }
