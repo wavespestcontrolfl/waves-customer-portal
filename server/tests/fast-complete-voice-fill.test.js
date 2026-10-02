@@ -1111,3 +1111,27 @@ describe('a negation after the product name', () => {
     expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
   });
 });
+
+describe('formatted numbers', () => {
+  test('"1,200 linear feet" is 1200, never 200', () => {
+    const t = 'Sprayed 1,200 linear feet outside.';
+    const run = (linearFt) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard: t.replace(/\.$/, '') }) }), ctx, t).visit.linearFt;
+    expect(run(1200)).toBe(1200);
+    expect(run(200)).toBeNull();
+  });
+
+  test('"3-4 ounces" is a range: neither end is the amount', () => {
+    const t = 'Used Taurus, 3-4 ounces.';
+    for (const amount of [3, 4]) {
+      const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t);
+      expect(out.products[0].amount).toBeNull();
+    }
+  });
+});
+
+test('a sentence after an office label is never customer-facing without a Check', () => {
+  const t = 'Treated the kitchen. Office: customer was rude. Please do not send another technician.';
+  const out = validateFill(answer({ customerNote: 'Treated the kitchen. Please do not send another technician.' }), ctx, t);
+  expect(out.customerNote).toBe('Treated the kitchen.');
+  expect(out.unclear).toContainEqual({ heard: 'Please do not send another technician.', reason: 'note_audience_unclear' });
+});

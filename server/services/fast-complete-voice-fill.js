@@ -358,7 +358,9 @@ const TOKEN_RE = /\d*\.\d+|\d+\/\d+|\d+|[½¼¾⅓⅔⅛]|[a-z]+/g;
 // Tokens with, for each, whether clause punctuation (or "but" / "then") sits
 // between it and the token before.
 function tokenize(text) {
-  const src = String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛])/g, '$1 $2');
+  // "1,200" is one number; "3-4" / "3–4" is a range, read like "3 to 4" (neither end counts).
+  const src = String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛])/g, '$1 $2')
+    .replace(/(\d),(?=\d{3}\b)/g, '$1').replace(/(\d)\s*[-–—]\s*(?=\d)/g, '$1 to ');
   const tokens = [];
   const breaks = [];
   const stops = [];
@@ -1134,19 +1136,20 @@ const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence) || accessCodeRe.test(sentence);
 
-// Where the note sentence was said, as 'customer' | 'office', or null when it is
-// not a whole clause of any transcript sentence.
+// Where the note sentence was said, as 'customer' | 'office' | 'unclear' (only
+// after an office label, so possibly still the aside), or null when it is not a
+// whole clause of any transcript sentence.
 function spokenClauseScope(sentence, spoken) {
   const words = tokensOf(sentence);
   if (!words.length) return null;
   let scope = null;
-  for (const { tokens, breaks, office } of spoken) {
+  for (const { tokens, breaks, office, afterOffice } of spoken) {
     for (let i = 0; i + words.length <= tokens.length; i += 1) {
       const atStart = i === 0 || breaks[i];
       const atEnd = i + words.length === tokens.length || breaks[i + words.length];
       if (!atStart || !atEnd || !words.every((w, k) => tokens[i + k] === w)) continue;
       if (office) return 'office';
-      scope = 'customer';
+      scope = afterOffice && scope !== 'customer' ? 'unclear' : 'customer';
     }
   }
   return scope;
@@ -1154,8 +1157,14 @@ function spokenClauseScope(sentence, spoken) {
 
 function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
-  const spoken = String(transcript).split(SENTENCE_SPLIT_RE).filter((t) => t.trim())
-    .map((t) => ({ ...tokenize(t), office: isOfficeSentence(t, COMPLETION_ACCESS_CODE_RE) }));
+  // After an office label ("Office: ...") the following sentences may still be the
+  // aside: their audience is unclear, so they never go to the customer unasked.
+  let afterOffice = false;
+  const spoken = String(transcript).split(SENTENCE_SPLIT_RE).filter((t) => t.trim()).map((t) => {
+    const entry = { ...tokenize(t), office: isOfficeSentence(t, COMPLETION_ACCESS_CODE_RE), afterOffice };
+    if (OFFICE_ADDRESSED_RE.test(t)) afterOffice = true;
+    return entry;
+  });
   const customer = [];
   const office = [];
   for (const sentence of String(customerRaw ?? '').split(SENTENCE_SPLIT_RE)) {
@@ -1164,7 +1173,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     const scope = isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : spokenClauseScope(text, spoken);
     if (scope === 'office') office.push(text);
     else if (scope === 'customer') customer.push(text);
-    else pushUnclear(unclear, text, 'note_not_heard');
+    else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }
   const officeText = [String(officeRaw ?? '').trim(), ...office].filter(Boolean).join(' ');
   return {
