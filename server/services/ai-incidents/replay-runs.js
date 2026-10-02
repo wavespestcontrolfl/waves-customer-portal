@@ -113,6 +113,18 @@ async function exportCases({ dbi, proposalId, split }) {
 }
 
 /**
+ * The candidate must clear its dev cases before its holdout: the proposal's
+ * CURRENT dev run (a later failed run, a new candidate, or a closed or
+ * replaced PR replaces or clears it) must have passed on the same code AND
+ * prompt version (gates change the prompt without a commit).
+ */
+async function assertCurrentDevPassed(trx, proposal, codeRef, promptVersion) {
+  const dev = proposal.dev_run_id ? await trx('ai_replay_runs').where({ id: proposal.dev_run_id }).first() : null;
+  const matches = dev && dev.status === 'passed' && dev.code_ref === codeRef && (dev.prompt_version ?? null) === (promptVersion ?? null);
+  if (!matches) throw new TransitionError('dev_not_passed', "a holdout run needs the proposal's current dev run passed on the same code_ref and prompt version");
+}
+
+/**
  * Store one replay run. `results` = [{ incident_key, verdict, reason?, evidence? }].
  * Every key must belong to the proposal's split; a key of the split with no
  * result is stored as inconclusive ('not_run'). Returns { run, results }.
@@ -145,13 +157,7 @@ async function recordReplayRun({
       throw new TransitionError('needs_holdout', 'a recurrence check replays the holdout cases');
     }
     if (purpose === 'fix' && split === 'holdout') {
-      // The candidate must clear its dev cases first: the proposal's CURRENT
-      // dev run (a later failed run, or a closed or replaced PR, replaces or
-      // clears it) must have passed on the same code AND prompt version
-      // (gates change the prompt without a commit).
-      const dev = proposal.dev_run_id ? await trx('ai_replay_runs').where({ id: proposal.dev_run_id }).first() : null;
-      const matches = dev && dev.status === 'passed' && dev.code_ref === codeRef && (dev.prompt_version ?? null) === (promptVersion ?? null);
-      if (!matches) throw new TransitionError('dev_not_passed', "a holdout run needs the proposal's current dev run passed on the same code_ref and prompt version");
+      await assertCurrentDevPassed(trx, proposal, codeRef, promptVersion);
     }
 
     const rows = keys.map((k) => {
@@ -187,10 +193,11 @@ async function recordReplayRun({
     await trx('ai_replay_results').insert(rows.map((r) => ({ ...r, run_id: stored.id })));
     // Only a fix run is the proposal's proof; a recurrence check is evidence
     // for carryForward and never replaces it.
+    // A new dev run is a new candidate (or a re-check of it): the holdout
+    // proof of whatever came before no longer applies.
     if (purpose === 'fix') {
-      await transitionProposal({
-        dbi: trx, id: proposalId, fields: { [split === 'dev' ? 'dev_run_id' : 'holdout_run_id']: stored.id }, by,
-      });
+      const fields = split === 'dev' ? { dev_run_id: stored.id, holdout_run_id: null } : { holdout_run_id: stored.id };
+      await transitionProposal({ dbi: trx, id: proposalId, fields, by });
     }
     return { run: stored, results: rows };
   });

@@ -161,6 +161,9 @@ test('export refuses a directory inside the repository, however it is spelled', 
     // Two clean holdout cases are not enough to call it proof.
     expect(run).toMatchObject({ status: 'underpowered', case_count: 2 });
     expect((await database('ai_fix_proposals').where({ id: proposal.id }).first()).holdout_run_id).toBe(run.id);
+    // A new candidate's dev run takes the old candidate's holdout proof off the proposal.
+    const next = await record({ codeRef: 'abcdef1234' });
+    expect(await database('ai_fix_proposals').where({ id: proposal.id }).first()).toMatchObject({ dev_run_id: next.run.id, holdout_run_id: null });
   });
 
   test('a version bump carries the proposal only when a recurrence check on the new version still reproduces', async () => {
