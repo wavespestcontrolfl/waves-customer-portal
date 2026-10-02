@@ -30,6 +30,30 @@ function allCommitPromisesOf(trx) {
   return out;
 }
 
+const ROLLED_BACK = Symbol('waves.trxRolledBack');
+const WATCHED = Symbol('waves.trxRollbackWatched');
+
+// Marks `trx` and every enclosing transaction when its rollback() is called
+// (idempotent per transaction). knex's callback form rolls back WITH the
+// thrown error, which already rejects executionPromise; an explicit
+// rollback() without an error resolves it — this is what tells them apart.
+function watchRollbacks(trx) {
+  const out = [];
+  for (let cur = trx; cur; cur = cur.parentTransaction) {
+    if (typeof cur.rollback === 'function' && !cur[WATCHED]) {
+      const original = cur.rollback;
+      const target = cur;
+      target.rollback = function rollbackWatched(...args) {
+        target[ROLLED_BACK] = true;
+        return original.apply(this, args);
+      };
+      target[WATCHED] = true;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
 /**
  * A commit scope for work done inside a SAVEPOINT that may be thrown away
  * (an insert kept only when it ends up grouped into another row's visit).
@@ -49,7 +73,12 @@ function deferredCommitScope(conn) {
   // between this scope and the root can roll back while the root commits, and
   // its executionPromise is what rejects then.
   const chain = (conn && conn.isTransaction) ? allCommitPromisesOf(conn) : [];
-  const executionPromise = kept.then(() => Promise.all(chain));
+  const watched = (conn && conn.isTransaction) ? watchRollbacks(conn) : [];
+  const executionPromise = kept.then(() => Promise.all(chain)).then(() => {
+    // knex resolves (not rejects) a plain rollback() — doNotRejectOnRollback
+    // defaults to true — so a resolved promise is not proof of a commit.
+    if (watched.some((t) => t[ROLLED_BACK])) throw new Error('an enclosing transaction rolled back');
+  });
   executionPromise.catch(() => {});
   return { isTransaction: true, executionPromise, keep: () => keep(), drop: (err) => drop(err) };
 }

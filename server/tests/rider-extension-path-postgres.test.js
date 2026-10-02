@@ -699,6 +699,17 @@ postgres('series extension keeps riding the lawn', () => {
         await mid.rollback(new Error('enclosing work failed'));
         expect(await state(scope.executionPromise)).toBe('dropped');
       } finally { await root.rollback().catch(() => {}); }
+      // Kept, then the enclosing savepoint is rolled back WITHOUT an error —
+      // knex resolves (not rejects) that promise; it must still be dropped.
+      const root1 = await mockPg.transaction();
+      try {
+        const mid1 = await root1.transaction();
+        const scope1 = deferredCommitScope(mid1);
+        scope1.keep();
+        await mid1.rollback();
+        await root1.commit();
+        expect(await state(scope1.executionPromise)).toBe('dropped');
+      } finally { await root1.rollback().catch(() => {}); }
       // Kept, savepoint released: still waits for the root, then fires on its commit.
       const root2 = await mockPg.transaction();
       const mid2 = await root2.transaction();
