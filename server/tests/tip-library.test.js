@@ -272,12 +272,29 @@ describe('tipsForVisit', () => {
       expect(lead.id).toBe('for_service');
       expect(lead.tips.map((tip) => tip.id)).toEqual(expect.arrayContaining(trapping));
     }
+    // The diagnostic rodent visits set no traps: no tip says they are out.
+    for (const serviceKey of VISIT_FACTS_CONTRACT.rodent_inspection.catalogKeys) {
+      const tips = tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups.flatMap((group) => group.tips);
+      expect(tips.map((tip) => tip.id).filter((id) => trapping.includes(id))).toEqual([]);
+    }
   });
 
   test('every recurring pest visit leads with the drains tip', () => {
     const { VISIT_FACTS_CONTRACT } = require('../config/visit-facts-contract');
     for (const serviceKey of VISIT_FACTS_CONTRACT.recurring_pest.catalogKeys) {
       expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toContain('pal_dry_drains');
+    }
+  });
+
+  test('the treated-soil tips go only where the soil along the foundation is the barrier (codex local r4 on #5582)', () => {
+    const lead = (serviceKey) => tipsForVisit({ serviceLine: 'termite', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id);
+    for (const serviceKey of ['termite_liquid', 'termite_trenching']) {
+      expect(lead(serviceKey)).toEqual(expect.arrayContaining(['tl_before_digging', 'tl_water_off_soil', 'tl_new_slabs']));
+    }
+    for (const serviceKey of ['foam_drill', 'foam_recurring', 'termite_spot_treatment']) {
+      expect(lead(serviceKey)).toContain('tl_new_slabs');
+      expect(lead(serviceKey)).not.toContain('tl_before_digging');
+      expect(lead(serviceKey)).not.toContain('tl_water_off_soil');
     }
   });
 

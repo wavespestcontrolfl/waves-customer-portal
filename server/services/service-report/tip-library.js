@@ -502,27 +502,30 @@ const TIPS = Object.freeze([
 
   // ── Rodent trapping (service tips, owner-approved 2026-10-02) ─────────────────────────────────────────────
   {
+    // Only services that set traps. A one-time rodent visit completes on the
+    // diagnostic inspection form and sets none, so these would claim traps
+    // that are not out (codex local r4 on #5582).
     id: 'rt_leave_traps', group: 'rodent', label: "Leave the traps where they are",
     keywords: ["traps", "move", "check", "attic", "garage"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion"],
     copy: "Rats are wary of anything new, so traps work best once they've sat in place a few nights. Moving them or checking them yourself starts that over; I check them at every visit.",
   },
   {
     id: 'rt_note_noises', group: 'rodent', label: "Note when and where you hear them",
     keywords: ["noise", "scratching", "night", "ceiling", "attic"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion"],
     copy: "The time of night and the room you hear scratching above show me where they're running. A quick note on your phone, like \"2 a.m., over the kitchen,\" helps me put the next traps right on that path.",
   },
   {
     id: 'rt_no_store_bait', group: 'rodent', label: "No store-bought rat bait inside",
     keywords: ["poison", "bait", "smell", "wall", "store"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion"],
     copy: "A rat that eats store-bought bait usually dies wherever it is, often inside a wall or the attic, where the smell lasts for weeks. Leave the attic to the traps, and let me know before adding anything of your own.",
   },
   {
     id: 'rt_doors_closed', group: 'rodent', label: "Attic and garage doors closed",
     keywords: ["pets", "kids", "dog", "attic door", "garage"], lines: ["rodent"], season: 'all',
-    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion", "rodent_general_one_time"],
+    services: ["rodent_trapping", "rodent_trapping_followup", "rodent_trapping_followup_3pack", "rodent_trap_check_additional", "rodent_trapping_exclusion", "rodent_trapping_sanitation", "rodent_trapping_exclusion_sanitation", "trap_only_retainer_monthly", "trap_only_retainer_standard", "trap_only_retainer_plus", "rodent_exclusion"],
     copy: "The traps go where rodents run, not where people go, but a curious dog or child can still reach one in the garage. Keep the garage and attic doors closed while the traps are out.",
   },
 
@@ -596,15 +599,19 @@ const TIPS = Object.freeze([
 
   // ── Termite treatment (liquid, trench, spot, foam) (service tips, owner-approved 2026-10-02) ──────────────
   {
+    // Only where the soil along the foundation is the barrier: the full liquid
+    // and trench treatments. A foam or spot treatment treats galleries, voids
+    // or one spot, so a tip calling the soil treated would claim work that was
+    // not done (codex local r4 on #5582).
     id: 'tl_before_digging', group: 'termite', label: "Call before digging by the foundation",
     keywords: ["digging", "planting", "edging", "pavers", "landscaper"], lines: ["termite"], season: 'all',
-    services: ["termite_liquid", "termite_trench", "termite_trenching", "termite_spot_treatment", "foam_drill", "foam_recurring"],
+    services: ["termite_liquid", "termite_trench", "termite_trenching"],
     copy: "The treated soil along the foundation is the barrier. New plantings, edging, or pavers dug into that strip break it, so let me know before any work there starts.",
   },
   {
     id: 'tl_water_off_soil', group: 'termite', label: "Keep water off the treated soil",
     keywords: ["downspout", "sprinkler", "erosion", "foundation", "washout"], lines: ["termite"], season: 'all',
-    services: ["termite_liquid", "termite_trench", "termite_trenching", "termite_spot_treatment", "foam_drill", "foam_recurring"],
+    services: ["termite_liquid", "termite_trench", "termite_trenching"],
     copy: "Downspouts and sprinklers that wash soil away from the foundation take the treated soil with them. Turn sprinkler heads away from the wall and run downspouts out a few feet.",
   },
   {
