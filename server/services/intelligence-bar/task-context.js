@@ -683,10 +683,17 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const hash = require('./pending-actions').paramsHash;
   const actionBinding = hash(toolName, boundParams);
   const recordsBinding = hash('ib-target-records', records);
+  // The owner-direct exemption rides on the approval proof (pre-push P1):
+  // the confirm-time re-check runs the request-scope refusals above against
+  // this proof, and a route-wide or outside write the owner proposed with a
+  // customer target would otherwise be refused at Confirm after its approval
+  // was consumed. The proof is server-minted and hashed into the stored
+  // params, so the flag cannot be added afterwards.
   const accepted = forApproval ? {
     targets: (context.targets || []).map(({ customer_id }) => ({ customer_id })),
     references: records.map(({ kind, id }) => ({ kind, id })),
     actionBinding, recordsBinding,
+    ...(direct ? { ownerDirect: true } : {}),
   } : null;
   if (context.actionBinding) {
     return context.actionBinding === actionBinding && context.recordsBinding === recordsBinding ? accepted

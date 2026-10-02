@@ -170,7 +170,25 @@ describe('target check for the owner login', () => {
     const accepted = await Context.validateRecordTarget({ lead_id: LEAD, first_name: 'Jay' }, direct(), { toolName: 'update_lead_contact', forApproval: true });
     expect(accepted.references).toEqual([{ kind: 'lead_id', id: LEAD }]);
     expect(typeof accepted.actionBinding).toBe('string');
-    expect(accepted.ownerDirect).toBeUndefined();
+    // The exemption is part of the proof, so the confirm-time re-check
+    // (which runs against the proof, not the live request) keeps it.
+    expect(accepted.ownerDirect).toBe(true);
+    const strictProof = await Context.validateRecordTarget({ lead_id: LEAD, first_name: 'Jay' }, strict({ targets: [{ customer_id: A }] }), { toolName: 'update_lead_contact', forApproval: true });
+    expect(strictProof.ownerDirect).toBeUndefined();
+  });
+
+  test('a route-wide write proposed with a customer target still confirms against its proof', async () => {
+    const params = { date: '2026-10-02' };
+    const task = { targets: [{ customer_id: A }], target: { customer_id: A } };
+    const proof = await Context.validateRecordTarget(params, direct(task), { toolName: 'optimize_all_routes', forApproval: true });
+    expect(proof).toMatchObject({ ownerDirect: true, targets: [{ customer_id: A }] });
+    // Confirm-time: the stored proof is the context.
+    expect(await Context.validateRecordTarget({ ...params, _ib_task_context: proof }, proof, { toolName: 'optimize_all_routes' })).toBeNull();
+    // Without the flag the same proof refuses before reaching the binding.
+    const { ownerDirect: _flag, ...stripped } = proof;
+    expect(await Context.validateRecordTarget({ ...params, _ib_task_context: stripped }, stripped, { toolName: 'optimize_all_routes' })).toMatchObject({ code: 'customer_scope_required' });
+    // A changed action still fails the binding for the owner too.
+    expect(await Context.validateRecordTarget({ date: '2026-10-03', _ib_task_context: proof }, proof, { toolName: 'optimize_all_routes' })).toMatchObject({ code: 'target_changed' });
   });
 
   test('facts about the data still refuse: bad id, missing record, cross-customer record', async () => {
