@@ -10,9 +10,11 @@
  * the letter as it was SENT (frozen on the notice by
  * services/rate-review-comms.js — service, old/new rate per application or
  * per prepaid year, effective date, the reason, the owner's cost block).
- * Only a delivered rate-review notice renders: an undelivered one is 404
- * and is neither counted nor flipped to viewed (its letter is not
- * customer-facing yet, and 'viewed' must never stand in for delivery).
+ * A rate-review notice renders once it was delivered, or once a send
+ * handed it to a provider with an uncertain outcome (the words frozen
+ * before that call — only a delivered message carries the token; its view
+ * is counted but never flips it to viewed). A notice no send ever touched
+ * is a 404, neither counted nor flipped.
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -58,10 +60,14 @@ router.get('/:token', async (req, res) => {
     const customer = await db('customers').where({ id: notice.customer_id }).first('first_name');
     const firstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
 
+    // An annual rate review notice whose send outcome is uncertain (not
+    // stamped sent) records the view but keeps its status: 'viewed' must
+    // never stand in for a delivery stamp, nor make it retirable.
+    const keepStatus = !!notice.rate_review_row_id && !notice.sent_at;
     void db('price_change_notices').where({ id: notice.id }).update({
       view_count: db.raw('view_count + 1'),
       first_viewed_at: db.raw('COALESCE(first_viewed_at, now())'),
-      status: 'viewed',
+      ...(keepStatus ? {} : { status: 'viewed' }),
       updated_at: new Date(),
     }).catch((err) => logger.warn(`[price-change-public] view update failed: ${err.message}`));
 

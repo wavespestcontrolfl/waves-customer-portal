@@ -148,14 +148,6 @@ describe('sendPreview', () => {
     expect(await previewDigest()).not.toBe(b);
   });
 
-  test('a draft whose earlier send reported failure keeps its frozen words and is reconciled past the cutoff', async () => {
-    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const n = draft(1, { effective_date: '2026-11-20', status: 'draft' });
-    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'November 20, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
-    mockDb.reset(book({ notices: [n] }));
-    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
-  });
-
   test('the digest moves with the cost block, not only the list', async () => {
     mockDb.reset(book());
     const a = await previewDigest();
@@ -220,36 +212,54 @@ describe('sendBatch', () => {
     expect(notices().map((x) => x.status)).toEqual(['sent', 'sent']);
   });
 
-  test('no leg delivered: an attempted send goes back to draft, an unreachable one parks — neither is stamped sent', async () => {
+  test('an uncertain outcome (a provider failure) is held send_uncertain with its words — never auto-retried', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: true });
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
-    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, failed: 1, sent: 0 });
-    expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
-    // the attempted send keeps its frozen words (the provider may have
-    // accepted it): an edited cost block changes neither the preview nor
-    // what a retry sends
-    mockDb.store.rate_review_config[0].cost_block = 'An EDITED cost block.';
-    const letter = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
-    expect(letter.html).toContain(COST_BLOCK);
-    expect(letter.html).not.toContain('An EDITED cost block.');
-    emailLeg.mockResolvedValue({ sent: false, attempted: false });
-    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
-    expect(notices()[0]).toMatchObject({ status: 'unreachable', sent_at: null });
-    // the blocked retry proves nothing about the EARLIER attempt: its words stay
-    const meta = notices()[0].metadata;
-    expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeTruthy();
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, uncertain: 1, sent: 0 });
+    const n = notices()[0];
+    expect(n).toMatchObject({ status: 'send_uncertain', sent_at: null });
+    expect((typeof n.metadata === 'string' ? JSON.parse(n.metadata) : n.metadata).pending_letter.payload.cost_block).toBe(COST_BLOCK);
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.customers[0].suppressedLines[0].reason).toBe('send_uncertain');
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
+    expect(emailLeg).toHaveBeenCalledTimes(1);
+    expect(snapshots()[0].status).toBe('approved');
+    // the link that email may carry renders the frozen words
+    expect(comms.publicReview(n)).toMatchObject({ costBlock: COST_BLOCK, delivered: false, lines: [{ current: '$117', next: '$121' }] });
   });
 
-  test('a first attempt that never reached a provider parks unreachable and drops its words', async () => {
+  test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
+    const n = notices()[0];
+    expect(n.status).toBe('unreachable');
+    expect((typeof n.metadata === 'string' ? JSON.parse(n.metadata) : n.metadata).pending_letter).toBeUndefined();
+    expect(comms.publicReview(n)).toEqual({ unavailable: true });
+    emailLeg.mockResolvedValue({ sent: true, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1 });
+  });
+
+  test('a claim gone stale after a crash is held send_uncertain, never reclaimed', async () => {
+    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) })] }));
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(preview.customers[0].suppressedLines[0].reason).toBe('send_uncertain');
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
+    expect(emailLeg).not.toHaveBeenCalled();
+  });
+
+  test('the words are frozen on the rows before the provider call', async () => {
+    mockDb.reset(book());
+    emailLeg.mockImplementation(async () => {
+      const meta = notices()[0].metadata;
+      expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter.payload.cost_block).toBe(COST_BLOCK);
+      return { sent: true, attempted: true };
+    });
+    expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).sent).toBe(1);
     const meta = notices()[0].metadata;
-    expect(notices()[0].status).toBe('unreachable');
     expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeUndefined();
-    expect(snapshots()[0].status).toBe('approved');
   });
 
   test('a fresh in-flight claim is never re-sent', async () => {
@@ -257,32 +267,6 @@ describe('sendBatch', () => {
     const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(preview.customers[0].suppressedLines[0].reason).toBe('in_flight');
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
-  });
-
-  test('a stale claim is recovered with the words its crashed attempt froze, not a rebuild', async () => {
-    const stale = new Date(NOW.getTime() - 60 * 60 * 1000);
-    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const frozen = { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: 'The OLD cost block.', notice_url: 'https://portal.example.com/price-change/x' }, letter: { first_name: 'Testcust1', cost_block: 'The OLD cost block.', lines: [{ current_cents: 11700, new_cents: 12100, effective_date: '2026-12-10' }] } };
-    const n = draft(1, { status: 'sending', updated_at: stale });
-    n.metadata = { ...n.metadata, pending_letter: frozen };
-    mockDb.reset(book({ notices: [n] }));
-    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    expect(out.sent).toBe(1);
-    expect(emailLeg.mock.calls[0][0].vars.cost_block).toBe('The OLD cost block.');
-    const meta = notices()[0].metadata;
-    const parsed = typeof meta === 'string' ? JSON.parse(meta) : meta;
-    expect(parsed.letter.cost_block).toBe('The OLD cost block.');
-    expect(parsed.pending_letter).toBeUndefined();
-  });
-
-  test('a crashed attempt (stale claim with frozen words) is reconciled even past the 30-day cutoff (the apply holds a late stamp)', async () => {
-    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const n = draft(1, { effective_date: '2026-11-20', status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) });
-    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'November 20, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { first_name: 'Testcust1', cost_block: COST_BLOCK, lines: [] } } };
-    mockDb.reset(book({ notices: [n] }));
-    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
-    expect(preview.counts.letters).toBe(1);
-    expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).sent).toBe(1);
   });
 
   test('a template published after the preview refuses the send', async () => {
@@ -304,28 +288,6 @@ describe('sendBatch', () => {
     mockDb.reset(book());
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     expect(emailLeg.mock.calls[0][0].expectedContentHash).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  test('a reclaimed crash whose text already went out never texts again', async () => {
-    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const n = draft(1, { status: 'sending', updated_at: new Date(NOW.getTime() - 60 * 60 * 1000) });
-    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, sms_sent: true, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
-    mockDb.reset(book({ notices: [n] }));
-    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    expect(out).toMatchObject({ sent: 1, texted: 1 });
-    expect(smsLeg).not.toHaveBeenCalled();
-    expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true });
-  });
-
-  test('a frozen line is reconciled with its group even if it would now be held (its email may be in the inbox)', async () => {
-    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
-    const n = draft(1, { status: 'draft' });
-    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
-    const b = book({ notices: [n] });
-    b.rate_review_snapshots[0].status = 'skipped';
-    mockDb.reset(b);
-    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
-    expect(preview.counts.letters).toBe(1);
   });
 
   test('a prepaid renewal the customer declined is held back, never sent', async () => {
@@ -476,6 +438,10 @@ describe('customer surfaces', () => {
     b.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '60.00' }];
     mockDb.reset(b);
     expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01' });
+    // delivered under 30 days before the effective date: the apply holds it
+    mockDb.store.price_change_notices[0].sent_at = new Date('2026-11-25T15:00:00Z');
+    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ chargeCents: null, chargeDate: null });
+    mockDb.store.price_change_notices[0].sent_at = NOW;
     // the line's rate moved since the notice: the apply would hold, nothing is announced
     mockDb.store.customer_plan_rates[0].monthly_rate = '35.00';
     expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ chargeCents: null, chargeDate: null });

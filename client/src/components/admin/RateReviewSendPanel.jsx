@@ -132,8 +132,8 @@ export default function RateReviewSendPanel({ batchKey }) {
     setFeedback(null);
     try {
       const data = await adminFetch(`/admin/rate-review/batches/${batchKey}/send`, { method: "POST", body: JSON.stringify({ expectedDigest: preview?.digest || "" }) });
-      const extra = [data.unreachable && `${data.unreachable} unreachable`, data.failed && `${data.failed} failed`].filter(Boolean).join(", ");
-      setFeedback({ ok: !data.failed, text: `${plural(data.sent || 0, "letter")} sent (${data.emailed || 0} emailed, ${data.texted || 0} texted)${extra ? `; ${extra}` : ""}.` });
+      const extra = [data.unreachable && `${data.unreachable} unreachable`, data.uncertain && `${data.uncertain} held: outcome uncertain, check the email log`, data.failed && `${data.failed} failed`].filter(Boolean).join(", ");
+      setFeedback({ ok: !data.failed && !data.uncertain, text: `${plural(data.sent || 0, "letter")} sent (${data.emailed || 0} emailed, ${data.texted || 0} texted)${extra ? `; ${extra}` : ""}.` });
     } catch (e) {
       setFeedback({ ok: false, text: e.message || "Could not send the letters." });
     } finally {

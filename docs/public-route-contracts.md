@@ -2012,7 +2012,9 @@ delivery record; an annual rate review notice adds `review` — the
 letter frozen at send: service line name, old/new rate per application
 or per prepaid year, effective date, the per-line reason from stored
 ranking facts and the owner's cost block, still no address/email/PII —
-and an UNDELIVERED rate-review notice is a generic 404, never counted
+also served, from the words frozen before the provider call, for a
+send whose outcome was uncertain (counted, never flipped to viewed);
+a rate-review notice no send touched is a generic 404, never counted
 or flipped to viewed),
 `/api/public/products` (read-only export; returns only active +
 customer_visibility=public + content_status=approved_for_public products;

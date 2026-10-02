@@ -54,6 +54,7 @@ const LINE_SLOTS = 4;
 const MIN_NOTICE_DAYS = PriceChangeNotices.MIN_NOTICE_DAYS;
 const SEND_CONCURRENCY = 5;
 const CLAIM_STALE_MS = 15 * 60 * 1000;
+const UNCERTAIN = 'send_uncertain';
 const BATCH_KEY_RE = /^\d{4}-\d{2}$/;
 const DAY_MS = 86400000;
 
@@ -75,6 +76,7 @@ const REASONS = Object.freeze({
   too_many_lines: `More than ${LINE_SLOTS} reviewed lines on one account`,
   no_contact: 'No email or phone on file',
   in_flight: 'A send for this customer is in progress',
+  send_uncertain: 'An earlier send may have reached the customer — check the email log before anything else is sent',
   renewal_declined: 'Customer declined to renew the prepaid plan',
 });
 
@@ -242,9 +244,13 @@ function letterPayload({ customer, lines, costBlock, noticeUrl }) {
 
 // ── batch read ─────────────────────────────────────────────────────────
 
-function claimable(notice, now) {
-  if (notice.sent_at) return false;
-  if (['draft', 'viewed', 'unreachable'].includes(String(notice.status))) return true;
+// Only a notice no attempt ever handed to a provider is sendable. A send
+// is single-shot: an attempt whose outcome is uncertain (the provider may
+// have accepted it) is never retried automatically — it is held for the
+// owner (send_uncertain, or a 'sending' claim gone stale after a crash).
+const SENDABLE_STATUSES = ['draft', 'viewed', 'unreachable'];
+function sendOutcomeUncertain(notice, now) {
+  if (String(notice.status) === UNCERTAIN) return true;
   return String(notice.status) === 'sending' && new Date(notice.updated_at).getTime() < now.getTime() - CLAIM_STALE_MS;
 }
 
@@ -293,14 +299,12 @@ const LINE_RULES = [
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
   ['renewal_declined', ({ notice, declinedTerms }) => declinedTerms.has(String(parseJson(notice.metadata, {}).term_id || ''))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
-  // Every line must be at least 30 days out (31 for a prepaid renewal) —
-  // a frozen line (reconciled, see planEntry) never reaches this rule; the
-  // apply counts 30 days from the stamped sent_at, so a late reconcile
-  // holds the change (safe direction), never applies it early.
+  ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
+  ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
+  // At least 30 days out from today, the delivery day (31 for a prepaid
+  // renewal, the apply lane's own rule).
   ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)],
-  ['in_flight', ({ notice, now }) => !claimable(notice, now)],
 ];
-const IN_FLIGHT_ONLY = LINE_RULES.filter(([code]) => code === 'in_flight');
 const ACCOUNT_RULES = [
   ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
   ['too_many_lines', ({ entry }) => entry.lines.length > LINE_SLOTS],
@@ -315,11 +319,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
-    // A line carrying words frozen by an earlier attempt is reconciled with
-    // its original group whatever changed since (that email may already be
-    // in the inbox, its link must keep working); only a live claim waits.
-    const rules = parseJson(notice.metadata, {}).pending_letter ? IN_FLIGHT_ONLY : LINE_RULES;
-    const reason = firstMatch(rules, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -344,16 +344,15 @@ function planBatch(data, { today, now }) {
     .sort((a, b) => a.customerId.localeCompare(b.customerId));
 }
 
-// The digest the send must match: per sendable letter, the exact words
-// (the frozen ones for a retry, else the letter as it would render now —
-// cost block, dates, first application) and the channels it goes out on.
+// The digest the send must match: per sendable letter, the exact words it
+// would render now (cost block, dates, first application), the channels it
+// goes out on, and the active template's content.
 function digestFor(entries, costBlock, templateHash = null) {
   const h = crypto.createHash('sha256');
   h.update(`cost:${costBlock || ''}\ntemplate:${templateHash || ''}\n`);
   for (const e of entries) {
     if (e.reason || !e.lines.length) continue;
-    const frozen = frozenFor(e);
-    const payload = frozen ? frozen.payload : letterPayload({ customer: e.customer, lines: e.lines, costBlock, noticeUrl: noticeUrlFor(e.lines) });
+    const payload = letterPayload({ customer: e.customer, lines: e.lines, costBlock, noticeUrl: noticeUrlFor(e.lines) });
     const ids = e.lines.map((l) => `${l.noticeId}:${l.currentCents}:${l.newCents}:${l.effectiveDate}`).sort();
     h.update(`${e.customerId}|${ids.join(',')}|${e.channels.email ? 'E' : ''}${e.channels.sms ? 'S' : ''}|${JSON.stringify(payload)}\n`);
   }
@@ -451,46 +450,23 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
     lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id)), data.firstVisits.get(String(notice.id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
-  const frozen = entry && entry.lines.length ? frozenFor(entry) : null;
-  const payload = frozen ? frozen.payload : letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
+  const payload = letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
   const rendered = await renderLetter(payload);
   return { ok: true, subject: rendered.subject, html: rendered.html, costBlockReady: !!costBlock, suppressed: entry ? entry.reason : null };
 }
 
-// The key of a claim: the exact notice set one letter carries.
 function claimKeyFor(noticeIds) {
   return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',')).digest('hex').slice(0, 16);
 }
 
-// The words an earlier attempt froze for this exact line set (written
-// before the provider call; kept until delivery is stamped, dropped only
-// when the attempt was definitively unsent) — the preview, the digest and
-// the reconciling retry all use them, so what the owner approves is what
-// that email said. null = nothing frozen.
-function frozenFor(entry) {
-  if (!entry.lines.length) return null;
-  const key = claimKeyFor(entry.lines.map((l) => l.noticeId));
-  const pending = entry.lines.map((l) => parseJson(l.notice.metadata, {}).pending_letter);
-  return pending.every((p) => p && p.key === key) ? pending[0] : null;
-}
-
-// ── send ───────────────────────────────────────────────────────────────
-
-async function claimLines(dbh, lines, now) {
+async function claimLines(dbh, lines) {
   const claimed = [];
   for (const l of lines) {
-    let n = await dbh('price_change_notices')
+    const n = await dbh('price_change_notices')
       .where({ id: l.noticeId })
       .whereNull('sent_at')
-      .whereIn('status', ['draft', 'viewed', 'unreachable'])
+      .whereIn('status', SENDABLE_STATUSES)
       .update({ status: 'sending', updated_at: new Date() });
-    if (!n) {
-      n = await dbh('price_change_notices')
-        .where({ id: l.noticeId, status: 'sending' })
-        .whereNull('sent_at')
-        .where('updated_at', '<', new Date(now.getTime() - CLAIM_STALE_MS))
-        .update({ status: 'sending', updated_at: new Date() });
-    }
     if (!n) {
       if (claimed.length) await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
       return null;
@@ -514,38 +490,33 @@ function frozenLetter(entry, payload, costBlock) {
   };
 }
 
-// The letter for this claim. A reclaim of a crashed attempt (same notice
-// set) reuses the words that attempt froze BEFORE it sent — the email leg
-// dedupes on its idempotency key, so the page must show what that email
-// said, never a rebuild from data edited since.
-async function letterForClaim(dbh, entry, { claimKey, costBlock }) {
-  const existing = frozenFor(entry);
-  entry.hadFrozen = !!existing;
-  if (existing) return existing;
-  const payload = letterPayload({ customer: entry.customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
-  const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
-  for (const l of entry.lines) {
-    const meta = parseJson(l.notice.metadata, {});
-    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: frozen }) });
-  }
-  return frozen;
-}
-
-async function markFrozenSmsSent(dbh, entry, frozen) {
-  frozen.sms_sent = true;
+// Freeze the letter on the claimed rows BEFORE any provider call: if the
+// outcome turns out uncertain, the public page still shows exactly what
+// that email said (only a delivered message carries the token).
+async function freezeLetter(dbh, entry, frozen) {
   for (const l of entry.lines) {
     const meta = parseJson(l.notice.metadata, {});
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: frozen }) });
   }
 }
 
-async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, now }) {
-  const claimed = await claimLines(dbh, entry.lines, now);
+async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
+  for (const l of entry.lines) {
+    const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
+    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
+      status, metadata: JSON.stringify(keepFrozen ? { ...meta, pending_letter: frozen } : meta), updated_at: new Date(),
+    });
+  }
+}
+
+async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
+  const claimed = await claimLines(dbh, entry.lines);
   if (!claimed) return { outcome: 'in_flight' };
   const customer = entry.customer;
   const claimKey = claimKeyFor(claimed);
-  const frozen = await letterForClaim(dbh, entry, { claimKey, costBlock });
-  const { payload, letter } = frozen;
+  const payload = letterPayload({ customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
+  await freezeLetter(dbh, entry, frozen);
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
@@ -554,49 +525,31 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     categories: ['billing', 'rate_review_notice'],
     expectedContentHash: templateHash,
   });
-  // The text leg has no provider idempotency key: a reclaim of a crashed
-  // attempt whose text already went out (recorded on the frozen letter
-  // right after it sent) never texts again.
-  const sms = frozen.sms_sent
-    ? { sent: true, attempted: true }
-    : await PriceChangeNotices.sendNoticeSms({
-      customer,
-      vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
-      actorId,
-      hasEmailLeg: email.sent,
-      operatorInitiated: true,
-    });
-  if (sms.sent && !frozen.sms_sent) await markFrozenSmsSent(dbh, entry, frozen);
+  const sms = await PriceChangeNotices.sendNoticeSms({
+    customer,
+    vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
+    actorId,
+    hasEmailLeg: email.sent,
+    operatorInitiated: true,
+  });
   if (!email.sent && !sms.sent) {
+    // Never handed to a provider (no contact, every leg policy-blocked):
+    // definitively unsent — parks as unreachable, words dropped, retirable
+    // and sendable again. Attempted (a provider or template failure that
+    // may still have delivered): held as send_uncertain with its words, for
+    // the owner — never auto-retried, never retired.
     const attempted = email.attempted || sms.attempted;
-    // Attempted (provider/template failure — the provider may still have
-    // accepted the email): back to draft for a retry, KEEPING the frozen
-    // words, so the preview, the digest and the retry show what that email
-    // may already have said (and the apply lane never retires it). Never
-    // attempted (no contact, every leg policy-blocked) parks as
-    // unreachable; it drops the words only when THIS attempt froze them —
-    // words an EARLIER attempt froze stay, since that attempt is still
-    // unreconciled.
-    const keep = attempted || entry.hadFrozen;
-    for (const l of entry.lines) {
-      const { pending_letter: _stale, ...meta } = parseJson(l.notice.metadata, {});
-      await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
-        status: attempted ? 'draft' : 'unreachable',
-        metadata: JSON.stringify(keep ? { ...meta, pending_letter: frozen } : meta),
-        updated_at: new Date(),
-      });
-    }
-    return { outcome: attempted ? 'failed' : 'unreachable' };
+    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen });
+    return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = new Date();
-  // Every line of one letter is stamped together: a partial stamp would
-  // leave siblings to be re-sent under a different claim key.
+  // Every line of one letter is stamped together.
   await dbh.transaction(async (trx) => {
     for (const l of entry.lines) {
-      const { pending_letter: _frozen, ...meta } = parseJson(l.notice.metadata, {});
+      const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
       await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-        metadata: JSON.stringify({ ...meta, letter: { ...letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
+        metadata: JSON.stringify({ ...meta, letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
       await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
     }
@@ -622,19 +575,19 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
   if (!sendable.length) return { ok: false, reason: 'nothing_to_send' };
   await renderLetter(letterPayload({ customer: sendable[0].customer, lines: sendable[0].lines, costBlock, noticeUrl: portalUrl('/') })); // template installed?
 
-  const summary = { sent: 0, emailed: 0, texted: 0, unreachable: 0, failed: 0, inFlight: 0, stoppedByGate: 0, suppressed: entries.filter((e) => e.reason && e.lines.length).length };
+  const summary = { sent: 0, emailed: 0, texted: 0, unreachable: 0, uncertain: 0, failed: 0, inFlight: 0, stoppedByGate: 0, suppressed: entries.filter((e) => e.reason && e.lines.length).length };
   for (let i = 0; i < sendable.length; i += SEND_CONCURRENCY) {
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, now });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
           if (res.sms) summary.texted += 1;
         } else if (res.outcome === 'in_flight') summary.inFlight += 1;
         else if (res.outcome === 'unreachable') summary.unreachable += 1;
-        else summary.failed += 1;
+        else summary.uncertain += 1;
       } catch (err) {
         summary.failed += 1;
         logger.error(`[rate-review-comms] letter failed for customer ${entry.customerId}: ${err.message}`);
@@ -646,14 +599,14 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
     await dbh('activity_log').insert({
       admin_user_id: actorId || null,
       action: 'rate_review_letters_sent',
-      description: `Rate review ${batchKey}: ${summary.sent} letter(s) sent (${summary.emailed} emailed, ${summary.texted} texted), ${summary.unreachable} unreachable, ${summary.failed} failed, ${summary.suppressed} suppressed.`,
+      description: `Rate review ${batchKey}: ${summary.sent} letter(s) sent (${summary.emailed} emailed, ${summary.texted} texted), ${summary.unreachable} unreachable, ${summary.uncertain} uncertain (held for review), ${summary.failed} failed, ${summary.suppressed} suppressed.`,
       metadata: JSON.stringify({ batch_key: batchKey, summary }),
     });
   } catch (logErr) {
     logger.warn(`[rate-review-comms] activity log failed for ${batchKey}: ${logErr.message}`);
   }
   logger.info(`[rate-review-comms] ${batchKey}: ${JSON.stringify(summary)}`);
-  return { ok: summary.failed === 0 && summary.stoppedByGate === 0, batchKey, ...summary };
+  return { ok: summary.failed === 0 && summary.uncertain === 0 && summary.stoppedByGate === 0, batchKey, ...summary };
 }
 
 // ── customer surfaces ──────────────────────────────────────────────────
@@ -682,17 +635,23 @@ function publicLines(letter) {
  */
 function publicReview(notice) {
   if (!notice?.rate_review_row_id) return null;
-  const letter = parseJson(notice.metadata, {}).letter;
-  if (!notice.sent_at) return { unavailable: true };
-  // Delivered without a frozen letter (a notice stamped by another sender):
-  // the plain notice page, never a 404 for a link the customer received.
-  if (!letter || !Array.isArray(letter.lines) || !letter.lines.length) return null;
+  const meta = parseJson(notice.metadata, {});
+  // Delivered: the letter frozen at send. Not stamped but handed to a
+  // provider (send_uncertain / a claim mid-send): the words frozen before
+  // the provider call — only a delivered message carries this token, so
+  // the link the customer holds keeps working. Anything else is a 404.
+  const letter = notice.sent_at ? meta.letter : meta.pending_letter?.letter;
+  if (!notice.sent_at && !letter) return { unavailable: true };
+  // Delivered without a frozen letter (a notice stamped by another
+  // sender): the plain notice page, never a 404 for a received link.
+  if (!letter || !Array.isArray(letter.lines) || !letter.lines.length) return notice.sent_at ? null : { unavailable: true };
   const lines = publicLines(letter);
   return {
     firstName: letter.first_name || null,
     costBlock: letter.cost_block || null,
     lines,
     hasPrepay: lines.some((l) => l.unit === 'year'),
+    delivered: !!notice.sent_at,
   };
 }
 
@@ -716,7 +675,8 @@ function chargeAtNewRate(notice, { monthly, customer }) {
   return { chargeCents: dues + delta, chargeDate };
 }
 
-// Monthly notices the nightly apply would still write: the lane's live
+// Monthly notices the nightly apply would still write: delivered in time,
+// and the lane's live
 // rate (re-read the way applyMonthly reads it — the family's ledger slices
 // for a ledger-priced line, else the account dues) still equals the noticed
 // current rate. A rate moved since the notice holds there, so no charge at
@@ -731,7 +691,10 @@ async function applicableMonthly(dbh, rows, customer) {
     const live = source === 'ledger_slice'
       ? cents(sumSlices((await loadFamilySlices(dbh, n.customer_id, n.family_key)).family))
       : cents(customer?.monthly_rate);
-    if (live === Number(n.noticed_current_cents ?? n.current_amount_cents)) out.push(n);
+    // ...and the delivery preceded the effective date by the 30 days the
+    // apply enforces from sent_at (a later stamp holds there).
+    const noticedInTime = n.sent_at && daysBetween(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS;
+    if (noticedInTime && live === Number(n.noticed_current_cents ?? n.current_amount_cents)) out.push(n);
   }
   return out;
 }

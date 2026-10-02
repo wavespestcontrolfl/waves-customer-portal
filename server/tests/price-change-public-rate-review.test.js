@@ -56,6 +56,16 @@ test('an undelivered rate review notice is a 404, never counted or flipped to vi
   expect(mockRows.updates).toEqual([]);
 });
 
+test('an uncertain send renders its frozen words; the view is counted but never flips the status', async () => {
+  mockRows.notice = { ...base, rate_review_row_id: 'r1', sent_at: null, status: 'send_uncertain', metadata: { pending_letter: { letter } } };
+  const { status, body } = await get(TOKEN);
+  expect(status).toBe(200);
+  expect(body.review).toMatchObject({ delivered: false, costBlock: 'Costs went up.' });
+  await new Promise((r) => setTimeout(r, 10));
+  expect(mockRows.updates).toHaveLength(1);
+  expect(mockRows.updates[0]).not.toHaveProperty('status');
+});
+
 test('a legacy monthly notice is unchanged: no review field', async () => {
   mockRows.notice = { ...base, rate_review_row_id: null, sent_at: new Date(), metadata: {} };
   const { status, body } = await get(TOKEN);
