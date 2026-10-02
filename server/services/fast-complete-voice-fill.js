@@ -223,10 +223,40 @@ async function loadPestReserviceContext(serviceId, knex = db) {
   };
 }
 
-// A catalog application_method as a sheet method key ("foliar_spray"), or ''.
+// The method a product's row offers on the pest sheet, derived EXACTLY as the
+// sheet does (client product-rate-prefill.js defaultApplicationMethodForLine on
+// the pest line + normalizeApplicationMethod, then FastCompleteSheet
+// catalogMethodOf's form rules), so the model can return what the row offers.
+const KNOWN_METHODS = ['perimeter_spray', 'broadcast_spray', 'spot_treatment', 'granular_broadcast', 'soil_drench', 'bait_placement', 'station_check', 'fog_ulv', 'foliar_spray', 'trunk_injection', 'pin_stream'];
+function normalizeApplicationMethod(value) {
+  const n = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!n || KNOWN_METHODS.includes(n)) return n;
+  const rules = [
+    [['trunk', 'inject'], 'trunk_injection'], [['foliar'], 'foliar_spray'], [['pin'], 'pin_stream'], [['granular'], 'granular_broadcast'],
+    [['bait', 'gel', 'glue'], 'bait_placement'], [['station'], 'station_check'], [['fog', 'ulv'], 'fog_ulv'], [['spot'], 'spot_treatment'],
+    [['broadcast'], 'broadcast_spray'], [['perimeter', 'band'], 'perimeter_spray'],
+  ];
+  const hit = rules.find(([words]) => words.some((w) => n.includes(w)));
+  return hit ? hit[1] : n;
+}
+const SHEET_SPRAY_METHODS = new Set(['spot_treatment', 'perimeter_spray']);
 function catalogMethodOf(row) {
-  const method = String(row?.application_method || '').trim().toLowerCase();
-  return /^[a-z][a-z_]{2,40}$/.test(method) ? method : '';
+  const explicit = row?.application_method || row?.method;
+  if (explicit) {
+    const method = normalizeApplicationMethod(explicit);
+    return /^[a-z][a-z_]{2,40}$/.test(method) ? method : '';
+  }
+  const category = String(row?.category || '').toLowerCase();
+  if (/bait|gel|glue/.test(category)) return 'bait_placement';
+  const rateUnit = String(row?.rate_unit || row?.default_unit || '').toLowerCase();
+  const liquid = rateUnit.includes('fl') || rateUnit.includes('gal') || /\b(liquid|flow?)\b/i.test(String(row?.name || ''));
+  if (category.includes('fert') && liquid) return 'broadcast_spray';
+  if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
+  const resolved = 'perimeter_spray';
+  const form = `${row?.name || ''} ${row?.category || ''} ${row?.formulation || ''}`;
+  if (/\b(wsg|wdg|wg|wp|df|sg|soluble)\b/i.test(form)) return SHEET_SPRAY_METHODS.has(resolved) ? '' : resolved;
+  if (/\b(baits?|blox|stations?|gels?)\b/i.test(form)) return 'bait_placement';
+  return /\bgranul\w*/i.test(form) ? 'granular_broadcast' : '';
 }
 
 // One sheet is built (pest_reservice). Another sheet adds its own loader, schema
@@ -561,6 +591,9 @@ const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square
 const isRate = (tokens, end) => tokens[end] === 'per'
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
   || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))
+  // "in each / in every gallon", "for one gallon", "for 1 gallon"
+  || (tokens[end] === 'in' && (tokens[end + 1] === 'each' || tokens[end + 1] === 'every') && RATE_BASES.has(tokens[end + 2]))
+  || (tokens[end] === 'for' && readSpokenNumber(tokens, end + 1) && RATE_BASES.has(tokens[readSpokenNumber(tokens, end + 1).next]))
   || (['for', 'to'].includes(tokens[end]) && ['every', 'each', 'the', 'a', 'an'].includes(tokens[end + 1]) && RATE_BASES.has(tokens[end + 2]));
 
 function quantitiesIn(text) {
@@ -646,6 +679,10 @@ function linearFeet(raw, transcript) {
 const GENERIC_NAME_WORDS = new Set([
   'nonionic', 'plus', 'gel', 'bait', 'dust', 'spray', 'insecticide', 'granular', 'liquid', 'concentrate', 'control',
   'professional', 'solution', 'powder', 'wasp', 'ant', 'cockroach', 'roach', 'pest', 'wsg', 'pro',
+  // pest species name a pest before a product ("mosquito" in Summit Mosquito Dunk)
+  'mosquito', 'mosquitoes', 'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'rodent', 'rodents', 'rat', 'rats',
+  'mouse', 'mice', 'ants', 'roaches', 'wasps', 'hornet', 'hornets', 'silverfish', 'earwig', 'earwigs', 'cricket', 'crickets',
+  'scorpion', 'scorpions', 'bedbug', 'bedbugs', 'fly', 'flies', 'gnat', 'gnats', 'beetle', 'beetles',
 ]);
 const isDistinctiveWord = (word) => word.length >= 4 && /^[a-z]+$/.test(word) && !GENERIC_NAME_WORDS.has(word);
 const hasLetters = (word) => /[a-z]/.test(word);
@@ -781,7 +818,7 @@ const NEGATION_WORDS = new Set(['not', 'no', 'never', 'without', 'skipped', 'ski
 const NEGATION_WINDOW = 6;
 // "Last time I used Taurus", "previously Talstar", "next time Taurus": a product
 // named for another visit, never this one's application.
-const OTHER_VISIT_NEXT = new Set(['time', 'visit', 'week', 'month', 'service']);
+const OTHER_VISIT_NEXT = new Set(['time', 'visit', 'week', 'month', 'service', 'appointment', 'treatment', 'trip', 'call']);
 function isOtherVisitAt(tokens, j) {
   if (tokens[j] === 'previously') return true;
   // "same as last time", "like last time": this visit, done the earlier way
@@ -1267,7 +1304,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|passwords?|passphrase|(?:garage |gate )?(?:opener|remote|clicker)s?(?: code)? (?:is|was|=)|(?:no|couldn'?t|could not|without) access|access (?:issue|issues|problem|problems)|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
@@ -1437,6 +1474,7 @@ async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callA
 }
 
 module.exports = {
+  catalogMethodOf,
   VOICE_FILL_TIER,
   LANE_ID,
   MAX_TRANSCRIPT_CHARS,

@@ -1491,3 +1491,41 @@ describe('Codex #5580 round 14', () => {
     expect(out.officeNote).toBe('');
   });
 });
+
+describe('Codex #5580 round 15', () => {
+  const row = (amount, unit, heard, productId = 'p-taurus') => ({ productId, amount, unit, sameAsLast: false, method: '', heard });
+
+  test.each(['Taurus, four ounces for one gallon.', 'Taurus, four ounces in each gallon.'])('a rate: "%s"', (t) => {
+    expect(validateFill(answer({ products: [row(4, 'fl_oz', t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test.each(['Opener is 1234.', 'Garage opener code is 5512.', 'Remote is four four one two.'])('"%s" is office-only', (line) => {
+    const t = `Treated the garage. ${line}`;
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+  });
+
+  test('"During the last appointment I used four ounces of Taurus" is another visit\'s', () => {
+    const t = 'During the last appointment I used four ounces of Taurus. Today Talstar.';
+    const out = validateFill(answer({ products: [row(4, 'fl_oz', 'four ounces of Taurus')] }), ctx, t);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a pest word is a pest, not product evidence ("mosquito" beside Summit Mosquito Dunk)', () => {
+    const withDunk = { ...ctx, products: [...ctx.products, { id: 'p-dunk', name: 'Summit Mosquito Dunk Tablets', fullName: 'Summit Mosquito Dunk Tablets', aliases: [], measure: 'count', units: ['each'] }] };
+    const out = validateFill(answer({ visit: visit({ pests: ['Other'], otherPest: 'mosquito', heard: 'Found mosquito activity outside' }) }), withDunk, 'Found mosquito activity outside.');
+    expect(out.visit.pests).toContain('Other');
+  });
+});
+
+test.each([
+  [{ name: 'K-Flow 0-0-25', category: 'fertilizer', rate_unit: 'fl_oz' }, 'broadcast_spray'],
+  [{ name: 'Some Granules', category: 'fertilizer' }, 'granular_broadcast'],
+  [{ name: 'Old row', application_method: 'granular' }, 'granular_broadcast'],
+  [{ name: 'Advion Ant Gel', category: 'insecticide' }, 'bait_placement'],
+  [{ name: 'Alpine WSG', category: 'insecticide', formulation: 'WSG' }, ''],
+  [{ name: 'Taurus SC', category: 'insecticide' }, ''],
+  [{ name: 'Dominion 2L', application_method: 'Soil Drench' }, 'soil_drench'],
+])('catalog method matches the sheet: %o → %p', (row, method) => {
+  expect(VoiceFill.catalogMethodOf(row)).toBe(method);
+});
