@@ -23,6 +23,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockCreate = jest.fn();
 const mockListPayments = jest.fn(async () => ({ payments: [] }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: (...a) => mockListPayments(...a) }));
+const mockListVisits = jest.fn(async () => ({ services: [], total: 0 }));
+jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: (...a) => mockListVisits(...a) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -47,6 +49,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[ENV];
   delete process.env.GATE_PORTAL_CHAT_FACTS;
+  delete process.env.GATE_PORTAL_CHAT_VISIT_FACTS;
 });
 afterAll(() => { delete process.env[ENV]; delete process.env.GATE_PORTAL_CHAT_FACTS; });
 
@@ -169,13 +172,50 @@ test('a card built before the model call fails still shows under the fallback te
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
+test('GATE_PORTAL_CHAT_VISIT_FACTS on: the model answers from the visit facts, and the gates compose', async () => {
+  process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+  mockListVisits.mockResolvedValue({ services: [{ id: 's1', date: '2026-09-28', type: 'Pest Control', technician: 'Jordan Sample', notes: 'Treated the lanai.', products: [{ product_name: 'BrandName', product_category: 'insecticide' }], reportUrl: '/report/tok_r' }], total: 1 });
+  wire('portal_chat', 'cust-1');
+  mockCreate
+    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'get_recent_visits', input: {} }] })
+    .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Jordan treated the lanai on Sep 28.' }] });
+
+  const result = await assistant.processMessage({ message: 'What was done last visit?', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  const first = mockCreate.mock.calls[0][0];
+  expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'get_recent_visits', 'escalate']);
+  expect(first.system[0].text).toMatch(/PAST VISITS:/);
+  expect(first.system[0].text).toMatch(/COMPANY FACTS \(owner-approved/);
+  // Payments gate off: the billing section is still the page-button one.
+  expect(first.system[0].text).toMatch(/BILLING, PLAN, REPORTS/);
+  const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
+  expect(toolResult).toMatch(/Treated the lanai/);
+  expect(toolResult).not.toMatch(/BrandName|tok_r|Sample/);
+  expect(result.actions).toEqual([
+    { type: 'tab', label: 'Open completed visits and reports', tab: 'services' },
+    { type: 'link', label: 'View report, Pest Control, Sep 28, 2026', href: '/report/tok_r' },
+  ]);
+  expect(result).not.toHaveProperty('cards');
+
+  // Both gates: both fact tools, both prompt sections.
+  process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+  mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+  await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+  const both = mockCreate.mock.calls.at(-1)[0];
+  expect(toolNames(both)).toEqual(expect.arrayContaining(['show_recent_payments', 'get_recent_visits']));
+  expect(both.system[0].text).toMatch(/CHARGES AND PAYMENTS:/);
+  expect(both.system[0].text).toMatch(/PAST VISITS:/);
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
   await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1' });
   const call = mockCreate.mock.calls[0][0];
   expect(toolNames(call)).not.toContain('show_recent_payments');
+  expect(toolNames(call)).not.toContain('get_recent_visits');
   expect(call.system[0].text).toMatch(/BILLING, PLAN, REPORTS/);
+  expect(call.system[0].text).not.toMatch(/PAST VISITS:|COMPANY FACTS/);
 });
 
 test('a portal reply with no button tool carries no actions field', async () => {

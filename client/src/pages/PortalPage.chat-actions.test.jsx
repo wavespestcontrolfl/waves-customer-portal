@@ -55,12 +55,14 @@ describe('assistant reply buttons', () => {
         { type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' },
         { type: 'link', label: 'Elsewhere', href: 'https://example.com/reschedule/tok' },
         { type: 'link', label: 'Admin', href: '/admin/customers' },
+        { type: 'link', label: 'View report, Pest Control, Sep 28, 2026', href: '/report/tok_report' },
         { type: 'tab', label: 'Open Billing', tab: 'billing' },
         { type: 'tab', label: 'Open Admin', tab: 'admin' },
       ],
     });
 
     expect(screen.getByRole('link', { name: 'Reschedule Pest Control, Oct 9' })).toHaveAttribute('href', '/reschedule/tok_one');
+    expect(screen.getByRole('link', { name: 'View report, Pest Control, Sep 28, 2026' })).toHaveAttribute('href', '/report/tok_report');
     expect(screen.queryByText('Elsewhere')).toBeNull();
     expect(screen.queryByText('Admin')).toBeNull();
     expect(screen.queryByText('Open Admin')).toBeNull();
