@@ -361,13 +361,17 @@ function tokenize(text) {
   const src = String(text || '').toLowerCase().replace(/(\d)([½¼¾⅓⅔⅛])/g, '$1 $2');
   const tokens = [];
   const breaks = [];
+  const stops = [];
   let prevEnd = 0;
   for (const m of src.matchAll(TOKEN_RE)) {
-    breaks.push(/[.,;:!?]/.test(src.slice(prevEnd, m.index)) || m[0] === 'but' || m[0] === 'then');
+    const gap = src.slice(prevEnd, m.index);
+    breaks.push(/[.,;:!?]/.test(gap) || m[0] === 'but' || m[0] === 'then');
+    // A sentence or clause stop (never a comma: "Taurus, four ounces" is one breath).
+    stops.push(/[.;!?]/.test(gap));
     tokens.push(m[0]);
     prevEnd = m.index + m[0].length;
   }
-  return { tokens, breaks };
+  return { tokens, breaks, stops };
 }
 const tokensOf = (text) => tokenize(text).tokens;
 // Own-property lookup: a transcript word like "constructor" is never a table hit.
@@ -602,7 +606,7 @@ function productEvidenceVerdict(product, evidence) {
 // number next to its product, so ownership is read off the transcript's own
 // token stream: where each product is named, and every spoken quantity.
 function transcriptWorld(ctx, transcript) {
-  const { tokens, breaks } = tokenize(transcript);
+  const { tokens, breaks, stops } = tokenize(transcript);
   const mentions = ctx.products.flatMap((product) => {
     const evidence = nameEvidence(product, tokens);
     return evidence.qualifies ? evidence.runs.map((run) => ({ id: product.id, ...run })) : [];
@@ -613,7 +617,7 @@ function transcriptWorld(ctx, transcript) {
   for (const m of mentions) {
     if (m.end - m.start >= 2 || isDistinctiveWord(tokens[m.start])) for (let i = m.start; i < m.end; i += 1) masked.add(i);
   }
-  return { tokens, breaks, mentions, masked, quantities: quantitiesIn(transcript) };
+  return { tokens, breaks, stops, mentions, masked, negated: negatedPositions(tokens, breaks), quantities: quantitiesIn(transcript) };
 }
 
 // ── Negated mentions ─────────────────────────────────────────────────────
@@ -626,6 +630,19 @@ function isNegationAt(tokens, j) {
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
   return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && tokens[j + 1] === 'wait');
 }
+// Token positions a negation word governs: up to NEGATED_SPAN words after it, never
+// past a clause break ("Activity was not heavy, just light": only "heavy"; "Did not
+// perimeter spray; spot treated": only "perimeter spray"). Evidence never comes from them.
+const NEGATED_SPAN = 4;
+function negatedPositions(tokens, breaks) {
+  const out = new Set();
+  tokens.forEach((_, j) => {
+    if (!isNegationAt(tokens, j)) return;
+    for (let k = j + 1; k < tokens.length && k <= j + NEGATED_SPAN && !breaks[k]; k += 1) out.add(k);
+  });
+  return out;
+}
+
 function isNegatedMention(mention, world) {
   let from = mention.start;
   while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
@@ -647,11 +664,31 @@ function productMentions(product, heard, world) {
   return hit.length ? hit : mine;
 }
 
-// The tokens between a mention's end and the next product mention (any product).
+// The tokens between a mention's end and the next product mention (any product),
+// never past the end of the mention's sentence: a quantity in a later sentence is
+// never this product's ("Used Taurus outside. The customer had four ounces of
+// concentrate in the garage").
+const firstStopAfter = (world, from) => {
+  for (let k = from; k < world.tokens.length; k += 1) if (world.stops[k]) return k;
+  return world.tokens.length;
+};
 const afterSpan = (mention, world) => {
-  const next = Math.min(world.tokens.length, ...world.mentions.filter((m) => m.start > mention.start).map((m) => m.start));
+  const next = Math.min(firstStopAfter(world, mention.end), ...world.mentions.filter((m) => m.start > mention.start).map((m) => m.start));
   return { from: mention.end, to: next };
 };
+// A product mention's own clause: from the end of the previous product mention (or
+// the sentence start) to the next product mention (or the sentence end). "Spot
+// treated with Talstar and sprayed Taurus around the perimeter": Talstar's clause
+// holds "spot", Taurus's holds "perimeter".
+const mentionClause = (mention, world) => {
+  let from = mention.start;
+  while (from > 0 && !world.stops[from]) from -= 1;
+  const prevEnd = Math.max(from, ...world.mentions.filter((m) => m.end <= mention.start).map((m) => m.end));
+  return { from: prevEnd, to: afterSpan(mention, world).to };
+};
+// The positive words of a token range: negated and product-name words left out.
+const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
+  .filter((_, i) => !world.negated.has(from + i)).join(' ');
 
 // The spoken quantities that belong to ONE mention of a product. A quantity joined
 // to a name by "of" ("four ounces of Taurus", "five of Talstar") belongs to that
@@ -731,13 +768,12 @@ const METHOD_LEXICON = {
   granular_broadcast: /\b(granular|granules?|broadcast|spread|spreader)\b/,
 };
 
-// The method the model chose for a product, kept only when its word is in that
-// product's span of the transcript (after its name, before the next product) or in
-// the transcript sentence that names it; otherwise cleared with a Check.
+// The method the model chose for a product, kept only when its word is said, not
+// negated, in that product's own clause (mentionClause); otherwise cleared with a
+// Check.
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   if (!ctx.productMethods.includes(raw.method)) return '';
-  const spans = productMentions(product, heard, world).map((m) => afterSpan(m, world)).map(({ from, to }) => world.tokens.slice(from, to).join(' '));
-  const text = norm([...spans, sentenceOf(transcript, heard)].join(' . '));
+  const text = productMentions(product, heard, world).map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
   if (METHOD_LEXICON[raw.method]?.test(text)) return raw.method;
   pushUnclear(unclear, heard, 'method_not_heard');
   return '';
@@ -828,8 +864,10 @@ const VISIT_LEXICON = {
 // The transcript as evidence for visit values: its words with every product's NAME
 // taken out, so "Advion Ant Gel" is not ants.
 function visitEvidence(world) {
-  const text = world.tokens.filter((_, i) => !world.masked.has(i)).join(' ');
-  return { text, tokens: world.tokens, masked: world.masked };
+  const text = world.tokens.filter((_, i) => !world.masked.has(i) && !world.negated.has(i)).join(' ');
+  // "No activity" / "nothing live" is itself the none level: it reads every word.
+  const fullText = world.tokens.filter((_, i) => !world.masked.has(i)).join(' ');
+  return { text, fullText, tokens: world.tokens, masked: new Set([...world.masked, ...world.negated]), nameMasked: world.masked };
 }
 
 // Activity: an explicit level word counts anywhere; a loose word ("some", "a
@@ -862,7 +900,8 @@ function valueHeard(field, value, evidence, otherPest) {
   if (field === 'pests' && value === 'Other') return evidence.text.includes(tokensOf(otherPest).join(' '));
   if (field === 'activity') {
     const rule = ACTIVITY_EVIDENCE[value];
-    return Boolean(rule) && (rule.anywhere.test(evidence.text) || rule.near.some((phrase) => nearCue(evidence, phrase)));
+    const view = value === 'none' ? { ...evidence, text: evidence.fullText, masked: evidence.nameMasked } : evidence;
+    return Boolean(rule) && (rule.anywhere.test(view.text) || rule.near.some((phrase) => nearCue(view, phrase)));
   }
   return Boolean(VISIT_LEXICON[field]?.[value]?.test(evidence.text));
 }
@@ -944,9 +983,28 @@ function validateFill(raw, ctx, transcript) {
   return {
     products,
     visit,
-    customerNote: cleanNote(input.customerNote, CAPS.customerNote),
-    officeNote: cleanNote(input.officeNote, CAPS.officeNote),
+    ...splitNotes(input.customerNote, input.officeNote),
     unclear: unclear.slice(0, CAPS.unclear),
+  };
+}
+
+// The customer/office split, enforced here rather than trusted to the model: a
+// customer-note sentence that names an entry code (the same rule /complete refuses
+// on customer-visible text, COMPLETION_ACCESS_CODE_RE) or that the tech addressed
+// to the office moves to the office note.
+const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b/i;
+function splitNotes(customerRaw, officeRaw) {
+  const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
+  const customer = [];
+  const office = [];
+  for (const sentence of String(customerRaw ?? '').split(/(?<=[.!?])\s+|\n+/)) {
+    if (!sentence.trim()) continue;
+    (COMPLETION_ACCESS_CODE_RE.test(sentence) || OFFICE_ADDRESSED_RE.test(sentence) ? office : customer).push(sentence.trim());
+  }
+  const officeText = [String(officeRaw ?? '').trim(), ...office].filter(Boolean).join(' ');
+  return {
+    customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
+    officeNote: cleanNote(officeText, CAPS.officeNote),
   };
 }
 

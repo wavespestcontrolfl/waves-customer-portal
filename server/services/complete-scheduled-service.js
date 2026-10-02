@@ -14530,3 +14530,4 @@ module.exports.normalizeServiceReportApplicationMethod = normalizeServiceReportA
 module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportApplication;
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
+module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;

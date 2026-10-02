@@ -691,8 +691,14 @@ describe('a product method needs its word in that product\'s span or sentence', 
     expect(out.unclear).toEqual([{ heard: 'Used Taurus', reason: 'method_not_heard' }]);
   });
 
-  test('a method word after the product, in its span, counts even across a sentence', () => {
+  test('a method word in a LATER sentence does not back the product (Codex #5580 r2): cleared with a Check', () => {
     const out = run(withMethod('perimeter_spray', 'Used Taurus'), 'Used Taurus. Ran the perimeter.');
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('a method word in the same clause before the product counts', () => {
+    const out = run(withMethod('perimeter_spray', 'sprayed Taurus around the perimeter'), 'Sprayed Taurus around the perimeter.');
     expect(out.products[0].method).toBe('perimeter_spray');
   });
 
@@ -871,5 +877,51 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
       expect(out.products[0].sameAsLast).toBe(false);
       expect(out.unclear).toEqual([{ heard, reason: 'same_as_last_not_heard' }]);
     });
+  });
+});
+
+describe('Codex #5580 round 2', () => {
+  test('a quantity in a later sentence never belongs to the product', () => {
+    const transcript = 'Used Taurus outside. The customer had four ounces of concentrate in the garage.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus ... four ounces' }] }), ctx, transcript);
+    expect(out.products.find((p) => p.productId === 'p-taurus')?.amount ?? null).toBeNull();
+  });
+
+  test('two products in one sentence: each keeps only the method in its own clause', () => {
+    const transcript = 'Spot treated with Talstar and sprayed Taurus around the perimeter.';
+    const out = validateFill(answer({ products: [
+      { productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'spot_treatment', heard: 'sprayed Taurus around the perimeter' },
+    ] }), ctx, transcript);
+    expect(out.products[0].method).toBe('');
+    const ok = validateFill(answer({ products: [
+      { productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'sprayed Taurus around the perimeter' },
+    ] }), ctx, transcript);
+    expect(ok.products[0].method).toBe('perimeter_spray');
+  });
+
+  test('negated visit values are not evidence', () => {
+    const heavy = validateFill(answer({ visit: visit({ activity: 'heavy', heard: 'Activity was not heavy, just light' }) }), ctx, 'Activity was not heavy, just light.');
+    expect(heavy.visit.activity).toBe('');
+    const light = validateFill(answer({ visit: visit({ activity: 'light', heard: 'Activity was not heavy, just light' }) }), ctx, 'Activity was not heavy, just light.');
+    expect(light.visit.activity).toBe('light');
+    const method = validateFill(answer({ visit: visit({ method: 'perimeter_spray', heard: 'Did not perimeter spray; spot treated' }) }), ctx, 'Did not perimeter spray; spot treated.');
+    expect(method.visit.method).toBe('');
+  });
+
+  test('"no activity" still backs none', () => {
+    const out = validateFill(answer({ visit: visit({ activity: 'none', heard: 'No activity' }) }), ctx, 'No activity today.');
+    expect(out.visit.activity).toBe('none');
+  });
+
+  test('an entry code the model put in the customer note moves to the office note', () => {
+    const out = validateFill(answer({ customerNote: 'Treated the front entry for ants. Gate code 1234.', officeNote: '' }), ctx, 'Treated the front entry for ants. Office note: gate code 1234.');
+    expect(out.customerNote).toBe('Treated the front entry for ants.');
+    expect(out.officeNote).toContain('Gate code 1234');
+  });
+
+  test('a sentence addressed to the office moves to the office note', () => {
+    const out = validateFill(answer({ customerNote: 'Sprayed the perimeter. Tell the office the dog was loose.', officeNote: '' }), ctx, 'Sprayed the perimeter. Tell the office the dog was loose.');
+    expect(out.customerNote).toBe('Sprayed the perimeter.');
+    expect(out.officeNote).toBe('Tell the office the dog was loose.');
   });
 });
