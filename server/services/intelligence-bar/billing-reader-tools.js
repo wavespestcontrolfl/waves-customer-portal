@@ -303,6 +303,7 @@ function paymentEntry(row, invoice) {
       recorded_at: iso(invoice.payment_recorded_at),
     } : { card_brand: row.card_brand || null, method_type: row.payment_method_type || null }),
     stripe_payment_intent_id: row.stripe_payment_intent_id || null,
+    attempt_ref: (parseJson(row.metadata) || {}).idempotency_key || null,
     payer_funded: row.payer_id != null,
     linked_by: row.linked_by,
   };
@@ -352,6 +353,7 @@ function attemptEntry(row, ledgerStates) {
     submitted_at: iso(row.submitted_at),
     resolved_at: iso(row.resolved_at),
     stripe_payment_intent_id: row.stripe_payment_intent_id || null,
+    attempt_ref: row.idempotency_key || null,
     decline_code: row.decline_code || null,
     error: scrub(row.error_message),
   };
@@ -628,14 +630,29 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   // Pending (a bank payment in flight) is not received YET. An unknown outcome (a charge handed to Stripe
   // with no recorded result, an ambiguous one, or an accepted-but-unrecorded one) may already have charged
   // the customer: its receipt is unconfirmed, which is not the same as not received.
-  const pending = notReceived.filter((entry) => entry.status === 'processing' || (entry.unconfirmed === true && entry.source === 'combined_pay_processing'));
-  const unknownOutcome = notReceived.filter((entry) => entry.state === 'claimed' || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing'));
+  // One charge attempt can leave rows in several tables (a saved-card decline writes a payments row AND an
+  // attempt row sharing the idempotency key or PaymentIntent): count each attempt once, by its worst state.
+  const groups = new Map();
+  for (const entry of notReceived) {
+    const key = entry.attempt_ref || entry.stripe_payment_intent_id || `${entry.type}:${entry.id}`;
+    groups.set(key, [...(groups.get(key) || []), entry]);
+  }
+  const isPending = (entry) => entry.status === 'processing' || (entry.unconfirmed === true && entry.source === 'combined_pay_processing');
+  const isUnknown = (entry) => entry.state === 'claimed' || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing');
+  const unknownOutcome = [...groups.values()].filter((group) => group.some(isUnknown));
+  const pending = [...groups.values()].filter((group) => !group.some(isUnknown) && group.some(isPending));
+  const failed = [...groups.values()].filter((group) => !group.some(isUnknown) && !group.some(isPending)
+    && group.some((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed'));
   const inFlight = [...pending, ...unknownOutcome];
-  const failed = notReceived.filter((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed');
   const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
   const creditSettled = entries.filter((entry) => entry.settled_by === 'account_credit');
   const netRecorded = fromCents(recorded.reduce((total, entry) => total + cents(entry.net_received), 0));
   const receivedAny = recorded.length > 0 || stripeConfirmed.length > 0;
+  // A PaymentIntent attached to a still-open invoice whose outcome no row records: the pay page stamps one
+  // before any payment, but Stripe may also have succeeded while its confirmation is still being persisted.
+  const intentId = invoice.stripe_payment_intent_id;
+  const intentUnobserved = Boolean(intentId) && !receivedAny && !INVOICE_UNCOLLECTIBLE_STATUSES.filter((state) => state !== 'processing').includes(invoiceStatusKey(invoice.status))
+    && !entries.some((entry) => entry.stripe_payment_intent_id === intentId);
 
   const parts = [];
   const refundedTotal = fromCents(recorded.reduce((total, entry) => total + cents(entry.refunded_amount), 0));
@@ -643,6 +660,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   if (stripeConfirmed.length) parts.push(`${stripeConfirmed.length} Stripe charge(s) that succeeded but are not in the payments table (needs reconciling)`);
   if (pending.length) parts.push(`${pending.length} payment(s) still processing (not received yet)`);
   if (unknownOutcome.length) parts.push(`${unknownOutcome.length} charge attempt(s) with an unknown outcome (Stripe may have charged the customer: receipt NOT confirmed)`);
+  if (intentUnobserved) parts.push('a Stripe PaymentIntent is attached to this invoice but its outcome is not recorded and its live state is not read here (it may have succeeded)');
   if (failed.length) parts.push(`${failed.length} failed or canceled attempt(s) (NOT received)`);
   if (disputed.length) parts.push(`${disputed.length} disputed payment(s) (not counted as received)`);
   if (creditSettled.length) parts.push('settled by account credit with no card charge (a credit settlement is not a payment received)');
@@ -651,7 +669,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   else if (invoiceStatusKey(invoice.status) === 'prepaid') statement = 'Settled as prepaid (account credit or an annual prepay): no payment row; nothing is owed.';
   else if (!evidenceComplete) statement = `Payment evidence is incomplete: the portal holds more records than were read${parts.length ? ` (found: ${parts.join('; ')})` : ''}. Do not say whether it was received or attempted.`;
   else if (creditSettled.length) statement = `Settled by account credit, not by a payment: ${parts.join('; ')}.`;
-  else if (unknownOutcome.length) statement = `Payment receipt is not confirmed: ${parts.join('; ')}. Stripe may have charged the customer, so do not say it was not paid, and do not retry the charge.`;
+  else if (unknownOutcome.length || intentUnobserved) statement = `Payment receipt is not confirmed: ${parts.join('; ')}. Stripe may have charged the customer, so do not say it was not paid, and do not retry the charge.`;
   else if (invoiceStatusKey(invoice.status) === 'paid') statement = `The invoice is marked paid but no received payment is linked to it in the portal's records${parts.length ? `; ${parts.join('; ')}` : ''}. Say the payment evidence is unknown.`;
   else statement = `No payment has been received${parts.length ? `: ${parts.join('; ')}` : ' and none has been attempted that the portal recorded'}.`;
 
@@ -663,6 +681,7 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
     attempts_in_flight_or_unknown: inFlight.length,
     payments_pending: pending.length,
     attempts_unknown_outcome: unknownOutcome.length,
+    attached_intent_outcome_unknown: intentUnobserved,
     attempts_failed_or_canceled: failed.length,
     disputed_payments: disputed.length,
     settled_by_account_credit: creditSettled.length,
@@ -694,7 +713,7 @@ async function getInvoiceDetail(input, actionContext) {
   const loadedPayments = await loadLinkedPayments(customer.id, [invoice]);
   const linked = loadedPayments.linked.get(String(invoice.id)) || [];
   const { rows: attempts, truncated: attemptsTruncated } = await newestRows(db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
-    .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at'));
+    .select('id', 'status', 'amount', 'credit_applied_delta', 'stripe_payment_intent_id', 'idempotency_key', 'error_message', 'decline_code', 'submitted_at', 'resolved_at', 'created_at'));
   const { rows: orphans, truncated: orphansTruncated } = await newestRows(db('stripe_orphan_charges').where({ invoice_id: invoice.id, resolved: false })
     .select('id', 'stripe_payment_intent_id', 'amount', 'source', 'created_at'));
   const { rows: credits, truncated: creditsTruncated } = await newestRows(db('customer_credit_ledger').where({ invoice_id: invoice.id })

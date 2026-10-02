@@ -156,6 +156,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     }
     attemptRows.push({ invoice_id: busy.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-busy-${run}-claimed`, status: 'claimed', amount: 70, submitted_at: new Date() });
     await db('stripe_invoice_charge_attempts').insert(attemptRows);
+    // One declined saved-card attempt leaves a payments row AND an attempt row sharing the idempotency key; an open invoice whose attached PaymentIntent has no recorded outcome.
+    const dup = await invoice('f_dup', F, { total: 25 });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: dup.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `inv_card_on_file_${dup.id}_x${run}`,
+      status: 'failed', amount: 25, error_message: 'declined', decline_code: 'card_declined', resolved_at: new Date() });
+    await db('payments').insert({ customer_id: F, payment_date: day(0), amount: 25, status: 'failed', processor: 'stripe', description: `Invoice ${dup.invoice_number} — card on file (FAILED)`,
+      failure_reason: 'declined', metadata: JSON.stringify({ invoice_id: dup.id, source: 'card_on_file_failed_attempt', idempotency_key: `inv_card_on_file_${dup.id}_x${run}` }) });
+    await invoice('f_pi', F, { total: 20, stripe_payment_intent_id: `pi_attached_${run}` });
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -364,6 +371,24 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.unknowns.join(' ')).toMatch(/more rows than were read/);
     const complete = await read('get_invoice_detail', { invoice_id: inv.open.id });
     expect(complete.payment_summary.evidence_complete).toBe(true);
+  });
+
+  test('one declined attempt written to two tables is counted once; both rows stay in the timeline', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.f_dup.id });
+    expect(detail.payments_timeline.filter((e) => ['payment_attempt', 'stripe_charge_attempt'].includes(e.type))).toHaveLength(2);
+    expect(detail.payment_summary).toMatchObject({ received: false, attempts_failed_or_canceled: 1, attempts_in_flight_or_unknown: 0 });
+    expect(detail.payment_summary.statement).toMatch(/1 failed or canceled attempt\(s\)/);
+    expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
+  });
+
+  test('an attached PaymentIntent with no recorded outcome is unconfirmed, not "no payment"', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.f_pi.id });
+    expect(detail.payment_summary).toMatchObject({ received: false, attached_intent_outcome_unknown: true });
+    expect(detail.payment_summary.statement).toMatch(/^Payment receipt is not confirmed/);
+    expect(detail.payment_summary.statement).toMatch(/do not say it was not paid/);
+    const plain = await read('get_invoice_detail', { invoice_id: inv.e_self.id });
+    expect(plain.payment_summary.attached_intent_outcome_unknown).toBe(false);
+    expect(plain.payment_summary.statement).toMatch(/^No payment has been received/);
   });
 
   test('applied credit: lines, discounts and the credit movement stay separate from payments', async () => {
