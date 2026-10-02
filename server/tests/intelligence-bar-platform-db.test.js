@@ -765,9 +765,11 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'confirmed', requested_by: owner });
       expect(rows[0].consumed_at).not.toBeNull();
-      expect(JSON.parse(rows[0].result)).toMatchObject({ success: true });
+      // jsonb comes back parsed from pg; a text column would not.
+      expect(typeof rows[0].result === 'string' ? JSON.parse(rows[0].result) : rows[0].result).toMatchObject({ success: true });
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
-      expect(JSON.stringify(mockModel.mock.calls)).toContain('"executed":true');
+      // The tool_result content is itself a JSON string, so its quotes are escaped here.
+      expect(JSON.stringify(mockModel.mock.calls)).toMatch(/executed\\?":true/);
 
       // The same edit by the non-owner admin, gate still on, keeps its card.
       proposeNote(customerA, 'Non-owner fixture');
