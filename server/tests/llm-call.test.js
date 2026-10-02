@@ -254,6 +254,7 @@ describe('AI Gateway passthrough', () => {
       defaultHeaders: {
         'cf-aig-authorization': 'Bearer cf-token',
         'cf-aig-metadata': JSON.stringify({ lane: 'sms_intent', prompt_version: 'v3', policy_label: 'fastStructured' }),
+        'cf-aig-skip-cache': 'true',
       },
     });
   });
@@ -267,6 +268,8 @@ describe('AI Gateway passthrough', () => {
       Authorization: 'Bearer o-key',
       'cf-aig-authorization': 'Bearer cf-token',
       'cf-aig-metadata': JSON.stringify({ lane: 'parse_when' }),
+      // The gateway's cache is a dashboard setting: every request opts out.
+      'cf-aig-skip-cache': 'true',
     }));
   });
 
@@ -276,7 +279,7 @@ describe('AI Gateway passthrough', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe(`${BASE}/google-ai-studio/v1beta/models/${GEMINI_VISION_BEST}:generateContent`);
     expect(url).not.toMatch(/g-key/);
-    expect(init.headers).toEqual(expect.objectContaining({ 'x-goog-api-key': 'g-key', 'cf-aig-authorization': 'Bearer cf-token' }));
+    expect(init.headers).toEqual(expect.objectContaining({ 'x-goog-api-key': 'g-key', 'cf-aig-authorization': 'Bearer cf-token', 'cf-aig-skip-cache': 'true' }));
   });
 
   test('gate off: every leg stays on the provider host with no gateway header', async () => {

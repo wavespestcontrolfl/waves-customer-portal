@@ -103,7 +103,10 @@ function aiGatewayFor(laneId, { promptVersion, policyLabel } = {}) {
   const meta = { lane: laneId };
   if (promptVersion) meta.prompt_version = String(promptVersion);
   if (policyLabel) meta.policy_label = String(policyLabel);
-  return { base, headers: { 'cf-aig-authorization': `Bearer ${token}`, 'cf-aig-metadata': JSON.stringify(meta) } };
+  // cf-aig-skip-cache on every request: the gateway's own cache is a dashboard
+  // setting this code cannot see, and a cached answer would be a response the
+  // provider never served for this call (stale output, no billed usage).
+  return { base, headers: { 'cf-aig-authorization': `Bearer ${token}`, 'cf-aig-metadata': JSON.stringify(meta), 'cf-aig-skip-cache': 'true' } };
 }
 
 // Minimal OpenAI Responses-API text extractor (from lawn-diagnostic-prompt.js).
