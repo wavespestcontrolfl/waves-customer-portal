@@ -891,7 +891,7 @@ const CONFIRM_REASON_TEXT = {
   service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
-  missing_first_name: "customer created without a first name — get it",
+  missing_first_name: "no first name on file for this customer — get the account holder's first name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',

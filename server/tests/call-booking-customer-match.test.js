@@ -273,7 +273,9 @@ describe('FIX 1: "book only on an exact match" — ONE predicate for creation an
   });
 
   test('the card text states the durable fact, not a booking', () => {
-    expect(source).toContain('missing_first_name: "customer created without a first name — get it"');
+    expect(source).toContain(`missing_first_name: "no first name on file for this customer — get the account holder's first name"`);
+    // neutral on provenance: the linked customer may predate the call (codex #5559 r15)
+    expect(source).not.toContain('customer created without a first name');
     expect(source).not.toContain('booked on the last name alone');
   });
 });
