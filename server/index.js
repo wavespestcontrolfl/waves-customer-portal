@@ -477,6 +477,9 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   }
   next();
 });
+// Re-service photo uploads (GATE_RESERVICE_PHOTOS): same pre-parser 404 as
+// the appointment route's visitPrepPreParserGuard above.
+app.use('/api/public/reservice', require('./routes/reservice-public').reservicePhotosPreParserGuard);
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 
 // Estimate map-image proxy: privacy headers + the dark overlay 404 must land

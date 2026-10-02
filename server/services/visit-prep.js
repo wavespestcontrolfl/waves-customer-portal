@@ -128,19 +128,25 @@ async function deleteUploadedObject(key) {
 // — passed in rather than re-derived (or required cross-module, which would
 // form a require cycle: that route is this service's only caller) so the
 // rule is never duplicated.
-function visitPrepEligibility({ svc, state, visitUnknown, dispatchOwnedUnreviewed = false } = {}) {
+// `reserviceCallback`: the caller (reservice-public.js only) has already
+// proved the row is this customer's pest/lawn re-service callback. A
+// re-service is a standalone visit, so it is exempt from the recurring-plan
+// rule below; every other condition still applies.
+function visitPrepEligibility({
+  svc, state, visitUnknown, dispatchOwnedUnreviewed = false, reserviceCallback = false,
+} = {}) {
   if (!visitPrepPhotosLive()) return { eligible: false, reason: 'gate_off' };
   if (visitUnknown) return { eligible: false, reason: 'visit_unknown' };
   if (state !== 'upcoming') return { eligible: false, reason: 'not_upcoming' };
   if (!svc || svc.customer_active !== true) return { eligible: false, reason: 'customer_inactive' };
-  if (!isRecurringLineageVisit(svc)) return { eligible: false, reason: 'one_time_visit' };
+  if (reserviceCallback !== true && !isRecurringLineageVisit(svc)) return { eligible: false, reason: 'one_time_visit' };
   // `one_time` is the explicit not-a-series sentinel (the seeder, the
   // recurring-schedule audit and admin-schedule's plan alerts all refuse
   // it), but the shared lineage predicate reads any non-empty pattern as
   // recurring — so it is refused here, whatever else the row carries
   // (Codex #5176 r3 P0). Not folded into utils/recurring-lineage.js:
   // estimate-card-holds.js shares that predicate for card holds.
-  if (svc.recurring_pattern === 'one_time') return { eligible: false, reason: 'one_time_visit' };
+  if (reserviceCallback !== true && svc.recurring_pattern === 'one_time') return { eligible: false, reason: 'one_time_visit' };
   if (dispatchOwnedUnreviewed) return { eligible: false, reason: 'dispatch_owned_unreviewed' };
   return { eligible: true, reason: null };
 }
