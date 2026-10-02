@@ -1,0 +1,532 @@
+{
+  "schema_version": 1,
+  "cases": {
+    "W1-dev-01": {
+      "outcome": "pass"
+    },
+    "W1-dev-02": {
+      "outcome": "pass"
+    },
+    "W1-dev-03": {
+      "outcome": "pass"
+    },
+    "W1-dev-04": {
+      "outcome": "pass"
+    },
+    "W1-dev-05": {
+      "outcome": "pass"
+    },
+    "W1-dev-06": {
+      "outcome": "pass"
+    },
+    "W1-dev-07": {
+      "outcome": "pass"
+    },
+    "W1-dev-08": {
+      "outcome": "pass"
+    },
+    "W1-dev-09": {
+      "outcome": "pass"
+    },
+    "W1-dev-10": {
+      "outcome": "pass"
+    },
+    "W2-dev-01": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "other_account_facts_in_brief",
+      "failures": [
+        "target_resolution:other_account_facts_in_brief"
+      ]
+    },
+    "W2-dev-02": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "other_account_facts_in_brief",
+      "failures": [
+        "target_resolution:other_account_facts_in_brief"
+      ]
+    },
+    "W2-dev-03": {
+      "outcome": "pass"
+    },
+    "W2-dev-04": {
+      "outcome": "pass"
+    },
+    "W2-dev-05": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "schedule_view_window_has_no_end",
+      "failures": [
+        "tool_result:schedule_view_window_has_no_end"
+      ]
+    },
+    "W2-dev-06": {
+      "outcome": "pass"
+    },
+    "W2-dev-07": {
+      "outcome": "pass"
+    },
+    "W2-dev-08": {
+      "outcome": "pass"
+    },
+    "W2-dev-09": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        "target_resolution:customer_target_not_established"
+      ]
+    },
+    "W2-dev-10": {
+      "outcome": "pass"
+    },
+    "W3-dev-01": {
+      "outcome": "pass"
+    },
+    "W3-dev-02": {
+      "outcome": "pass"
+    },
+    "W3-dev-03": {
+      "outcome": "pass"
+    },
+    "W3-dev-04": {
+      "outcome": "pass"
+    },
+    "W3-dev-05": {
+      "outcome": "pass"
+    },
+    "W3-dev-06": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "lead_target_not_established",
+      "failures": [
+        "target_resolution:lead_target_not_established",
+        "confirm:superseded_pending_card_still_executable"
+      ]
+    },
+    "W3-dev-07": {
+      "outcome": "pass"
+    },
+    "W3-dev-08": {
+      "outcome": "pass"
+    },
+    "W3-dev-09": {
+      "outcome": "pass"
+    },
+    "W3-dev-10": {
+      "outcome": "pass"
+    },
+    "W4-dev-01": {
+      "outcome": "pass"
+    },
+    "W4-dev-02": {
+      "outcome": "pass"
+    },
+    "W4-dev-03": {
+      "outcome": "pass"
+    },
+    "W4-dev-04": {
+      "outcome": "pass"
+    },
+    "W4-dev-05": {
+      "outcome": "pass"
+    },
+    "W4-dev-06": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        "target_resolution:customer_target_not_established"
+      ]
+    },
+    "W4-dev-07": {
+      "outcome": "pass"
+    },
+    "W4-dev-08": {
+      "outcome": "pass"
+    },
+    "W4-dev-09": {
+      "outcome": "pass"
+    },
+    "W4-dev-10": {
+      "outcome": "pass"
+    },
+    "W5-dev-01": {
+      "outcome": "pass"
+    },
+    "W5-dev-02": {
+      "outcome": "pass"
+    },
+    "W5-dev-03": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "half_hour_refusal_not_specific",
+      "failures": [
+        "tool_result:half_hour_refusal_not_specific",
+        "proposal:half_hour_request_carded"
+      ]
+    },
+    "W5-dev-04": {
+      "outcome": "pass"
+    },
+    "W5-dev-05": {
+      "outcome": "pass"
+    },
+    "W5-dev-06": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "commercial_refusal_not_specific",
+      "failures": [
+        "tool_result:commercial_refusal_not_specific",
+        "proposal:commercial_booking_carded",
+        "domain_rule:commercial_account_booked_on_price",
+        "side_effect:guard_sent_a_text",
+        "side_effect:guard_outbound_row_added"
+      ]
+    },
+    "W5-dev-07": {
+      "outcome": "fail",
+      "point": "confirm",
+      "code": "obsolete_booking_proposal_still_executable",
+      "failures": [
+        "confirm:obsolete_booking_proposal_still_executable",
+        "read_back:final_booking_wrong",
+        "side_effect:nine_am_row_exists"
+      ]
+    },
+    "W5-dev-08": {
+      "outcome": "pass"
+    },
+    "W5-dev-09": {
+      "outcome": "fail",
+      "point": "domain_rule",
+      "code": "taken_slot_double_booked",
+      "failures": [
+        "domain_rule:taken_slot_double_booked",
+        "side_effect:guard_sent_a_text",
+        "side_effect:guard_outbound_row_added"
+      ]
+    },
+    "W5-dev-10": {
+      "outcome": "pass"
+    },
+    "W6-dev-01": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "reschedule_notice_send"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W6-dev-02": {
+      "outcome": "pass"
+    },
+    "W6-dev-03": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "reschedule_notice_send"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W6-dev-04": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "reschedule_notice_send"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W6-dev-05": {
+      "outcome": "pass"
+    },
+    "W6-dev-06": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "series_reschedule_writer",
+        "reschedule_notice_send"
+      ],
+      "probe": "fail:series_partially_moved",
+      "probe_failures": [
+        "domain_rule:series_partially_moved"
+      ]
+    },
+    "W6-dev-07": {
+      "outcome": "pass"
+    },
+    "W6-dev-08": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        "target_resolution:customer_target_not_established"
+      ]
+    },
+    "W6-dev-09": {
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "card_shown_for_a_send_that_will_be_blocked",
+      "failures": [
+        "proposal:card_shown_for_a_send_that_will_be_blocked"
+      ]
+    },
+    "W6-dev-10": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "reschedule_notice_send"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W7-dev-01": {
+      "outcome": "pass"
+    },
+    "W7-dev-02": {
+      "outcome": "pass"
+    },
+    "W7-dev-03": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "secondary_number_customer_link"
+      ],
+      "probe": "fail:no_card_for_secondary_number",
+      "probe_failures": [
+        "proposal:no_card_for_secondary_number",
+        "proposal:card_does_not_name_the_number",
+        "read_back:sent_to_wrong_number"
+      ]
+    },
+    "W7-dev-04": {
+      "outcome": "fail",
+      "point": "read_back",
+      "code": "queued_text_not_canceled",
+      "failures": [
+        "read_back:queued_text_not_canceled",
+        "side_effect:guard_outbound_row_added"
+      ]
+    },
+    "W7-dev-05": {
+      "outcome": "fail",
+      "point": "receipt",
+      "code": "unknown_outcome_not_recorded",
+      "failures": [
+        "receipt:unknown_outcome_not_recorded",
+        "receipt:unknown_outcome_retry_allowed",
+        "recovery:resend_before_reconciliation",
+        "side_effect:guard_send_count_not_declared"
+      ]
+    },
+    "W7-dev-06": {
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "card_shown_for_a_send_that_will_be_blocked",
+      "failures": [
+        "proposal:card_shown_for_a_send_that_will_be_blocked"
+      ]
+    },
+    "W7-dev-07": {
+      "outcome": "pass"
+    },
+    "W7-dev-08": {
+      "outcome": "pass"
+    },
+    "W7-dev-09": {
+      "outcome": "pass"
+    },
+    "W7-dev-10": {
+      "outcome": "pass"
+    },
+    "W8-dev-01": {
+      "outcome": "pass"
+    },
+    "W8-dev-02": {
+      "outcome": "pass"
+    },
+    "W8-dev-03": {
+      "outcome": "pass"
+    },
+    "W8-dev-04": {
+      "outcome": "pass"
+    },
+    "W8-dev-05": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "estimate_measurement_selector"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W8-dev-06": {
+      "outcome": "pass"
+    },
+    "W8-dev-07": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "sent_quote_refusal_not_specific",
+      "failures": [
+        "tool_result:sent_quote_refusal_not_specific",
+        "domain_rule:sent_quote_revision_offered",
+        "side_effect:sent_quote_changed",
+        "side_effect:guard_unchanged_rows_changed"
+      ]
+    },
+    "W8-dev-08": {
+      "outcome": "pass"
+    },
+    "W8-dev-09": {
+      "outcome": "pass"
+    },
+    "W8-dev-10": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "customer_target_not_established",
+      "failures": [
+        "target_resolution:customer_target_not_established"
+      ]
+    },
+    "W9-dev-01": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "pass",
+      "probe_failures": []
+    },
+    "W9-dev-02": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "fail:failed_card_attempt_not_readable",
+      "probe_failures": [
+        "tool_result:failed_card_attempt_not_readable"
+      ]
+    },
+    "W9-dev-03": {
+      "outcome": "fail",
+      "point": "tool_result",
+      "code": "intent_not_linkable_to_customer",
+      "failures": [
+        "tool_result:intent_not_linkable_to_customer"
+      ]
+    },
+    "W9-dev-04": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "fail:recorded_payment_not_readable",
+      "probe_failures": [
+        "tool_result:recorded_payment_not_readable"
+      ]
+    },
+    "W9-dev-05": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "fail:remaining_balance_wrong",
+      "probe_failures": [
+        "tool_result:remaining_balance_wrong",
+        "tool_result:payment_and_credit_not_named_by_type"
+      ]
+    },
+    "W9-dev-06": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "fail:dispute_hold_not_readable",
+      "probe_failures": [
+        "tool_result:dispute_hold_not_readable"
+      ]
+    },
+    "W9-dev-07": {
+      "outcome": "pass"
+    },
+    "W9-dev-08": {
+      "outcome": "pass"
+    },
+    "W9-dev-09": {
+      "outcome": "not_runnable",
+      "reasons": [
+        "invoice_payment_reader"
+      ],
+      "probe": "fail:payment_method_not_readable",
+      "probe_failures": [
+        "tool_result:payment_method_not_readable"
+      ]
+    },
+    "W9-dev-10": {
+      "outcome": "pass"
+    },
+    "W10-dev-01": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    },
+    "W10-dev-02": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    },
+    "W10-dev-03": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    },
+    "W10-dev-04": {
+      "outcome": "pass"
+    },
+    "W10-dev-05": {
+      "outcome": "pass"
+    },
+    "W10-dev-06": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established",
+        "tool_result:missing_unit_not_clarified",
+        "side_effect:stock_changed_without_a_unit"
+      ]
+    },
+    "W10-dev-07": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    },
+    "W10-dev-08": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    },
+    "W10-dev-09": {
+      "outcome": "pass"
+    },
+    "W10-dev-10": {
+      "outcome": "fail",
+      "point": "target_resolution",
+      "code": "product_target_not_established",
+      "failures": [
+        "target_resolution:product_target_not_established"
+      ]
+    }
+  }
+}

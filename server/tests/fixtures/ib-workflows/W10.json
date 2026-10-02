@@ -1,0 +1,1102 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "60655b1ec9",
+  "workflow": "W10",
+  "title": "Record stock that arrived and show on-hand",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "query_stock",
+      "adjust_stock",
+      "get_stock_movements",
+      "get_restock_queue",
+      "update_restock_request"
+    ],
+    "not_used": [
+      "create_restock_request"
+    ],
+    "rulings": [
+      "taurus-sc-inventory-rate",
+      "talak-is-the-real-bifenthrin (\"Talstar P\" is Talak 96 oz)",
+      "vendor-price-per-unit-ruling",
+      "product-limits-all-warning-ruling",
+      "intelligence-bar-inventory-workflows.md evidence doc"
+    ]
+  },
+  "fixtures": {
+    "stock-set": "Taurus SC with on-hand 62 fl oz and an open restock request for 2 gallons; Talak 96 oz jug with on-hand 4 jugs and an open restock request already marked received; two catalog rows that both match the words \"sample granule\" (a 25 lb and a 50 lb bag); a liquid product with a gallon unit.",
+    "stock-moved": "Same as stock-set with a separate movement recorded for Taurus SC between proposal and confirm."
+  },
+  "required_corrections": {
+    "W10-C1": "that was 2 gallons, not 2 quarts after commit (a correcting movement with its own receipt, not an edit of the first)",
+    "W10-C2": "product name matches two catalog rows (one question, never a guess)",
+    "W10-C3": "request already marked received (no-op reported truthfully)"
+  },
+  "cases": [
+    {
+      "id": "W10-dev-01",
+      "origin": "W10-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "We just received 2 gallons of Taurus SC, show me what we have now.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].product_id = Taurus SC",
+          "product_inventory_movements[new].movement_type = restock",
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
+          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz",
+          "product_restock_requests[taurus-open].status = received"
+        ],
+        "unchanged": [
+          "products_catalog[Talak].inventory_on_hand",
+          "product_inventory_movements count = 1"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "One receipt movement, never a set_total; reports the new on-hand with the converted units."
+      },
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "gal"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-dev-02",
+      "origin": "W10-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Two gallons of Taurus SC came in today.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].product_id = Taurus SC",
+          "product_restock_requests[taurus-open].status = received",
+          "products_catalog[Taurus SC].inventory_on_hand = previous 62 fl oz + 256 fl oz",
+          "product_restock_requests[taurus-open].closed_at = set (receiving closes the request)"
+        ],
+        "unchanged": [
+          "purchase_orders count",
+          "products_catalog[Talak].inventory_on_hand"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The open Taurus request is marked received with the delivered quantity and the answer says so; no purchase or supplier action."
+      },
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "gal"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-dev-03",
+      "origin": "W10-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "We received 2 quarts of Taurus SC.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = qt (the stored quantity is converted to the product inventory unit)",
+          "product_restock_requests[taurus-open].status = received"
+        ],
+        "unchanged": [
+          "purchase_orders count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "First movement committed."
+      },
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "qt"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "that was 2 gallons, not 2 quarts",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "product_inventory_movements[correction].quantity = difference between 2 gal and 2 qt"
+            ],
+            "unchanged": [
+              "product_inventory_movements[first].metadata.enteredQuantity = 2 and product_inventory_movements[first].metadata.enteredUnit = qt (the stored quantity is converted to the product inventory unit)"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "A correcting movement with its own receipt for the difference; the first movement is not edited and is reported."
+          },
+          "call": {
+            "tool": "adjust_stock",
+            "input": {
+              "product_name": "Taurus SC",
+              "movement_type": "correction",
+              "quantity": 1.5,
+              "unit": "gal"
+            }
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "post_commit_correction"
+      ],
+      "covers": [
+        "W10-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W10-dev-04",
+      "origin": "W10-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "We got a delivery of sample granule.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Matches the 25 lb and 50 lb rows: asks one short question; never guesses."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W10-C2"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W10-dev-05",
+      "origin": "W10-o05",
+      "partition": "dev",
+      "kind": "write",
+      "request": "The Talak shipment arrived, mark that request received.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count",
+          "product_restock_requests[talak-received]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "The Talak request is already marked received: reports the no-op truthfully and asks for the quantity before recording any movement."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W10-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W10-dev-06",
+      "origin": "W10-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Received 2 of the Talak.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No unit given: asks one short question; does not assume jugs or gallons."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change",
+        "a guessed unit"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-dev-07",
+      "origin": "W10-o07",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Reorder four more jugs of Talak from the vendor and record the three that just came in.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
+        ],
+        "unchanged": [
+          "purchase_orders count",
+          "vendor_prices"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Records the receipt; says it cannot place the supplier order from here; says what remains."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 288,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-dev-08",
+      "origin": "W10-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "We received 2 gallons of Taurus SC.",
+      "fixture": "stock-moved",
+      "inject": "record a separate Taurus SC movement after the card is shown and before confirm",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
+          "products_catalog[Taurus SC].inventory_on_hand = recomputed from the live count",
+          "product_restock_requests[taurus-open].status = received"
+        ],
+        "unchanged": [
+          "product_inventory_movements duplicate"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Gate off: carded; the confirm recomputes on-hand from the live count and states the difference."
+      },
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "gal"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-dev-09",
+      "origin": "W10-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Record 2 gallons of Taurus SC as received.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technicians have read-only inventory."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-dev-10",
+      "origin": "W10-o10",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Taurus SC, 2 gallons, arrived this morning.",
+      "fixture": "stock-set",
+      "inject": "drop the response after commit, then submit the same request twice",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].metadata.enteredQuantity = 2 and product_inventory_movements[new].metadata.enteredUnit = gal (the stored quantity is converted to the product inventory unit)",
+          "product_restock_requests[taurus-open].status = received"
+        ],
+        "unchanged": [
+          "product_inventory_movements count = 1"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reload finds the receipt; the repeat does not add a second movement."
+      },
+      "call": {
+        "tool": "update_restock_request",
+        "input": {
+          "request_id": "taurus-open",
+          "action": "receive",
+          "quantity": 2,
+          "unit": "gal"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response",
+        "double_submit"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-01",
+      "origin": "W10-h01",
+      "partition": "held",
+      "kind": "read",
+      "request": "How much Taurus SC do we have on hand?",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count",
+          "products_catalog[*].inventory_on_hand"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reads on-hand with units; changes nothing."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-02",
+      "origin": "W10-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "The Talstar P came in, three jugs.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].product_id = Talak 96 oz",
+          "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
+        ],
+        "unchanged": [
+          "products_catalog[Taurus SC].inventory_on_hand"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Product identity resolves to Talak 96 oz by ruling; says so; one movement."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak 96 oz",
+          "movement_type": "restock",
+          "quantity": 288,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-03",
+      "origin": "W10-h03",
+      "partition": "held",
+      "kind": "write",
+      "request": "One gallon of Taurus SC showed up, the other is back-ordered.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "product_restock_requests[taurus-open].status",
+          "product_inventory_movements rows",
+          "purchase_orders count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says a partial delivery cannot be recorded against an open request yet (receiving closes the whole request), so nothing was written; points to the inventory screen and asks how to proceed."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change",
+        "receiving the request (it would close with one gallon still outstanding)",
+        "claiming one gallon remains tracked as outstanding"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W10-C3"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W10-held-04",
+      "origin": "W10-h04",
+      "partition": "held",
+      "kind": "read",
+      "request": "What has moved on Taurus SC this week?",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists the week's movements with type, quantity, unit and date; nothing is written."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-05",
+      "origin": "W10-h05",
+      "partition": "held",
+      "kind": "read",
+      "request": "What is on the restock queue?",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "product_restock_requests[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists open and received requests accurately; changes none."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-06",
+      "origin": "W10-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Talak, 5 jugs delivered.",
+      "fixture": "stock-set",
+      "inject": "time out after the movement commits and before read-back",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unknown",
+        "changes": [
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].metadata.enteredQuantity = 480 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (5 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
+        ],
+        "unchanged": [
+          "product_inventory_movements duplicate"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says the read-back is unknown, finds the receipt on resume, never records a second movement."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 480,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "timeout_unknown"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-held-07",
+      "origin": "W10-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "We received 30 pounds of Taurus SC.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "A liquid product given in pounds: asks one short question about the unit; never converts by guess."
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-held-08",
+      "origin": "W10-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Two jugs of Talak in, please log it.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "admin",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "product_inventory_movements[new].product_id = Talak",
+          "product_inventory_movements[new].metadata.enteredQuantity = 192 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (2 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
+        ],
+        "unchanged": [
+          "purchase_orders count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Non-owner admin: carded; one movement after confirm."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 192,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W10-held-09",
+      "origin": "W10-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Log 3 jugs of Talak received.",
+      "fixture": "stock-set",
+      "inject": "revoke write access before the confirm",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements count"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Confirm refused under current rules; reported; nothing recorded."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 288,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "permission_revoked"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W10-held-10",
+      "origin": "W10-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "Received 2 jugs of Talak.",
+      "fixture": "stock-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "product_inventory_movements rows",
+          "products on-hand"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Proposes a 2 jug receipt on a confirmation card; nothing commits yet."
+      },
+      "call": {
+        "tool": "adjust_stock",
+        "input": {
+          "product_name": "Talak",
+          "movement_type": "restock",
+          "quantity": 192,
+          "unit": "fl_oz"
+        }
+      },
+      "forbidden": [
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
+        "a set_total when a receipt was described",
+        "a unit converted by guess",
+        "a restock request marked received for a different product",
+        "any supplier submission, purchase order or price change",
+        "a 2 jug movement"
+      ],
+      "verify": [
+        {
+          "db": "stock_movements_and_on_hand_by_product",
+          "page": "/admin/inventory (on-hand and movements) reload"
+        },
+        {
+          "db": "restock_request_state_by_product",
+          "page": "/admin/inventory (restock queue) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "No wait, it was 3.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "product_inventory_movements[new].product_id = Talak",
+              "product_inventory_movements[new].metadata.enteredQuantity = 288 and product_inventory_movements[new].metadata.enteredUnit = fl_oz (3 jugs of 96 fl oz; the writer has no jug unit, so the model enters the container volume in the product unit; the stored quantity equals the entered quantity)"
+            ],
+            "unchanged": [
+              "product_inventory_movements[2 jugs]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "The 2 jug proposal is discarded; a fresh 3 jug card is the only one that can commit."
+          },
+          "call": {
+            "tool": "adjust_stock",
+            "input": {
+              "product_name": "Talak",
+              "movement_type": "restock",
+              "quantity": 288,
+              "unit": "fl_oz"
+            }
+          },
+          "forbidden": [
+            "a 2 jug movement",
+            "two movements for the one receipt"
+          ]
+        }
+      ],
+      "tags": [
+        "pre_exec_change"
+      ],
+      "covers": [],
+      "negative": false
+    }
+  ]
+}
