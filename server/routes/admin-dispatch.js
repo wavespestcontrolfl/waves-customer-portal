@@ -4239,6 +4239,59 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill
+// body: { sheet: 'pest_reservice', transcript }
+// Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL): maps what
+// the tech said onto the sheet's own choices through one structured model call
+// and answers the VALIDATED fill — products {productId, amount, unit,
+// sameAsLast, method, heard}, visit fields, customerNote, officeNote and
+// `unclear` items (anything off-list, ambiguous or unspoken; each becomes a
+// Check chip on the sheet). It only suggests: nothing is saved or completed, and
+// the transcript is never stored or logged (the audit line carries ids and
+// counts only; the notes never reach the report writer from here). A visit whose
+// live completion profile is not pest_re_service is refused (409). A model
+// failure is 502 and the client keeps the typed sheet. See
+// services/fast-complete-voice-fill.js.
+// Paid model call: cap per staff bucket (same key as every other paid-LLM
+// limiter, rate-limit-key.js), like the dictation upload.
+const fastCompleteVoiceFillLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many voice fills. Keep typing for now.' },
+});
+router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillLimiter, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').fastCompleteVoiceFillLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const { sheet, transcript } = req.body || {};
+    if (typeof sheet !== 'string' || !Object.prototype.hasOwnProperty.call(VoiceFill.SHEETS, sheet)) {
+      return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
+    }
+    const trimmed = typeof transcript === 'string' ? transcript.trim() : '';
+    if (!trimmed || trimmed.length > VoiceFill.MAX_TRANSCRIPT_CHARS) {
+      return res.status(400).json({ error: `transcript must be 1-${VoiceFill.MAX_TRANSCRIPT_CHARS} characters`, code: 'bad_transcript' });
+    }
+    const result = await VoiceFill.voiceFill({ serviceId: req.params.serviceId, sheet, transcript: trimmed });
+    if (!result.ok) {
+      if (result.reason === 'model_failed') {
+        logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=false`);
+        return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
+      }
+      const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible'
+        ? 409 : recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const counts = VoiceFill.fillCounts(result.fill);
+    // Audit line: who/what/size only — never the transcript or either note.
+    logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
+    return res.json({ enabled: true, ...result.fill });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
