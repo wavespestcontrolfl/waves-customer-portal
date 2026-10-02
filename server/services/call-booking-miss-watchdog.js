@@ -173,7 +173,9 @@ function rowClearsSlot(row, call, slot) {
   if (INACTIVE_STATUSES.has(row.status)) {
     const rowCreated = row.created_at ? new Date(row.created_at).getTime() : NaN;
     const callCreated = call.created_at ? new Date(call.created_at).getTime() : NaN;
-    if (!Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated) return true;
+    // Never falls through to the window match below: a stale cancelled row
+    // at the same time of day is not this call's booking.
+    return !Number.isNaN(rowCreated) && !Number.isNaN(callCreated) && rowCreated >= callCreated;
   }
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;

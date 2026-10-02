@@ -163,6 +163,11 @@ describe('rowClearsSlot — cancelled/rescheduled rows the office created after 
     expect(computeBookingMisses([call()], [cancelled], { now: NOW })).toEqual([]);
     expect(computeBookingMisses([call()], [{ ...cancelled, created_at: beforeCall }], { now: NOW })).toHaveLength(1);
   });
+
+  test('computeBookingMisses: a pre-call cancelled row AT the slot time still does not clear (no window-match fallthrough)', () => {
+    const stale = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: beforeCall });
+    expect(computeBookingMisses([call()], [stale], { now: NOW })).toHaveLength(1);
+  });
 });
 
 describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
