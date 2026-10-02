@@ -185,6 +185,12 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     // A claimed attempt that was never submitted to Stripe: still unconfirmed, never "not received".
     const gClaim = await invoice('g_claim', G, { total: 35 });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: gClaim.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gclaim-${run}`, status: 'claimed', amount: 35 });
+    // A saved-bank charge in flight: a processing payments row (PaymentIntent, no key) and a claimed attempt row (key + same PaymentIntent).
+    const gBank = await invoice('g_bank', G, { total: 55, status: 'sent' });
+    await db('payments').insert({ customer_id: G, payment_date: day(0), amount: 55, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_gb_${run}`,
+      description: 'Saved bank payment', metadata: json({ invoice_id: gBank.id }) });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: gBank.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-gbank-${run}`, status: 'claimed', amount: 55,
+      stripe_payment_intent_id: `pi_gb_${run}`, submitted_at: new Date() });
     // More payment rows than the reader keeps: whether a payment was recorded is unknown.
     P = await customer(`Bulk${run}`, `Payments${run}`);
     const bulk = await invoice('p_bulk', P, { total: 90 });
@@ -461,6 +467,14 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const alias = await read('get_invoice_detail', { invoice_id: inv.g_alias.id });
     expect(alias.payments_timeline.find((e) => e.type === 'recorded_payment')).toMatchObject({ received: true, linked_by: 'metadata.waves_invoice_id' });
     expect(alias.payment_summary).toMatchObject({ received: true, recorded_payments_net: 60 });
+  });
+
+  test('review: one saved-bank charge written as a processing payment and a claimed attempt is one pending payment', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.g_bank.id });
+    expect(detail.payments_timeline.filter((e) => ['payment_attempt', 'stripe_charge_attempt'].includes(e.type))).toHaveLength(2);
+    expect(detail.payment_summary).toMatchObject({ received: false, attempts_in_flight_or_unknown: 1, payments_pending: 1, attempts_unknown_outcome: 0 });
+    expect(detail.payment_summary.statement).toMatch(/1 payment\(s\) still processing/);
+    expect(detail.payment_summary.statement).not.toMatch(/unknown outcome/);
   });
 
   test('review: a failed per-invoice hold lookup is unknown (null), never false', async () => {

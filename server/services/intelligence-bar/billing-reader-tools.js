@@ -729,6 +729,29 @@ function orphanEntry(row) {
   };
 }
 
+function groupByAttempt(entries) {
+  const parent = new Map();
+  const find = (key) => {
+    if (!parent.has(key)) parent.set(key, key);
+    let root = key;
+    while (parent.get(root) !== root) root = parent.get(root);
+    parent.set(key, root);
+    return root;
+  };
+  const keysOf = (entry) => [entry.attempt_ref && `ref:${entry.attempt_ref}`, entry.stripe_payment_intent_id && `pi:${entry.stripe_payment_intent_id}`].filter(Boolean);
+  for (const entry of entries) {
+    const [first, ...rest] = keysOf(entry);
+    if (first) for (const key of rest) parent.set(find(key), find(first));
+  }
+  const groups = new Map();
+  for (const entry of entries) {
+    const [first] = keysOf(entry);
+    const key = first ? find(first) : `${entry.type}:${entry.id}`;
+    groups.set(key, [...(groups.get(key) || []), entry]);
+  }
+  return [...groups.values()];
+}
+
 function summarizePayments(entries, invoice, evidenceComplete = true) {
   const recorded = entries.filter((entry) => entry.type === 'recorded_payment' && entry.received);
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
@@ -741,16 +764,18 @@ function summarizePayments(entries, invoice, evidenceComplete = true) {
   // the customer: its receipt is unconfirmed, which is not the same as not received.
   // One charge attempt can leave rows in several tables (a saved-card decline writes a payments row AND an
   // attempt row sharing the idempotency key or PaymentIntent): count each attempt once, by its worst state.
-  const groups = new Map();
-  for (const entry of notReceived) {
-    const key = entry.attempt_ref || entry.stripe_payment_intent_id || `${entry.type}:${entry.id}`;
-    groups.set(key, [...(groups.get(key) || []), entry]);
-  }
+  // Entries that share EITHER identifier are one attempt (a saved-bank charge writes a processing payments
+  // row with a PaymentIntent and no key, and a claimed attempt row with a key): merged through their keys.
+  const groups = groupByAttempt(notReceived);
   const isPending = (entry) => entry.status === 'processing' || (entry.unconfirmed === true && entry.source === 'combined_pay_processing');
-  const isUnknown = (entry) => entry.state === 'claimed' || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing');
-  const unknownOutcome = [...groups.values()].filter((group) => group.some(isUnknown));
-  const pending = [...groups.values()].filter((group) => !group.some(isUnknown) && group.some(isPending));
-  const failed = [...groups.values()].filter((group) => !group.some(isUnknown) && !group.some(isPending)
+  // A recorded processing payment for the same attempt resolves a claimed attempt's missing result: that one
+  // payment is pending (bank transfer in flight), not an unknown outcome.
+  const isUnknown = (entry, group) => (entry.state === 'claimed' && !group.some((other) => other.status === 'processing'))
+    || entry.state === 'ambiguous' || (entry.unconfirmed === true && entry.source !== 'combined_pay_processing');
+  const groupUnknown = (group) => group.some((entry) => isUnknown(entry, group));
+  const unknownOutcome = groups.filter(groupUnknown);
+  const pending = groups.filter((group) => !groupUnknown(group) && group.some(isPending));
+  const failed = groups.filter((group) => !groupUnknown(group) && !group.some(isPending)
     && group.some((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed'));
   const inFlight = [...pending, ...unknownOutcome];
   const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
