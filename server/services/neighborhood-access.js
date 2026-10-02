@@ -378,7 +378,14 @@ async function fileOneSavedCode(customerId, lookup) {
     // (and flags an existing copy) — only while the note names THIS code
     // ("Gate code 2424 is unconfirmed: confirm on site."); a replacement code
     // saved later, with the old note left behind, is not the one it doubted.
-    const unconfirmed = String(prefs?.access_notes || '').includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
+    const markedUnconfirmed = String(prefs?.access_notes || '').includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
+    // The same value already filed in ANOTHER neighborhood: the property moved
+    // (or the office re-linked it), so the code is old evidence — it may be the
+    // former address's gate. File it for the office to confirm, never active.
+    const [carried] = (await trx.raw(`SELECT (f.value_hash = ${VALUE_HASH_SQL}) AS same_value, f.neighborhood_id
+      FROM neighborhood_access_filings f JOIN property_preferences pp ON pp.customer_id = f.customer_id
+      WHERE f.customer_id = ?`, [customerId])).rows;
+    const unconfirmed = markedUnconfirmed || Boolean(carried?.same_value && carried.neighborhood_id);
     let neighborhoodId = active[0].neighborhood_id;
     if (!neighborhoodId && parcel) {
       const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });

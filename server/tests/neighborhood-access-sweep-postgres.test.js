@@ -175,14 +175,15 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).toBeUndefined();
   });
 
-  test('a code is filed again where the property is re-linked (address move, office fix)', async () => {
+  test('a code carried to a re-linked property (address move, office fix) files for the office to confirm', async () => {
     const n1 = await neighborhood('Old Grove');
     const n2 = await neighborhood('New Grove');
     const customerId = await customerWithCode('1919', { neighborhoodId: n1 });
     await sweepSavedGateCodes();
     await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2, neighborhood_source: 'office' });
     expect((await sweepSavedGateCodes()).tally).toEqual({ filed: 1 });
-    expect((await accessRows(n2)).map((r) => r.code)).toEqual(['1919']);
+    // Carried over from the old neighborhood: the office confirms it, never active.
+    expect((await accessRows(n2)).map((r) => [r.code, r.status])).toEqual([['1919', 'needs_confirm']]);
     expect((await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).neighborhood_id).toBe(n2);
     expect((await sweepSavedGateCodes()).customers).toBe(0);
   });
