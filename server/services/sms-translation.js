@@ -67,7 +67,9 @@ function isEnglishText(text) {
     current = current ? `${current} ${sentence}` : sentence;
   }
   if (current) chunks.push(current);
-  return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && !needsTranslation(c));
+  // the English guard itself, without needsTranslation's short-text discovery rule (a name or product is fine here)
+  const { isEnglishInbound } = require('./sms-label-facts');
+  return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && isEnglishInbound(c));
 }
 
 const INBOUND_SCHEMA = {
@@ -149,7 +151,7 @@ async function translateInbound(inbound) {
 async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written (digits stay digits). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). Return only the translation. ${DATA_NOTE}`,
+    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). Return only the translation. ${DATA_NOTE}`,
     text: `<text>\n${englishReply}\n</text>`,
     jsonSchema: TRANSLATE_SCHEMA,
   });
@@ -425,7 +427,8 @@ function addressOrderFaults(englishReply, translated) {
 }
 
 function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
-  const en = protectedTokens(englishReply, { strictTimes });
+  // strict mode (our reply): a number in words is a number ("two hours" = 2); the translator writes digits
+  const en = protectedTokens(strictTimes ? require('./sms-shadow-drafter').normalizeNumberWords(String(englishReply || '')) : englishReply, { strictTimes });
   const tr = protectedTokens(translated, { strictTimes });
   const missingDigits = diffCounts(en.digits, tr.digits);
   const addedDigits = diffCounts(tr.digits, en.digits);
@@ -547,6 +550,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   // branch committed): a staff reply or newer text landing during the model calls below never reaches
   // the draft. Same live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
   const ContextAggregator = require('./context-aggregator');
+  const liveEtaFetchedAt = new Date();
   const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const inbound = await translateInbound(inboundMessage);
   if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
@@ -564,8 +568,13 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
   const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
   // both read off the English: the webhook's own reads ran on the foreign text
-  const intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
+  let intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
   const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
+  // a thank-you-only text gets the approved gratitude reply, as draftShadowReply does for a live one
+  const gratitude = require('./sms-gratitude');
+  if (!schedulingIntent && gratitude.isGratitudeOnly(inbound.english)) {
+    intent = { intent: gratitude.GRATITUDE_INTENT, confidence: 1, approvedReply: gratitude.buildGratitudeReply(customer.first_name) };
+  }
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const draft = await require('./sms-shadow-drafter').generateGroundedDraft({
@@ -573,6 +582,8 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
     city: customer.city || null, liveOpenTimes: true,
     // trial traffic is metered on its own lane, never as live drafting
     laneId: 'sms_translation', verifierLaneId: 'sms_translation', metricsLane: 'translation_trial',
+    // the live ETA ages from its lookup above, not from when the draft rendered it
+    liveEtaFetchedAt,
   });
   const englishReply = typeof draft?.parsed?.reply === 'string' ? draft.parsed.reply.trim() : '';
   Object.assign(fields, {

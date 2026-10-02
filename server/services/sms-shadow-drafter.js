@@ -5135,7 +5135,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, verifierLaneId = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -5468,7 +5468,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // shadow row, never published or auto-sent — instead of re-resolving (a second
   // GPS + route-provider round trip and a full re-verify for a figure the next
   // inbound will refresh anyway).
-  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt })) {
+  // a caller that fetched the context earlier (the any-language trial) passes when, so the ETA ages from its real lookup
+  const etaAsOf = liveEtaFetchedAt instanceof Date && factsAt instanceof Date && liveEtaFetchedAt < factsAt ? liveEtaFetchedAt : factsAt;
+  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt: etaAsOf })) {
     logger.warn('[sms-shadow] live ETA expired while the draft was generated; withholding the card (not converged)');
     converged = false;
   }

@@ -25,6 +25,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   replyQuotesUngroundedAmount: (...a) => mockUngrounded(...a),
   hasBannedCustomerCopy: (t) => /pet[- ]safe/i.test(t),
   SMS_COMPLIANCE_CLAIM_RE: jest.requireActual('../services/sms-shadow-drafter').SMS_COMPLIANCE_CLAIM_RE,
+  normalizeNumberWords: jest.requireActual('../services/sms-shadow-drafter').normalizeNumberWords,
 }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -139,6 +140,11 @@ describe('tokenParity', () => {
   test('a time written in words keeps its half of the day in the strict check', () => {
     expect(tokenParity('We can come at 2 in the afternoon.', 'Podemos ir a las 14:00.')).toMatchObject({ ok: true });
     expect(tokenParity('We can come at 2 in the afternoon.', 'Podemos ir a las 2:00.')).toMatchObject({ ok: false });
+  });
+
+  test('a number in words in our reply compares as digits', () => {
+    expect(tokenParity('We can come in two hours.', 'Podemos ir en 3 horas.')).toMatchObject({ ok: false });
+    expect(tokenParity('We can come in two hours.', 'Podemos ir en 2 horas.')).toMatchObject({ ok: true });
   });
 
   test('a signed number keeps its sign; a range dash is not a sign', () => {
@@ -264,6 +270,27 @@ describe('runTranslationTrial', () => {
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(order[0]).toBe('context');
     expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(1);
+  });
+
+  test('a thank-you-only text gets the approved gratitude intent, as the live drafter gives it', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you!' } });
+    await runTranslationTrial({ inboundMessage: '¡Muchas gracias!', customer: { ...customer, first_name: 'Ana' }, smsLogId: 's1' });
+    expect(mockDraft.mock.calls[0][0].intent).toMatchObject({ intent: 'gratitude_reply', confidence: 1 });
+  });
+
+  test('the live ETA ages from the context lookup, which is passed to the drafter', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const before = Date.now();
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    const at = mockDraft.mock.calls[0][0].liveEtaFetchedAt;
+    expect(at).toBeInstanceOf(Date);
+    expect(at.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  test('model output naming a product or person is still English (no short-word discovery rule)', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Use Termidor?' } });
+    const row = await runTranslationTrial({ inboundMessage: '¿Usan Termidor?', customer, smsLogId: 's1' });
+    expect(row.hold_reason).not.toBe('inbound_translation_failed:translation_not_english');
   });
 
   test('trial drafting is metered on the translation lane', async () => {
