@@ -1845,9 +1845,11 @@ router.get('/intent-modes', async (req, res, next) => {
   }
 });
 
-// PUT /intent-modes/:intent — flip one intent between shadow and suggest.
-// Escalation intents are locked server-side (validateModeChange rejects);
-// every flip writes an activity_log audit row.
+// PUT /intent-modes/:intent — flip one intent between shadow, suggest and
+// auto_send. Escalation intents are locked server-side (validateModeChange
+// rejects), auto_send must be EARNED (eligibility below) and is written only
+// over a stored suggest mode (setIntentMode enforces the ladder); every flip
+// writes an activity_log audit row.
 router.put('/intent-modes/:intent', async (req, res, next) => {
   try {
     const suggestMode = require('../services/sms-suggest-mode');
@@ -1875,7 +1877,9 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
     try {
       row = await suggestMode.setIntentMode({ intent, mode, actor: actorName(req), reason });
     } catch (err) {
-      if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+      // 400 = invalid flip; 409 = the ladder refused it (auto_send is written
+      // only over a stored suggest mode — see setIntentMode).
+      if (err.statusCode === 400 || err.statusCode === 409) return res.status(err.statusCode).json({ error: err.message });
       throw err;
     }
 

@@ -10,6 +10,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
+const { toE164 } = require('../../utils/phone');
+const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
 const leadAttribution = require('../lead-attribution');
 const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
@@ -148,6 +150,23 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
       required: ['current_status', 'new_status'],
     },
   },
+  {
+    name: 'update_lead_contact',
+    description: `Correct a lead's contact details: first name, last name, phone, or email (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email clears that field; first_name cannot be cleared.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email"
+ALWAYS show the operator the before → after values and get approval before saving.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_id: { type: 'string' },
+        lead_name: { type: 'string', description: 'Find the lead by name (partial match, active leads only) when lead_id is unknown' },
+        first_name: { type: 'string' },
+        last_name: { type: 'string' },
+        phone: { type: 'string', description: 'Any US format; stored as E.164' },
+        email: { type: 'string' },
+      },
+    },
+  },
 ];
 
 
@@ -165,6 +184,7 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
       case 'get_response_times': return await getResponseTimes(input.days || 30);
       case 'update_lead_status': return await updateLeadStatus(input);
       case 'bulk_update_leads': return await bulkUpdateLeads(input);
+      case 'update_lead_contact': return await updateLeadContact(input);
       default: return { error: `Unknown leads tool: ${toolName}` };
     }
   } catch (err) {
@@ -621,6 +641,187 @@ async function matchBulkLeads(input) {
 
 // Read-only preview of a bulk update — the route runs this at proposal time
 // to pin the matched ids into the stored pending-action params.
+// ─── CONTACT DETAILS (two-step write) ───────────────────────────
+//
+// Preview→confirmed executor (write-gates WRITE_TWO_STEP): without
+// `confirmed` it resolves the lead, validates the requested fields and
+// returns the before → after diff for the card; nothing is written. The
+// route pins that preview's fingerprint and re-runs it at Confirm, so a
+// lead edited in the pending window refuses with preview_changed instead
+// of overwriting a value the card never showed. The UPDATE's own WHERE
+// re-asserts every old value as well (same atomic guard as the status
+// write) — the fingerprint check and the commit are not one statement.
+
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+
+// Normalize one requested contact field. Returns { value } (null = clear)
+// or { error }.
+function normalizeLeadContactField(field, raw) {
+  const text = raw === null || raw === undefined ? '' : String(raw).trim();
+  if (field === 'first_name') {
+    if (!text) return { error: 'first_name cannot be blank — a lead needs a first name.' };
+    return { value: text.slice(0, 255) };
+  }
+  if (field === 'last_name') return { value: text ? text.slice(0, 255) : null };
+  if (field === 'phone') {
+    if (!text) return { value: null };
+    // Strict shape first (pre-push P1): the shared normalizer keeps the LAST
+    // ten digits of a bare number, so a mistyped 12-digit string would be
+    // silently truncated to a different phone. Accept exactly a 10-digit US
+    // number, 11 digits with a leading 1, or a full +country number.
+    // Only digits and formatting punctuation (Codex r1 P2): "ext 23" or any
+    // letters would otherwise be folded into the destination number.
+    if (!/^\+?[\d\s().-]+$/.test(text)) return { error: 'phone is not a valid phone number — digits only, no extension.' };
+    const digits = text.replace(/\D/g, '');
+    const wellFormed = text.startsWith('+')
+      ? /^\+\d{8,15}$/.test(`+${digits}`)
+      : (digits.length === 10 || (digits.length === 11 && digits.startsWith('1')));
+    const e164 = wellFormed ? toE164(text) : null;
+    // Canonical E.164 (Codex r2 P2): a non-zero country code then 7–14 more
+    // digits — not the looser isLikelyE164 helper, which both admits a
+    // leading zero and rejects valid 8–9 digit international numbers.
+    // NANP (+1) numbers are exactly ten more digits with a [2-9] area code.
+    const canonical = e164 && (e164.startsWith('+1') ? /^\+1[2-9]\d{9}$/.test(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
+    if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
+    return { value: e164 };
+  }
+  if (field === 'email') {
+    if (!text) return { value: null };
+    const email = cleanValidEmailOrNull(text);
+    if (!email) return { error: 'email is not a valid email address.' };
+    // leads.email is varchar(255) (Codex r2 P2): refuse at preview, not at commit.
+    if (email.length > 255) return { error: 'email is too long (255 characters max).' };
+    return { value: email };
+  }
+  return { error: `Unknown contact field: ${field}` };
+}
+
+// { field: { from, to } } for every requested field whose stored value
+// differs (empty string and NULL both read as "empty").
+function diffLeadContact(lead, requested) {
+  const changes = {};
+  for (const [field, next] of Object.entries(requested)) {
+    let current = lead[field] === undefined || lead[field] === null || lead[field] === '' ? null : String(lead[field]);
+    // Emails compare normalized (the requested value is trimmed + lowercased)
+    // so a legacy mixed-case stored address re-saved unchanged is not a change.
+    if (field === 'email' && current !== null) current = current.trim().toLowerCase() || null;
+    if (current !== next) changes[field] = { from: current, to: next };
+  }
+  return changes;
+}
+
+// The route-pinned diff for a confirmed run: every field must be a contact
+// field whose target equals what this call requests, or the pin is refused.
+function approvedLeadContactChanges(pinned, requested) {
+  if (pinned === undefined || pinned === null) return null;
+  if (typeof pinned !== 'object' || Array.isArray(pinned) || Object.keys(pinned).length === 0) {
+    return { error: 'Approved changes are malformed. Rebuild the confirmation card.', preview_changed: true };
+  }
+  const changes = {};
+  for (const [field, change] of Object.entries(pinned)) {
+    const from = change?.from === undefined || change?.from === null ? null : String(change.from);
+    const to = change?.to === undefined || change?.to === null ? null : String(change.to);
+    if (!LEAD_CONTACT_FIELDS.includes(field) || !(field in requested) || requested[field] !== to) {
+      return { error: 'Approved changes do not match this request. Rebuild the confirmation card.', preview_changed: true };
+    }
+    changes[field] = { from, to };
+  }
+  return changes;
+}
+
+async function updateLeadContact(input) {
+  const requested = {};
+  for (const field of LEAD_CONTACT_FIELDS) {
+    if (input[field] === undefined) continue;
+    const norm = normalizeLeadContactField(field, input[field]);
+    if (norm.error) return { error: norm.error };
+    requested[field] = norm.value;
+  }
+  if (Object.keys(requested).length === 0) {
+    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email.' };
+  }
+
+  const lead = await resolveLeadForUpdate(input);
+  if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
+  if (lead.error) return lead;
+
+  // Only fields whose stored value actually differs are written (and shown).
+  // A confirmed run uses the APPROVED diff the route pinned at proposal
+  // (pre-push P1): the route's fingerprint re-check and this executor's own
+  // read are two reads, so a write landing between them would otherwise be
+  // re-asserted against the newer value and overwritten. The approved
+  // "from" values ride into the UPDATE's WHERE instead.
+  const approved = input.confirmed === true ? approvedLeadContactChanges(input._approved_changes, requested) : null;
+  if (approved?.error) return approved;
+  const changes = approved || diffLeadContact(lead, requested);
+  const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+  if (Object.keys(changes).length === 0) {
+    return { error: `Lead ${leadName} already has those contact details — nothing to change.` };
+  }
+
+  const preview = {
+    lead_id: lead.id,
+    lead_name: leadName,
+    lead_status: lead.status,
+    changes,
+    ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
+  };
+
+  if (input.confirmed !== true) {
+    return {
+      preview: true,
+      ...preview,
+      note: 'PREVIEW ONLY — nothing was saved. Updates the lead record only'
+        + (lead.customer_id ? ' (the linked customer account is NOT changed)' : '')
+        + '. After the operator approves, this commits via the confirmation card.',
+    };
+  }
+
+  const updates = { updated_at: new Date() };
+  for (const [field, { to }] of Object.entries(changes)) updates[field] = to;
+  // A real email change stamps its confirmation time (Codex r1 P1), as the
+  // lead editor does: admin-triage's emailDisagreementConfirmed reads
+  // email_confirmed_at — not updated_at — as the only proof a customer-less
+  // voicemail lead's email-disagreement card was corrected after it was filed.
+  if (changes.email) updates.email_confirmed_at = updates.updated_at;
+
+  const updatedRows = await db.transaction(async (trx) => {
+    let q = trx('leads').where('id', lead.id).whereNull('deleted_at');
+    // Re-assert every value the card showed as "from" — a concurrent edit
+    // matches zero rows instead of being overwritten.
+    for (const [field, { from }] of Object.entries(changes)) {
+      if (from === null) q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
+      else if (field === 'email') q = q.whereRaw('LOWER(TRIM(email)) = ?', [from]);
+      else q = q.where(field, from);
+    }
+    const rows = await q.update(updates, ['id']);
+    if (!rows || rows.length === 0) return rows;
+    await trx('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'updated',
+      description: `Contact updated: ${Object.keys(changes).join(', ')}`,
+      performed_by: 'Intelligence Bar',
+      metadata: JSON.stringify(changes),
+    });
+    return rows;
+  });
+  if (!updatedRows || updatedRows.length === 0) {
+    return {
+      error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
+
+  // Log which fields changed only — the values are contact PII.
+  logger.info(`[intelligence-bar:leads] Updated lead ${lead.id} contact: ${Object.keys(changes).join(', ')}`);
+
+  return {
+    success: true,
+    ...preview,
+    updated_fields: Object.keys(changes),
+  };
+}
+
 async function previewBulkLeadUpdate(input) {
   return bulkUpdateLeads({ ...input, dry_run: true });
 }

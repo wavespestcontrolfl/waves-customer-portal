@@ -10,7 +10,6 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -5085,12 +5084,11 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
   }
 }
 
-async function loadProjectCompletionContextByServiceId(services, { userId = null } = {}) {
+async function loadProjectCompletionContextByServiceId(services) {
   const rows = Array.isArray(services) ? services : [];
-  // GATE_TS_FAST_COMPLETE + the requesting user's `ts_fast_complete` flag:
-  // one read per request, not per service. A flag-read failure is "off".
-  const treeShrubFastCompleteEnabled = tsFastCompleteLive()
-    && await isUserFeatureEnabled(userId, 'ts_fast_complete').catch(() => false);
+  // GATE_TS_FAST_COMPLETE alone: every tech completes T&S on the Fast Complete
+  // sheet (owner 2026-10-01, no per-tech flag).
+  const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
@@ -5846,7 +5844,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
+    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6547,7 +6545,7 @@ router.get('/week', async (req, res, next) => {
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
-      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services, { userId: req.technicianId });
+      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
       // Same trace-eligibility flag the day feed carries (codex P2 r2):
       // the mobile Week view opens the shared CompletionPanel straight off
       // these rows, so the tracer-gating verdict must ride here too. The
@@ -10751,6 +10749,30 @@ function seriesAckMatches(body, preview) {
   const ok = want.size === have.size && [...want].every((id) => have.has(id));
   return { ok, changed: !ok };
 }
+// GATE_SERIES_MOVE_CARRIES_VISIT: a later occurrence in a grouped visit
+// would be CARRIED by the series writer, which can still refuse (a frozen
+// visit, an unmovable partner, the partner plan's own day) after the
+// update-details handler has committed the other field edits — a partial
+// save. That surface moves no grouped stop: refuse before anything is
+// written; the schedule board moves the whole stop with its partners.
+async function refuseCarriedStopInEditMove(ackedIds) {
+  if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;
+  const visitIds = [...new Set((await db('scheduled_services').whereIn('id', ackedIds).whereNotNull('visit_id')
+    .select('visit_id')).map((r) => String(r.visit_id)))];
+  for (const visitId of visitIds) {
+    // NULL-safe: a legacy member with no status is live.
+    const live = await db('scheduled_services').where({ visit_id: visitId })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show']))
+      .count({ n: '*' }).first();
+    if (Number(live?.n || 0) >= 2) {
+      throw Object.assign(
+        httpError(409, 'A later visit in this plan is grouped with another service at the same stop. Move the plan from the schedule (each stop moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -10832,6 +10854,7 @@ async function planCollectiveEditDateMove(req) {
     }
     ackedIds = preview.occurrenceIds.map(String);
   }
+  await refuseCarriedStopInEditMove(ackedIds);
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
   if (!clearWindow && intake.windowStart) {
@@ -10873,6 +10896,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // Never carries grouped partners (refuseCarriedStopInEditMove's
+        // promise holds even if a stop is grouped after that preflight).
+        carryVisit: false,
         actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.

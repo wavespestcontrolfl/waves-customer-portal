@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const { validateCustomerCopy } = require('./customer-copy-forbidden');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { resolveLabel } = require('../pest-pressure/label');
 const { DEFAULT_CONFIG } = require('../pest-pressure/config');
@@ -21,19 +22,6 @@ const SEVERITY_RANK = {
   low: 2,
   info: 1,
 };
-
-const FORBIDDEN_PATTERNS = [
-  /\binfestation\b/i,
-  /\beliminated\b/i,
-  /\bguaranteed\b/i,
-  /\bdangerous\b/i,
-  /\btoxic\b/i,
-  /\bpoison\b/i,
-  /\bunsafe\b/i,
-  /\bdeadly\b/i,
-  /\bapocalypse\b/i,
-  /\bwar zone\b/i,
-];
 
 const PEST_DOSSIERS = {
   ghost_ant: {
@@ -255,14 +243,6 @@ function buildPrimaryMoveContext({ findings = [] } = {}) {
     status: 'open',
     dueLabel: 'Before next service',
   };
-}
-
-function validateCustomerCopy(text) {
-  const copy = cleanText(text);
-  for (const pattern of FORBIDDEN_PATTERNS) {
-    if (pattern.test(copy)) return false;
-  }
-  return true;
 }
 
 function buildAiSummaryPersonalityContext({

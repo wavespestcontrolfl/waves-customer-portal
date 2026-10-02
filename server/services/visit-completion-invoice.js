@@ -8,10 +8,11 @@ const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('
 const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
 
-function office(reason, serviceId = null) {
-  return { state: 'office_required', reason, serviceId, invoiceId: null };
+function office(reason, serviceId = null, extra = null) {
+  return { state: 'office_required', reason, serviceId, invoiceId: null, ...(extra || {}) };
 }
 
 function visitBusy(error) {
@@ -118,7 +119,91 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
   return built;
 }
 
-async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
+// The member's series parent's LIVE setup-fee claim, or null: scheduled_services.
+// pending_setup_fee (positive = queued, negative = a completion mid-mint) on
+// the parent. Keyed on the stamp itself, never on how it got there: the
+// pay-after-first-visit accept (estimate_data.setupFeeDeferredToFirstVisit)
+// and the secure plan-choice lane write the SAME claim, and the secure lane's
+// stamps exist with GATE_PAF_SETUP_FEE (and the marker) absent entirely. The
+// claim is consumed only by the single-visit completion mint, so a packet mint
+// that carries no setup line must never run past it.
+async function liveSetupClaim(trx, member) {
+  const parentId = member.recurring_parent_id || member.id;
+  const parent = await trx('scheduled_services').where({ id: parentId }).first('pending_setup_fee');
+  const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : 0;
+  return Number.isFinite(stamp) && stamp !== 0
+    ? { parentId, raw: parent.pending_setup_fee, amount: Math.round(Math.abs(stamp) * 100) / 100, queued: stamp > 0 }
+    : null;
+}
+
+async function deferredSetupClaimStillQueued(trx, member) {
+  return !!(await liveSetupClaim(trx, member));
+}
+
+// The packet hands this closeout to the office, who bill the visit by hand. A
+// QUEUED claim is never cleared into nothing (and never left armed: an ordinary
+// invoice does not consume it, so a later single-visit completion would charge
+// the fee a second time): on EVERY office-required exit it is PARKED FOR THE
+// OFFICE (owner ruling 2026-10-01), in this transaction: the stamp is cleared
+// and a setup_fee_office_billing alert is the durable owed-fee record. NO
+// invoice is created outside the normal completion mint; the office bills the
+// fee by hand, once. A rollback restores the stamp with it, and a park failure
+// throws (never swallowed) so the whole packet transaction rolls back. A
+// NEGATIVE stamp is a single-visit completion mid-mint that will bill the fee
+// itself, left alone. Every member's series is scanned (billed or not), once
+// per series.
+// Only a member whose visit was really PERFORMED as live work can be the first
+// visit the queued fee rides: a declined / inspection-only / incomplete visit
+// (record_notes.visitOutcome, even on a 'completed' record),
+// a backfill or an already-invoiced completion, a recap-only record, a callback
+// or always-free work keeps its series' stamp for the visit that is performed
+// (the single-visit completion's own rule). The member must also be a PLAN
+// application (is_recurring, the detector's own isPlanApplicationRow rule): a
+// non-recurring booster or add-on riding the same grouped stop never takes the
+// plan's fee.
+function memberPerformedForSetupClaim(member) {
+  const notes = member.record_notes || {};
+  return member.record_status === 'completed'
+    && isPlanApplicationRow(member)
+    && !notes.backfill && !notes.invoiceAlreadySent && !notes.oneTimeRecapOnly
+    && !['inspection_only', 'customer_declined', 'incomplete'].includes(notes.visitOutcome)
+    && !member.is_callback && !isAlwaysFreeServiceType(member.service_type);
+}
+
+async function parkQueuedSetupClaimsForOffice(trx, members, { packet, visit }) {
+  const parked = [];
+  const seen = new Set();
+  for (const member of members) {
+    if (!memberPerformedForSetupClaim(member)) continue;
+    const claim = await liveSetupClaim(trx, member);
+    if (!claim?.queued || seen.has(claim.parentId)) continue;
+    seen.add(claim.parentId);
+    const result = await parkSetupFeeStampForOffice(trx, {
+      parentId: claim.parentId, rawAmount: claim.raw, customerId: member.customer_id,
+      estimateId: member.source_estimate_id || null, origin: 'grouped closeout handed to the office',
+      alertContext: { visitId: visit.id, packetId: packet.id, serviceId: member.id },
+      billToScheduledServiceId: member.id,
+      visit: member,
+    });
+    if (result) parked.push({ amount: result.amount, seriesId: result.parentId, alertId: result.alertId });
+  }
+  return parked;
+}
+
+// Every office-required exit of the mint hands over the queued claims it found.
+// Every outcome of the packet mint, not only an office exit: this mint never
+// carries a setup line, so a queued fee left on a performed plan member's
+// series after it (a $0 member never checked by the billed / fee-review scan,
+// or a closeout that invoiced another member) would otherwise slide to a later
+// visit. Parked for the office in the same transaction (the alert is the
+// durable record).
+async function mintPacketInvoice(args) {
+  const result = await mintPacketInvoiceInner(args);
+  const parked = await parkQueuedSetupClaimsForOffice(args.trx, args.members, args);
+  return parked.length ? { ...result, setupFeeParked: parked } : result;
+}
+
+async function mintPacketInvoiceInner({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
   const adoptionMembers = [];
@@ -235,6 +320,21 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     }
   }
   for (const member of [...billed.map((entry) => entry.member), ...feeReviewCandidates]) {
+    // A setup fee queued on the series (the pay-after-first-visit accept's
+    // deferral or a secure plan-choice stamp: scheduled_services.
+    // pending_setup_fee) is consumed ONLY by the single-visit completion
+    // mint. This combined-packet mint carries no setup line, so letting it
+    // proceed would silently push the fee to a later visit — send the closeout
+    // to the office instead, never "deferred, therefore fine".
+    // (mintPacketInvoice consumes the queued claim into its draft on this and
+    // every other office-required exit.)
+    // A non-recurring booster / add-on is not a plan application: it bills its
+    // own work normally and the plan's fee waits for a performed plan visit.
+    // A NEGATIVE stamp is another completion mid-claim (its mint in flight):
+    // that is a retryable busy, never a frozen office hold.
+    const planClaim = isPlanApplicationRow(member) ? await liveSetupClaim(trx, member) : null;
+    if (planClaim && !planClaim.queued) visitBusy(null);
+    if (planClaim) return office('setup_fee_deferred_claim', member.id);
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.
     // A zero-price member skips that lane, so its canceled fee remains owed.
@@ -451,7 +551,24 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       }
       return { state: 'invoice_ready', invoiceId: ownInvoice.id, total: Number(ownInvoice.total) };
     }
-    if (visit.billing_hold) return office(packet.error || 'visit_billing_held');
+    if (visit.billing_hold) {
+      // A hold set before this mint ran (the office, a payer withdrawal) still
+      // hands the closeout over: any queued claim on its series is parked for the
+      // office here too, never left armed behind the manual bill.
+      const heldMembers = await trx('visit_completion_packet_items as i')
+        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+        .join('service_records as r', 'r.id', 'i.service_record_id')
+        .where('i.packet_id', packet.id).orderBy('s.id')
+        // The whole visit row: the prepay waiver judges coverage on it.
+        .select('s.*', 'r.status as record_status', 'r.structured_notes as record_notes');
+      const parked = await parkQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
+      if (parked.length) {
+        await trx('visit_completion_packets').where({ id: packet.id }).update({
+          payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ setupFeeParked: parked })]), updated_at: trx.fn.now(),
+        });
+      }
+      return { ...office(packet.error || 'visit_billing_held'), ...(parked.length ? { setupFeeParked: parked } : {}) };
+    }
     if (visit.billing_frozen_at) return { state: 'no_charge', invoiceId: null };
     const members = await trx('visit_completion_packet_items as i')
       .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
@@ -471,7 +588,15 @@ async function createVisitCompletionInvoice(packetId, database = db) {
     await trx('service_visits').where({ id: visit.id }).update({
       billing_hold: held, billing_frozen_at: trx.fn.now(), updated_at: trx.fn.now(),
     });
-    if (held) await trx('visit_completion_packets').where({ id: packet.id }).update({ error: result.reason, updated_at: trx.fn.now() });
+    if (held) {
+      await trx('visit_completion_packets').where({ id: packet.id }).update({
+        error: result.reason,
+        // The setup fee the held closeout parked for the office rides the
+        // packet, so the office review alert says it was handed over by hand.
+        ...(result.setupFeeParked ? { payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ setupFeeParked: result.setupFeeParked })]) } : {}),
+        updated_at: trx.fn.now(),
+      });
+    }
     await trx('visit_effects').insert({
       visit_id: visit.id, effect_type: 'billing_ready', dedupe_key: `${visit.id}:billing_ready`,
       status: held ? 'failed' : 'sent', provider_id: result.invoiceId,
@@ -482,4 +607,4 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice };
+module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued };
