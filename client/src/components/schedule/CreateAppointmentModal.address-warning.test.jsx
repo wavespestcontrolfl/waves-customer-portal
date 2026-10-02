@@ -71,6 +71,8 @@ function installModalFetch({
   submitAddressRequest,
   freshPrepayRequest,
   prepayInvoiceRequest,
+  // Queued annual-prepay-invoice POST responses, consumed one per call.
+  prepayInvoiceResponses,
   enablePrepay = false,
   discounts = [],
   basePrice = 100,
@@ -199,6 +201,7 @@ function installModalFetch({
       return Promise.resolve(jsonResponse(PREPAY_PREVIEW));
     }
     if (url.includes('/annual-prepay-invoice') && options.method === 'POST') {
+      if (Array.isArray(prepayInvoiceResponses) && prepayInvoiceResponses.length) return Promise.resolve(prepayInvoiceResponses.shift());
       return prepayInvoiceRequest?.promise || Promise.resolve(jsonResponse({ invoice: {}, delivery: {} }));
     }
     if (url.endsWith('/card-request-availability')) return Promise.resolve(jsonResponse({ enabled: false }));
@@ -689,6 +692,36 @@ describe('CreateAppointmentModal submit cancellation', () => {
       id: 'appointment-committed', scheduledDate: state.scheduledDate,
     });
     expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1);
+  });
+
+  it('a noticed renewal amount 409 asks once; on confirm the mint is resent with acknowledgeNoticedAmount', async () => {
+    const noticed = jsonResponse(
+      { error: 'noticed', code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, chargedAmount: 900, termId: 't1' },
+      { ok: false, status: 409 },
+    );
+    const confirmMock = vi.spyOn(window, 'confirm').mockImplementation(() => true);
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const state = await beginPrepayBooking({ prepayInvoiceResponses: [noticed, jsonResponse({ invoice: {}, delivery: {} })] });
+    await waitFor(() => expect(prepayInvoicePosts(state.fetcher)).toHaveLength(2));
+    expect(confirmMock).toHaveBeenCalledWith('The customer was told $484.00. Charge $900.00 instead?');
+    const [first, second] = prepayInvoicePosts(state.fetcher).map(([, options]) => JSON.parse(options.body));
+    expect(first.acknowledgeNoticedAmount).toBeUndefined();
+    expect(second).toEqual({ ...PREPAY_PREVIEW.mintPayload, acknowledgeNoticedAmount: true });
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    expect(alertMock).not.toHaveBeenCalledWith(expect.stringContaining('did not complete cleanly'));
+  });
+
+  it('a noticed renewal amount 409 cancelled sends nothing more and says the invoice was not created', async () => {
+    const noticed = jsonResponse(
+      { error: 'noticed', code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, chargedAmount: 900, termId: 't1' },
+      { ok: false, status: 409 },
+    );
+    vi.spyOn(window, 'confirm').mockImplementation(() => false);
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const state = await beginPrepayBooking({ prepayInvoiceResponses: [noticed] });
+    await waitFor(() => expect(alertMock).toHaveBeenCalledWith(expect.stringContaining('The annual prepay invoice was not created: Not saved. The customer was told $484.00 for this renewal.')));
+    expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1);
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1), { timeout: 2000 });
   });
 
   it('turns the delayed success callback into a background refresh after close', async () => {

@@ -105,6 +105,7 @@ import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileShe
 import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
+import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -120,10 +121,12 @@ async function adminFetch(path, options = {}) {
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
     let code = null;
+    let body = null;
     try {
       const data = await r.clone().json();
       message = data.error || data.message || message;
       code = data.code || null;
+      body = data;
     } catch {
       const text = await r.text().catch(() => "");
       if (text) message = text;
@@ -131,6 +134,8 @@ async function adminFetch(path, options = {}) {
     const err = new Error(message);
     err.status = r.status;
     if (code) err.code = code;
+    // Structured refusals (the noticed renewal amount 409) ride along.
+    if (body && typeof body === "object") err.body = body;
     throw err;
   }
   return r.json();
@@ -5292,9 +5297,10 @@ function AnnualPrepayModal({
     setActionError("");
     setSaving(true);
     try {
-      await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
+      await sendWithNoticedAmountConfirm((ack) => adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
         method: "POST",
         body: JSON.stringify({
+          ...ack,
           termStart: start || undefined,
           months: Number(months) || undefined,
           planLabel: planLabel.trim() || undefined,
@@ -5314,7 +5320,7 @@ function AnnualPrepayModal({
               ? cadence
               : undefined,
         }),
-      });
+      }));
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
     } catch (err) {
       onError(`Annual prepay failed: ${err.message}`);

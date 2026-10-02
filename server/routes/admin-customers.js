@@ -5656,6 +5656,9 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // term records — after tax, minus the setup — never the request.
       const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
+      if (noticedInTrx) {
+        await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay_invoice', invoiceId: invoice.id });
+      }
       term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: invoice.id,
@@ -6019,6 +6022,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // term records — after tax, minus the setup — never the request.
       const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
+      if (noticedInTrx) {
+        await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay', invoiceId: updatedInvoice.id });
+      }
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: updatedInvoice.id,
