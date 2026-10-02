@@ -657,7 +657,7 @@ class WavesAssistant {
     const teamNotified = isPortal
       && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage });
 
-    const reply = escalationReply({ isPortal, teamNotified, firstName: customer?.first_name });
+    const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim() });
 
     await db('agent_messages').insert({
       conversation_id: conversation.id,

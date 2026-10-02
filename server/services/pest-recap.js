@@ -251,6 +251,11 @@ function recapServiceIdentity(svc, profile) {
     // schedule row (the tech Fast Complete sheet) can confirm this is
     // still the visit type it was opened for.
     serviceKey: profile?.serviceKey || null,
+    // A free callback booked under a regular service key: the Fast Complete
+    // report flow treats it as the re-service it is (no pay link, no review
+    // ask), so that flow echoes it back and a visit the office changed to or
+    // from a callback meanwhile is refused (recapVisitIdentityChanged).
+    isCallback: svc.is_callback === true,
   };
 }
 
@@ -297,6 +302,33 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
  * most-used list; only that sheet asks for it, so the recap modal (and the
  * sheet's stock re-read) never pay for the aggregate.
  */
+// Whether a trace saved on a lane visit would show on its report, judged as
+// the report judges it (trace-eligibility.js): with the eligibility gate on,
+// the visit's own line (bed bug's indoor work and bee, wasp and mud dauber
+// nest work carry no map) or, when it carries none, an add-on line that
+// does; with the gate off, the report's legacy indoor-only rule for bed bug.
+// The line is judged from the profile this context already resolved, never
+// a second lookup, and an add-on read that fails counts as shown: the
+// report's render fails closed, but here an unknown must keep the sheet's
+// trace holds (codex local r6 on #5629).
+async function laneTraceOnReport(svc, profile, lane, knex) {
+  const traceEligibility = require('./service-report/trace-eligibility');
+  if (!traceEligibility.traceEligibilityGateOn()) return lane !== 'bed_bug_treatment';
+  const satellite = (verdict) => !!verdict?.eligible && verdict.variant !== 'photo';
+  const own = traceEligibility.resolveTraceEligibility({
+    serviceKey: profile?.serviceKey || null,
+    findingsType: profile?.findingsType || null,
+    displayName: svc.service_type || '',
+  });
+  if (satellite(own)) return true;
+  try {
+    const addons = await traceEligibility.resolveAddonVerdicts(svc.id, knex, { renderSide: true });
+    return addons.some(satellite);
+  } catch {
+    return true;
+  }
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -358,9 +390,24 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;
 
+  // Lane voice fill (GATE_LANE_VOICE_FILL): the specialty lane whose record
+  // the Fast Complete sheet reads from the note, resolved as the completion
+  // resolves it (visit-lane-facts.js voiceLaneFor), never for a visit that
+  // completes through a project, nor when the profile could not be read
+  // (whether it does is then unknown); null otherwise. The recap's own
+  // `eligible` stays pest control only.
+  const lane = profile && require('../config/feature-gates').laneVoiceFillLive() && !profile.projectBacked && !profile.requiresProject
+    ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type })
+    : null;
+  const traceOnReport = lane ? await laneTraceOnReport(svc, profile, lane, knex) : undefined;
+
   return {
     ok: true,
     eligible,
+    // Whether a saved trace would show on a lane visit's report, so the
+    // sheet holds only on a map the customer would see.
+    ...(lane ? { traceOnReport } : {}),
+    lane,
     existingRecordLoadFailed,
     service: recapServiceIdentity(svc, profile),
     timeline,
@@ -442,6 +489,9 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
   if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
   if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
+  // Whether it is a free callback decides the pay link and the review ask
+  // the client sends, so a change to it is a changed visit.
+  if ('isCallback' in expected && (expected.isCallback === true) !== (locked.is_callback === true)) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};

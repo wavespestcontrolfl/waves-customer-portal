@@ -4641,6 +4641,11 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            // GATE_SMS_SCHEDULING_SUGGEST rollback (Codex #5617 r2): a scheduling
+            // card queued while the gate was on must not fire after it is unset.
+            // Gate on, this reads nothing. Same block+retire path as the checks below.
+            const schedulingGated = !anchorStale
+              && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
             // anchor check can't see it). Non-human-authored agent text
@@ -4826,7 +4831,7 @@ function initScheduledJobs() {
               }
             }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
+            const priorStale = anchorStale || schedulingGated || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4839,7 +4844,9 @@ function initScheduledJobs() {
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
-                : amountsStale
+                : schedulingGated
+                  ? 'scheduling_suggest_gate_off'
+                  : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
@@ -4877,7 +4884,9 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : amountsStale
+                    : schedulingGated
+                      ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
+                      : amountsStale
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`

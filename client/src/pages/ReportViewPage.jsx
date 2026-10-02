@@ -2428,6 +2428,32 @@ export function TechNoteCard({ data, mode = 'live' }) {
   );
 }
 
+// "From the Waves blog" (GATE_REPORT_BLOG_POST): the one post the technician
+// or the office picked at completion, frozen on the record with its title
+// and live URL (the server checks the URL is on the Waves site). The last
+// card before the footer; live view only, like the tech note.
+export function BlogPostCard({ data, mode = 'live' }) {
+  const post = data?.blogPost;
+  if (mode !== 'live' || !post?.url || !post?.title) return null;
+  let host = '';
+  try {
+    const parsed = new URL(post.url);
+    host = `${parsed.hostname.replace(/^www\./i, '')}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+  return (
+    <section data-glass="card" className="sr-section" id="from-the-blog">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>From the Waves blog</h2>
+      <p className="map-context-copy" style={{ fontWeight: 600 }}>
+        <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text, #04395E)' }}>{post.title}</a>
+      </p>
+      <p className="map-context-copy" style={{ fontSize: 14, overflowWrap: 'anywhere' }}>{host}</p>
+    </section>
+  );
+}
+
 function readinessSummary(context, mode = 'live', nowMsOverride) {
   const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
   const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
@@ -9857,6 +9883,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+
+        {/* The Waves blog post picked at completion, at the bottom of the
+            report on every layout (live only). */}
+        <BlogPostCard data={data} mode={mode} />
 
 
 

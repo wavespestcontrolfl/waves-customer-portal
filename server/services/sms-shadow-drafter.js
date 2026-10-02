@@ -5837,8 +5837,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
     // card; intents flipped to 'auto_send' (and that have earned the rung)
     // have it SENT to the customer automatically. Escalation intents,
-    // scheduling-intent messages, and anything without a customer + inbound
-    // link stay silent shadow.
+    // scheduling-intent messages (unless GATE_SMS_SCHEDULING_SUGGEST and the
+    // offer came from a booking picker: then a card, never a send), and
+    // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
     const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft);
     const deliveryMode = await suggestMode.resolveDeliveryMode({
@@ -5847,6 +5848,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
+      // GATE_SMS_SCHEDULING_SUGGEST: a scheduling draft whose times came from a
+      // booking picker may reach the staff card (never auto-send).
+      openTimesSnapshot,
       // Any draft whose facts list something owed goes to a person: no check can
       // prove a non-empty reply actually addressed it (openLoopThanks is the
       // demoted-gratitude case of the same rule).
@@ -6061,6 +6065,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
             const decisionId = await suggestMode.publishSuggestion({
@@ -6114,6 +6119,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             smsLogId: smsLogId || null,
             intent: intentName,
             schedulingIntent,
+            openTimesSnapshot,
           });
           publishDemotedCard = freshMode === 'suggest' || freshMode === suggestMode.AUTO_SEND_MODE;
           if (publishDemotedCard) {

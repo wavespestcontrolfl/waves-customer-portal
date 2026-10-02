@@ -221,7 +221,7 @@ describe('tipsForVisit', () => {
     const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
     const all = groups.flatMap((group) => group.tips);
     expect(line).toBe(serviceLine);
-    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine)).map((tip) => tip.id).sort());
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services).map((tip) => tip.id).sort());
     expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
@@ -240,6 +240,97 @@ describe('tipsForVisit', () => {
     const allTip = water.tips.findIndex((t) => t.season === 'all');
     const wetTip = water.tips.findIndex((t) => t.season === 'wet');
     expect(allTip).toBeLessThan(wetTip);
+  });
+
+  test('a visit whose service has its own tips leads with them; other visits never list them (owner-approved 2026-10-02)', () => {
+    const bedBug = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bed_bug_treatment', date: '2026-10-02' });
+    expect(bedBug.groups[0]).toMatchObject({ id: 'for_service', label: 'For this service', primary: true });
+    expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter']);
+    expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
+    const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
+    expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    // The one-time pest identity is one_time_pest_control in prod and
+    // pest_initial_cleanout in migration-built databases (Codex #5582).
+    for (const serviceKey of ['one_time_pest_control', 'pest_initial_cleanout']) {
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains']);
+    }
+    for (const serviceKey of [null, 'lawn_care', 'not_a_service']) {
+      const visit = tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' });
+      expect(visit.groups.map((group) => group.id)).not.toContain('for_service');
+      expect(visit.groups.flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
+    }
+  });
+
+  // The keys come from the visit facts registry's own form lines, so a
+  // service added to the trapping or recurring pest form fails here until its
+  // tips reach it (codex local r2, r3 on #5582).
+  test('every visit on the trapping form, and the combined exclusion & trapping service, leads with the trapping tips', () => {
+    const { VISIT_FACTS_CONTRACT } = require('../config/visit-facts-contract');
+    const trapping = ['rt_doors_closed', 'rt_leave_traps', 'rt_no_store_bait', 'rt_note_noises'];
+    for (const serviceKey of [...VISIT_FACTS_CONTRACT.rodent_trapping.catalogKeys, 'rodent_exclusion']) {
+      const lead = tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups[0];
+      expect(lead.id).toBe('for_service');
+      expect(lead.tips.map((tip) => tip.id)).toEqual(expect.arrayContaining(trapping));
+    }
+    // The diagnostic rodent visits set no traps: no tip says they are out.
+    for (const serviceKey of VISIT_FACTS_CONTRACT.rodent_inspection.catalogKeys) {
+      const tips = tipsForVisit({ serviceLine: 'rodent', serviceKey, date: '2026-10-02' }).groups.flatMap((group) => group.tips);
+      expect(tips.map((tip) => tip.id).filter((id) => trapping.includes(id))).toEqual([]);
+    }
+  });
+
+  test('every recurring pest visit leads with the drains tip', () => {
+    const { VISIT_FACTS_CONTRACT } = require('../config/visit-facts-contract');
+    for (const serviceKey of VISIT_FACTS_CONTRACT.recurring_pest.catalogKeys) {
+      expect(tipsForVisit({ serviceLine: 'pest', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id)).toContain('pal_dry_drains');
+    }
+  });
+
+  test('the treated-soil tips go only where the soil along the foundation is the barrier (codex local r4 on #5582)', () => {
+    const lead = (serviceKey) => tipsForVisit({ serviceLine: 'termite', serviceKey, date: '2026-10-02' }).groups[0].tips.map((tip) => tip.id);
+    for (const serviceKey of ['termite_liquid', 'termite_trenching']) {
+      expect(lead(serviceKey)).toEqual(expect.arrayContaining(['tl_before_digging', 'tl_water_off_soil', 'tl_new_slabs']));
+    }
+    for (const serviceKey of ['foam_drill', 'foam_recurring', 'termite_spot_treatment']) {
+      expect(lead(serviceKey)).toContain('tl_new_slabs');
+      expect(lead(serviceKey)).not.toContain('tl_before_digging');
+      expect(lead(serviceKey)).not.toContain('tl_water_off_soil');
+    }
+  });
+
+  test('a tip that names work goes only to services that do it (GitHub Codex on #5582)', () => {
+    const lead = (serviceLine, serviceKey) => (tipsForVisit({ serviceLine, serviceKey, date: '2026-10-02' }).groups.find((group) => group.id === 'for_service')?.tips || []).map((tip) => tip.id);
+    // flea_tick is the flea-only Flea Control Service: no tick advice.
+    expect(lead('pest', 'flea_tick').filter((id) => id.startsWith('tick_'))).toEqual([]);
+    expect(lead('pest', 'tick_control')).toEqual(expect.arrayContaining(['tick_mow_edges', 'tick_wood_line', 'tick_check']));
+    // Detection-only monitoring places no bait.
+    expect(lead('termite', 'termite_monitoring')).not.toContain('tb_no_spray_stations');
+    expect(lead('termite', 'termite_bait')).toContain('tb_no_spray_stations');
+    // Native-roach packages get no German-roach advice.
+    for (const serviceKey of ['cockroach_control', 'pest_initial_roach']) {
+      expect(lead('pest', serviceKey).filter((id) => id.startsWith('gr_'))).toEqual([]);
+    }
+    expect(lead('pest', 'german_roach').filter((id) => id.startsWith('gr_'))).toHaveLength(4);
+    // A mesh or bird-box job seals one opening, not the house.
+    for (const serviceKey of ['rodent_wire_mesh', 'rodent_bird_box']) expect(lead('rodent', serviceKey)).not.toContain('rx_garage_door');
+    expect(lead('rodent', 'rodent_exclusion')).toContain('rx_garage_door');
+    // The flea tip claims only the house, which every flea visit treats.
+    expect(TIPS.find((tip) => tip.id === 'flea_pet_prevention').copy).toMatch(/^Treating the house handles/);
+  });
+
+  test('a service tip sorts in-season first in its lead group', () => {
+    const dry = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bee_wasp_removal', date: '2026-01-20' });
+    expect(dry.groups[0].tips.map((tip) => tip.id)).toEqual(['bw_dont_seal_active', 'bw_call_early', 'bw_cover_sweets']);
+  });
+
+  test('every service tip names catalog-shaped service keys', () => {
+    const withServices = TIPS.filter((tip) => tip.services);
+    expect(withServices).toHaveLength(50);
+    for (const tip of withServices) {
+      expect(tip.services.length).toBeGreaterThan(0);
+      expect(new Set(tip.services).size).toBe(tip.services.length);
+      for (const key of tip.services) expect(key).toMatch(/^[a-z][a-z0-9_]+$/);
+    }
   });
 
   test('a lawn visit leads with the lawn group', () => {

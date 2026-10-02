@@ -77,6 +77,18 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+"From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
+`true`, read at call time) adds `blogPost: { title, url }` — the one Waves
+blog post the technician or the office picked at completion, frozen on the
+record (`structured_notes.blogPost`) with its live URL and re-checked at read
+to be on the marketing site's own host
+(`server/services/service-report/report-blog-post.js`). The web report
+renders it in live mode only, above the footer. Off, or nothing frozen, the
+field is `null` (the switch hides frozen posts too). Auth, headers and routes
+are unchanged.
+
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), when the visit's rating was entered by staff
