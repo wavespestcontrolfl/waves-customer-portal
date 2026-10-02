@@ -18,18 +18,14 @@ export function blogPostPath(url) {
   }
 }
 
-export default function BlogPostPicker({ search, value = null, onChange, disabled = false, tokens = {} }) {
-  const inputId = useId();
+// The search behind the completion form's picker and the tech sheet's blog
+// section: only the latest search may land; a short query clears the list.
+// status is idle, searching, done or failed.
+export function useBlogPostSearch(search) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [status, setStatus] = useState("idle");
   const sequence = useRef(0);
-  const ink = tokens.ink || "#111";
-  const muted = tokens.muted || "#525252";
-  const border = tokens.border || "#E5E5E5";
-  const card = tokens.card || "#fff";
-
-  // Only the latest search may land; a short query clears the list.
   useEffect(() => {
     const q = query.trim();
     const current = ++sequence.current;
@@ -55,6 +51,16 @@ export default function BlogPostPicker({ search, value = null, onChange, disable
     }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [query, search]);
+  return { query, setQuery, results, status };
+}
+
+export default function BlogPostPicker({ search, value = null, onChange, disabled = false, tokens = {} }) {
+  const inputId = useId();
+  const { query, setQuery, results, status } = useBlogPostSearch(search);
+  const ink = tokens.ink || "#111";
+  const muted = tokens.muted || "#525252";
+  const border = tokens.border || "#E5E5E5";
+  const card = tokens.card || "#fff";
 
   const rowStyle = (picked) => ({
     display: "block",

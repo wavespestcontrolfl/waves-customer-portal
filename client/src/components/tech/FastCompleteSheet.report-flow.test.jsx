@@ -61,7 +61,7 @@ const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], p
 function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
-  promises = { available: false, promises: [] },
+  promises = { available: false, promises: [] }, blog = { available: false, posts: [] },
 } = {}) {
   const calls = [];
   const completes = [...complete];
@@ -71,6 +71,7 @@ function makeRequest({
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
+    if (path.split('?')[0].endsWith('/blog-posts')) return typeof blog === 'function' ? blog(path) : blog;
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
     if (path.split('?')[0].endsWith('/treatment-zone')) return typeof trace === 'function' ? trace(path, options) : trace;
     if (path === '/admin/schedule/generate-report') {
@@ -940,6 +941,43 @@ describe('complete and send', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
     expect(request.bodies('/complete')).toHaveLength(1);
+  });
+});
+
+describe('the Waves blog post', () => {
+  const POST = { id: '00000000-0000-4000-8000-0000000000b1', title: 'Ghost ants in the kitchen: what works', url: 'https://www.wavespestcontrol.com/pest-control/ghost-ants-in-the-kitchen/' };
+  const offered = (path) => ({ available: true, posts: path.includes('?q=') ? [POST] : [] });
+
+  test('no blog section when the server does not offer it for this visit', async () => {
+    await openSheet(makeRequest());
+    expect(screen.queryByLabelText('Search the Waves blog')).toBeNull();
+  });
+
+  test('a post picked from the search shows under the report and rides the completion', async () => {
+    const request = makeRequest({ blog: offered, complete: [{ success: true, completionSmsStatus: 'sent' }] });
+    await openSheet(request);
+    fireEvent.change(await screen.findByLabelText('Search the Waves blog'), { target: { value: 'ghost ants' } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(POST.title) }));
+    expect(screen.getByText('1 picked')).toBeTruthy();
+    expect(request.calls.some((call) => call.path.endsWith('/blog-posts?q=ghost%20ants'))).toBe(true);
+    await generate();
+    expect(screen.getByText(`At the bottom, from the Waves blog: ${POST.title}`)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].blogPostId).toBe(POST.id);
+  });
+
+  test('Remove takes the pick back off', async () => {
+    const request = makeRequest({ blog: offered });
+    await openSheet(request);
+    fireEvent.change(await screen.findByLabelText('Search the Waves blog'), { target: { value: 'ghost ants' } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(POST.title) }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(screen.getByLabelText('Search the Waves blog')).toBeTruthy();
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).not.toHaveProperty('blogPostId');
   });
 });
 
