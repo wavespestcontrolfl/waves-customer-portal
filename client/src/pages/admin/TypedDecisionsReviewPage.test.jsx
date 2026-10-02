@@ -207,3 +207,12 @@ it('a 409 subject_changed from the server locks the row instead of offering Repl
   expect(await screen.findByText(/changed after Jev answered/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
 });
+
+it('names the provider whose answer a row holds: a Clef row reads Clef, with Clef right and Clef wrong', async () => {
+  mockList([yesNoRow({ provider: 'cloudflare', providerLabel: 'Clef' })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Clef: Yes (0.91)')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Clef right' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Clef wrong' })).toBeInTheDocument();
+  expect(screen.queryByText(/Jev/)).toBeNull();
+});

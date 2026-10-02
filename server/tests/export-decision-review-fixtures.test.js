@@ -157,10 +157,12 @@ describe('exportCases (stubbed db)', () => {
       whereIn: jest.fn((c, v) => { calls.whereIn = [c, v]; return query; }),
       whereRaw: jest.fn((sql) => { calls.whereRaw = sql; return query; }),
       select: jest.fn((cols) => { calls.select = cols; return query; }),
-      orderBy: jest.fn(async () => [ROW]),
+      orderBy: jest.fn(async (order) => { calls.orderBy = order; return [ROW]; }),
     };
     const db = jest.fn((table) => { calls.table = table; return query; });
     const result = await exportCases({ db, capability: 'call_judge', now: () => new Date('2026-10-01T00:00:00Z') });
+    // provider is the last ordering column: two providers' rows for one subject and question never tie
+    expect(calls.orderBy.map((o) => o.column)).toEqual(['package_id', 'subject_type', 'subject_id', 'question_id', 'provider']);
     expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereRaw: expect.stringMatching(/package_hash ~ '\^\[0-9a-f\]\{64\}\$'.*label->>'verdict' IN \('jev_right','jev_wrong','unclear'\).*jsonb_exists\(label, 'correct_value'\).*btrim\(labeled_by\) <> ''.*confirmed_correct' AND label->>'verdict' = 'jev_right'/), select: COLUMNS });
     expect(calls.whereRaw).not.toMatch(/\?/);
     expect(rowToCase(ROW).package_hash).toBe(CALL_JUDGE_HASH);

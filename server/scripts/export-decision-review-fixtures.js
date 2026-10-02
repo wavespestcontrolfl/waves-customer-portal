@@ -192,7 +192,9 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
     .whereIn('label_status', statuses)
     .whereRaw(EVIDENCE_PREDICATE)
     .select(COLUMNS)
-    .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
+    // provider last: two providers' rows for one subject and question tie on
+    // every other column, and a committed fixture must not reorder on re-export.
+    .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }, { column: 'provider' }]);
   return { capability, exported_at: now().toISOString(), cases: rows.map((row) => rowToCase(row, capability)).filter(Boolean) };
 }
 

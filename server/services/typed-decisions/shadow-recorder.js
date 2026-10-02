@@ -31,9 +31,12 @@ const SUBJECT_TYPES = ['call_log', 'sms_log'];
 // One row per provider per subject and question (migration 20261002010000):
 // a second provider answering the same case keeps its own row.
 const CONFLICT_KEY = ['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id'];
-// The random-audit draw is keyed on the SUBJECT, never the provider: two
+// Review-cohort membership is coordinated across provider siblings two ways.
+// The random-audit draw is keyed on the SUBJECT, never the provider, so two
 // providers answering the same subject and question fall in (or out of) the
-// audit together, so their labels compare on the same cases.
+// audit together. And a caller recording more than one provider passes each
+// write the others' answers (`siblingAnswers`: question id -> a normalised
+// answer or a list of them), so a case where they differ queues every row.
 const DRAW_KEY = ['capability', 'package_id', 'subject_type', 'subject_id', 'question_id'];
 const MERGE_COLUMNS = ['jev_answer', 'baseline_answers', 'served_model', 'package_hash', 'sampled_for', 'subject_hash'];
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -94,6 +97,23 @@ function sampleFor(jevAnswer, baselines, rand = Math.random) {
   return typeof draw === 'number' && draw < RANDOM_AUDIT_RATE ? 'random_audit' : null;
 }
 
+// True when another provider's answer to the SAME subject and question
+// differs from this one. A difference between providers is itself a
+// disagreement worth a reviewer, and because each provider's write is handed
+// the others' answers (`siblingAnswers`), it puts EVERY sibling row in the
+// queue: whenever exactly one provider disagrees with a baseline the
+// providers also differ from each other, so the same cases get labeled for
+// all of them (Codex r1 on #5555).
+function siblingDisagrees(answer, siblings) {
+  const mine = comparable(answer);
+  if (mine === undefined) return false;
+  const list = Array.isArray(siblings) ? siblings : (siblings ? [siblings] : []);
+  return list.some((sibling) => {
+    const theirs = comparable(sibling);
+    return theirs !== undefined && typeof theirs === typeof mine && theirs !== mine;
+  });
+}
+
 // Only yes/no/choice values survive into baseline_answers; text never does.
 function cleanBaselines(baselines) {
   const out = {};
@@ -106,7 +126,7 @@ function cleanBaselines(baselines) {
 const jsonOrNull = (value) => (value ? JSON.stringify(value) : null);
 
 // `random` (tests) overrides the stable per-row draw.
-function buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, subjectHash, random }) {
+function buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, siblingAnswers, subjectHash, random }) {
   const hash = result.packageHash || packageHash(pkg);
   const rows = [];
   for (const questionId of Object.keys(pkg.questions)) {
@@ -126,6 +146,9 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
       subject_hash: typeof subjectHash === 'string' && HEX64.test(subjectHash) ? subjectHash : null,
     };
     row.sampled_for = sampleFor(answer, baselines && baselines[questionId], random || (() => stableDraw(row)));
+    // The audit draw is shared by key; a difference between providers pulls an
+    // otherwise unsampled row into the disagreement queue with its sibling.
+    if (row.sampled_for === null && siblingDisagrees(answer, siblingAnswers && siblingAnswers[questionId])) row.sampled_for = 'disagreement';
     rows.push(row);
   }
   return rows;
@@ -136,7 +159,7 @@ function buildRows({ capability, pkg, provider, subjectType, subjectId, result, 
  * Gate off, a failed answer or a bad subject returns early with no write.
  * Throws only on a database error (callers wrap shadow work in try/catch).
  */
-async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PROVIDER, subjectType, subjectId, result, baselines = {}, subjectHash = null, random = null, conn = db } = {}) {
+async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PROVIDER, subjectType, subjectId, result, baselines = {}, siblingAnswers = {}, subjectHash = null, random = null, conn = db } = {}) {
   if (!typedDecisionsLive()) return { recorded: 0, skipped: 'gate_off' };
   if (!pkg || !pkg.questions) return { recorded: 0, skipped: 'no_package' };
   if (!result || result.ok !== true || !result.answers) return { recorded: 0, skipped: 'no_answers' };
@@ -144,7 +167,7 @@ async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PR
   // The table's CHECK closes this set; an unknown provider is refused here so
   // shadow work never fails on a constraint.
   if (!DECISION_PROVIDERS.includes(provider)) return { recorded: 0, skipped: 'bad_provider' };
-  const rows = buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, subjectHash, random });
+  const rows = buildRows({ capability, pkg, provider, subjectType, subjectId, result, baselines, siblingAnswers, subjectHash, random });
   if (!rows.length) return { recorded: 0, skipped: 'no_answers' };
   await conn(TABLE)
     .insert(rows)
@@ -158,4 +181,4 @@ async function recordDecisions({ capability, pkg, provider = DEFAULT_DECISION_PR
   return { recorded: rows.length, sampled };
 }
 
-module.exports = { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };
+module.exports = { recordDecisions, sampleFor, siblingDisagrees, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };

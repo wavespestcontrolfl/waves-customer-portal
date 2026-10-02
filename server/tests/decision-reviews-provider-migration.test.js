@@ -70,3 +70,38 @@ describe('decision_reviews provider migration', () => {
     expect(noColumn.state.raw).toEqual([]);
   });
 });
+
+describe('decision_reviews provider rollback lock (supersedes the first provider migration)', () => {
+  const superseding = require('../models/migrations/20261002020000_decision_reviews_provider_rollback_lock');
+
+  test('up re-asserts the first migration: same column, CHECK and key, so the two can never disagree', async () => {
+    const { knex, state } = buildKnex();
+    await superseding.up(knex);
+    expect(state.ops).toEqual([['string', 'provider', 30], ['notNullable'], ['defaultTo', 'typesafe']]);
+    expect(state.raw.some((s) => /ADD CONSTRAINT decision_reviews_provider_subject_question_uniq/.test(s))).toBe(true);
+  });
+
+  test('down locks the table BEFORE checking for another provider, then restores the old key and drops the column', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await superseding.down(knex);
+    expect(state.raw[0]).toBe('LOCK TABLE decision_reviews IN ACCESS EXCLUSIVE MODE');
+    expect(state.wheres).toEqual([['whereNot', { provider: 'typesafe' }]]);
+    expect(state.raw.find((s) => /ADD CONSTRAINT decision_reviews_subject_question_uniq UNIQUE/.test(s))).toBeTruthy();
+    expect(state.ops).toEqual([['dropColumn', 'provider']]);
+  });
+
+  test('down refuses under the lock while another provider has rows: nothing is altered', async () => {
+    const { knex, state } = buildKnex({ column: true, otherProviderRow: { id: 'r1' } });
+    await expect(superseding.down(knex)).rejects.toThrow(/rows from a provider other than typesafe/);
+    expect(state.raw).toEqual(['LOCK TABLE decision_reviews IN ACCESS EXCLUSIVE MODE']);
+    expect(state.ops).toEqual([]);
+  });
+
+  test('after it has run, the superseded down finds no column and does nothing', async () => {
+    const { knex, state } = buildKnex({ column: false });
+    await migration.down(knex);
+    await superseding.down(knex);
+    expect(state.raw).toEqual([]);
+  });
+});
+

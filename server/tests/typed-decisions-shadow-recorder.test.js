@@ -3,7 +3,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY } = require('../services/typed-decisions/shadow-recorder');
+const { recordDecisions, sampleFor, siblingDisagrees, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY } = require('../services/typed-decisions/shadow-recorder');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 
 const pkg = packageFor('call_judge.v2');
@@ -185,5 +185,50 @@ describe('provider (one row per provider per subject and question; Codex r1 on #
     const [jev, clef] = [await record('typesafe'), await record('cloudflare')];
     expect(clef.map((r) => stableDraw(r))).toEqual(jev.map((r) => stableDraw(r)));
     expect(clef.map((r) => r.sampled_for)).toEqual(jev.map((r) => r.sampled_for));
+  });
+});
+
+describe('review cohort is paired across provider siblings (Codex r1 on #5555)', () => {
+  const sms = packageFor('sms_courtesy.v1');
+  const result = (p, servedModel) => ({ ok: true, packageHash: packageHash(sms), servedModel, answers: { is_courtesy_only: noul(p) } });
+  const record = async ({ provider, p, sibling, baselines }) => {
+    const { conn, calls } = stubConn();
+    await recordDecisions({ capability: 'sms_courtesy', pkg: sms, provider, subjectType: 'sms_log', subjectId: 's-pair', result: result(p),
+      baselines, siblingAnswers: sibling === undefined ? {} : { is_courtesy_only: noul(sibling) }, random: () => 0.99, conn });
+    return calls.inserted[0].sampled_for;
+  };
+
+  test('one provider disagrees with the baseline, the other agrees: BOTH rows enter the disagreement queue', async () => {
+    const baselines = { is_courtesy_only: { rules: true } };
+    // typesafe says yes (agrees with rules), cloudflare says no (disagrees)
+    expect(await record({ provider: 'typesafe', p: 0.9, sibling: 0.1, baselines })).toBe('disagreement');
+    expect(await record({ provider: 'cloudflare', p: 0.1, sibling: 0.9, baselines })).toBe('disagreement');
+  });
+
+  test('the providers differ with no baseline at all: still a disagreement for both', async () => {
+    expect(await record({ provider: 'typesafe', p: 0.9, sibling: 0.1 })).toBe('disagreement');
+    expect(await record({ provider: 'cloudflare', p: 0.1, sibling: 0.9 })).toBe('disagreement');
+  });
+
+  test('the providers agree with each other and the baseline: neither is queued', async () => {
+    const baselines = { is_courtesy_only: { rules: true } };
+    expect(await record({ provider: 'typesafe', p: 0.9, sibling: 0.95, baselines })).toBeNull();
+    expect(await record({ provider: 'cloudflare', p: 0.95, sibling: 0.9, baselines })).toBeNull();
+  });
+
+  test('no sibling answers (the other provider failed, or a single-provider caller) keeps the per-row rule', async () => {
+    expect(await record({ provider: 'typesafe', p: 0.9, baselines: { is_courtesy_only: { rules: true } } })).toBeNull();
+    expect(await record({ provider: 'typesafe', p: 0.9, baselines: { is_courtesy_only: { rules: false } } })).toBe('disagreement');
+  });
+
+  test('siblingDisagrees compares like with like and accepts one answer or a list', () => {
+    expect(siblingDisagrees(noul(0.9), noul(0.1))).toBe(true);
+    expect(siblingDisagrees(noul(0.9), [noul(0.8), noul(0.2)])).toBe(true);
+    expect(siblingDisagrees(noul(0.9), [noul(0.8)])).toBe(false);
+    expect(siblingDisagrees({ choice: 'a' }, { choice: 'b' })).toBe(true);
+    expect(siblingDisagrees({ choice: 'a' }, noul(0.1))).toBe(false); // different answer types never compare
+    expect(siblingDisagrees({ score: 3 }, { score: 1 })).toBe(false); // a score has nothing to disagree about
+    expect(siblingDisagrees(noul(0.9), undefined)).toBe(false);
+    expect(siblingDisagrees(noul(0.9), [null, 'text', {}])).toBe(false);
   });
 });

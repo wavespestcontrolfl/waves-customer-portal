@@ -71,7 +71,7 @@ test('rows: ONE alert with the counts, the review link and per-row detail', asyn
   const [category, title, body, opts] = mockNotify.mock.calls[0];
   expect(category).toBe('typed_decisions');
   expect(title).toBe('System — review 3 AI decisions');
-  expect(body).toBe('2 disagreements, 1 spot check · Jev vs rules/judge');
+  expect(body).toBe('2 disagreements, 1 spot check · AI vs rules/judge');
   expect(body.length).toBeLessThanOrEqual(110);
   expect(opts.link).toBe(LINK);
   expect(LINK).toBe('/admin/agents?tab=typed');
@@ -125,7 +125,7 @@ test('the dedupe key is per ET day, so each day raises its own item', async () =
 
 test('a single decision reads in the singular and still passes the admin-alert rule', () => {
   expect(() => composeAdminAlert({
-    area: 'System', action: 'review 1 AI decision', why: '1 disagreement, 0 spot checks · Jev vs rules/judge', severity: 'needs-you',
+    area: 'System', action: 'review 1 AI decision', why: '1 disagreement, 0 spot checks · AI vs rules/judge', severity: 'needs-you',
     link: LINK, subject: { type: 'check', id: 'typed-decisions-review' }, doneWhen: 'reviews_labeled', who: 'person',
   })).not.toThrow();
 });
@@ -134,3 +134,12 @@ test('describeRow carries ids and answers only', () => {
   const line = describeRow(review({ baseline_answers: JSON.stringify({ rules: true }) }));
   expect(line).toBe('call_judge is_spam: Jev yes (p 0.93) vs rules yes');
 });
+
+test('a row is described by the provider that answered it: a Clef row never reads as Jev (Codex r1 on #5555)', () => {
+  const { describeRow } = require('../services/typed-decisions/daily-review-item');
+  const row = { capability: 'sms_courtesy', question_id: 'is_courtesy_only', jev_answer: JSON.stringify({ p: 0.2, yes: false, confident: false }), baseline_answers: JSON.stringify({ rules: true }) };
+  expect(describeRow({ ...row, provider: 'cloudflare' })).toBe('sms_courtesy is_courtesy_only: Clef no (p 0.20) vs rules yes');
+  expect(describeRow({ ...row, provider: 'typesafe' })).toBe('sms_courtesy is_courtesy_only: Jev no (p 0.20) vs rules yes');
+  expect(describeRow(row)).toBe('sms_courtesy is_courtesy_only: Jev no (p 0.20) vs rules yes'); // rows from before the column
+});
+
