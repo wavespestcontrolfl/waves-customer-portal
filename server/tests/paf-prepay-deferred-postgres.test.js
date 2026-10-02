@@ -316,6 +316,15 @@ postgres('annual prepay charged after the first visit', () => {
       expect(text).toMatch(/nothing (is )?due today/);
     });
 
+    it('a second held visit done before the release pass keeps the regular text', async () => {
+      const f = await deferredAccept();
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
+      await perform(f.parentId, f.customerId);
+      expect(await facts(f.childId)).toBeNull();
+    });
+
     it('a charge the sweep will not take automatically keeps the regular text (Codex r8)', async () => {
       const removed = await deferredAccept();
       await trx('payment_methods').where({ id: removed.pmId }).del();

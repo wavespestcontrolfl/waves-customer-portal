@@ -467,6 +467,12 @@ async function firstChargeCompletionFacts(svc, conn = db) {
     if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
     const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
     if (!(await pafDeferredPrepayCoversVisit(svc, conn, { throwOnError: true }))) return null;
+    // First visit only: another held visit already performed (two visits done
+    // before a release pass) already carried the announcement.
+    for (const other of await performedVisitCandidates(estimateId, svc.customer_id)) {
+      if (String(other.id) === String(svc.id)) continue;
+      if (await pafDeferredPrepayCoversVisit(other, conn, { throwOnError: true })) return null;
+    }
     // "Being charged now" only when the sweep's automatic charge will really
     // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
     // it on the pay link, Auto Pay was not turned off or paused since the
