@@ -3723,6 +3723,9 @@ router.post('/rewrite-sms', async (req, res) => {
           });
         if (matches.length === 1) {
           customer = matches[0];
+          // Same scope as the customerId branch: a technician gets no context
+          // for a customer off their route (pre-push Codex P1).
+          if (!(await technicianCustomerGuard(req, res, customer.id))) return undefined;
         } else if (matches.length > 1) {
           logger.warn(`[sms-rewrite] ${matches.length} customers matched ${maskPhone(req.body.customerPhone)}; skipping customer context`);
         }

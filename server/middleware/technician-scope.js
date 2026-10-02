@@ -101,6 +101,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'promises', methods: ['POST'], pattern: /^\/api\/admin\/call-recordings\/calls\/[^/]+\/commitments$/ },
   { bucket: 'promises', methods: READ, pattern: /^\/api\/admin\/call-recordings\/blocked$/ },
 
+  // The field app's review-request trigger after a visit (the router already
+  // scopes a technician to those two POSTs; everything else there is admin).
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/review-requests\/(trigger|tech-trigger)$/ },
+
   // Documents, pay and growth.
   { bucket: 'documents', methods: ANY, pattern: /^\/api\/tech\/staff-documents(\/.*)?$/ },
   { bucket: 'pay-growth', methods: ANY, pattern: /^\/api\/tech\/pay-growth(\/.*)?$/ },

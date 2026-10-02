@@ -207,19 +207,23 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-// Every /:serviceId route is pinned to the technician's own current/recent
-// visit here, once, before the handler (codex #5568 r2 P1: a few per-visit
-// reads — card-hold, recap context — had no check of their own). The canonical
-// predicate (technicianCurrentVisitFilter: dead statuses excluded, 7-day
-// window) answers 404 so an id seen elsewhere confirms nothing. Admins pass.
-// Handlers that lock the row (lockOwnedLiveVisit) still do so for writes.
+// Every /:serviceId route is pinned to the technician's own visit here, once,
+// before the handler (codex #5568 r2 P1: a few per-visit reads — card-hold,
+// recap context — had no check of their own). Assignment + the 7-day access
+// window only: status is deliberately NOT part of this gate, because the
+// status route's own terminal-transition logic must still see a same-status
+// retry on a cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1);
+// every handler keeps its stricter live-visit predicate for writes. 404 so an
+// id seen elsewhere confirms nothing. Admins pass.
 router.param('serviceId', async (req, res, next, serviceId) => {
   try {
     if (!isTechnicianRequest(req)) return next();
-    const owned = await technicianCurrentVisitFilter(
-      req,
-      db('scheduled_services').where('scheduled_services.id', serviceId),
-    ).first('scheduled_services.id');
+    const { techAccessCutoff } = require('../services/technician-visit-scope');
+    const owned = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .where('scheduled_services.technician_id', req.technicianId)
+      .where('scheduled_services.scheduled_date', '>=', techAccessCutoff())
+      .first('scheduled_services.id');
     if (!owned) return res.status(404).json({ error: 'Service not found' });
     return next();
   } catch (err) { return next(err); }

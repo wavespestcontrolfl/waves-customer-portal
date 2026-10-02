@@ -44,7 +44,7 @@ function withServer(fn) {
 
 beforeEach(() => { jest.clearAllMocks(); mockRole = 'technician'; mockOwnedRow = null; });
 
-test('a technician reading /:serviceId/card-hold for a visit not on their route gets 404 before the handler', async () => {
+test('a technician reading /:serviceId/card-hold for a visit not assigned to them gets 404 before the handler', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
     expect(res.status).toBe(404);

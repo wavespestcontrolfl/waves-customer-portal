@@ -74,6 +74,8 @@ describe('matcher', () => {
     ['GET', '/api/admin/communications/agent-draft', true],
     ['GET', '/api/admin/communications/stats', false],
     ['GET', '/api/dispatch/jobs', true],
+    ['POST', '/api/admin/review-requests/trigger', true],
+    ['GET', '/api/admin/review-requests', false],
     ['GET', '/api/dispatch/routes', false],
     ['GET', '/api/dispatch/insights', false],
     ['GET', '/api/admin/equipment-systems/calibrations', true],
