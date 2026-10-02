@@ -31,6 +31,8 @@ const ctx = {
 const product = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'not_said', heard: 'Taurus', ...over });
 const visit = (over = {}) => ({ pests: [], otherPest: '', areas: [], method: 'not_said', linearFt: 0, activity: 'not_said', heard: '', ...over });
 const answer = (over = {}) => ({ products: [], visit: visit(), customerNote: '', officeNote: '', unclear: [], ...over });
+// The Checks other than "named but not filled", for tests that feed a partial answer on purpose.
+const checksBesidesOmitted = (out) => out.unclear.filter((u) => u.reason !== 'product_said_not_filled');
 
 describe('validateFill', () => {
   test('a clean answer passes through in the documented shape', () => {
@@ -633,7 +635,7 @@ describe('ownership is read off the transcript, not the model\'s stitched quote 
     const out = run([row('p-taurus', 5, 'Taurus ... five ounces')]);
     expect(out.products).toHaveLength(1);
     expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
-    expect(out.unclear).toEqual([{ heard: 'Taurus ... five ounces', reason: 'amount_not_spoken' }]);
+    expect(checksBesidesOmitted(out)).toEqual([{ heard: 'Taurus ... five ounces', reason: 'amount_not_spoken' }]);
   });
 
   test('the same stitched quote with the right number passes', () => {
@@ -714,7 +716,7 @@ describe('linear feet need a quantity said with a distance word', () => {
   test('"four ounces of Taurus" never becomes 4 linear feet (the audit reproduction)', () => {
     const out = run(4, 'four ounces of Taurus outside');
     expect(out.visit.linearFt).toBeNull();
-    expect(out.unclear).toEqual([{ heard: 'four ounces of Taurus outside', reason: 'linear_ft_not_heard' }]);
+    expect(checksBesidesOmitted(out)).toEqual([{ heard: 'four ounces of Taurus outside', reason: 'linear_ft_not_heard' }]);
   });
 
   test.each([
@@ -784,7 +786,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
     ])('"%s" does not apply %s', (transcript, productId, amount, heard) => {
       const out = run([row(productId, amount, amount ? 'fl_oz' : 'not_said', heard)], transcript);
       expect(out.products).toEqual([]);
-      expect(out.unclear).toEqual([{ heard, reason: 'negated_product' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard, reason: 'negated_product' }]);
     });
 
     test('the product used in the next clause is still applied', () => {
@@ -831,7 +833,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
       const out = visitRun({ pests: ['Ants'], areas: ['Inside'], heard: 'Placed Advion Ant Gel in the kitchen' }, text);
       expect(out.visit.pests).toEqual([]);
       expect(out.visit.areas).toEqual(['Inside']);
-      expect(out.unclear).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
     });
 
     test('the same word used as a pest still counts ("ants in the kitchen" beside the product)', () => {
@@ -842,7 +844,7 @@ describe('audit round 4: carrier volume, negation, field context, same-as-last, 
     test('"Used some Taurus" is not moderate activity', () => {
       const out = visitRun({ activity: 'moderate', heard: 'Used some Taurus' }, 'Used some Taurus');
       expect(out.visit.activity).toBe('');
-      expect(out.unclear).toEqual([{ heard: 'moderate', reason: 'value_not_heard' }]);
+      expect(checksBesidesOmitted(out)).toEqual([{ heard: 'moderate', reason: 'value_not_heard' }]);
     });
 
     test.each([
@@ -923,5 +925,69 @@ describe('Codex #5580 round 2', () => {
     const out = validateFill(answer({ customerNote: 'Sprayed the perimeter. Tell the office the dog was loose.', officeNote: '' }), ctx, 'Sprayed the perimeter. Tell the office the dog was loose.');
     expect(out.customerNote).toBe('Sprayed the perimeter.');
     expect(out.officeNote).toBe('Tell the office the dog was loose.');
+  });
+});
+
+describe('Codex #5580 round 3', () => {
+  const taurus = (over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Taurus', ...over });
+
+  test('a range ("between three and four", "three to four") is no amount', () => {
+    for (const transcript of ['Between three and four ounces of Taurus.', 'Three to four ounces of Taurus.']) {
+      const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: transcript.replace(/\.$/, '') })] }), ctx, transcript);
+      expect(out.products[0]?.amount ?? null).toBeNull();
+    }
+  });
+
+  test('a product named for another visit is not this visit\'s', () => {
+    const transcript = 'Last time I used four ounces of Taurus; today I used Talstar.';
+    const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: 'four ounces of Taurus' })] }), ctx, transcript);
+    expect(out.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test('a product clearly named but left out of the fill becomes a Check', () => {
+    const transcript = 'Used Taurus four ounces and Talstar five ounces.';
+    const out = validateFill(answer({ products: [taurus({ amount: 4, unit: 'fl_oz', heard: 'Taurus four ounces' })] }), ctx, transcript);
+    expect(out.unclear).toEqual([{ heard: 'Talstar', reason: 'product_said_not_filled' }]);
+  });
+
+  test('words that also name another product, or that a Check already quotes, add no second Check', () => {
+    const alpines = { ...ctx, products: [...ctx.products,
+      { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      { id: 'p-alp-dust', name: 'Alpine Dust', fullName: 'Alpine Dust', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const dust = { productId: 'p-alp-dust', amount: 2, unit: 'oz', sameAsLast: false, method: '', heard: 'Alpine dust, two ounces' };
+    const out = validateFill(answer({ products: [dust] }), alpines, 'Alpine dust, two ounces, in the attic.');
+    expect(out.unclear).toEqual([]);
+  });
+
+  test('an Other pest matches whole words only', () => {
+    const out = validateFill(answer({ visit: visit({ pests: ['Other'], otherPest: 'rat', heard: 'applied at a moderate rate' }) }), ctx, 'Applied at a moderate rate.');
+    expect(out.visit.pests).not.toContain('Other');
+  });
+
+  test('a customer-note sentence the tech never said becomes a Check', () => {
+    const out = validateFill(answer({ customerNote: 'Treated the perimeter. Found a severe interior infestation.' }), ctx, 'Treated the perimeter.');
+    expect(out.customerNote).toBe('Treated the perimeter.');
+    expect(out.unclear.map((u) => u.reason)).toContain('note_not_heard');
+  });
+});
+
+describe('Codex #5580 round 3: lone common-word names', () => {
+  const withSuspend = { ...ctx, products: [...ctx.products, { id: 'p-suspend', name: 'Suspend Polyzone', fullName: 'Suspend Polyzone', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+  const suspend = (over = {}) => ({ productId: 'p-suspend', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'suspend', ...over });
+
+  test('one ordinary word of a longer name, with no application wording, is not the product', () => {
+    const transcript = 'The office asked us to suspend service. Sprayed Taurus around the perimeter.';
+    const out = validateFill(answer({ products: [suspend({ heard: 'suspend' })] }), withSuspend, transcript);
+    expect(out.products).toEqual([]);
+    expect(out.unclear).toContainEqual({ heard: 'suspend', reason: 'product_not_heard' });
+    // and no "named but not filled" Check for it either
+    expect(out.unclear.filter((u) => /suspend/i.test(u.heard) && u.reason === 'product_said_not_filled')).toEqual([]);
+  });
+
+  test('the same word beside an amount or "used" is the product', () => {
+    for (const transcript of ['Used Suspend around the lanai.', 'Two ounces of Suspend on the lanai.']) {
+      const out = validateFill(answer({ products: [suspend({ heard: 'Suspend' })] }), withSuspend, transcript);
+      expect(out.products.map((p) => p.productId)).toEqual(['p-suspend']);
+    }
   });
 });

@@ -32,10 +32,12 @@ const ctx = {
 const norm = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const inTranscript = (snippet, transcript) => String(snippet).split(/\.{3}|…/).map(norm).filter(Boolean)
   .every((piece) => ` ${norm(transcript)} `.includes(` ${piece} `));
-const UNCLEAR_REASONS = ['ambiguous_product', 'unknown_product', 'unclear_amount', 'unclear_unit', 'unclear_other'];
+const UNCLEAR_REASONS = ['ambiguous_product', 'unknown_product', 'unclear_amount', 'unclear_unit', 'unclear_other', 'product_said_not_filled'];
 
 // What a perfect model would answer for a case (the schema's own empties).
-function idealAnswer(expected) {
+// The notes are any sentence the tech said: what the note says is not scored here.
+function idealAnswer(expected, transcript = '') {
+  const said = String(transcript).split(/(?<=[.!?])\s+/)[0] || '';
   return {
     products: expected.products.map((p) => ({
       productId: p.productId,
@@ -54,8 +56,8 @@ function idealAnswer(expected) {
       activity: expected.visit.activity || 'not_said',
       heard: expected.visit.heard,
     },
-    customerNote: expected.customerNote.present ? 'note' : '',
-    officeNote: expected.officeNote.present ? 'note' : '',
+    customerNote: expected.customerNote.present ? said : '',
+    officeNote: expected.officeNote.present ? said : '',
     unclear: expected.unclear,
   };
 }
@@ -157,7 +159,7 @@ describe('pest_reservice golden fixtures', () => {
     });
 
     test('the validator turns an ideal model answer into exactly this fill', () => {
-      const out = validateFill(idealAnswer(expected), ctx, c.transcript);
+      const out = validateFill(idealAnswer(expected, c.transcript), ctx, c.transcript);
       expect(out.products).toEqual(expected.products);
       expect(out.visit).toEqual({ ...expected.visit, heard: expected.visit.heard });
       expect(out.unclear).toEqual(expected.unclear);

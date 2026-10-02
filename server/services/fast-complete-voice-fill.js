@@ -483,7 +483,10 @@ function quantitiesIn(text) {
     const { unit, length, skipped } = readUnitAfter(tokens, number.next);
     const end = number.next + skipped + length;
     const nameAt = tokens[end] === 'of' ? end + (tokens[end + 1] === 'the' ? 2 : 1) : null;
-    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), orNext: tokens[end] === 'or' && readSpokenNumber(tokens, end + 1) !== null });
+    // "three or four", "three to four", "between three and four": a range, so
+    // neither number is the one that was meant.
+    const joiner = tokens[end] === 'or' || tokens[end] === 'to' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
+    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
   // "three or four": neither number is the one that was meant. "four ounces of
@@ -566,23 +569,60 @@ function runsOf(positions) {
   return runs;
 }
 
-// For one product against a token stream: whether its name is said, every word of
-// its names that was said (to tell two products apart), and where its name sits:
-// each run of its said letter words as { start, end } token positions.
+// Words of catalog names that are also everyday words (from a dictionary pass over
+// products_catalog names): said alone, they are weak evidence of the product.
+const COMMON_NAME_WORDS = new Set([
+  'action', 'advance', 'agent', 'alpine', 'arena', 'armada', 'badge', 'balanced', 'barricade', 'bloom', 'broadcast', 'care',
+  'certainty', 'chemical', 'city', 'clean', 'common', 'compass', 'complete', 'conserve', 'contact', 'copper', 'delta',
+  'demand', 'dimension', 'dismiss', 'dispatch', 'distance', 'dominion', 'drive', 'eagle', 'foam', 'forbid', 'fusion',
+  'ghost', 'green', 'growth', 'gunner', 'headway', 'heritage', 'high', 'image', 'iron', 'keystone', 'landscape', 'large',
+  'mainspring', 'manager', 'manicure', 'manor', 'medallion', 'merit', 'moisture', 'monument', 'onslaught', 'organic',
+  'outdoor', 'palm', 'patch', 'phantom', 'pillar', 'plant', 'race', 'recognition', 'release', 'residual', 'roundup',
+  'safari', 'scale', 'seed', 'segment', 'selective', 'shortstop', 'signature', 'slow', 'snap', 'snapshot', 'soil', 'spot',
+  'starter', 'station', 'sticker', 'stonewall', 'storm', 'subdue', 'summit', 'supply', 'suspend', 'systemic', 'tank',
+  'target', 'tempo', 'tenacity', 'termite', 'three', 'torque', 'total', 'tracker', 'trap', 'trapper', 'tree', 'tribute',
+  'trio', 'tropical', 'turf', 'verge', 'world', 'yard', 'zone',
+]);
+
+// For one product against a token stream: whether its name is said, whether only
+// by everyday words of a longer name (weak: "suspend" of Suspend Polyzone), every
+// word of its names that was said (to tell two products apart), and where its
+// name sits: each run of its said letter words as { start, end } token positions.
 function nameEvidence(product, tokens) {
   const words = new Set();
   const spots = new Set();
   let qualifies = false;
+  let strong = false;
   for (const name of [product.name, product.fullName, ...product.aliases]) {
     const nameTokens = tokensOf(name);
     const said = nameTokens.filter((t) => tokens.includes(t));
     const letters = said.filter((t) => hasLetters(t) && t.length > 2);
-    const named = containsRun(tokens, nameTokens) || said.some(isDistinctiveWord) || said.filter(hasLetters).length >= 2;
+    const whole = containsRun(tokens, nameTokens) || said.filter(hasLetters).length >= 2;
+    const named = whole || said.some(isDistinctiveWord);
     qualifies = qualifies || named;
+    strong = strong || whole || said.some((t) => isDistinctiveWord(t) && !COMMON_NAME_WORDS.has(t));
     said.forEach((t) => words.add(t));
     if (named) tokens.forEach((t, i) => letters.includes(t) && spots.add(i));
   }
-  return { qualifies, words, runs: runsOf(spots) };
+  return { qualifies, weak: qualifies && !strong, words, runs: runsOf(spots) };
+}
+
+// An everyday word of a longer name ("the office asked us to suspend service")
+// names the product only beside application wording in its own clause: an amount,
+// or a word like "used", "sprayed", "mixed", "same" (as last time).
+const APPLICATION_WORDS = new Set([
+  'used', 'use', 'using', 'applied', 'apply', 'applying', 'sprayed', 'spraying', 'put', 'putting', 'mixed', 'mix', 'mixing',
+  'added', 'add', 'treated', 'treating', 'dusted', 'dusting', 'baited', 'baiting', 'laid', 'spread', 'injected', 'hit',
+  'same', 'usual',
+]);
+const CONTEXT_WINDOW = 6;
+function hasApplicationContext(run, tokens, breaks, quantities) {
+  let from = run.start;
+  while (from > 0 && !breaks[from] && run.start - from < CONTEXT_WINDOW) from -= 1;
+  let to = run.end;
+  while (to < tokens.length && !breaks[to] && to - run.end < CONTEXT_WINDOW) to += 1;
+  for (let j = from; j < to; j += 1) if (APPLICATION_WORDS.has(tokens[j])) return true;
+  return quantities.some((q) => q.nameAt === run.start || (q.start >= from && q.end <= to));
 }
 
 // Every product's evidence against one heard snippet, computed once per row.
@@ -607,9 +647,12 @@ function productEvidenceVerdict(product, evidence) {
 // token stream: where each product is named, and every spoken quantity.
 function transcriptWorld(ctx, transcript) {
   const { tokens, breaks, stops } = tokenize(transcript);
+  const quantities = quantitiesIn(transcript);
   const mentions = ctx.products.flatMap((product) => {
     const evidence = nameEvidence(product, tokens);
-    return evidence.qualifies ? evidence.runs.map((run) => ({ id: product.id, ...run })) : [];
+    if (!evidence.qualifies) return [];
+    const runs = evidence.weak ? evidence.runs.filter((run) => hasApplicationContext(run, tokens, breaks, quantities)) : evidence.runs;
+    return runs.map((run) => ({ id: product.id, ...run }));
   });
   // Token positions that are a product's NAME (a run of two words, or one
   // distinctive word): not evidence for anything else ("Advion Ant Gel" is not ants).
@@ -617,7 +660,15 @@ function transcriptWorld(ctx, transcript) {
   for (const m of mentions) {
     if (m.end - m.start >= 2 || isDistinctiveWord(tokens[m.start])) for (let i = m.start; i < m.end; i += 1) masked.add(i);
   }
-  return { tokens, breaks, stops, mentions, masked, negated: negatedPositions(tokens, breaks), quantities: quantitiesIn(transcript) };
+  return { tokens, breaks, stops, mentions, masked, negated: negatedPositions(tokens, breaks), quantities };
+}
+
+// The transcript's own words for a run of tokens ("Taurus", as said), or ''.
+function spokenSlice(transcript, words) {
+  if (!words.length) return '';
+  const escaped = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const match = String(transcript).match(new RegExp(`\\b${escaped.join('[^a-z0-9]+')}\\b`, 'i'));
+  return match ? match[0] : '';
 }
 
 // ── Negated mentions ─────────────────────────────────────────────────────
@@ -626,7 +677,15 @@ function transcriptWorld(ctx, transcript) {
 // in the same clause (a few words back), or "not" right after it.
 const NEGATION_WORDS = new Set(['not', 'no', 'never', 'without', 'skipped', 'skip', 'skipping', 'didn', 'don', 'doesn', 'wasn', 'weren', 'haven', 'hasn', 'couldn', 'wouldn', 'instead']);
 const NEGATION_WINDOW = 6;
+// "Last time I used Taurus", "previously Talstar", "next time Taurus": a product
+// named for another visit, never this one's application.
+const OTHER_VISIT_NEXT = new Set(['time', 'visit', 'week', 'month', 'service']);
+function isOtherVisitAt(tokens, j) {
+  if (tokens[j] === 'previously') return true;
+  return (tokens[j] === 'last' || tokens[j] === 'next') && OTHER_VISIT_NEXT.has(tokens[j + 1]);
+}
 function isNegationAt(tokens, j) {
+  if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
   return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && tokens[j + 1] === 'wait');
 }
@@ -647,6 +706,10 @@ function isNegatedMention(mention, world) {
   let from = mention.start;
   while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
   for (let j = from; j < mention.start; j += 1) if (isNegationAt(world.tokens, j)) return true;
+  // "Last time I used four ounces of Taurus": another visit's, anywhere earlier in the clause.
+  let clause = from;
+  while (clause > 0 && !world.breaks[clause]) clause -= 1;
+  for (let j = clause; j < from; j += 1) if (isOtherVisitAt(world.tokens, j)) return true;
   return world.tokens[mention.end] === 'not' && !world.breaks[mention.end];
 }
 
@@ -714,7 +777,9 @@ function productRefusal(raw, product, heard, normTranscript, seen, evidence, wor
   const reason = productEvidenceVerdict(product, evidence);
   if (reason) return { reason, text: heard };
   const mentions = world.mentions.filter((m) => m.id === product.id);
-  return mentions.length && mentions.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
+  // Named only by a lone ordinary word with no application wording near it.
+  if (!mentions.length) return { reason: 'product_not_heard', text: heard };
+  return mentions.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
 }
 
 // Why a spoken unit word does not back the model's unit (null when it does).
@@ -791,6 +856,7 @@ function productSameAsLast(raw, amount, heard, transcript, unclear) {
 function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript = '', world = transcriptWorld(ctx, transcript)) {
   const byId = new Map(ctx.products.map((p) => [p.id, p]));
   const seen = new Set();
+  const refusedIds = new Set();
   const out = [];
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
@@ -800,6 +866,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
+      if (product) refusedIds.add(product.id);
       continue;
     }
     seen.add(product.id);
@@ -809,6 +876,20 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
   }
   for (const dropped of out.splice(CAPS.products)) pushUnclear(unclear, dropped.heard, 'too_many_products');
+  // A product the tech clearly named for this visit that the fill left out is a
+  // Check, so a dropped application is never mistaken for a complete fill. Not
+  // when the words also name another product ("the Alpine": already ambiguous or
+  // the other one's) or a Check already quotes them.
+  const filled = new Set([...out.map((row) => row.productId), ...refusedIds]);
+  const quoted = unclear.map((u) => ` ${tokensOf(u.heard).join(' ')} `);
+  for (const product of ctx.products) {
+    if (filled.has(product.id)) continue;
+    const clear = world.mentions.find((m) => m.id === product.id
+      && !isNegatedMention(m, world)
+      && !world.mentions.some((o) => o.id !== product.id && o.start < m.end && o.end > m.start)
+      && !quoted.some((q) => q.includes(` ${world.tokens.slice(m.start, m.end).join(' ')} `)));
+    if (clear) pushUnclear(unclear, spokenSlice(transcript, world.tokens.slice(clear.start, clear.end)) || product.name, 'product_said_not_filled');
+  }
   return out;
 }
 
@@ -897,7 +978,10 @@ function nearCue(evidence, phrase) {
 }
 
 function valueHeard(field, value, evidence, otherPest) {
-  if (field === 'pests' && value === 'Other') return evidence.text.includes(tokensOf(otherPest).join(' '));
+  if (field === 'pests' && value === 'Other') {
+    const phrase = tokensOf(otherPest).join(' ');
+    return Boolean(phrase) && ` ${evidence.text} `.includes(` ${phrase} `);
+  }
   if (field === 'activity') {
     const rule = ACTIVITY_EVIDENCE[value];
     const view = value === 'none' ? { ...evidence, text: evidence.fullText, masked: evidence.nameMasked } : evidence;
@@ -983,7 +1067,7 @@ function validateFill(raw, ctx, transcript) {
   return {
     products,
     visit,
-    ...splitNotes(input.customerNote, input.officeNote),
+    ...splitNotes(input.customerNote, input.officeNote, transcript, unclear),
     unclear: unclear.slice(0, CAPS.unclear),
   };
 }
@@ -993,13 +1077,27 @@ function validateFill(raw, ctx, transcript) {
 // on customer-visible text, COMPLETION_ACCESS_CODE_RE) or that the tech addressed
 // to the office moves to the office note.
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b/i;
-function splitNotes(customerRaw, officeRaw) {
+// A customer-note sentence is kept only when at least half of its content words
+// (four letters or more, matched on their first five letters so "treated" meets
+// "treat") were said; anything else is the model's own wording and becomes a Check.
+const NOTE_STOPWORDS = new Set(['there', 'their', 'that', 'this', 'with', 'from', 'were', 'have', 'been', 'will', 'your', 'they', 'them', 'some', 'into', 'also', 'just', 'what', 'when', 'today', 'about']);
+const stemOf = (word) => word.slice(0, 5);
+function noteSentenceHeard(sentence, saidStems) {
+  const words = tokensOf(sentence).filter((w) => w.length >= 4 && !NOTE_STOPWORDS.has(w) && !/^\d/.test(w));
+  if (!words.length) return true;
+  return words.filter((w) => saidStems.has(stemOf(w))).length * 2 >= words.length;
+}
+
+function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
+  const saidStems = new Set(tokensOf(transcript).map(stemOf));
   const customer = [];
   const office = [];
   for (const sentence of String(customerRaw ?? '').split(/(?<=[.!?])\s+|\n+/)) {
     if (!sentence.trim()) continue;
-    (COMPLETION_ACCESS_CODE_RE.test(sentence) || OFFICE_ADDRESSED_RE.test(sentence) ? office : customer).push(sentence.trim());
+    if (COMPLETION_ACCESS_CODE_RE.test(sentence) || OFFICE_ADDRESSED_RE.test(sentence)) office.push(sentence.trim());
+    else if (noteSentenceHeard(sentence, saidStems)) customer.push(sentence.trim());
+    else pushUnclear(unclear, sentence.trim(), 'note_not_heard');
   }
   const officeText = [String(officeRaw ?? '').trim(), ...office].filter(Boolean).join(' ');
   return {
