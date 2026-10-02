@@ -22,7 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { TECH_DEAD_ASSIGNMENT_STATUSES, techAccessCutoff } = require('../services/technician-visit-scope');
+const { TECH_DEAD_ASSIGNMENT_STATUSES, techAccessCutoff, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 const {
   PROJECT_TYPES,
   PROJECT_TYPE_KEYS,
@@ -784,7 +784,7 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
   if (scheduled_service_id) {
     const scheduled = await db('scheduled_services')
       .where({ id: scheduled_service_id })
-      .first('id', 'customer_id', 'technician_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!scheduled) {
       const err = new Error('Scheduled service not found');
       err.status = 400;
@@ -795,7 +795,11 @@ async function validateProjectCreateScope(req, { customer_id, service_record_id,
       err.status = 400;
       throw err;
     }
-    if (String(scheduled.technician_id || '') === String(req.technicianId || '')) linkedAssignedToTech = true;
+    // A cancelled, rescheduled or out-of-window visit no longer authorizes a
+    // new project: creation stamps created_by_tech_id, which grants lasting
+    // access (codex #5568 r8 P1). Same predicate as hasProjectAccess.
+    if (String(scheduled.technician_id || '') === String(req.technicianId || '')
+      && technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, scheduled)) linkedAssignedToTech = true;
   }
 
   if (!isAdmin(req) && !linkedAssignedToTech) {

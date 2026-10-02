@@ -379,7 +379,9 @@ async function assertVisitStillOwned(req, trx, serviceId) {
     req,
     trx('scheduled_services').where('scheduled_services.id', serviceId),
   ).forUpdate().first('scheduled_services.id');
-  if (!owned) throw Object.assign(new Error('serviceId not found'), { status: 404 });
+  // status for the /confirm catch, statusCode + isOperational for the shared
+  // error handler /assess falls through to (otherwise a 500).
+  if (!owned) throw Object.assign(new Error('serviceId not found'), { status: 404, statusCode: 404, isOperational: true });
 }
 
 // =========================================================================
@@ -1178,8 +1180,9 @@ function normalizeStressFlags(input) {
 // scores merge instead of overwriting each other. A blank score keeps it
 // pending: scores, notes, flags and checks are saved; nothing is confirmed,
 // no baseline is installed, and adjusted_scores (the AI read) is untouched.
-async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks }, knex) {
+async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks, assertOwned }, knex) {
   return knex.transaction(async (trx) => {
+    if (assertOwned) await assertOwned(trx);
     const original = await trx('lawn_assessments').where({ id: assessmentId }).first('customer_id');
     if (!original) throw Object.assign(new Error('Assessment not found'), { status: 404 });
     await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
@@ -1257,12 +1260,19 @@ router.post('/confirm', async (req, res, next) => {
 
     // Persisted provenance selects the workflow, even after the visit gate is
     // turned off. Legacy rows retain their existing confirmation behavior.
+    // Re-check the visit under its row lock inside each confirmation
+    // transaction, first (the /assess lock order: visit row, then baseline),
+    // so a reassignment between the check above and the write cannot let the
+    // former technician's confirmation commit (codex #5568 r8 P1).
+    const assertOwned = assessment.service_id && isTechnicianRequest(req)
+      ? (trx) => assertVisitStillOwned(req, trx, assessment.service_id)
+      : undefined;
     const visitRun = await visitRuns.loadRun(assessmentId, db);
     let updated;
     let confirmation;
     if (visitRun) {
       confirmation = await visitRuns.confirmRun({
-        assessmentId, adjustedScores, review: req.body, technicianId: req.technicianId,
+        assessmentId, adjustedScores, review: req.body, technicianId: req.technicianId, assertOwned,
         observationEdit, propertyHistoryEnabled, scoreValue, calculateOverallScore,
         stressFlags: normalizedStressFlags === null ? undefined : normalizedStressFlags,
         persistChecks: protocolFieldChecksProvided
@@ -1278,7 +1288,7 @@ router.post('/confirm', async (req, res, next) => {
       }
     } else {
       confirmation = await confirmLegacyAssessment({
-        assessmentId, adjustedScores, propertyHistoryEnabled,
+        assessmentId, adjustedScores, propertyHistoryEnabled, assertOwned,
         stressFlags: normalizedStressFlags,
         persistChecks: protocolFieldChecksProvided
           ? async (current, trx) => {

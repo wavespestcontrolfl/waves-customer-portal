@@ -16,6 +16,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { technicianVisitRowInScope, TECH_DEAD_ASSIGNMENT_STATUSES, techAccessCutoff } = require('../services/technician-visit-scope');
 const {
   recordOutcome,
   consultationStats,
@@ -43,12 +44,8 @@ async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
   // The canonical current/recent assignment (not a dead status, inside the
   // access window) — a cancelled or stale visit that still names the
   // technician grants nothing (codex #5568 r5 P1).
-  // (Real rows always carry status + date; the window is evaluated when
-  // they do, so the bare assignment contract its route tests pin still holds.)
-  const consultationWindowed = visit.status != null || visit.scheduled_date != null;
-  const consultationOwner = visit.technician_id === req.technicianId
-    && (!consultationWindowed || require('../services/technician-visit-scope').technicianVisitRowInScope(req, visit));
-  if (req.techRole !== 'admin' && !consultationOwner) {
+  const consultationOwner = technicianVisitRowInScope(req, visit);
+  if (!consultationOwner) {
     res.status(403).json({ error: 'Not assigned to this consultation' });
     return null;
   }
@@ -101,7 +98,13 @@ router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin
     const q = db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .where('co.scheduled_service_id', scheduledServiceId);
-    if (req.techRole !== 'admin') q.where('ss.technician_id', req.technicianId);
+    // The same canonical current-assignment predicate as loadOwnedVisitOr403,
+    // inlined on the `ss` alias (own row, not a dead status, inside the window).
+    if (req.techRole !== 'admin') {
+      q.where('ss.technician_id', req.technicianId)
+        .whereNotIn('ss.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+        .where('ss.scheduled_date', '>=', techAccessCutoff());
+    }
     const row = await q.first('co.*');
     if (!row) {
       // Reassigned in between → the same 403 the check gives; else 404.

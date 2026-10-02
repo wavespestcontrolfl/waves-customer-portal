@@ -40,6 +40,20 @@ const config = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const trackTransitions = require('../services/track-transitions');
+const { technicianVisitRowInScope } = require('../services/technician-visit-scope');
+
+// The status-flip / rain-out legs below are the technician's own field taps:
+// they never admitted an admin who is not the row's assigned technician
+// ("admins go through admin-dispatch; don't bypass here"). A technician must
+// hold the CURRENT assignment (canonical predicate: own row, not a dead
+// status, inside the access window); an admin keeps the historical
+// assigned-technician match, unchanged.
+function ownsTrackedVisit(req, row) {
+  if (req.techRole === 'admin') return String(row.technician_id || '') === String(req.technicianId || '');
+  // Judged as a technician for every other role, so a future staff role is
+  // never waved through by the admin-unscoped predicate.
+  return technicianVisitRowInScope({ techRole: 'technician', technicianId: req.technicianId }, row);
+}
 const { transitionJobStatus } = require('../services/job-status');
 const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
@@ -86,7 +100,7 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       .where({ id: svc.id })
       .forUpdate()
       .first('technician_id', 'status', 'customer_confirmed', 'source_action', 'scheduled_date');
-    if (!fresh || fresh.technician_id !== req.technicianId) {
+    if (!fresh || !ownsTrackedVisit(req, fresh)) {
       const e = new Error('Not assigned to this service');
       e.code = 'TECH_OWNERSHIP_LOST';
       throw e;
@@ -234,8 +248,8 @@ async function guardAdvance(trx, req, svc) {
   const fresh = await trx('scheduled_services')
     .where({ id: svc.id })
     .forUpdate()
-    .first('technician_id', 'scheduled_date', 'source_action', 'customer_confirmed');
-  if (!fresh || fresh.technician_id !== req.technicianId) {
+    .first('technician_id', 'status', 'scheduled_date', 'source_action', 'customer_confirmed');
+  if (!fresh || !ownsTrackedVisit(req, fresh)) {
     const e = new Error('Not assigned to this service');
     e.code = 'TECH_OWNERSHIP_LOST';
     throw e;
@@ -359,7 +373,7 @@ router.post('/:id/en-route', async (req, res, next) => {
 
     // Tech can only flip their own assigned services. Admins with
     // requireTechOrAdmin go through admin-dispatch; don't bypass here.
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -518,7 +532,7 @@ router.post('/:id/on-site', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -610,9 +624,9 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -648,9 +662,9 @@ router.post('/:id/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'scheduled_date');
+      .first('id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (svc.technician_id !== req.technicianId) {
+    if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -768,13 +782,13 @@ router.post('/:id/photos', (req, res, next) => {
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     // Techs can only attach photos to their own assigned services.
     // Admin dispatch can attach completion-panel photos for any route row.
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
@@ -1042,9 +1056,9 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const record = await db('service_records')
@@ -1082,9 +1096,9 @@ router.get('/:id/photos', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -1219,9 +1233,9 @@ router.get('/:id/photo-marks', async (req, res, next) => {
     if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Lane resolution failure is not a 500: the tech simply gets no marking
@@ -1249,9 +1263,9 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     if (!photoMarksGateOn()) return res.status(404).json({ error: 'Not found' });
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'scheduled_date', 'service_type', 'service_id');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const s3Key = typeof req.body?.s3Key === 'string' ? req.body.s3Key.trim() : '';
@@ -1340,9 +1354,9 @@ async function findVisitPhotoByKey(scheduledServiceId, s3Key) {
 const recapMedia = require('../services/service-report/recap-media');
 
 async function loadOwnedServiceOr403(req, res) {
-  const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id');
+  const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id', 'status', 'scheduled_date');
   if (!svc) { res.status(404).json({ error: 'Service not found' }); return null; }
-  if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+  if (!technicianVisitRowInScope(req, svc)) {
     res.status(403).json({ error: 'Not assigned to this service' });
     return null;
   }
@@ -1422,9 +1436,9 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): a trace
@@ -1503,9 +1517,9 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id', 'service_id', 'service_type');
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_id', 'service_type');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     // Same eligibility gate as the save route — the auto-trace suggestion
@@ -1565,13 +1579,15 @@ router.get('/:id/geocode', async (req, res, next) => {
       .first(
         'scheduled_services.id',
         'scheduled_services.technician_id',
+        'scheduled_services.status',
+        'scheduled_services.scheduled_date',
         db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as line1'),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip')
       );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const address = [svc.line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');

@@ -3431,9 +3431,9 @@ async function assertRecapOwnership(req, res) {
   if (req.techRole === 'admin') return true;
   const svc = await db('scheduled_services')
     .where({ id: req.params.serviceId })
-    .first('technician_id');
+    .first('technician_id', 'status', 'scheduled_date');
   if (!svc) { res.status(404).json({ error: 'Service not found' }); return false; }
-  if (svc.technician_id !== req.technicianId) {
+  if (!technicianVisitRowInScope(req, svc)) {
     res.status(403).json({ error: 'Not assigned to this service' });
     return false;
   }
@@ -6235,8 +6235,8 @@ const recapMedia = require('../services/service-report/recap-media');
 // 403 itself and returns false so the caller bails.
 async function recapOwnerOk(req, res) {
   if (req.techRole === 'admin') return true;
-  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id');
-  if (svc && svc.technician_id === req.technicianId) return true;
+  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id', 'status', 'scheduled_date');
+  if (svc && technicianVisitRowInScope(req, svc)) return true;
   res.status(403).json({ error: 'Not your visit' });
   return false;
 }
