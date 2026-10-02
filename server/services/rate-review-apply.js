@@ -1063,7 +1063,15 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     // linked. Rows are locked, deleted under the same predicate, and ONLY
     // the rows confirmed deleted are unlinked (a count mismatch rolls back).
     const retirable = (q) => q.whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
-    const candidates = await retirable(trx('price_change_notices').whereIn('id', noticeIds)).forUpdate().select('id');
+    // A draft carrying a letter frozen by a send attempt (comms lane,
+    // metadata.pending_letter) may already sit in the customer's inbox — the
+    // provider can accept and still report a failure — so it is kept like
+    // an in-flight row: retiring it would break the link that email carries.
+    const frozenLetter = (n) => {
+      const meta = typeof n.metadata === 'string' ? (() => { try { return JSON.parse(n.metadata); } catch { return {}; } })() : (n.metadata || {});
+      return !!meta.pending_letter;
+    };
+    const candidates = (await retirable(trx('price_change_notices').whereIn('id', noticeIds)).forUpdate().select('id', 'metadata')).filter((n) => !frozenLetter(n));
     const candidateIds = candidates.map((n) => n.id);
     let retired = 0;
     if (candidateIds.length) {

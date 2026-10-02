@@ -39,7 +39,7 @@ function getStripe() {
 // other lane = nothing to announce (nextCharge null). Gate off or
 // nothing pending = no field (byte-identical payload); a read failure omits
 // the field, never the card.
-async function rateChangesField(customerId, { autopayEnabled, method, funding, customer }) {
+async function rateChangesField(customerId, { autopayEnabled, method, funding, customer, monthlyBilling }) {
   try {
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
@@ -48,7 +48,9 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
         // A pause covering the effective date skips that charge (billing
         // cron isPaused) — nothing to announce for it.
         const pausedThen = !!chargeDate && isPaused(customer, new Date(`${chargeDate}T16:00:00Z`));
-        const charge = autopayEnabled && method && chargeCents > 0 && !pausedThen ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
+        // Only while the account still bills monthly dues (the lane the cron
+        // charges; a switch to prepay or per application stops them).
+        const charge = monthlyBilling && autopayEnabled && method && chargeCents > 0 && !pausedThen ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
         return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
       }),
     };
@@ -235,7 +237,7 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
-      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer })),
+      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer, monthlyBilling: !nonMonthlyBilling })),
     });
   } catch (err) { next(err); }
 });

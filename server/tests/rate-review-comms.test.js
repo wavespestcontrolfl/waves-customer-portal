@@ -148,11 +148,12 @@ describe('sendPreview', () => {
     expect(await previewDigest()).not.toBe(b);
   });
 
-  test('a draft whose earlier send failed is NOT exempt from the 30-day rule', async () => {
+  test('a draft whose earlier send reported failure keeps its frozen words and is reconciled past the cutoff', async () => {
+    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
     const n = draft(1, { effective_date: '2026-11-20', status: 'draft' });
-    n.metadata = { ...n.metadata, pending_letter: { key: 'x', payload: {}, letter: {} } };
+    n.metadata = { ...n.metadata, pending_letter: { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'November 20, 2026', cost_block: COST_BLOCK, notice_url: 'https://portal.example.com/price-change/x' }, letter: { lines: [] } } };
     mockDb.reset(book({ notices: [n] }));
-    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('too_late');
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
   });
 
   test('the digest moves with the cost block, not only the list', async () => {
@@ -225,11 +226,13 @@ describe('sendBatch', () => {
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, failed: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
-    // a reported failure drops the frozen words: the retry is a fresh send
-    // of the current letter, which is what the preview shows
+    // the attempted send keeps its frozen words (the provider may have
+    // accepted it): an edited cost block changes neither the preview nor
+    // what a retry sends
     mockDb.store.rate_review_config[0].cost_block = 'An EDITED cost block.';
     const letter = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
-    expect(letter.html).toContain('An EDITED cost block.');
+    expect(letter.html).toContain(COST_BLOCK);
+    expect(letter.html).not.toContain('An EDITED cost block.');
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'unreachable', sent_at: null });
@@ -412,6 +415,28 @@ describe('customer surfaces', () => {
     mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [mk(1, '2026-12-15'), mk(2, '2026-12-15')] }));
     const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
     expect(out.map((c) => c.chargeCents)).toEqual([10800, 10800]);
+  });
+
+  test('portal: a declined prepaid renewal is not upcoming', async () => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW,
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+    });
+    const b = book({ notices: [prepay] });
+    b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'cancel' }];
+    mockDb.reset(b);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('portal: two monthly increases landing on the same debit both count, whatever their effective dates', async () => {
+    const mk = (n, eff) => draft(n, {
+      customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: eff, status: 'sent', sent_at: NOW,
+      current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+    });
+    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00', billing_day: 1 })], notices: [mk(1, '2026-12-10'), mk(2, '2026-12-20')] }));
+    const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
+    expect(out.map((c) => [c.chargeDate, c.chargeCents])).toEqual([['2027-01-01', 10800], ['2027-01-01', 10800]]);
   });
 
   test('portal: a prepaid change stays upcoming after the nightly apply, until its renewal date', async () => {

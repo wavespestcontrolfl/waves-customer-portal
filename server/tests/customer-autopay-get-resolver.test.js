@@ -35,7 +35,8 @@ jest.mock('../services/autopay-log', () => ({
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn(), sendAutopayDisabled: jest.fn(), sendPaymentMethodUpdated: jest.fn(),
 }));
-jest.mock('../services/billing-lane', () => ({ resolveBillingLane: () => ({ mode: 'monthly_membership' }) }));
+let mockLane = 'monthly_membership';
+jest.mock('../services/billing-lane', () => ({ resolveBillingLane: () => ({ mode: mockLane }) }));
 const mockUpcomingRateChanges = jest.fn(async () => []);
 jest.mock('../services/rate-review-comms', () => ({ upcomingRateChanges: (...a) => mockUpcomingRateChanges(...a) }));
 
@@ -182,6 +183,15 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
     state.customers[0].autopay_paused_until = '2027-01-05';
     const { body } = await getAutopay();
     expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('an account no longer on monthly dues announces no monthly charge', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockLane = 'annual_prepay';
+    try {
+      const { body } = await getAutopay();
+      expect(body.rate_changes[0].nextCharge).toBeNull();
+    } finally { mockLane = 'monthly_membership'; }
   });
 
   test('Auto Pay off: no charge is announced', async () => {

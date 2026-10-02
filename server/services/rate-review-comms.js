@@ -290,13 +290,14 @@ const LINE_RULES = [
   ['not_approved', ({ snapshot }) => !snapshot || String(snapshot.status) !== 'approved'],
   ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
-  // A crashed attempt (a stale 'sending' claim that froze its words) may
-  // already have been delivered — the stamp failed after the provider took
-  // it: it is reconciled under the same claim key (the email dedupes)
-  // whatever the date. The apply counts 30 days from the stamped sent_at,
-  // so a late stamp holds the change, never applies it early. Every other
-  // line must still be at least 30 days out (31 for a prepaid renewal).
-  ['too_late', ({ line, notice, today }) => !(String(notice.status) === 'sending' && parseJson(notice.metadata, {}).pending_letter)
+  // A line carrying words frozen by an earlier attempt may already be in
+  // the customer's inbox (a crash after the provider took it, or a provider
+  // that accepted and still reported failure): it is reconciled under the
+  // same claim key — the email dedupes — whatever the date, never left with
+  // a dead link. The apply counts 30 days from the stamped sent_at, so a
+  // late stamp holds the change (safe direction), never applies it early.
+  // Every other line must be at least 30 days out (31 for a prepaid renewal).
+  ['too_late', ({ line, notice, today }) => !parseJson(notice.metadata, {}).pending_letter
     && (!line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0))],
   ['in_flight', ({ notice, now }) => !claimable(notice, now)],
 ];
@@ -447,10 +448,11 @@ function claimKeyFor(noticeIds) {
   return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',')).digest('hex').slice(0, 16);
 }
 
-// The words a crashed attempt froze for this exact line set (written before
-// the provider call, dropped on any reported outcome) — the preview, the
-// digest and the reconciling retry all use them, so what the owner approves
-// is what that email said. null = nothing frozen.
+// The words an earlier attempt froze for this exact line set (written
+// before the provider call; kept until delivery is stamped, dropped only
+// when the attempt was definitively unsent) — the preview, the digest and
+// the reconciling retry all use them, so what the owner approves is what
+// that email said. null = nothing frozen.
 function frozenFor(entry) {
   if (!entry.lines.length) return null;
   const key = claimKeyFor(entry.lines.map((l) => l.noticeId));
@@ -519,7 +521,8 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
   if (!claimed) return { outcome: 'in_flight' };
   const customer = entry.customer;
   const claimKey = claimKeyFor(claimed);
-  const { payload, letter } = await letterForClaim(dbh, entry, { claimKey, costBlock });
+  const frozen = await letterForClaim(dbh, entry, { claimKey, costBlock });
+  const { payload, letter } = frozen;
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
@@ -536,16 +539,17 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
   });
   if (!email.sent && !sms.sent) {
     const attempted = email.attempted || sms.attempted;
-    // Both legs reported not delivered: the frozen words are dropped, so a
-    // retry is a fresh send with the current letter, the 30-day rule and
-    // the digest the owner approves. Attempted (provider/template failure)
-    // goes back to draft for a retry; never attempted (no contact, every
-    // leg policy-blocked) parks as unreachable.
+    // Attempted (provider/template failure — the provider may still have
+    // accepted the email): back to draft for a retry, KEEPING the frozen
+    // words, so the preview, the digest and the retry show what that email
+    // may already have said (and the apply lane never retires it). Never
+    // attempted (no contact, every leg policy-blocked) is definitively
+    // unsent: it parks as unreachable and drops them.
     for (const l of entry.lines) {
-      const { pending_letter: _frozen, ...meta } = parseJson(l.notice.metadata, {});
+      const { pending_letter: _stale, ...meta } = parseJson(l.notice.metadata, {});
       await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
         status: attempted ? 'draft' : 'unreachable',
-        metadata: JSON.stringify(meta),
+        metadata: JSON.stringify(attempted ? { ...meta, pending_letter: frozen } : meta),
         updated_at: new Date(),
       });
     }
@@ -665,12 +669,17 @@ function publicReview(notice) {
 // date (the cron charges on the CURRENT billing_day). A per-application
 // charge depends on what else that visit bills (combined visit invoices)
 // and a prepaid renewal is recorded by the office — neither is announced.
-function chargeAtNewRate(notice, { monthlyDelta, customer }) {
+function chargeAtNewRate(notice, { monthly, customer }) {
   if (notice.billing_lane !== 'monthly_membership') return { chargeCents: null, chargeDate: null };
   const dues = Math.round(Number(customer?.monthly_rate || 0) * 100);
   if (!(dues > 0)) return { chargeCents: null, chargeDate: null };
   const { nextBillingDayOnOrAfter } = require('./rate-review-apply')._private;
-  return { chargeCents: dues + monthlyDelta, chargeDate: nextBillingDayOnOrAfter(ymd(notice.effective_date), customer.billing_day) };
+  const chargeDate = nextBillingDayOnOrAfter(ymd(notice.effective_date), customer.billing_day);
+  // Every pending monthly increase in force by that debit moves the dues.
+  const delta = monthly
+    .filter((o) => ymd(o.effective_date) <= chargeDate)
+    .reduce((sum, o) => sum + Number(o.noticed_new_cents ?? o.new_amount_cents) - Number(o.noticed_current_cents ?? o.current_amount_cents), 0);
+  return { chargeCents: dues + delta, chargeDate };
 }
 
 /**
@@ -693,26 +702,28 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // renewal — it stays upcoming until its effective date. Every other lane
   // drops off once the nightly apply writes the new rate.
   const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('monthly_rate', 'billing_day') : null;
-  const pending = rows.filter((n) => !n.applied_at || n.billing_lane === 'annual_prepay');
-  return pending.map((n) => {
-    const unit = unitFor(n);
-    const current = Number(n.noticed_current_cents ?? n.current_amount_cents);
-    const next = Number(n.noticed_new_cents ?? n.new_amount_cents);
-    // Monthly: every pending monthly increase in force by this date moves
-    // the same account dues (applyMonthly adds each delta).
-    const monthlyDelta = pending
-      .filter((o) => o.billing_lane === 'monthly_membership' && ymd(o.effective_date) <= ymd(n.effective_date))
-      .reduce((sum, o) => sum + Number(o.noticed_new_cents ?? o.new_amount_cents) - Number(o.noticed_current_cents ?? o.current_amount_cents), 0);
-    return {
-      service: SERVICE_LABELS[n.family_key] || null,
-      unit,
-      current: money(current),
-      next: money(next),
-      ...chargeAtNewRate(n, { monthlyDelta, customer }),
-      effectiveDate: ymd(n.effective_date),
-      noticePath: `/price-change/${n.notice_token}`,
-    };
-  });
+  const declinedTerms = await declinedPrepayTermIds(dbh, rows);
+  const pending = rows.filter((n) => (!n.applied_at || n.billing_lane === 'annual_prepay')
+    && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
+  const monthly = pending.filter((o) => o.billing_lane === 'monthly_membership');
+  return pending.map((n) => ({
+    service: SERVICE_LABELS[n.family_key] || null,
+    unit: unitFor(n),
+    current: money(n.noticed_current_cents ?? n.current_amount_cents),
+    next: money(n.noticed_new_cents ?? n.new_amount_cents),
+    ...chargeAtNewRate(n, { monthly, customer }),
+    effectiveDate: ymd(n.effective_date),
+    noticePath: `/price-change/${n.notice_token}`,
+  }));
+}
+
+// A prepaid term the customer declined to renew (renewal_decision cancel,
+// or the term cancelled) never renews at the new rate — not upcoming.
+async function declinedPrepayTermIds(dbh, rows) {
+  const termIds = rows.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
+  if (!termIds.length) return new Set();
+  const terms = await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'status', 'renewal_decision');
+  return new Set(terms.filter((t) => String(t.renewal_decision) === 'cancel' || String(t.status) === 'cancelled').map((t) => String(t.id)));
 }
 
 module.exports = {

@@ -929,6 +929,17 @@ describe('scheduling races', () => {
 });
 
 describe('retireDraftNotices and the rebuild guard', () => {
+  test('a draft carrying a letter frozen by a send attempt is kept (it may already be in the inbox)', async () => {
+    const book = pestBook();
+    await scheduleBook(book);
+    const n = notices()[0];
+    n.metadata = { ...(typeof n.metadata === 'string' ? JSON.parse(n.metadata) : n.metadata), pending_letter: { key: 'k', payload: {}, letter: {} } };
+    const out = await apply.retireDraftNotices(BATCH_KEY);
+    expect(out).toMatchObject({ ok: true, retired: 0, keptDelivered: 1 });
+    expect(notices()).toHaveLength(1);
+    expect(snapshots()[0].notice_id).toBe(n.id);
+  });
+
   test('retires the batch\'s undelivered rows (a draft, and a draft the public page flipped to viewed on a preview) and unlinks their ranking rows; a delivered notice is kept', async () => {
     const book = pestBook();
     await scheduleBook(book);
