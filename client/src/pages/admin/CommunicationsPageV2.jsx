@@ -126,6 +126,21 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// Home-line PR 3: whether the composer may take the server's sender for a
+// fresh text — no draft in progress (body, attachments, or a loaded draft)
+// and no staff pick since the request: the line is still the one the
+// request was made with, or the one the automatic customer-sender effect set
+// (state.autoLine), which is initialization, not a staff choice.
+// replaceableLines (from the server's answer) bounds it further: a current
+// line that is not an office/main line — recruiting, tech, tracking — stays.
+export function composerAcceptsServerSender(state, requestedLine, replaceableLines = null) {
+  if (!state) return false;
+  const line = state.line || "";
+  if (replaceableLines && line && !replaceableLines.includes(line)) return false;
+  return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
+    && (line === (requestedLine || "") || (!!state.autoLine && line === state.autoLine));
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -1310,6 +1325,43 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setThreadLock({ contactPhone: customer.phone, ourNumber: customerSenderNumber, label: customerSenderLabel });
     }
   }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel, fromNumber, threadLock?.ourNumber, loadedMessageDraft]);
+
+  // GATE_HOME_LINE (home-line PR 3): for a fresh text the server picks the
+  // line — the one they texted within 30 days, else their home line, else
+  // main. It answers null while the gate is off or the thread is on a
+  // non-customer line (recruiting, tech), leaving the thread-line choice
+  // above untouched. Never overrides a draft in progress.
+  const composerStateRef = useRef(null);
+  composerStateRef.current = {
+    line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft,
+    autoLine: automaticCustomerSenderRef.current?.number || "",
+  };
+  useEffect(() => {
+    const phone = toNumber.trim();
+    const requested = composerStateRef.current;
+    if (phone.replace(/\D/g, "").length < 10 || !composerAcceptsServerSender(requested, requested.line)) return undefined;
+    let cancelled = false;
+    const params = new URLSearchParams({ phone });
+    if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+    if (requested.line) params.set("currentLine", requested.line);
+    adminFetch(`/admin/communications/sender?${params.toString()}`)
+      .then((r) => {
+        // Re-read the composer at response time: a line staff picked, or a
+        // draft started, while the request was in flight must stand.
+        if (cancelled || !r?.fromNumber
+          || !composerAcceptsServerSender(composerStateRef.current, requested.line, Array.isArray(r.replaceableLines) ? r.replaceableLines : [])) return;
+        setFromNumber(r.fromNumber);
+        // Only a live conversation locks the picker ("Replying from … to
+        // continue thread"); a home-line / main default is a preselect staff
+        // can change.
+        setThreadLock(r.reason === "conversation"
+          ? { contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber }
+          : null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Recipient changes only: a later staff pick of a line must stand.
+  }, [toNumber, selectedCustomerId, loadedMessageDraft]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();

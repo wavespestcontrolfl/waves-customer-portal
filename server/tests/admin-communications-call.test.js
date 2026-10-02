@@ -63,6 +63,8 @@ function query({ result = [], returning } = {}) {
     'where',
     'whereNull',
     'whereRaw',
+    'whereIn',
+    'modify',
     'orderBy',
     'limit',
     'insert',
@@ -276,6 +278,39 @@ describe('admin communications voice route', () => {
     test('gate off: the main line, as before', async () => {
       const call = await callFor(parrishCustomer);
       expect(call.from).toBe(MAIN);
+    });
+  });
+
+  describe('GET /sender (staff texts, home-line PR 3)', () => {
+    const get = (qs) => withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sender?${qs}`, { headers: { Authorization: 'Bearer admin' } });
+      return { status: res.status, body: await res.json() };
+    });
+
+    test('gate off: null, so the composer keeps its thread line', async () => {
+      expect(await get('phone=%2B15551234567')).toEqual({ status: 200, body: { fromNumber: null } });
+    });
+
+    test('gate on: the line they texted within 30 days', async () => {
+      homeLineLive.mockReturnValue(true);
+      db.mockImplementation((table) => {
+        if (table === 'sms_log') return query({ result: { to_phone: '+19412973337' } });
+        throw new Error(`Unexpected table ${table}`);
+      });
+      const { status, body } = await get('phone=%2B15551234567&customerId=11111111-1111-4111-8111-111111111111');
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ fromNumber: '+19412973337', reason: 'conversation' });
+      expect(body.replaceableLines).toEqual(expect.arrayContaining(['+19412975749', '+19412973337']));
+    });
+
+    test('gate on: a thread on a non-customer line (recruiting / tech) keeps it', async () => {
+      homeLineLive.mockReturnValue(true);
+      expect((await get('phone=%2B15551234567&currentLine=%2B15559990000')).body).toEqual({ fromNumber: null });
+    });
+
+    test('gate on: a missing phone is a 400', async () => {
+      homeLineLive.mockReturnValue(true);
+      expect((await get('phone=')).status).toBe(400);
     });
   });
 });
