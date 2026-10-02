@@ -3329,9 +3329,9 @@ describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound langua
   const english = (t) => !labelFactsLib.isUnverifiedLanguageInbound(t) && labelFactsLib.isEnglishInbound(t);
   test('English the sweep held: contractions, ordinals, units, address tails, names-only, media reactions, everyday words', () => {
     for (const t of [
-      'How about soap? Dish soap', '1200 maple loop apt 3', 'Im home all day..', '1500 9th Ave east', 'Jane Example', "i'm impressed",
-      'Reacted \u2764\ufe0f to an image', '4400 Elm St., Oak Bluff?', 'Reimbursed from Sam not you lol', 'Gate code for the community is 5 digits. #0000',
-      'Please leave cert in the permit box for inspection', 'Rain or shine?', 'Pat Sample 100 Harbor Dr Oak Bluff FL 34000', 'Is everybody good?',
+      'How about soap? Dish soap', '1200 maple loop apt 3', '1500 9th Ave east', "i'm impressed",
+      'Reacted \u2764\ufe0f to an image', '4400 Elm St., Oak Bluff', 'Reimbursed from Sam not you lol', 'Gate code for the community is 5 digits. #0000',
+      'Please leave cert in the permit box for inspection', 'Rain or shine?', 'My address is 100 Harbor Dr Oak Bluff FL 34000', 'Is everybody good?',
       'Liked \u201cHello Alex! Payment received. Your report: portal.example...', 'the dogs Rex and Bo can go out now?',
       'Reacted \u2764\ufe0f to "Hello Alex! Payment received, thank you. Invoice WPC-0000-0000...',
     ]) expect([t, english(t)]).toEqual([t, true]);
@@ -3339,7 +3339,9 @@ describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound langua
   // (#5520 r5 P1 "Can our Fido now mehet?" - 3 of 5 words English - still passes the 60% share: every word-list rule that held it held
   // 48 more real English texts in the prod sweep, so it stays an accepted gap; see the PR.)
   test('the earlier mixed-language leaks stay held', () => {
-    for (const t of ['Can Fido mehet?', 'Kutyak mehetnek outside?', 'Hi Fido kimehet most kerlek please?', 'Pot iesi?', '2godziny wystarczy?', 'Dlaczego nie']) {
+    // #5537 r1: each was let through by a loosening and is held again (fail closed; the English ones they cost - a names-only text,
+    // "Im home", a name before an address - go to a person)
+    for (const t of ['1200 Main St. Kiedy Psy?', '4821 Oak St Kiedy Psy Moga Wyjsc?', 'Liked "\u00bfYa pueden salir los perros?"', 'Liked "See https://x.y/z" kiedy psy moga wyjsc', 'Pot Iesi', 'Im Haus?', 'Can Fido mehet?', 'Kutyak mehetnek outside?', 'Hi Fido kimehet most kerlek please?', 'Pot iesi?', '2godziny wystarczy?', 'Dlaczego nie']) {
       expect([t, english(t)]).toEqual([t, false]);
     }
   });
@@ -3355,6 +3357,8 @@ describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound langua
     expect(labelFactsLib.replyClaimsUngroundedLabelTiming('No, it will not.', '', asked)).toBe(true);
     expect(labelFactsLib.inboundRefersToOtherVisit("I asked two times before; for yesterday's treatment, when can the kids go out?", '2026-09-30', '2026-10-01')).toBe(false);
     expect(labelFactsLib.inboundRefersToOtherVisit('two treatments back, can the kids go out?', '2026-09-30', '2026-10-01')).toBe(true);
+    for (const t of ['the treatment two times ago', 'two times ago, when can the dogs go out?']) expect([t, labelFactsLib.inboundRefersToOtherVisit(t, '2026-09-30', '2026-10-01')]).toEqual([t, true]);
+    expect(labelFactsLib.inboundRefersToOtherVisit('I called you three times before, can the dogs go out?', '2026-09-30', '2026-10-01')).toBe(false);
   });
   test('"Is everybody good?" after a re-entry question inherits re-entry only (r5 P2)', () => {
     expect(labelFactsLib.askedLabelKinds(['Is everybody good?', 'When can the dogs go out after the spray?'])).toEqual(['reentry']);
