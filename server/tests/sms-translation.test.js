@@ -62,6 +62,13 @@ describe('tokenParity', () => {
     expect(tokenParity('We will call you back.', 'Le llamaremos en 2 horas.')).toMatchObject({ ok: false, added: ['2'] });
   });
 
+  test('only a PM time may come back as a 24-hour time: a price or count never gets the +12 pass', () => {
+    expect(tokenParity('The fee is $2.', 'La tarifa es de $14.')).toMatchObject({ ok: false, missing: ['2'], added: ['14'] });
+    expect(tokenParity('We need 3 more days.', 'Necesitamos 15 días más, a las 15 h.')).toMatchObject({ ok: false });
+    expect(tokenParity('See you at 2:30 PM.', 'Nos vemos a las 14:30.')).toEqual({ ok: true, missing: [], added: [] });
+    expect(tokenParity('See you at 2 AM.', 'Nos vemos a las 14 h.')).toMatchObject({ ok: false });
+  });
+
   test('links and emails must come through exactly', () => {
     const en = 'Pick a time here: https://portal.example.com/l/abc12 or email contact@example.com.';
     expect(tokenParity(en, 'Elija una hora aquí: https://portal.example.com/l/abc12 o escriba a contact@example.com.').ok).toBe(true);
@@ -97,6 +104,28 @@ describe('runTranslationTrial', () => {
     expect(row).toMatchObject({ verdict: 'ready', language_code: 'es', reply_english: REPLY, reply_translated: REPLY_ES, back_translation: REPLY });
     expect(mockInsert).toHaveBeenCalledTimes(1);
     expect(JSON.parse(mockInsert.mock.calls[0][0].checks)).toMatchObject({ converged: true, token_parity: { ok: true }, meaning: { same: true } });
+  });
+
+  test('the drafter reads the thread with foreign rows translated; the live context is not changed', async () => {
+    const ctx = require('../services/context-aggregator');
+    const OLDER = 'Gracias, ¿y los gatos también pueden salir?';
+    const live = { customer: { id: 'c1' }, smsHistory: [
+      { direction: 'inbound', body: SPANISH, fromPhone: '+19415550100' },
+      { direction: 'outbound', body: 'Thanks, we will check.' },
+      { direction: 'inbound', body: OLDER, fromPhone: '+19415550100' },
+    ] };
+    ctx.getContextForCustomer.mockResolvedValueOnce(live);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const base = mockDispatch.getMockImplementation();
+    mockDispatch.mockImplementation(async (policy, payload) => (payload.text.includes(OLDER)
+      ? { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Thanks, can the cats go out too?' } }
+      : base(policy, payload)));
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    const seen = mockDraft.mock.calls[0][0].context.smsHistory;
+    expect(seen.map((m) => m.body)).toEqual([ENGLISH_IN, 'Thanks, we will check.', 'Thanks, can the cats go out too?']);
+    expect(seen[0].translatedFrom).toBe(SPANISH);
+    expect(live.smsHistory[0].body).toBe(SPANISH);
+    expect(row.checks.thread_rows_translated).toBe(2);
   });
 
   test('a draft that did not pass the English checks is held before any translation', async () => {

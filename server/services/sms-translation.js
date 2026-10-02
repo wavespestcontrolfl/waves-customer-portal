@@ -175,16 +175,32 @@ function diffCounts(from, to) {
   return out;
 }
 
-// 12-hour times may legitimately be written as 24-hour ones ("2 PM" -> "14 h"):
-// a missing hour h (1-11) is satisfied by an added h+12, and vice versa.
-function pairTwentyFourHour(missing, added) {
+// A 12-hour PM time may legitimately be written as a 24-hour one ("2 PM" ->
+// "14 h", "2:30 PM" -> "14:30"). Only then: an hour h (1-11) the English states
+// as a PM time may come back as h+12 where the translation writes a time. Any
+// other number (a price, a count, a date) must match exactly.
+const EN_PM_HOUR_RE = /\b(\d{1,2})(?::\d{2})?\s*(?:pm|p\.m\.)/gi;
+const TR_24H_HOUR_RE = /\b(\d{1,2})(?:\s*[:h]\s*\d{2}|\s*h\b|\s*horas?\b|\s*heures?\b|(?:[.:]\d{2})?\s*uhr\b)/gi;
+
+function hoursMatching(text, re) {
+  return [...String(text || '').replace(LINK_RE, ' ').matchAll(re)].map((m) => String(Number(m[1])));
+}
+
+function pairTwentyFourHour(missing, added, englishReply, translated) {
+  const pmHours = hoursMatching(englishReply, EN_PM_HOUR_RE);
+  const timeHours = hoursMatching(translated, TR_24H_HOUR_RE);
   const m = [...missing];
   const a = [...added];
   for (let i = m.length - 1; i >= 0; i -= 1) {
     const n = Number(m[i]);
     if (!Number.isInteger(n) || n < 1 || n > 11) continue;
-    const j = a.indexOf(String(n + 12));
-    if (j !== -1) { m.splice(i, 1); a.splice(j, 1); }
+    const h24 = String(n + 12);
+    const p = pmHours.indexOf(m[i]);
+    const t = timeHours.indexOf(h24);
+    const j = a.indexOf(h24);
+    if (p === -1 || t === -1 || j === -1) continue;
+    pmHours.splice(p, 1); timeHours.splice(t, 1);
+    m.splice(i, 1); a.splice(j, 1);
   }
   return { missing: m, added: a };
 }
@@ -192,10 +208,34 @@ function pairTwentyFourHour(missing, added) {
 function tokenParity(englishReply, translated) {
   const en = protectedTokens(englishReply);
   const tr = protectedTokens(translated);
-  const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits));
+  const digits = pairTwentyFourHour(diffCounts(en.digits, tr.digits), diffCounts(tr.digits, en.digits), englishReply, translated);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
   return { ok: missing.length === 0 && added.length === 0, missing, added };
+}
+
+// The drafter's guards read the recent thread too (readInboundThread: the last
+// 10 rows, the current inbound among them), so a foreign row left there keeps
+// the English-only restriction on the translated question. The trial drafts on
+// a COPY of the context whose foreign inbound rows carry their English
+// translation (the original kept beside it); the real context is untouched.
+async function translateThread(context, inboundMessage, inboundEnglish) {
+  const rows = Array.isArray(context?.smsHistory) ? context.smsHistory : [];
+  const cache = new Map([[String(inboundMessage).trim(), inboundEnglish]]);
+  let translatedRows = 0;
+  const out = [];
+  for (const [i, m] of rows.entries()) {
+    if (i >= 10 || !m || m.direction !== 'inbound' || typeof m.body !== 'string' || !needsTranslation(m.body)) { out.push(m); continue; }
+    const key = m.body.trim();
+    if (!cache.has(key)) {
+      const t = await translateInbound(m.body);
+      if (!t.ok) return { ok: false, reason: t.reason };
+      cache.set(key, t.isEnglish ? null : t.english);
+    }
+    const english = cache.get(key);
+    if (english) { out.push({ ...m, body: english, translatedFrom: m.body }); translatedRows += 1; } else out.push(m);
+  }
+  return { ok: true, context: { ...context, smsHistory: out }, translatedRows };
 }
 
 async function recordTrial(row) {
@@ -227,7 +267,10 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     const langFields = { language: inbound.language, language_code: inbound.languageCode, inbound_english: clip(inbound.english) };
 
     const ContextAggregator = require('./context-aggregator');
-    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
+    const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: false });
+    const thread = await translateThread(liveContext, inboundMessage, inbound.english);
+    if (!thread.ok) return await hold(`thread_translation_failed:${thread.reason}`.slice(0, 80), langFields);
+    const { context } = thread;
     const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
     const intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
     const Anthropic = require('@anthropic-ai/sdk');
@@ -244,7 +287,7 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
       facts_block: draft?.factsBlock || null,
       ...(draft?.promptVersion ? { prompt_version: `${PROMPT_VERSION}+${draft.promptVersion}`.slice(0, 80) } : {}),
     };
-    const loop = { converged: Boolean(draft?.converged), passes: draft?.passes ?? null };
+    const loop = { converged: Boolean(draft?.converged), passes: draft?.passes ?? null, thread_rows_translated: thread.translatedRows };
     if (!draft?.parsed) return await hold('draft_unparseable', { ...draftFields, checks: loop });
     if (!englishReply) {
       const row = { ...base, ...draftFields, verdict: 'skipped', hold_reason: 'no_reply_needed', checks: loop, trial_ms: Date.now() - startedAt };
