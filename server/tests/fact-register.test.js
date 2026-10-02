@@ -664,6 +664,10 @@ describe('findUnverifiedClaims', () => {
       // centigrade is Celsius
       'Large patch thrives at 80 degrees centigrade.',
       'Large patch thrives at an 85°F maximum temperature or higher.',
+      'Large patch thrives at an 85°F maximum temperature, or even higher.',
+      'Large patch thrives at an 85°F maximum temperature, and sometimes higher.',
+      'Large patch thrives between 80 and 90 degrees centigrade.',
+      'Large patch thrives at 80 degrees centigrade or higher.',
       'Large patch thrives at 30 degrees centigrade.',
       'Large patch thrives when temperatures are 30 centigrade or higher.',
       'Large patch thrives in summer despite being far from common in winter.',
