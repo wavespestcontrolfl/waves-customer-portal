@@ -711,7 +711,15 @@ function productEvidenceVerdict(product, evidence) {
 // token stream: where each product is named, and every spoken quantity.
 function transcriptWorld(ctx, transcript) {
   const { tokens, breaks, stops } = tokenize(transcript);
-  const quantities = quantitiesIn(transcript);
+  // A size inside a product's own name ("Dismiss 64 oz") was never a dose.
+  const nameSpans = ctx.products.flatMap((product) => [product.name, product.fullName, ...product.aliases].flatMap((name) => {
+    const run = tokensOf(name);
+    if (run.length < 2) return [];
+    return tokens.map((_, i) => i).filter((i) => run.every((w, k) => tokens[i + k] === w)).map((i) => ({ start: i, end: i + run.length }));
+  }));
+  const quantities = quantitiesIn(transcript).map((q) => (
+    nameSpans.some((span) => q.start >= span.start && q.end <= span.end) ? { ...q, retracted: true } : q
+  ));
   const mentions = ctx.products.flatMap((product) => {
     const evidence = nameEvidence(product, tokens);
     if (!evidence.qualifies) return [];
@@ -1239,6 +1247,13 @@ function spokenClauseScope(sentence, spoken) {
   return scope;
 }
 
+// The company is "Waves Pest Control", never the retired "Waves Lawn & Pest"
+// (AGENTS.md; the comms-lint company-name rule is the one check).
+function saysRetiredName(text) {
+  const rule = require('./comms-lint').RULES.find((r) => r.name === 'company-name');
+  return Boolean(rule && rule.check(text));
+}
+
 function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
   const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
@@ -1262,6 +1277,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     // no pesticide is "safe", "pet-safe" or "EPA-approved" on a customer surface
     // (AGENTS.md compliance language): even said word for word, it is a Check
     else if (scope === 'customer' && reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
+    else if (scope === 'customer' && saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
     else if (scope === 'customer') customer.push(text);
     else pushUnclear(unclear, text, scope === 'unclear' ? 'note_audience_unclear' : 'note_not_heard');
   }
@@ -1276,6 +1292,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     if (!said) pushUnclear(unclear, text, 'note_not_heard');
     else if (said !== 'customer' || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) officeSaid.push(text);
     else if (reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
+    else if (saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
     else customer.push(text);
   }
   const officeText = [...officeSaid, ...office].join(' ');
@@ -1284,7 +1301,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const kept = ` ${norm(officeText)} `;
   for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
-    if (!text || !(OFFICE_ADDRESSED_RE.test(text) || COMPLETION_ACCESS_CODE_RE.test(text))) continue;
+    if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
     const words = norm(text).split(' ').filter((w) => w.length >= 4 && !/^(office|dispatch|note|tell|that)$/.test(w));
     if (words.length && !words.some((w) => kept.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
   }

@@ -33,8 +33,9 @@ const visit = (over = {}) => ({ pests: [], otherPest: '', areas: [], method: 'no
 const answer = (over = {}) => ({ products: [], visit: visit(), customerNote: '', officeNote: '', unclear: [], ...over });
 // The Checks other than "named but not filled", for tests that feed a partial answer on purpose.
 const checksBesidesOmitted = (out) => out.unclear.filter((u) => u.reason !== 'product_said_not_filled' && u.reason !== 'visit_said_not_filled');
-// The Checks other than "the visit was left empty", for tests that send no visit on purpose.
-const withoutVisitOmission = (out) => out.unclear.filter((u) => u.reason !== 'visit_said_not_filled');
+// The Checks other than "the visit / an office line was left out", for tests that
+// send no visit or notes on purpose.
+const withoutVisitOmission = (out) => out.unclear.filter((u) => u.reason !== 'visit_said_not_filled' && u.reason !== 'office_said_not_filled');
 
 describe('validateFill', () => {
   test('a clean answer passes through in the documented shape', () => {
@@ -1337,4 +1338,25 @@ test.each([['one thousand two hundred', 1200], ['two thousand', 2000], ['a thous
   const run = (linearFt) => validateFill(answer({ visit: visit({ areas: ['Outside'], linearFt, heard: t.replace(/\.$/, '') }) }), ctx, t).visit.linearFt;
   expect(run(feet)).toBe(feet);
   if (feet % 1000) expect(run(feet % 1000)).toBeNull();
+});
+
+describe('Codex #5580 round 9', () => {
+  test('the retired company name never reaches the customer note', () => {
+    const t = 'Waves Lawn & Pest treated the exterior. Treated the garage.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the garage.');
+    expect(out.unclear).toContainEqual({ heard: 'Waves Lawn & Pest treated the exterior.', reason: 'note_company_name' });
+  });
+
+  test.each(['Customer did not pay the invoice.', 'The gate was locked.'])('a plain internal line "%s" carried by neither note is a Check', (line) => {
+    const out = validateFill(answer({}), ctx, `Treated outside. ${line}`);
+    expect(out.unclear).toContainEqual({ heard: line, reason: 'office_said_not_filled' });
+  });
+
+  test('a package size inside a product name is never the dose ("Dismiss 64 oz")', () => {
+    const withDismiss = { ...ctx, products: [...ctx.products, { id: 'p-dismiss', name: 'Dismiss 64 oz', fullName: 'Dismiss 64 oz', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'] }] };
+    const row = (amount) => ({ productId: 'p-dismiss', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Dismiss 64 oz outside' });
+    expect(validateFill(answer({ products: [row(64)] }), withDismiss, 'Used Dismiss 64 oz outside.').products[0].amount).toBeNull();
+    expect(validateFill(answer({ products: [{ ...row(2), heard: 'two ounces of Dismiss 64 oz' }] }), withDismiss, 'Used two ounces of Dismiss 64 oz outside.').products[0].amount).toBe(2);
+  });
 });

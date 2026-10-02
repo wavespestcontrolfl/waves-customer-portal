@@ -38,7 +38,7 @@ const UNCLEAR_REASONS = ['ambiguous_product', 'unknown_product', 'unclear_amount
 // The notes are any sentence the tech said: what the note says is not scored here.
 function idealAnswer(expected, transcript = '') {
   const said = String(transcript).split(/(?<=[.!?])\s+/)[0] || '';
-  const toOffice = String(transcript).split(/(?<=[.!?])\s+/).filter((t) => /\b(office|dispatch)\b/i.test(t)).join(' ') || said;
+  const toOffice = String(transcript).split(/(?<=[.!?])\s+/).filter((t) => /\b(office|dispatch|invoices?|charge|paid|billing|gate|locked|dogs?)\b/i.test(t)).join(' ') || said;
   return {
     products: expected.products.map((p) => ({
       productId: p.productId,
