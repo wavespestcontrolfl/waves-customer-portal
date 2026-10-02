@@ -70,6 +70,7 @@
  * (see CONVERSATION_MINUTES_KEYS).
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etMonthStart, addETDays, validCalendarDate } = require('../utils/datetime-et');
@@ -1367,7 +1368,7 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
     .whereIn('customer_id', customerIds)
     .where('batch_key', '<', batchKey)
     .orderBy([{ column: 'batch_key', order: 'desc' }, { column: 'computed_at', order: 'desc' }])
-    .select('customer_id', 'family_key', 'status', 'review_date', 'batch_key', 'computed_at');
+    .select('customer_id', 'family_key', 'status', 'review_date', 'batch_key', 'computed_at', 'flags');
   const map = new Map();
   for (const row of rows) {
     const key = `${row.customer_id}|${row.family_key}`;
@@ -1869,6 +1870,77 @@ async function batchHasSentRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
+// Every writer on a batch (a build — for its whole recompute —, a row edit,
+// an approval) takes this transaction-scoped advisory lock first, so they
+// serialize even before the batch row exists (a FOR UPDATE on a row that is
+// not there locks nothing — two first builds could both pass the refusal
+// check).
+async function lockBatch(conn, batchKey) {
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rate_review_batch:${batchKey}`]);
+}
+
+// A rebuild discards every undecided row. Once the owner approved rows (or
+// the comms lane sent them) the batch is a decision, not a draft — refused,
+// with the reason the route and the screen can name.
+async function batchRebuildRefusal(dbh, batchKey) {
+  if (await batchHasSentRows(dbh, batchKey)) return 'batch_has_sent_rows';
+  const row = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).whereIn('status', ['approved']).count({ n: '*' }).first();
+  return Number(row && row.n) > 0 ? 'batch_has_approved_rows' : null;
+}
+
+// Flags a row carries only because the owner acted on it from the screen.
+const OWNER_DECISION_FLAGS = ['admin_edited', 'admin_skipped', 'exception_included'];
+
+// Whether the owner has decided anything on this batch: an approved (or
+// since sent) row, or a row edited, skipped or included from the screen.
+// Such a batch is never recomputed by the tick's own retry (updateRow /
+// approveBatch own those rows).
+const DECIDED_STATUSES = ['approved', ...SENT_STATUSES];
+async function batchOwnerDecisions(dbh, batchKey) {
+  const rows = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('status', 'flags');
+  const decided = rows.some((r) => DECIDED_STATUSES.includes(r.status) || (parseJson(r.flags) || []).some((flag) => OWNER_DECISION_FLAGS.includes(flag)));
+  return { decided, rows: rows.length };
+}
+
+async function batchRowsForDigest(dbh, batchKey) {
+  return dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('id', 'proposed_rate_cents', 'status');
+}
+
+// The build's write: ONE short transaction under the batch advisory lock —
+// the lock updateRow and approveBatch take — that judges the refusal and
+// the rows' digest again before replacing them. An edit or approval that
+// landed since the ranking read the rows changes the digest, and the
+// rebuild refuses (batch_changed) rather than discard the owner's decision;
+// the build is simply run again. Nothing in here reads the pool: with a
+// two-connection pool and the build lease holding one, a pool read inside
+// this transaction would wait on itself.
+async function commitBatchRows(dbh, { batchKey, expectedDigest, rows, computedAt, batch, preserveOwnerDecisions = false }) {
+  const run = async (conn) => {
+    await lockBatch(conn, batchKey);
+    const refusal = await batchRebuildRefusal(conn, batchKey);
+    if (refusal) return { refused: refusal };
+    // The tick's retry never replaces a decision of the owner's — judged
+    // HERE, under the lock: the monthly lease does not serialize updateRow,
+    // so a row edited between the tick's pre-check and the ranking's digest
+    // capture is already in that digest and would pass the check below.
+    if (preserveOwnerDecisions && (await batchOwnerDecisions(conn, batchKey)).decided) return { refused: 'batch_has_owner_decisions' };
+    if (batchDigest(await batchRowsForDigest(conn, batchKey)) !== expectedDigest) return { refused: 'batch_changed' };
+    // Literal table names on every WRITER (insert / merge / update): the
+    // status-integrity scan in tests/annual-prepay-term-states.test.js fails
+    // closed on a mutation chain behind a dynamic table expression. Reads
+    // keep the constants.
+    await conn('rate_review_batches')
+      .insert({ batch_key: batchKey, ...batch, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null })
+      .onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
+    await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
+    if (rows.length) {
+      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
+    }
+    return { refused: null };
+  };
+  return dbh.isTransaction ? run(dbh) : dbh.transaction(run);
+}
+
 // ── batch stages ────────────────────────────────────────────────────────
 
 // Stage 1 — every input the book needs (parallel where independent).
@@ -2048,12 +2120,34 @@ function accountFirstVisits(firstVisits, book) {
   return accountFirst;
 }
 
+// The occurrence of a line's anniversary this batch reviews: the one inside
+// the window, or — for a line an earlier batch (within 90 days) held or
+// skipped — that batch's review date, carried forward. A line with no
+// anniversary at all is listed (it is held as no_anniversary) unless the
+// owner skipped it: that skip holds until the line has an anniversary, when
+// the rules below take over. Null = not in this batch.
+function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
+  // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
+  // decision for that cycle, not a hold to carry — the line returns at its
+  // next anniversary (or a catch-up build), as the screen says. Consecutive
+  // windows share their boundary day, so the occurrence the owner skipped is
+  // not listed again by the next window either.
+  const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+  if (!entry.anniversary.date) return ownerSkipped ? null : { reviewDate: null, carriedFrom: null };
+  const inWindow = anniversaryInWindow(entry.anniversary.date, from, to);
+  if (inWindow) return ownerSkipped && dateColumn(latest.review_date) === inWindow ? null : { reviewDate: inWindow, carriedFrom: null };
+  if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) return null;
+  const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
+  if (!anchor || anchor < carryFloor || anchor > to) return null;
+  return { reviewDate: anchor, carriedFrom: latest.batch_key };
+}
+
 function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
   const selected = [];
   for (const entry of book) {
-    const anniversary = resolveAnniversary({
+    entry.anniversary = resolveAnniversary({
       firstCompletedVisit: firstCompletedVisitFor(entry.first, entry.acceptedAt),
       acceptedAt: entry.acceptedAt,
       // member_since is a DATE; the created_at fallback is an instant.
@@ -2061,34 +2155,36 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       accountFirstVisit: accountFirst.get(entry.customer.id) || null,
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
     });
-    entry.anniversary = anniversary;
-    entry.reviewDate = anniversaryInWindow(anniversary.date, from, to);
-    entry.carriedFrom = null;
-    if (!anniversary.date || entry.reviewDate) { selected.push(entry); continue; }
-    const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
-    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status)) continue;
-    const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
-    if (!anchor || anchor < carryFloor || anchor > to) continue;
-    entry.reviewDate = anchor;
-    entry.carriedFrom = latest.batch_key;
+    const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
+    if (!occurrence) continue;
+    entry.reviewDate = occurrence.reviewDate;
+    entry.carriedFrom = occurrence.carriedFrom;
+    // Tenure is measured AT the review date (the anniversary's occurrence in
+    // the window, or the carried-forward one), never at build time.
+    entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
     selected.push(entry);
   }
-  // Tenure is measured AT the review date (the anniversary's occurrence in
-  // the window, or the carried-forward one), never at build time.
-  for (const entry of selected) entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
   return selected;
 }
 
 // Stage 5 — per-customer facts for the selected entries only (facts.js
 // fans out ~24 queries per customer; sequential on purpose).
+// The facts and signal reads recover from a failed statement (degraded
+// evidence holds the line), so they never run on the build transaction:
+// PostgreSQL aborts a transaction at its first failed statement and ignores
+// everything after it until the rollback, which would turn one degraded
+// read into a failed build. They read the committed state on the pool; the
+// batch lock, and the prior-review read (which does not recover), stay on
+// the transaction.
 async function loadReviewFacts(dbh, selected, { now, config, batchKey }) {
   const windowCustomerIds = [...new Set(selected.map((e) => e.customer.id))];
   const priorReviews = await loadPriorReviews(dbh, windowCustomerIds, { batchKey });
+  const recoverable = dbh.isTransaction ? db : dbh;
   const factsByCustomer = new Map();
   const signalsByCustomer = new Map();
   for (const customerId of windowCustomerIds) {
-    factsByCustomer.set(customerId, await loadFacts(dbh, customerId, { now }));
-    signalsByCustomer.set(customerId, await loadExceptionSignals(dbh, customerId, { now, config }));
+    factsByCustomer.set(customerId, await loadFacts(recoverable, customerId, { now }));
+    signalsByCustomer.set(customerId, await loadExceptionSignals(recoverable, customerId, { now, config }));
   }
   return { priorReviews, factsByCustomer, signalsByCustomer };
 }
@@ -2207,7 +2303,7 @@ function resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, win
   return { from, to, digestReset: !!(existing && existing.email_sent_at) };
 }
 
-async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {} } = {}) {
+async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor = null, trx = null, now = new Date(), deps = {}, preserveOwnerDecisions = false } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   assertBatchKey(batchKey);
   assertYmd(anniversaryFrom, 'anniversaryFrom');
@@ -2215,10 +2311,19 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   if (anniversaryFrom && anniversaryTo) assertWindowOrder(anniversaryFrom, anniversaryTo); // before any read
 
   const dbh = trx || db;
-  if (await batchHasSentRows(dbh, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', batchKey };
+  // A decided batch is never recomputed: refused before any ranking query,
+  // and judged again under the batch lock right before the rows are replaced.
+  const refusal = await batchRebuildRefusal(dbh, batchKey);
+  if (refusal) return { ok: false, reason: refusal, batchKey };
 
   const existing = await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to', 'email_sent_at');
   const { from, to, digestReset } = resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor });
+  // The rows as they stand when the ranking starts. The ranking runs on the
+  // pool and pins no connection for its duration (a two-connection pool with
+  // the build lease holding one would otherwise wait on itself); an edit or
+  // approval that lands while it runs changes this digest, and the write
+  // refuses rather than replace rows the owner just decided.
+  const before = batchDigest(await batchRowsForDigest(dbh, batchKey));
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);
@@ -2241,22 +2346,11 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
 
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
-  // Literal table names on every WRITER (insert / merge / update): the
-  // status-integrity scan in tests/annual-prepay-term-states.test.js fails
-  // closed on a mutation chain behind a dynamic table expression. Reads
-  // keep the constants.
-  const write = async (conn) => {
-    await conn('rate_review_batches').insert({
-      batch_key: batchKey, window_from: from, window_to: to,
-      allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
-      book_lines: book.length, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null,
-    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
-    await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
-    if (rows.length) {
-      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
-    }
-  };
-  if (trx) await write(trx); else await db.transaction(write);
+  const landed = await commitBatchRows(dbh, {
+    batchKey, expectedDigest: before, rows, computedAt, preserveOwnerDecisions,
+    batch: { window_from: from, window_to: to, allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson), book_lines: book.length },
+  });
+  if (landed.refused) return { ok: false, reason: landed.refused, batchKey };
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
@@ -2282,22 +2376,395 @@ async function summarizeBatch(batchKey, dbh = db) {
   return { batchKey, ...summarizeRows(rows) };
 }
 
+// The batch row and its rows come from ONE snapshot: under read committed a
+// rebuild landing between the two reads would pair the old window/config
+// with freshly ranked rows, and the screen would derive review dates from
+// the old window. A REPEATABLE READ transaction when called on the pool;
+// inside a caller's transaction, that caller's own snapshot.
 async function getBatch(batchKey, dbh = db) {
   assertBatchKey(batchKey);
-  const rows = await dbh(`${SNAPSHOTS} as r`)
-    .leftJoin('customers as c', 'c.id', 'r.customer_id')
-    .where('r.batch_key', batchKey)
-    .orderByRaw("CASE r.status WHEN 'green' THEN 0 WHEN 'exception' THEN 1 WHEN 'no_change' THEN 2 ELSE 3 END")
-    .orderBy('r.annual_delta_cents', 'desc')
-    .select('r.*', 'c.first_name', 'c.last_name', 'c.city');
-  const shaped = rows.map((r) => ({ ...r, flags: parseJson(r.flags) || [], customer_name: [r.first_name, r.last_name].filter(Boolean).join(' ') }));
-  const batch = await dbh(BATCHES).where({ batch_key: batchKey }).first();
+  const read = async (conn) => {
+    const batch = await conn(BATCHES).where({ batch_key: batchKey }).first();
+    const rows = await conn(`${SNAPSHOTS} as r`)
+      .leftJoin('customers as c', 'c.id', 'r.customer_id')
+      .where('r.batch_key', batchKey)
+      .orderByRaw("CASE r.status WHEN 'green' THEN 0 WHEN 'exception' THEN 1 WHEN 'no_change' THEN 2 ELSE 3 END")
+      .orderBy('r.annual_delta_cents', 'desc')
+      .select('r.*', 'c.first_name', 'c.last_name', 'c.city');
+    return { batch, rows };
+  };
+  const { batch, rows } = dbh.isTransaction ? await read(dbh) : await dbh.transaction(read, { isolationLevel: 'repeatable read' });
+  const shaped = rows.map(shapeSnapshotRow);
   return {
     batchKey,
     batch: batch ? { ...batch, allowances: parseJson(batch.allowances) || {}, config: parseJson(batch.config) || {}, line_rph: parseJson(batch.line_rph) || {} } : null,
     rows: shaped,
     summary: summarizeRows(shaped),
+    approvalDigest: batchDigest(shaped),
   };
+}
+
+// The admin screen's row: flags parsed, the customer's display name, and
+// the DATE columns as calendar days (never an instant the browser would
+// shift a day). `review_date` is the anniversary's occurrence the ranking
+// stored for this batch (the day the review is about and the notice counts
+// back from); a row from before the column falls back to the start date.
+function shapeSnapshotRow(r) {
+  const anniversary = dateColumn(r.anniversary_date);
+  return { ...r, anniversary_date: anniversary, review_date: dateColumn(r.review_date) || anniversary, flags: parseJson(r.flags) || [], customer_name: [r.first_name, r.last_name].filter(Boolean).join(' ') };
+}
+
+// The config a batch was ranked with (frozen on rate_review_batches.config)
+// — an edit on that batch is judged by the same minimum the ranking used,
+// never by a setting changed since. The live row (read BEFORE the edit's
+// transaction — never a best-effort statement inside it) only fills a key
+// the frozen copy lacks. Pure: no query.
+function configForBatch(batchRow, liveConfig) {
+  const frozen = batchRow ? parseJson(batchRow.config) : null;
+  const config = { ...liveConfig };
+  if (!frozen || typeof frozen !== 'object') return config;
+  for (const key of Object.keys(DEFAULT_CONFIG)) {
+    const n = finite(frozen[key]);
+    if (n != null && n >= 0) config[key] = n;
+  }
+  return config;
+}
+
+// ── admin edits (Pricing hub → Rate review) ──────────────────────────────
+//
+// What the screen may change on a snapshot row before the batch is sent: the
+// proposed amount (whole dollars, never below the current rate) and whether
+// the row is in the batch (green ↔ skipped). An exception row joins only
+// with an explicit includeException. Approval stamps green rows 'approved'
+// against a digest of the whole batch, so the decision is taken on exactly
+// the list the owner saw. None of this sends anything or writes a rate.
+
+const LOCKED_STATUSES = ['approved', 'sent', 'applied'];
+const EDITABLE_STATUSES = ['green', 'no_change', 'skipped', 'exception'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_COST_BLOCK_CHARS = 4000;
+// A proposed amount above this multiple of the current rate is a typo
+// ($1,170 for $117), not a review — the bands never move an account that far.
+const MAX_PROPOSED_MULTIPLE = 2;
+
+// Stable fingerprint of what the owner approves (`approvalDigest` on the
+// batch read — distinct from the batch's owner DIGEST email): every row's
+// id, proposed cents and status, order-independent. The approve route
+// refuses when the batch moved under the screen (expectedDigest ≠ this).
+function batchDigest(rows) {
+  const lines = rows.map((r) => `${r.id}:${Number(r.proposed_rate_cents) || 0}:${r.status}`).sort();
+  return crypto.createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 16);
+}
+
+async function configEditorNames(dbh, ids) {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  if (!wanted.length) return new Map();
+  try {
+    const rows = await dbh('technicians').whereIn('id', wanted).select('id', 'name');
+    return new Map(rows.map((r) => [r.id, r.name || null]));
+  } catch (err) {
+    logger.warn(`[rate-review] config editor lookup failed: ${err.message}`);
+    return new Map();
+  }
+}
+
+// The knobs (loadConfig's numeric view) plus the cost block and who last
+// edited — what the admin screen's Settings disclosure and cost-block
+// status read.
+async function readConfig(dbh = db) {
+  const config = await loadConfig(dbh);
+  let row = null;
+  try {
+    row = await dbh(CONFIG).where({ id: 1 }).first();
+  } catch (err) {
+    logger.warn(`[rate-review] config row read failed: ${err.message}`);
+  }
+  const names = await configEditorNames(dbh, row ? [row.updated_by, row.cost_block_set_by] : []);
+  return {
+    ...config,
+    cost_block: row && row.cost_block ? String(row.cost_block) : '',
+    cost_block_set_at: (row && row.cost_block_set_at) || null,
+    cost_block_set_by: (row && row.cost_block_set_by) || null,
+    cost_block_set_by_name: row ? names.get(row.cost_block_set_by) || null : null,
+    updated_at: (row && row.updated_at) || null,
+    updated_by: (row && row.updated_by) || null,
+    updated_by_name: row ? names.get(row.updated_by) || null : null,
+  };
+}
+
+// Every editable setting with its bounds — the one loop below validates
+// them all. Percentages keep three decimals; cents and counts are whole
+// numbers; the cost block is the owner's plain text.
+const CONFIG_RULES = Object.freeze({
+  pass_through_pct: { kind: 'number', min: 0, max: 100 },
+  band_b_tolerance_pct: { kind: 'number', min: 0, max: 100 },
+  band_c_max_pct: { kind: 'number', min: 0, max: 100 },
+  cap_pct: { kind: 'number', min: 0, max: 100 },
+  cap_cents: { kind: 'integer', min: 0, max: 100000 }, // $1,000 per application
+  // A minimum of zero would make an unchanged rate a "change" (delta 0 ≥ 0)
+  // and let a band-A row be approved as a notice: at least one cent.
+  min_delta_cents: { kind: 'integer', min: 1, max: 100000 },
+  // at least one: a zero floor would let the ranking prefer an EMPTY not-home
+  // sample over the account's populated home visits (lineDurationStats)
+  min_usable_visits: { kind: 'integer', min: 1, max: 100 },
+  lock_months: { kind: 'integer', min: 0, max: 120 },
+  exception_callback_days: { kind: 'integer', min: 0, max: 3650 },
+  exception_manual_edit_months: { kind: 'integer', min: 0, max: 120 },
+  cost_block: { kind: 'text', max: MAX_COST_BLOCK_CHARS },
+});
+
+// One setting against its rule: the cleaned value, or the message.
+function checkSetting(key, rule, raw) {
+  if (rule.kind === 'text') {
+    if (raw != null && typeof raw !== 'string') return { error: `${key} must be text` };
+    const text = String(raw || '').replace(/\r\n/g, '\n').trim();
+    return text.length > rule.max ? { error: `${key} must be at most ${rule.max} characters` } : { value: text };
+  }
+  const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isFinite(n)) return { error: `${key} must be a number` };
+  if (rule.kind === 'integer' && !Number.isInteger(n)) return { error: `${key} must be a whole number` };
+  if (n < rule.min) return { error: `${key} must be at least ${rule.min}` };
+  if (n > rule.max) return { error: `${key} must be at most ${rule.max}` };
+  return { value: rule.kind === 'integer' ? n : Math.round(n * 1000) / 1000 };
+}
+
+function validateConfigPatch(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { errors: ['Settings must be an object'], clean: {} };
+  const errors = [];
+  const clean = {};
+  for (const [key, raw] of Object.entries(patch)) {
+    const checked = CONFIG_RULES[key] ? checkSetting(key, CONFIG_RULES[key], raw) : { error: `${key} is not a rate review setting` };
+    if (checked.error) errors.push(checked.error);
+    else clean[key] = checked.value;
+  }
+  return { errors, clean };
+}
+
+function auditLog() {
+  return require('./audit-log');
+}
+
+// PUT /config. Partial: only the keys sent change. Every change lands in one
+// audit_log row (critical — a lost audit on a pricing knob fails the save).
+// The cost block is the owner's own paragraph: stored verbatim (trimmed),
+// never generated, with who set it and when for the screen's status line.
+async function updateConfig({ patch, actorId = null, dbh = db } = {}) {
+  const { errors, clean } = validateConfigPatch(patch);
+  if (errors.length) return { ok: false, reason: 'invalid', errors };
+  if (!Object.keys(clean).length) return { ok: false, reason: 'invalid', errors: ['Nothing to change'] };
+  // The write transaction holds the write and its audit row only. The
+  // display read (readConfig: the row plus best-effort editor names) runs
+  // AFTER the commit on the pool — a failed best-effort statement inside the
+  // transaction would leave it aborted and roll the valid save back.
+  const outcome = await dbh.transaction(async (trx) => {
+    const existing = await trx(CONFIG).where({ id: 1 }).forUpdate().first();
+    const numericBefore = {};
+    for (const key of Object.keys(DEFAULT_CONFIG)) {
+      const n = existing ? finite(existing[key]) : null;
+      numericBefore[key] = n != null && n >= 0 ? n : DEFAULT_CONFIG[key];
+    }
+    const merged = { ...numericBefore };
+    for (const key of Object.keys(DEFAULT_CONFIG)) if (clean[key] != null) merged[key] = clean[key];
+    if (merged.band_b_tolerance_pct > merged.band_c_max_pct) {
+      return { ok: false, reason: 'invalid', errors: ['Band B tolerance must not exceed the band C maximum'] };
+    }
+    const now = new Date();
+    const changed = {};
+    const update = {};
+    for (const [key, value] of Object.entries(clean)) {
+      if (key === 'cost_block') {
+        const before = existing && existing.cost_block ? String(existing.cost_block) : '';
+        if (before === value) continue;
+        update.cost_block = value || null;
+        update.cost_block_set_at = value ? now : null;
+        update.cost_block_set_by = value ? actorId : null;
+        changed.cost_block = { from_chars: before.length, to_chars: value.length };
+      } else {
+        if (numericBefore[key] === value) continue;
+        update[key] = value;
+        changed[key] = { from: numericBefore[key], to: value };
+      }
+    }
+    if (!Object.keys(changed).length) return { ok: true, changed };
+    update.updated_at = now;
+    update.updated_by = actorId;
+    // literal table names on every writer — see the note in buildBatch
+    if (existing) await trx('rate_review_config').where({ id: 1 }).update(update);
+    else await trx('rate_review_config').insert({ id: 1, ...DEFAULT_CONFIG, ...update, created_at: now });
+    await auditLog().recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'rate_review.config.update',
+      resource_type: 'rate_review_config',
+      resource_id: null,
+      metadata: { changed },
+      critical: true,
+      trx,
+    });
+    return { ok: true, changed };
+  });
+  if (!outcome.ok) return outcome;
+  return { ...outcome, config: await readConfig(dbh) };
+}
+
+// Per-application amounts are whole dollars (the plan's rule); a monthly
+// line's dues are a whole-dollar per-application amount spread over 12, so
+// they legitimately carry cents.
+function validateProposedCents(raw, currentCents, { wholeDollars = true } = {}) {
+  const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isInteger(n) || n < 0) return { error: 'proposed_rate_cents must be a whole number of cents', reason: 'proposed_invalid' };
+  if (wholeDollars && n % 100 !== 0) return { error: 'Proposed amounts are whole dollars', reason: 'proposed_not_whole_dollars' };
+  if (n < currentCents) return { error: 'A proposed amount is never below the current rate', reason: 'proposed_below_current' };
+  if (currentCents > 0 && n > currentCents * MAX_PROPOSED_MULTIPLE) return { error: `A proposed amount above ${MAX_PROPOSED_MULTIPLE}× the current rate is refused — check the figure`, reason: 'proposed_too_high' };
+  return { cents: n };
+}
+
+function rowEditRefusal(row, { includeException, status }) {
+  if (!row) return { ok: false, reason: 'row_not_found', error: 'Row not found' };
+  if (LOCKED_STATUSES.includes(row.status)) return { ok: false, reason: 'row_locked', error: `This row is already ${row.status} and can no longer be edited.` };
+  if (!EDITABLE_STATUSES.includes(row.status)) return { ok: false, reason: 'row_locked', error: `A ${row.status} row cannot be edited.` };
+  if (row.status === 'exception' && includeException !== true) return { ok: false, reason: 'row_is_exception', error: 'This row is an exception — include it explicitly to change it.' };
+  if (row.status === 'exception' && status == null) return { ok: false, reason: 'status_required', error: 'Say whether the exception joins the batch (green) or is skipped this cycle.' };
+  if (!(Number(row.current_rate_cents) > 0)) return { ok: false, reason: 'row_locked', error: 'A row with no current rate cannot be edited.' };
+  return null;
+}
+
+// The row after an edit — the proposal, its deltas, the status and the flags
+// that record how it got there — as one pure rule (the Include and Proposed
+// controls on the screen rely on exactly this).
+function nextRowState(row, { proposed, status, config }) {
+  const current = Number(row.current_rate_cents);
+  const monthly = row.rate_unit === 'month';
+  const vpy = Number(row.visits_per_year) || 0;
+  const delta = proposed - current;
+  // A notice needs a real increase: strictly positive AND at least the
+  // minimum (which a stored config could, in principle, carry as 0). A
+  // monthly line's dues are a whole-dollar per-application amount spread
+  // over 12, so the minimum is spread the same way, rounded DOWN — an
+  // already-ranked boundary proposal (33¢ a month for $1 per application
+  // on a quarterly line) stays green across an Include toggle.
+  const minDelta = monthly && vpy > 0 ? Math.floor((config.min_delta_cents * vpy) / 12) : config.min_delta_cents;
+  // A per-application line with no visit count (a custom cadence) cannot
+  // price a change per year — the ranking's own no_visits_per_year hold.
+  const priceable = monthly || vpy > 0;
+  const isChange = priceable && delta > 0 && delta >= minDelta;
+  // A status-less amount edit keeps the row in or out of the batch as it was.
+  const out = status === 'skipped' || (status == null && row.status === 'skipped');
+  const flags = new Set(parseJson(row.flags) || []);
+  if (proposed !== Number(row.proposed_rate_cents)) flags.add('admin_edited');
+  // Included despite a hold: the row the ranking held (status exception), or
+  // one it held that the owner skipped and now includes (status skipped, the
+  // hold flags still on it) — the marker outlives a skip/include cycle, so a
+  // retry's rebuild can never read the inclusion as untouched.
+  const held = row.status === 'exception' || [...flags].some((flag) => EXCEPTION_FLAGS.includes(flag));
+  if (held && !out) flags.add('exception_included');
+  if (!priceable) flags.add('no_visits_per_year');
+  // An owner's skip is a decision for this cycle, never a carry-forward hold
+  // (selectReviewEntries leaves an admin_skipped line out of the next batch).
+  if (out) flags.add('admin_skipped'); else flags.delete('admin_skipped');
+  return {
+    proposed_rate_cents: proposed,
+    delta_cents: delta,
+    annual_delta_cents: Math.round(delta * (monthly ? 12 : vpy)),
+    status: out ? 'skipped' : (isChange ? 'green' : 'no_change'),
+    flags: [...flags],
+  };
+}
+
+// PUT /batches/:key/rows/:id. Recomputes delta, annual delta and status
+// from the (possibly new) proposed amount; the row's band and list rate are
+// the ranking's and never change here. Refused once the batch has a sent
+// row, on a locked (approved/sent/applied) row, and on an exception row
+// without includeException — an exception leaves its hold only by the
+// owner's explicit choice, and then must say green or skipped.
+async function updateRow({ batchKey, rowId, proposedRateCents, status, includeException = false, actorId = null, dbh = db } = {}) {
+  assertBatchKey(batchKey);
+  if (!UUID_RE.test(String(rowId || ''))) return { ok: false, reason: 'row_not_found', error: 'Row not found' };
+  if (status != null && !['green', 'skipped'].includes(status)) return { ok: false, reason: 'status_invalid', error: 'status must be green or skipped' };
+  if (proposedRateCents == null && status == null) return { ok: false, reason: 'nothing_to_change', error: 'Send a proposed amount or a status' };
+  // The live config is read on the pool, outside the transaction below: a
+  // failed best-effort read inside it would leave the transaction aborted
+  // and roll the row update and its audit back.
+  const liveConfig = await loadConfig(dbh);
+  return dbh.transaction(async (trx) => {
+    // The writers' shared lock (a rebuild takes it to judge and replace the
+    // rows), so an edit and a recompute's write never interleave.
+    await lockBatch(trx, batchKey);
+    const batchRow = await trx(BATCHES).where({ batch_key: batchKey }).first();
+    if (await batchHasSentRows(trx, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', error: 'This batch already has rows that were sent to customers — it can no longer be edited.' };
+    const row = await trx(SNAPSHOTS).where({ id: rowId, batch_key: batchKey }).forUpdate().first();
+    const refusal = rowEditRefusal(row, { includeException, status });
+    if (refusal) return refusal;
+    const checked = proposedRateCents == null
+      ? { cents: Number(row.proposed_rate_cents) }
+      : validateProposedCents(proposedRateCents, Number(row.current_rate_cents), { wholeDollars: row.rate_unit !== 'month' });
+    if (checked.error) return { ok: false, reason: checked.reason, error: checked.error };
+    // A line without a visit count cannot price a change per year (the
+    // ranking holds it at no change): an amount above the current rate is
+    // refused rather than approved as a green row worth $0 a year.
+    if (row.rate_unit !== 'month' && !(Number(row.visits_per_year) > 0) && checked.cents > Number(row.current_rate_cents)) {
+      return { ok: false, reason: 'no_visits_per_year', error: 'This line has no visit count, so a change cannot be priced per year — it stays at no change until its cadence is known.' };
+    }
+    const next = nextRowState(row, { proposed: checked.cents, status, config: configForBatch(batchRow, liveConfig) });
+
+    const now = new Date();
+    // literal table name on the writer — see the note in buildBatch
+    await trx('rate_review_snapshots').where({ id: row.id }).update({ ...next, flags: JSON.stringify(next.flags), updated_at: now });
+    await auditLog().recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'rate_review.row.update',
+      resource_type: 'rate_review_snapshot',
+      resource_id: row.id,
+      metadata: {
+        batch_key: batchKey,
+        from: { proposed_rate_cents: Number(row.proposed_rate_cents), status: row.status },
+        to: { proposed_rate_cents: next.proposed_rate_cents, status: next.status },
+        include_exception: row.status === 'exception',
+      },
+      critical: true,
+      trx,
+    });
+    const updated = await trx(`${SNAPSHOTS} as r`).leftJoin('customers as c', 'c.id', 'r.customer_id').where('r.id', row.id).select('r.*', 'c.first_name', 'c.last_name', 'c.city').first();
+    const batchRows = await trx(SNAPSHOTS).where({ batch_key: batchKey }).select('id', 'proposed_rate_cents', 'status', 'annual_delta_cents');
+    return { ok: true, row: shapeSnapshotRow(updated), summary: summarizeRows(batchRows), approvalDigest: batchDigest(batchRows) };
+  });
+}
+
+// POST /batches/:key/approve. Marks every green row 'approved' and stamps
+// who/when on the rows and the batch, against expectedDigest. NO sending
+// here: the comms lane reads 'approved' rows. Exceptions, skipped and
+// no-change rows are untouched.
+async function approveBatch({ batchKey, expectedDigest, actorId = null, dbh = db } = {}) {
+  assertBatchKey(batchKey);
+  if (typeof expectedDigest !== 'string' || !expectedDigest.trim()) return { ok: false, reason: 'digest_required', error: 'expectedDigest is required' };
+  return dbh.transaction(async (trx) => {
+    await lockBatch(trx, batchKey); // the writers' shared lock (see updateRow)
+    const rows = await trx(SNAPSHOTS).where({ batch_key: batchKey }).forUpdate().select('id', 'proposed_rate_cents', 'status', 'annual_delta_cents');
+    if (!rows.length) return { ok: false, reason: 'batch_not_found', error: 'Batch not found' };
+    if (rows.some((r) => SENT_STATUSES.includes(r.status))) return { ok: false, reason: 'batch_has_sent_rows', error: 'This batch already has rows that were sent to customers.' };
+    const digest = batchDigest(rows);
+    if (digest !== expectedDigest.trim()) return { ok: false, reason: 'digest_mismatch', error: 'The batch changed since this screen loaded — review it again before approving.', approvalDigest: digest };
+    const green = rows.filter((r) => r.status === 'green');
+    if (!green.length) return { ok: false, reason: 'nothing_to_approve', error: 'No green rows to approve.', approvalDigest: digest };
+    const now = new Date();
+    const annualDeltaCents = green.reduce((sum, r) => sum + (Number(r.annual_delta_cents) || 0), 0);
+    // literal table names on the writers — see the note in buildBatch
+    await trx('rate_review_snapshots').whereIn('id', green.map((r) => r.id)).update({ status: 'approved', approved_at: now, approved_by: actorId, updated_at: now });
+    await trx('rate_review_batches').where({ batch_key: batchKey }).update({ approved_at: now, approved_by: actorId, approval_digest: digest, updated_at: now });
+    await auditLog().recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'rate_review.batch.approve',
+      resource_type: 'rate_review_batch',
+      resource_id: null,
+      metadata: { batch_key: batchKey, digest, approved: green.length, annual_delta_cents: annualDeltaCents },
+      critical: true,
+      trx,
+    });
+    const after = rows.map((r) => (r.status === 'green' ? { ...r, status: 'approved' } : r));
+    return { ok: true, approved: green.length, annual_delta_cents: annualDeltaCents, approved_at: now, approvalDigest: batchDigest(after), summary: summarizeRows(after) };
+  });
 }
 
 async function listBatches(dbh = db) {
@@ -2364,10 +2831,19 @@ function composeBatchEmail({ batchKey, rows, summary, batch = null }) {
   const window = windowLabel(batch);
   const label = window ? `${monthLabel(batchKey)} batch (${window})` : `${monthLabel(batchKey)} batch`;
   const decide = summary.green + summary.exception;
-  const greenDollars = dollars(summary.green_annual_delta_cents);
+  const sumAnnual = (list) => list.reduce((total, r) => total + (Number(r.annual_delta_cents) || 0), 0);
+  const green = rows.filter((r) => r.status === 'green');
+  const approved = rows.filter((r) => r.status === 'approved');
+  const sentRows = rows.filter((r) => SENT_STATUSES.includes(r.status));
+  // Pending proposals (green) and decisions already taken (approved) are
+  // separate money: the subject and the "if all approved" figure are green
+  // only; approved rows carry their own total and section.
+  const greenDollars = dollars(sumAnnual(green));
+  const approvedDollars = dollars(sumAnnual(approved));
+  const approvedNote = approved.length ? `, ${approved.length} approved (+${approvedDollars}/yr, waiting to send)` : '';
   const subject = decide > 0
     ? `ACT: Rate review — ${label} · ${summary.green} green · ${summary.exception} exception${summary.exception === 1 ? '' : 's'} · +${greenDollars}/yr`
-    : `OK: Rate review — ${label}: nothing to decide (${summary.no_change} no-change, ${summary.skipped} skipped)`;
+    : `OK: Rate review — ${label}: nothing to decide (${approved.length ? `${approved.length} approved, ` : ''}${summary.no_change} no-change, ${summary.skipped} skipped)`;
   const link = `${adminPortalUrl()}/admin/pricing-logic?area=rate-review&batch=${batchKey}`;
   const unitFor = (row) => (row.rate_unit === 'month' ? '/mo' : '/application');
   const describe = (row) => {
@@ -2383,26 +2859,33 @@ function composeBatchEmail({ batchKey, rows, summary, batch = null }) {
     return `${name} — ${row.family_key.replace(/_/g, ' ')} ${row.cadence.replace(/_/g, ' ')} · band ${row.band || '—'} · ${move}${list}${rph}${flags}`;
   };
   const section = (title, list) => (list.length ? [`${title} (${list.length})`, ...list.map((r) => `- ${describe(r)}`), ''] : []);
-  const green = rows.filter((r) => r.status === 'green');
   const exceptions = rows.filter((r) => r.status === 'exception');
   const noChange = rows.filter((r) => r.status === 'no_change');
   const skipped = rows.filter((r) => r.status === 'skipped');
+  const standing = sentRows.length
+    ? 'The sent rows are already with their customers; nothing else has gone out and no other rate has changed.'
+    : 'Nothing has been sent to a customer and no rate has changed; this is the ranking only.';
   const carried = rows.filter((r) => Array.isArray(r.flags) && r.flags.includes('carried_forward')).length;
-  const intro = `Rate review ${label}: ${summary.rows} plan line${summary.rows === 1 ? '' : 's'} with an anniversary in the window${carried ? ` (${carried} carried forward from an earlier batch)` : ''} — ${summary.green} green (+${greenDollars}/yr if all approved), ${summary.exception} held out as exceptions, ${summary.no_change} no change, ${summary.skipped} skipped. Nothing has been sent to a customer and no rate has changed; this is the ranking only.`;
-  const text = [intro, '', ...section('GREEN — proposed increases', green), ...section('EXCEPTIONS — held out, your call', exceptions), ...section('NO CHANGE', noChange), ...section('SKIPPED — could not be priced', skipped), `Review: ${link}`].join('\n');
+  const intro = `Rate review ${label}: ${summary.rows} plan line${summary.rows === 1 ? '' : 's'} with an anniversary in the window${carried ? ` (${carried} carried forward from an earlier batch)` : ''} — ${summary.green} green (+${greenDollars}/yr if all approved)${approvedNote}, ${summary.exception} held out as exceptions, ${summary.no_change} no change, ${summary.skipped} skipped. ${standing}`;
+  const text = [intro, '', ...section('GREEN — proposed increases', green), ...section('APPROVED — waiting to send', approved), ...section('EXCEPTIONS — held out, your call', exceptions), ...section('NO CHANGE', noChange), ...section('SKIPPED — could not be priced', skipped), ...section('SENT — notices out', sentRows), `Review: ${link}`].join('\n');
   const htmlSection = (title, list) => (list.length
     ? `<p><strong>${esc(title)} (${list.length})</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${list.map((r) => `<li style="margin:0 0 6px 0;">${esc(describe(r))}</li>`).join('')}</ul>`
     : '');
   const html = [
     `<p>${esc(intro)}</p>`,
     htmlSection('GREEN — proposed increases', green),
+    htmlSection('APPROVED — waiting to send', approved),
     htmlSection('EXCEPTIONS — held out, your call', exceptions),
     htmlSection('NO CHANGE', noChange),
     htmlSection('SKIPPED — could not be priced', skipped),
+    htmlSection('SENT — notices out', sentRows),
     `<p><a href="${esc(link)}">Open the rate review batch</a></p>`,
   ].join('\n');
-  const headline = decide > 0 ? `Rate review — ${monthLabel(batchKey)}: ${summary.green} green, ${summary.exception} exceptions` : `Rate review — ${monthLabel(batchKey)}: nothing to decide`;
-  const summaryLine = decide > 0 ? `+${greenDollars}/yr proposed across ${summary.green} accounts; ${summary.exception} need a look.` : `${summary.rows} lines ranked, none need a decision.`;
+  const approvedHeadline = approved.length ? `, ${approved.length} approved` : '';
+  const headline = decide > 0 ? `Rate review — ${monthLabel(batchKey)}: ${summary.green} green, ${summary.exception} exceptions${approvedHeadline}` : `Rate review — ${monthLabel(batchKey)}: nothing to decide${approvedHeadline}`;
+  const summaryLine = decide > 0
+    ? `+${greenDollars}/yr proposed across ${summary.green} accounts; ${summary.exception} need a look.${approved.length ? ` ${approved.length} approved (+${approvedDollars}/yr) wait to send.` : ''}`
+    : `${summary.rows} lines ranked, none need a decision.${approved.length ? ` ${approved.length} approved (+${approvedDollars}/yr) wait to send.` : ''}`;
   const itemKeys = rows.map((r) => `${r.customer_id}:${r.family_key}:${r.status}`);
   return { subject, text, html, headline, summary: summaryLine, link: `/admin/pricing-logic?area=rate-review&batch=${batchKey}`, itemKeys, decide };
 }
@@ -2453,7 +2936,7 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
     logger.warn('[rate-review] recipient is not an internal address — skipping batch email; set a valid RATE_REVIEW_DIGEST_EMAIL');
     return { sent: false, skipped: 'recipient', subject: composed.subject };
   }
-  await deliverOpsDigest({
+  const delivered = await deliverOpsDigest({
     key: 'rate-review',
     subject: composed.subject,
     html: composed.html,
@@ -2476,27 +2959,50 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
   });
   const stamped = await stampEmailed(dbh, batchKey, composed.subject, version);
   if (!stamped) logger.warn(`[rate-review] digest for ${batchKey} described a version the batch no longer has — not stamped; the rebuilt rankings go out on the next delivery`);
-  return { sent: true, stamped, subject: composed.subject, rows: batch.summary.rows };
+  // deliverOpsDigest records an in-app bell row and skips the email when the
+  // ops digests run in-app; the screen tells the owner which one happened.
+  const channel = delivered && delivered.channel === 'in_app' ? 'in_app' : 'email';
+  return { sent: true, stamped, channel, subject: composed.subject, rows: batch.summary.rows };
 }
 
 // Scheduler entry (1st of the month): build the batch for anniversaries in
 // the FOLLOWING month and email it once. Gate read first — off = return
 // before any query. A batch with sent rows is never rebuilt.
+// The tick's batch. No explicit window: buildBatch keeps an EXISTING batch's
+// stored window; a NEW batch (a day-1 build, or a retry after a day-1 build
+// that failed before persisting) is anchored on the first of the build
+// month, so every tick of the month covers the same anniversaries. A retry
+// (the digest did not go out) rebuilds the unsent batch only while it
+// carries no decision of the owner's: once a row was edited, skipped,
+// included or approved from the screen, the batch stands and only the
+// delivery is retried — judged before the ranking (its cost is skipped) and
+// again under the commit lock (a decision can land while it runs).
+// A rebuild refused under the commit lock for a decision of the owner's — an
+// edit, skip or inclusion (batch_has_owner_decisions), or an approval or a
+// send that landed while the ranking ran — leaves the batch standing: the
+// tick delivers it as it is.
+const STANDING_REFUSALS = ['batch_has_owner_decisions', 'batch_has_approved_rows', 'batch_has_sent_rows'];
+async function tickBatch(dbh, batchKey, { now, deps }) {
+  const standing = await batchOwnerDecisions(dbh, batchKey);
+  if (standing.decided) return { ok: true, batchKey, rows: standing.rows, rebuilt: false };
+  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps, preserveOwnerDecisions: true });
+  if (built.ok || !STANDING_REFUSALS.includes(built.reason)) return { ...built, rebuilt: true };
+  const decided = await batchOwnerDecisions(dbh, batchKey);
+  return { ok: true, batchKey, rows: decided.rows, rebuilt: false };
+}
+
 async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null, deps = {} } = {}) {
   if (!rateReviewLive()) return { skipped: 'gate_off' };
   // batch_key = the BUILD month. A batch already emailed is finished for
   // the month — a retried tick must not rebuild it (and slide its window).
   const batchKey = etMonthStart(now, 0).slice(0, 7);
   if (await alreadyEmailed(dbh, batchKey)) return { skipped: 'already_emailed', batchKey, emailed: false };
-  // No explicit window: buildBatch keeps an EXISTING batch's stored window;
-  // a NEW batch (a day-1 build, or a retry after a day-1 build that failed
-  // before persisting) is anchored on the first of the build month, so every
-  // tick of the month covers the same anniversaries.
-  const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps });
+  const built = await tickBatch(dbh, batchKey, { now, deps });
   if (!built.ok) {
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
+  if (!built.rebuilt) logger.info(`[rate-review] ${batchKey} carries owner decisions — delivery retried without a rebuild`);
   // The batch is persisted either way. A delivery failure is RE-THROWN so
   // runExclusive records the job as failed (job_health) instead of a quiet
   // success with email_sent_at still null; the tick runs on days 1–7 and is
@@ -2538,11 +3044,20 @@ module.exports = {
   getBatch,
   listBatches,
   loadConfig,
+  readConfig,
+  updateConfig,
+  updateRow,
+  approveBatch,
+  batchDigest,
   runMonthlyRateReview,
   sendBatchEmail,
   batchEmailed,
   composeBatchEmail,
   _private: {
+    loadReviewFacts,
+    batchOwnerDecisions,
+    commitBatchRows,
+    batchRowsForDigest,
     soldPosturePins,
     COMBINED_CATALOG_SQL,
     RETIRED_COMBINED_CATALOG_KEYS,
@@ -2566,7 +3081,7 @@ module.exports = {
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
-    gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,
+    gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows, validateConfigPatch, validateProposedCents, nextRowState,
     resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer, engineInputsFromEstimate,
     loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, ledgerSliceForLine, loadEstimates, loadCustomers,
     loadSettledDues, duesPerVisitCents,
