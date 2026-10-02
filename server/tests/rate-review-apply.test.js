@@ -1336,15 +1336,20 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
     // an amount-only edit of its own term (coverage omitted) is judged on the coverage that term keeps, never as unlabeled
-    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null })');
+    expect(route).toContain('const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };');
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount })');
     expect(call).toBeGreaterThan(0);
+    // what the customer actually pays is judged too: the LOCKED invoice's total, whenever it differs from the term amount
+    expect(route).toMatch(/\.where\(\{ id: invoice\.id \}\)\.forUpdate\(\)\.first\('id', 'customer_id', 'total'\)/);
+    expect(route).toContain('const chargedTotal = Number(lockedInvoiceRow.total);');
+    expect(route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal })')).toBeGreaterThan(call);
     // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
     // preserves them when no start is sent), so the guard judges the preserved start, never today
     expect(route).toMatch(/const linkedTermForNotice = await trx\('annual_prepay_terms'\)\s*\.where\(\{ prepay_invoice_id: invoice\.id \}\)/);
     // after the per-customer annual-prepay advisory lock, before the term write
     expect(route.indexOf('pg_advisory_xact_lock')).toBeLessThan(call);
     expect(call).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay('));
-    expect(route.slice(Math.max(0, call - 900), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route.slice(Math.max(0, call - 1800), call)).toMatch(/rateReviewLive\(\)/);
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });
