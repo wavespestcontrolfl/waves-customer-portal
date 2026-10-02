@@ -191,12 +191,14 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
 // them only when every saved follow-up is on a lawn date AND in that lawn
 // row's visit (a seeded row whose grouping failed or was refused is a separate
 // stop). Otherwise the savepoint rolls back and the normal walk is seeded.
-// No rider = the normal seed, untouched. `seed(conn, overrideDates|null)`.
+// No rider = the normal seed, untouched. `seed(conn, overrideDates|null,
+// commitScope|null)`: inside the savepoint the seeder's post-commit work waits
+// on the caller's transaction (commitScope), not on the savepoint's RELEASE.
 async function seedWithRide(conn, parentRow, rider, seed) {
-  if (!rider) return { seedResult: await seed(conn, null), rides: false };
+  if (!rider) return { seedResult: await seed(conn, null, null), rides: false };
   try {
     const seedResult = await conn.transaction(async (sp) => {
-      const result = await seed(sp, rider.overrideDates);
+      const result = await seed(sp, rider.overrideDates, conn.isTransaction ? conn : null);
       if (!(await persistedRiderOnHost(sp, parentRow.id, rider.hostParentId, rider.overrideDates))) {
         throw new Error('saved follow-ups are not all in the lawn visits');
       }
@@ -205,7 +207,7 @@ async function seedWithRide(conn, parentRow, rider, seed) {
     return { seedResult, rides: true };
   } catch (err) {
     logger.warn(`[rider-accept] rider ${parentRow.id} does not ride (${err.message}) — seeding the quarterly walk`);
-    return { seedResult: await seed(conn, null), rides: false };
+    return { seedResult: await seed(conn, null, null), rides: false };
   }
 }
 

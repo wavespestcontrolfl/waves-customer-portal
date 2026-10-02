@@ -260,6 +260,25 @@ describe('rider context fall-backs', () => {
     expect(seedCalls).toEqual([rider.overrideDates, null]);
   });
 
+  test('inside the ride savepoint, the seeder\'s post-commit work waits on the OUTER transaction', async () => {
+    const ctx = RiderAccept.createContext();
+    await seedLawn(ctx);
+    const rider = await RiderAccept.beforeSeed(ctx, conn, pest(), pestPlan);
+    conn.persisted = [
+      ...lawnRows(8),
+      ...rider.overrideDates.map((d, i) => ({ id: `p${i}`, recurring_parent_id: 'pest', scheduled_date: d, visit_id: `v${d}` })),
+    ];
+    const outer = Object.assign(conn, { isTransaction: true });
+    const scopes = [];
+    try {
+      const ride = await RiderAccept.seedWithRide(outer, pest(), rider, async (_c, _d, commitScope) => {
+        scopes.push(commitScope); return { insertedRows: [] };
+      });
+      expect(ride.rides).toBe(true);
+      expect(scopes).toEqual([outer]);
+    } finally { delete conn.isTransaction; }
+  });
+
   test('no rider: the plain seed runs once, no savepoint ride', async () => {
     seedCalls.length = 0;
     const ride = await RiderAccept.seedWithRide(conn, pest(), null, seed);

@@ -4306,10 +4306,11 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   let ride;
   try {
     // No rider (gate off, not a rider, not riding) = the plain seed below.
-    ride = await RiderAcceptSeeding.seedWithRide(database, parentRow, rider, (conn, overrideDates) => (
+    ride = await RiderAcceptSeeding.seedWithRide(database, parentRow, rider, (conn, overrideDates, commitScope) => (
       RecurringAppointmentSeeder.seedFollowUpsForParent(conn, parentRow, {
         ...plan.seedOpts,
         ...(overrideDates ? { overrideDates } : {}),
+        ...(commitScope ? { commitScope } : {}),
       })));
   } catch (seedErr) {
     // A lawn that failed to seed hosts nothing for the units after it.
