@@ -109,7 +109,9 @@ const DIVERGENCE_METRIC = {
 function qualityBucket(value) {
   if (typeof value === 'string') {
     const key = value.trim().toLowerCase();
-    return ['adequate', 'limited', 'poor'].includes(key) ? key : 'unrated';
+    if (['adequate', 'limited', 'poor'].includes(key)) return key;
+    // quality_score is a Postgres decimal: pg returns it as a string ('80.00').
+    if (!/^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(key)) return 'unrated';
   }
   const n = value == null || value === '' ? NaN : Number(value);
   if (!Number.isFinite(n) || n <= 0) return 'unrated';
@@ -317,8 +319,10 @@ function seasonOf(side) {
 /**
  * @param {object} input
  * @param {{date, season?, isBaseline?, scores, confidence}} input.current this visit's assessment
- * @param {{date, season?, scores, confidence?}} input.prior the prior visit's assessment
- * @param {object|null} [input.sinceLast] reportV2.sinceLast (P12): { priorDate, applied[], checks[] }
+ * @param {{assessmentId?, date, season?, scores, confidence?}} input.prior the prior visit's assessment
+ * @param {object|null} [input.sinceLast] reportV2.sinceLast (P12): { priorAssessmentId, priorDate, applied[], checks[] }
+ *   When both name an assessment and they differ, the scores belong to another
+ *   visit than the frozen treatments: nothing is judged (reason 'prior_mismatch').
  * @param {number} [input.band] category dead-band (default 8)
  * @param {number} [input.overallBand] overall dead-band (default 4)
  * @returns {object} { v, engineVersion, eligible, reason, daysSincePrior, confidence, season, overall, deltas, items, unmapped }
@@ -341,6 +345,12 @@ function buildLawnProgress({
   };
 
   if (current?.isBaseline) return { ...base, reason: 'baseline' };
+  // The frozen sinceLast pins the visit its treatments came from; scores from
+  // any other visit would judge those treatments against the wrong dates.
+  if (sinceLast?.priorAssessmentId != null && prior?.assessmentId != null
+    && String(sinceLast.priorAssessmentId) !== String(prior.assessmentId)) {
+    return { ...base, reason: 'prior_mismatch' };
+  }
   const priorDay = dayNumber(prior?.date || sinceLast?.priorDate);
   const curDay = dayNumber(current?.date);
   if (!prior?.scores || !current?.scores || priorDay == null || curDay == null || curDay <= priorDay) {

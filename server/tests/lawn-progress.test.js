@@ -579,3 +579,20 @@ describe('ships dark', () => {
     ]);
   });
 });
+
+describe('codex pre-push P1s', () => {
+  it('a decimal quality score as a pg string is a number, named levels still work, junk is unrated', () => {
+    expect(deriveAssessmentConfidence({ photos: ['80.00', '80.00'] }).level).toBe('moderate');
+    expect(deriveAssessmentConfidence({ photos: ['adequate', 'adequate'] }).level).toBe('moderate');
+    expect(deriveAssessmentConfidence({ photos: ['80abc', 'n/a'] }).level).not.toBe('moderate');
+  });
+
+  it('scores from a different visit than the frozen sinceLast judge nothing (prior_mismatch)', () => {
+    const out = buildLawnProgress({
+      current: { date: '2026-09-30', scores: { overall: 70 }, confidence: 'high' },
+      prior: { assessmentId: 'la-mid', date: '2026-09-01', scores: { overall: 60 } },
+      sinceLast: { priorAssessmentId: 'la-prior', priorDate: '2026-08-01', applied: [], checks: [{ key: 'weeds', status: 'watch' }] },
+    });
+    expect(out).toMatchObject({ eligible: false, reason: 'prior_mismatch', items: [] });
+  });
+});

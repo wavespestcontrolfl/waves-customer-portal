@@ -3239,9 +3239,23 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // from what this render already loaded (the visible photos' quality and the
   // models' divergence flags), so there is no extra query.
   if (visitMemoryOut && typeof visitMemoryOut === 'object') {
-    const priorRow = visitMemoryOut.priorVisit
-      ? historyRows.find((row) => String(row.id) === String(visitMemoryOut.priorVisit.assessmentId))
-      : null;
+    // A prior is any strictly earlier history row (property-scoped, capped at
+    // this visit). The call site resolves it by the FROZEN sinceLast's
+    // priorAssessmentId, so treatments are never judged on another visit's
+    // scores when history changes after the freeze.
+    const currentDay = String(visitMemoryOut.serviceDate || '').slice(0, 10);
+    const priorInputFor = (assessmentId) => {
+      if (assessmentId == null) return null;
+      const row = historyRows.find((r) => String(r.id) === String(assessmentId));
+      const date = row ? ymd(row.service_date) : null;
+      if (!row || !date || !currentDay || date >= currentDay) return null;
+      return {
+        assessmentId: String(row.id),
+        date,
+        season: row.season || null,
+        scores: scoresFromAssessmentRow(row),
+      };
+    };
     visitMemoryOut.progressInput = {
       current: {
         date: visitMemoryOut.serviceDate,
@@ -3253,13 +3267,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           divergenceFlags: parseJsonArray(assessment.divergence_flags),
         }),
       },
-      prior: priorRow
-        ? {
-          date: visitMemoryOut.priorVisit.date,
-          season: priorRow.season || null,
-          scores: scoresFromAssessmentRow(priorRow),
-        }
-        : null,
+      prior: priorInputFor(visitMemoryOut.priorVisit?.assessmentId),
+      priorInputFor,
     };
   }
 
@@ -5453,7 +5462,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // fail a render. Server-internal until P14 writes copy from it.
         try {
           const input = visitMemoryOut.progressInput;
-          lawnProgress = buildLawnProgress({ current: input?.current, prior: input?.prior, sinceLast: visitMemorySinceLast || null });
+          const frozenPriorId = visitMemorySinceLast?.priorAssessmentId;
+          const prior = frozenPriorId != null && typeof input?.priorInputFor === 'function'
+            ? input.priorInputFor(frozenPriorId)
+            : input?.prior;
+          lawnProgress = buildLawnProgress({ current: input?.current, prior, sinceLast: visitMemorySinceLast || null });
         } catch {
           lawnProgress = null;
         }

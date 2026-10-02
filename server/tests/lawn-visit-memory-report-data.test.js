@@ -568,6 +568,46 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     expect(data.reportV2.progress).toMatchObject({ eligible: false, reason: 'no_prior', items: [] });
   });
 
+  test('decimal quality scores arrive from pg as strings and still count ("80.00" is adequate)', async () => {
+    live();
+    setHistory([PRIOR, CUR]);
+    const data = await render(records(), { lawn_assessment_photos: [photo('p1', '80.00'), photo('p2', '80.00')] });
+    expect(data.reportV2.progress.confidence).toMatchObject({ level: 'moderate', comparable: true });
+  });
+
+  test('a frozen sinceLast pins the prior: a visit added between them later never supplies the scores', async () => {
+    live();
+    const MID = assessmentRow('la-mid', '2026-09-01', 'svc-mid');
+    setHistory([PRIOR, MID, CUR]);
+    const recs = records();
+    const FROZEN_SINCE = {
+      v: 1, priorAssessmentId: 'la-prior', priorDate: '2026-08-01',
+      applied: PRIOR_ENTRY.applied, checks: PRIOR_ENTRY.checks,
+    };
+    recs['svc-cur'].structured_notes.lawnVisitMemory = {
+      'la-cur': { v: 1, assessmentId: 'la-cur', serviceDate: '2026-09-30', applied: [], checks: [], sinceLast: FROZEN_SINCE },
+    };
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+    // Judged against la-prior (60 days), not the later-added la-mid (29 days).
+    expect(data.reportV2.progress).toMatchObject({ eligible: true, daysSincePrior: 60 });
+  });
+
+  test('a frozen prior that is no longer in history judges nothing', async () => {
+    live();
+    const MID = assessmentRow('la-mid', '2026-09-01', 'svc-mid');
+    setHistory([MID, CUR]);
+    const recs = records();
+    recs['svc-cur'].structured_notes.lawnVisitMemory = {
+      'la-cur': {
+        v: 1, assessmentId: 'la-cur', serviceDate: '2026-09-30', applied: [], checks: [],
+        sinceLast: { v: 1, priorAssessmentId: 'la-gone', priorDate: '2026-08-01', applied: PRIOR_ENTRY.applied, checks: PRIOR_ENTRY.checks },
+      },
+    };
+    const data = await render(recs, { lawn_assessment_photos: [photo('p1', 80), photo('p2', 80)] });
+    expect(data.reportV2.progress).toMatchObject({ eligible: false, items: [] });
+  });
+
   test('a prior that froze no memory still gets a direction, with no items', async () => {
     live();
     setHistory([PRIOR, CUR]);
