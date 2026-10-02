@@ -164,7 +164,14 @@ const KEY_LOCATION_RE = new RegExp(
 );
 // Any pesticide-safety claim: "safe", "pet-safe", "kid friendly", "non-toxic",
 // "harmless", "chemical-free" (AGENTS.md: customer copy never claims safety).
-const SAFETY_CLAIM_RE = /\b(?:safe(?:ty|ly|r|st)?|(?:pet|child|kid|family|people|eco|environment(?:ally)?)[-\s]?(?:safe|friendly)|non-?toxic|harmless|chemical-?free|all-?natural|organic)\b/i;
+// Any separator between the halves — none, spaces, an ASCII hyphen or a
+// Unicode dash ("non toxic", "chemical–free") — counts (Codex r14).
+const CLAIM_SEP = '[\\s\\-\u2010-\u2015\u2212]*';
+const SAFETY_CLAIM_RE = new RegExp(
+  `\\b(?:safe(?:ty|ly|r|st)?|(?:pet|child|kid|family|people|eco|environment(?:ally)?)${CLAIM_SEP}(?:safe|friendly)`
+  + `|non${CLAIM_SEP}toxic|harmless|chemical${CLAIM_SEP}free|all${CLAIM_SEP}natural|organic)\\b`,
+  'i',
+);
 
 function scrubbedWords(raw, scrub, lane) {
   if (typeof scrub !== 'function') return '';

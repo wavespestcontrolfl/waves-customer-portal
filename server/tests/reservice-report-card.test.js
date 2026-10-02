@@ -702,3 +702,17 @@ describe('Codex r13 (#5542): combination is a credential except "a combination o
     expect(own('A combo of spiders and wasps by the door.')).toBe('A combo of spiders and wasps by the door.');
   });
 });
+
+describe('Codex r14 (#5542): safety claims with any separator', () => {
+  const words = (text) => card(frozenService({ version: 1, source: 'picker', text, pests: [] }), { scrub: scrubCustomerText })?.youToldUs?.text ?? null;
+  test.each([
+    'The non toxic treatment did not stop the ants.',
+    'The chemical free spray failed on the ants.',
+    'The all natural spray did nothing for the roaches.',
+    'The non–toxic option missed the ants.',
+    'The pet – friendly spray missed the spiders.',
+    'The nontoxic spray missed the ants.',
+  ])('%p never reaches the card', (text) => {
+    expect(words(text)).toBeNull();
+  });
+});
