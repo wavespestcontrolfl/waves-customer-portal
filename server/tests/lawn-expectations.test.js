@@ -176,12 +176,23 @@ describe('product name map', () => {
     expect(missing).toEqual([]);
   });
 
+  it('"Talstar P" (the office name for Talak) maps exactly like Atticus Talak', () => {
+    expect(classifyLawnProductStatus('Talstar P')).toBe('mapped');
+    expect(classifyLawnProductStatus('  talstar   p ')).toBe('mapped');
+    const base = { serviceDate: '2026-10-01', applications: [] };
+    const talstar = buildLawnExpectations({ ...base, applications: [{ name: 'Talstar P', targets: ['Southern chinch bugs'] }] }, PREVIEW);
+    const talak = buildLawnExpectations({ ...base, applications: [{ name: 'Atticus Talak', targets: ['Southern chinch bugs'] }] }, PREVIEW);
+    expect(talstar.rows.map((r) => r.id)).toEqual(talak.rows.map((r) => r.id));
+    expect(talstar.rows.map((r) => r.id)).toEqual(['insecticide_curative']);
+  });
+
   it('every lawn product in use in the last 90 days is mapped or an explicit null', () => {
     // Fixture: the audit's in-use list (2026-09-29), exact catalog names.
     const inUse = [
       'LESCO K-Flow 0-0-25',
       'LESCO Chelated AM + Micros',
       'Atticus Talak',
+      'Talstar P',
       'Artavia 2 SC',
       'Celsius WG',
       'SedgeHammer Plus',
