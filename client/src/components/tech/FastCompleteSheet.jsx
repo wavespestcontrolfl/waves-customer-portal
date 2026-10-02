@@ -1301,7 +1301,7 @@ function VisitStep({
             />
           )}
           {blog.available && (
-            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setForm((prev) => ({ ...prev, blogPost: post }))} />
+            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
           )}
           {visitPromises.available && visitPromises.promises.length > 0 && (
             <PromisesSection
