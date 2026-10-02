@@ -50,6 +50,8 @@ const VOICE_FACTS_TIMEOUT_MS = 10 * 1000;
 // The sheet's former Where choices, in their order.
 const AREA_LABELS = { inside: 'Inside', outside: 'Outside', garage: 'Garage' };
 const AREA_ORDER = Object.keys(AREA_LABELS);
+// The ways the sprays can be heard to have gone down.
+const SPRAY_METHODS = new Set(['perimeter', 'spot']);
 
 const VOICE_FACTS_SCHEMA = {
   type: 'object',
@@ -184,34 +186,42 @@ function pestName(name, quote) {
  * The model's answer, kept only where the note grounds it. Areas come back
  * in the sheet's order with its labels; pests in the order heard, deduped.
  */
+// What the note says about one quoted fact: null when the note does not hold
+// the quote, else the quote and whether the note denies it there.
+function readQuote(quote, note) {
+  const grounded = groundedQuote(quote, note);
+  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note) } : null;
+}
+const listOf = (value) => (Array.isArray(value) ? value : []);
+
 function validateVoiceFacts(json, note) {
+  const answer = json && typeof json === 'object' ? json : {};
   const grounding = matchText(note);
-  const areaQuotes = new Map();
+  const heardAreas = new Map();
   const deniedAreas = new Set();
-  for (const entry of Array.isArray(json?.areas) ? json.areas : []) {
-    const area = AREA_LABELS[entry?.area] ? entry.area : null;
-    const quote = area ? groundedQuote(entry?.quote, grounding) : null;
-    if (!quote) continue;
+  for (const entry of listOf(answer.areas)) {
+    const read = AREA_LABELS[entry?.area] && readQuote(entry.quote, grounding);
     // Heard, but the note's clause denies it: never recorded, and never
     // silently dropped either, since a missed indoor treatment loses the
     // customer's indoor wait. The sheet holds until the tech says it plainly.
-    if (deniedInNote(quote, grounding)) deniedAreas.add(area);
-    else if (!areaQuotes.has(area)) areaQuotes.set(area, quote);
+    if (read?.denied) deniedAreas.add(entry.area);
+    else if (read && !heardAreas.has(entry.area)) heardAreas.set(entry.area, read.quote);
   }
-  const areas = AREA_ORDER.filter((area) => areaQuotes.has(area))
-    .map((area) => ({ area: AREA_LABELS[area], quote: areaQuotes.get(area) }));
-  const unclearAreas = AREA_ORDER.filter((area) => deniedAreas.has(area) && !areaQuotes.has(area)).map((area) => AREA_LABELS[area]);
-  const pests = [];
-  for (const entry of Array.isArray(json?.pests) ? json.pests : []) {
-    const quote = groundedQuote(entry?.quote, grounding);
-    const name = quote && !deniedInNote(quote, grounding) ? pestName(entry?.name, quote) : null;
-    if (name && !pests.some((pest) => pest.name === name)) pests.push({ name, quote });
-    if (pests.length >= MAX_PESTS) break;
+  const pests = new Map();
+  for (const entry of listOf(answer.pests)) {
+    const read = readQuote(entry?.quote, grounding);
+    const name = read && !read.denied && pestName(entry.name, read.quote);
+    if (name && !pests.has(name)) pests.set(name, read.quote);
   }
-  // How the sprays went down: only a grounded, unnegated quote says it.
-  const sprayQuote = ['perimeter', 'spot'].includes(json?.spray?.method) ? groundedQuote(json.spray.quote, grounding) : null;
-  const spray = sprayQuote && !deniedInNote(sprayQuote, grounding) ? { method: json.spray.method, quote: sprayQuote } : null;
-  return { areas, unclearAreas, pests, spray };
+  // How the sprays went down: only a grounded quote the note does not deny.
+  const spray = answer.spray || {};
+  const sprayRead = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding);
+  return {
+    areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
+    unclearAreas: AREA_ORDER.filter((area) => deniedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
+    pests: [...pests].slice(0, MAX_PESTS).map(([name, quote]) => ({ name, quote })),
+    spray: sprayRead && !sprayRead.denied ? { method: spray.method, quote: sprayRead.quote } : null,
+  };
 }
 
 /**

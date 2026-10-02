@@ -218,10 +218,9 @@ export function PromisesSection({ promises, total, marks, locked, onChange }) {
 // The visit's saved spray trace (GET /tech/services/:id/treatment-zone),
 // read once and replaced by what the tracer saves. `enabled` is false while
 // the treatment-zone map is off, and the trace step is then left out.
-export function useVisitTrace({ serviceId, request, enabled = true }) {
+export function useVisitTrace({ serviceId, request }) {
   const [state, setState] = useState({ loaded: false, enabled: false, zone: null });
   useEffect(() => {
-    if (!enabled) return undefined;
     let cancelled = false;
     request(`/tech/services/${serviceId}/treatment-zone`)
       .then((data) => {
@@ -229,18 +228,19 @@ export function useVisitTrace({ serviceId, request, enabled = true }) {
       })
       .catch(() => { if (!cancelled) setState({ loaded: true, enabled: false, zone: null }); });
     return () => { cancelled = true; };
-  }, [request, serviceId, enabled]);
+  }, [request, serviceId]);
   const saved = useCallback((zone) => setState((prev) => ({ ...prev, zone: zone || prev.zone })), []);
   return { ...state, saved };
 }
 
-// The traced perimeter's length, when the saved trace is a perimeter: that
-// length is the perimeter spray's linear feet on the record. An interior or
-// outline capture, or a trace with no length, is no perimeter.
+// The traced perimeter's length, when the saved trace is a perimeter (with
+// or without "Interior spray too", which keeps the perimeter's length): that
+// length is the perimeter spray's linear feet on the record. A lawn or yard
+// outline, or a trace with no length, is no perimeter.
+const PERIMETER_CAPTURES = new Set(['perimeter', 'interior']);
 export function perimeterFeetOf(zone) {
   if (!zone) return null;
-  const mode = zone.capture_mode ?? zone.captureMode ?? 'perimeter';
-  if (mode !== 'perimeter') return null;
+  if (!PERIMETER_CAPTURES.has(zone.capture_mode ?? zone.captureMode ?? 'perimeter')) return null;
   const feet = Math.round(Number(zone.linear_ft ?? zone.linearFt));
   return Number.isFinite(feet) && feet > 0 ? feet : null;
 }
@@ -433,21 +433,23 @@ export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
 const money = (value) => `$${Number(value).toFixed(2)}`;
 // What became of the report text, from the completion's own status and
 // reason: a held, blocked or failed text says so, never silence.
+// The completion's status says whether the report went, not how: a customer
+// who prefers the app gets it there, so the words never say "text".
 const SMS_RESULT = {
-  sent: () => 'The report went to the customer by text.',
-  sending: () => 'The report text is sending.',
-  deferred: () => 'The report text is queued and goes out in the customer’s texting hours.',
-  no_phone: () => 'No phone on file, so no text went. The report is in the customer’s portal.',
-  skipped_recap_sms_already_sent: () => 'A text already went to the customer for this visit.',
-  suppressed_delivery_mode: () => 'No text went: this visit’s report is not sent to customers.',
-  blocked: (reason) => `No text went: ${reason || 'the customer’s texting settings held it'}.`,
-  failed: (reason) => `The report text did not go out${reason ? ` (${reason})` : ''}. The office can resend it.`,
+  sent: () => 'The report went to the customer.',
+  sending: () => 'The report is on its way to the customer.',
+  deferred: () => 'The report is queued and goes out in the customer’s messaging hours.',
+  no_phone: () => 'No phone on file, so nothing was sent. The report is in the customer’s portal.',
+  skipped_recap_sms_already_sent: () => 'A message already went to the customer for this visit.',
+  suppressed_delivery_mode: () => 'Nothing was sent: this visit’s report is not sent to customers.',
+  blocked: (reason) => `Nothing was sent: ${reason || 'the customer’s message settings held it'}.`,
+  failed: (reason) => `The report did not go out${reason ? ` (${reason})` : ''}. The office can resend it.`,
 };
 function smsLine(result) {
   const status = result?.completionSmsStatus;
   if (!status || status === 'not_requested') return null;
   const reason = String(result.completionSmsError || '').trim();
-  return SMS_RESULT[status]?.(reason) || `No text went to the customer${reason ? `: ${reason}` : ''}.`;
+  return SMS_RESULT[status]?.(reason) || `Nothing was sent to the customer${reason ? `: ${reason}` : ''}.`;
 }
 
 function billLine(result) {

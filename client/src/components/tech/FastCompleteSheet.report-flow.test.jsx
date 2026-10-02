@@ -408,7 +408,7 @@ describe('complete and send', () => {
     expect(body.products[0]).not.toHaveProperty('areaValue');
     expect(body.products[0]).not.toHaveProperty('applicationArea');
     expect(screen.getByRole('heading', { name: 'Service complete' })).toBeTruthy();
-    expect(screen.getByText('The report went to the customer by text.')).toBeTruthy();
+    expect(screen.getByText('The report went to the customer.')).toBeTruthy();
     expect(screen.getByText('Bill: $95.00 due.')).toBeTruthy();
   });
 
@@ -417,7 +417,7 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(screen.getByText('No text went: customer opted out of texts.')).toBeTruthy();
+    expect(screen.getByText('Nothing was sent: customer opted out of texts.')).toBeTruthy();
   });
 
   test('a promise marked Done shows as closed only when the server closed it', async () => {
@@ -596,10 +596,13 @@ describe('reportParts', () => {
 });
 
 describe('perimeterFeetOf', () => {
-  test('a perimeter trace gives its rounded length; anything else gives none', () => {
+  test('a perimeter trace gives its rounded length; an outline gives none', () => {
     expect(perimeterFeetOf({ linear_ft: 181.6, capture_mode: 'perimeter' })).toBe(182);
     expect(perimeterFeetOf({ linear_ft: 120 })).toBe(120);
-    expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'interior' })).toBeNull();
+    // "Interior spray too" keeps the perimeter's length.
+    expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'interior' })).toBe(120);
+    expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'yard' })).toBeNull();
+    expect(perimeterFeetOf({ linear_ft: 120, capture_mode: 'lawn_highlight' })).toBeNull();
     expect(perimeterFeetOf({ linear_ft: 0, capture_mode: 'perimeter' })).toBeNull();
     expect(perimeterFeetOf(null)).toBeNull();
   });
