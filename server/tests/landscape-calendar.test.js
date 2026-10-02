@@ -38,7 +38,7 @@ describe('level rule (derived from catalog months)', () => {
         const m = i + 1;
         const expected = Math.max(...entries.map((e) => {
           if (e.peak_months.includes(m)) return 3;
-          if (e.active_months.includes(m)) return new Set(e.active_months).size === 12 ? 1 : 2;
+          if (e.active_months.includes(m)) return new Set(e.active_months).size === 12 && e.peak_months.length > 0 ? 1 : 2;
           return 0;
         }));
         expect(lv).toBe(expected);
@@ -51,6 +51,15 @@ describe('level rule (derived from catalog months)', () => {
       expect(item.levelLabel).toBe(LEVEL_LABELS[item.level]);
       expect(item.levels).toHaveLength(12);
     }
+  });
+});
+
+describe('a year-round entry with no peak', () => {
+  test('is In season every month, never "Low year-round" (Ganoderma: UF/IFAS gives no season)', () => {
+    const g = catalog.getEntry('ganoderma-butt-rot');
+    expect(new Set(g.active_months).size).toBe(12);
+    expect(g.peak_months).toEqual([]);
+    expect(byId(buildYardCalendar({ month: 1 }), 'ganoderma-butt-rot').levels).toEqual(Array(12).fill(2));
   });
 });
 
@@ -79,7 +88,7 @@ describe('October output (approved mockup)', () => {
   });
 
   test('shape: header, 23 items, plan ahead, catalog-derived fields', () => {
-    expect(oct).toMatchObject({ month: 10, grass: 'all', area: 'Southwest Florida', reviewedAt: '2026-09-30' });
+    expect(oct).toMatchObject({ month: 10, grass: 'all', area: 'Southwest Florida', reviewedAt: '2026-10-02' });
     expect(oct.items).toHaveLength(23);
     expect(oct.planAhead).toHaveLength(2);
     expect(oct.planAhead[0]).toMatch(/^Large patch starts in November/);

@@ -11,6 +11,9 @@
  * Level rule per calendar month m (1-12), over the entry's catalog months:
  *   m in peak_months                          -> 3  Peak season
  *   m in active_months, active all 12 months  -> 1  Low year-round
+ *     (unless the entry has no peak at all: "low outside its peak" has
+ *     no meaning there, so a year-round, peakless entry is 2 In season
+ *     every month; e.g. Ganoderma, where UF/IFAS gives no season)
  *   m in active_months otherwise              -> 2  In season
  *   anything else                             -> 0  Off season
  * A combined row (several catalog slugs) takes the max level of its members.
@@ -25,7 +28,7 @@
 const catalog = require('../species-catalog');
 const logger = require('../logger');
 
-const REVIEWED_AT = '2026-09-30';
+const REVIEWED_AT = '2026-10-02';
 const AREA = 'Southwest Florida';
 
 const GRASSES = Object.freeze(['sta', 'bah', 'zoy', 'ber']);
@@ -84,7 +87,7 @@ function monthLevel(entry, month) {
   const peak = entry.peak_months || [];
   const active = entry.active_months || [];
   if (peak.includes(month)) return 3;
-  if (active.includes(month)) return new Set(active).size === 12 ? 1 : 2;
+  if (active.includes(month)) return new Set(active).size === 12 && peak.length > 0 ? 1 : 2;
   return 0;
 }
 

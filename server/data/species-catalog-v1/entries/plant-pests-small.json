@@ -1216,12 +1216,12 @@
     "legacy_slugs": [],
     "sources": [
       "https://ask.ifas.ufl.edu/publication/in307",
-      "https://ask.ifas.ufl.edu/publication/IN307"
+      "https://ask.ifas.ufl.edu/publication/CG002"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Peak months follow the cited 'hot, dry summer and fall' pattern for twospotted spider mite; Florida's summer is also rainy season, which can knock populations down, so actual SWFL peak timing may vary by year. Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
-      "approval_hash": "f2a00c3b057266bb2695658932a449043cc670a4acf9628b57875eb397ecb69e"
+      "notes": "Peak runs April to October: Florida's dry spring (citrus spider mites are 'usually most abundant ... between March and June', CG002) through the 'hot, dry summer and fall' of twospotted spider mite (IN307). Florida's rainy summer can knock populations down, so actual SWFL timing may vary by year. Owner re-approved 2026-10-02 after the UF/IFAS season check of the yard calendar.",
+      "approval_hash": "18febaea40526581a9e33304beb83c9acfa0c19042db9eaceff0dc1d1748561f"
     },
     "role": "plant_pest",
     "risk": "low",
