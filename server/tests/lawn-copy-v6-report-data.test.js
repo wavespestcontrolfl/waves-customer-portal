@@ -294,7 +294,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     afterEach(() => { jest.useRealTimers(); });
     const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
     const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
-    const gapFor = async (nextStamp, extraRows = []) => {
+    const gapFor = async (nextStamp, extraRows = [], patch = {}) => {
       live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
@@ -305,6 +305,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
             { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...nextStamp },
             ...extraRows,
           ],
+          ...patch,
         });
         return spy.mock.calls[0][0].ctx.nextVisitGapDays;
       } finally {
@@ -318,6 +319,14 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 
     test('another home of the same customer: no gap (no by-next-visit sentence), never the other home\'s date', async () => {
       expect(await gapFor(HOME_B)).toBeNull();
+    });
+
+    test('the gap counts from the SELECTED assessment\'s date, not the record\'s service_date (an A→B re-do)', async () => {
+      const redo = { ...CUR, service_date: '2026-10-01', visit_date: '2026-10-01' };
+      history.installedForVisit.mockResolvedValue(redo);
+      history.historyForReport.mockResolvedValue({ current: redo, rows: [redo], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+      history.historyForAssessment.mockResolvedValue({ current: redo, rows: [redo], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+      expect(await gapFor(HOME_A, [], { lawn_assessments: [redo] })).toBe(106);
     });
 
     test('an EARLIER booking at another home is skipped and the later booking at this home sets the gap', async () => {

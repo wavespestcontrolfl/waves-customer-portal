@@ -5653,7 +5653,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .first('scheduled_date')
             .catch(() => null);
           let nextVisit = null;
-          lawnCopyTiming.visitDate = svcIso || null;
+          // The SELECTED assessment's date (an A→B re-do or a pinned render can
+          // differ from the record's service_date), the same anchor the water
+          // snapshot and gap history use.
+          const anchorRaw = lawnAssessment.assessmentDate || service.service_date || null;
+          lawnCopyTiming.visitDate = anchorRaw
+            ? (anchorRaw instanceof Date ? anchorRaw.toISOString().slice(0, 10) : String(anchorRaw).slice(0, 10))
+            : null;
           lawnCopyTiming.afterIso = afterIso;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
