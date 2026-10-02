@@ -16225,7 +16225,7 @@ function chatActionsOf(actions) {
   return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
     (a.type === 'link' && typeof a.href === 'string' && /^\/reschedule\/[A-Za-z0-9_-]+$/.test(a.href))
     || (a.type === 'tab' && CHAT_ACTION_TABS.includes(a.tab))
-  )).slice(0, 4);
+  )).slice(0, 9);
 }
 
 // A /ai/chat response as the chat rows it adds: the assistant's reply (with

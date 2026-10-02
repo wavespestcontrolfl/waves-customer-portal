@@ -192,13 +192,27 @@ function escalationReply({ isPortal, teamNotified, firstName }) {
     : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 }
 
-const TOPIC_BY_REASON = {
+// How the office bell words a hand-off topic (tools.js ESCALATION_TOPICS).
+// The topic comes from the model's escalate call, or from the keyword group
+// that forced the hand-off — never from classifyEscalation, whose broad
+// "change"/"charge" matches would call an email change a schedule change.
+const TOPIC_WORDING = {
   cancellation: 'a cancellation',
   schedule_change: 'a schedule change',
+  billing: 'a billing question',
   complaint: 'a complaint',
-  billing_dispute: 'a billing question',
-  manager_request: 'a manager',
+  account_change: 'an account change',
+  add_service: 'adding a service',
+  manager: 'reaching a manager',
 };
+const TRIGGER_TOPICS = [
+  ['cancellation', ['cancel', 'cancellation', 'stop service', 'end service', 'discontinue']],
+  ['schedule_change', RESCHEDULE_TRIGGERS],
+  ['complaint', ['complaint', 'not happy', 'terrible', 'worst', 'never coming back', 'lawsuit', 'bbb']],
+  ['billing', ['refund', 'charge back', 'dispute']],
+  ['manager', ['manager', 'supervisor', 'owner', 'adam']],
+];
+const topicOfTrigger = (trigger) => TRIGGER_TOPICS.find(([, words]) => words.includes(trigger))?.[0];
 
 class WavesAssistant {
 
@@ -227,7 +241,7 @@ class WavesAssistant {
     const lane = portalSelfServe(channel)
       ? { prompt: PORTAL_SYSTEM_PROMPT, tools: PORTAL_TOOLS, actions: [] }
       : { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null };
-    const needsEscalation = this.checkEscalationTriggers(message, channel);
+    const trigger = this.matchedEscalationTrigger(message, channel);
 
     // 3. Save the user message
     try {
@@ -247,8 +261,8 @@ class WavesAssistant {
     }
 
     // 4. If escalation trigger detected, escalate immediately
-    if (needsEscalation) {
-      return this.escalate(conversation, message, 'Sensitive topic detected in customer message');
+    if (trigger) {
+      return this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic: topicOfTrigger(trigger) });
     }
 
     // 5. Build conversation history for Claude
@@ -346,7 +360,7 @@ class WavesAssistant {
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-            { gap: toolUse.input.not_supported === true });
+            { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
           return escResult;
         }
 
@@ -497,15 +511,19 @@ class WavesAssistant {
    * Check if message contains escalation trigger keywords.
    */
   checkEscalationTriggers(message, channel) {
+    return Boolean(this.matchedEscalationTrigger(message, channel));
+  }
+
+  matchedEscalationTrigger(message, channel) {
     const lower = (message || '').toLowerCase();
     const triggers = portalSelfServe(channel) ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
-    return triggers.some(trigger => lower.includes(trigger));
+    return triggers.find(trigger => lower.includes(trigger)) || null;
   }
 
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false } = {}) {
+  async escalate(conversation, customerMessage, reason, { gap = false, topic } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -516,11 +534,10 @@ class WavesAssistant {
     if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
     if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
 
-    const escalationClass = this.classifyEscalation(customerMessage);
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: escalationClass,
+      reason: this.classifyEscalation(customerMessage),
       summary: reason,
       customer_message: customerMessage,
       ai_draft_response: null,
@@ -553,7 +570,7 @@ class WavesAssistant {
     // sent, so SMS keeps its wording.)
     const isPortal = portalSelfServe(conversation.channel);
     const teamNotified = isPortal
-      && await this.notifyTeamOfEscalation({ escalation, escalationClass, conversation, customer, customerMessage });
+      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage });
 
     const reply = escalationReply({ isPortal, teamNotified, firstName: customer?.first_name });
 
@@ -591,16 +608,15 @@ class WavesAssistant {
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, escalationClass, conversation, customer, customerMessage }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
       const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
-      const topic = TOPIC_BY_REASON[escalationClass] || 'a question it could not answer';
       const result = await raiseAdminAlert('alert', {
         area: 'Comms',
         action: 'Reply to a portal chat request',
-        why: cutAtWord(`${name} asked the portal assistant about ${topic}`, 110),
+        why: cutAtWord(`${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, 110),
         severity: 'needs-you',
         // The customer record, not a message thread: a portal customer may
         // have no texts yet, or only a thread on an old number.
@@ -611,8 +627,9 @@ class WavesAssistant {
       }, {
         bell: true,
         dedupeKey: `portal-chat-escalation:${escalation.id}`,
-        // The customer's own words, read from the bell's "Show full text".
-        detail: String(customerMessage || '').slice(0, 1000),
+        // The customer's own words in full (the chat route caps a message at
+        // 4000 characters), read from the bell's "Show full text".
+        detail: String(customerMessage || ''),
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
       });
       // notifyAdmin returns the stored row flattened ({ id, …, deduped }),

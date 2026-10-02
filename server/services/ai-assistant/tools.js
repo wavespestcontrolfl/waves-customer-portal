@@ -60,10 +60,12 @@ const PORTAL_SECTIONS = {
   documents: { tab: 'documents', label: 'Open Documents' },
   referrals: { tab: 'refer', label: 'Open Refer' },
 };
-const MAX_ACTIONS_PER_REPLY = 4;
 // Reschedule buttons shown at once, and how many upcoming visits are checked
 // to find them (a year of monthly visits).
 const MAX_RESCHEDULE_BUTTONS = 3;
+// What a portal hand-off is about, named by the model (or by the keyword that
+// forced the hand-off) and worded for the office in assistant.js.
+const ESCALATION_TOPICS = ['cancellation', 'schedule_change', 'billing', 'complaint', 'account_change', 'add_service', 'manager', 'other'];
 const RESCHEDULE_CANDIDATES = 12;
 
 const PORTAL_TOOLS = [
@@ -87,13 +89,25 @@ const PORTAL_TOOLS = [
   {
     ...TOOLS[2],
     description: 'Hand the conversation to a human team member. Use for: cancellations, complaints, billing disputes, a visit that cannot be moved online, account changes, or anything uncertain.',
+    input_schema: {
+      ...TOOLS[2].input_schema,
+      properties: {
+        ...TOOLS[2].input_schema.properties,
+        // What the office bell says the customer asked about. Never shown to the customer.
+        topic: { type: 'string', enum: ESCALATION_TOPICS, description: 'What the customer needs. account_change: email, phone, address, gate code, pets. add_service: adding or quoting a service. other: none of the rest.' },
+      },
+      required: ['reason', 'topic'],
+    },
   },
 ];
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link']);
 
+// One button per target. No count cap is needed, and none may refuse a
+// button a tool then reports as shown: the distinct targets are the portal
+// sections plus MAX_RESCHEDULE_BUTTONS links.
 function addAction(actions, action) {
-  if (!Array.isArray(actions) || actions.length >= MAX_ACTIONS_PER_REPLY) return;
+  if (!Array.isArray(actions)) return;
   const key = action.href || action.tab;
   if (actions.some((a) => (a.href || a.tab) === key)) return;
   actions.push(action);
@@ -195,27 +209,37 @@ async function offerRescheduleLink(customerId, actions) {
   // frozen visit, the self-serve move notice window), never a mirror of it.
   // Any failure fails closed — no button.
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
-  const visits = [];
+  const movable = [];
   for (const row of rows) {
     // The cap applies to buttons, not candidates: a visit the page refuses
     // must not hide a later one it accepts.
-    if (visits.length >= MAX_RESCHEDULE_BUTTONS) break;
-    if (!row.reschedule_token) continue;
-    const verdict = await loadById(row.id).then((svc) => pageEligibility(svc)).catch((err) => {
+    if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
+    const svc = await loadById(row.id).catch(() => null);
+    const verdict = svc && await pageEligibility(svc).catch((err) => {
       logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
       return null;
     });
-    if (!verdict?.ok) continue;
+    if (verdict?.ok) movable.push({ row, property: String(svc.address_line1 || '').trim() });
+  }
+  if (!movable.length) return NO_LINK;
+
+  // A customer with visits at more than one property gets the street on each
+  // button, so two same-day visits are never indistinguishable.
+  const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
+  const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
     const type = String(row.service_type || 'visit');
+    const where = multiProperty && property ? `, ${property}` : '';
     addAction(actions, {
       type: 'link',
-      label: `Reschedule ${type}, ${shortDateLabel(dateKey)}`.slice(0, 60),
+      label: `Reschedule ${type}, ${shortDateLabel(dateKey)}${where}`.slice(0, 80),
       href: `/reschedule/${row.reschedule_token}`,
     });
-    visits.push({ date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD' });
-  }
-  if (!visits.length) return NO_LINK;
+    return {
+      date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD',
+      ...(where ? { property } : {}),
+    };
+  });
   return {
     available: true,
     visits,

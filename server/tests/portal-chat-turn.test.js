@@ -60,6 +60,22 @@ test('a billing ask in the portal returns the reply with an Open Billing button'
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
+test('a hand-off carries its topic: from the model on an escalate call, from the keyword group on a forced one', async () => {
+  wire('portal_chat');
+  const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'ok', escalated: true });
+  mockCreate.mockResolvedValue({ content: [{ type: 'tool_use', id: 't1', name: 'escalate', input: { reason: 'wants a new email on file', topic: 'account_change' } }] });
+
+  await assistant.processMessage({ message: 'Please change my email', channel: 'portal_chat', channelIdentifier: 'sess-1' });
+  await assistant.processMessage({ message: 'I want to cancel', channel: 'portal_chat', channelIdentifier: 'sess-1' });
+
+  expect(escalate.mock.calls[0][3]).toEqual({ gap: false, topic: 'account_change' });
+  expect(escalate.mock.calls[1][3]).toEqual({ topic: 'cancellation' });
+  expect(mockCreate).toHaveBeenCalledTimes(1);
+  const escalateTool = mockCreate.mock.calls[0][0].tools.find((t) => t.name === 'escalate');
+  expect(escalateTool.input_schema.required).toEqual(['reason', 'topic']);
+  escalate.mockRestore();
+});
+
 test('a portal reply with no button tool carries no actions field', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Ghost ants follow moisture.' }] });

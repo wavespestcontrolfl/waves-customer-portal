@@ -33,6 +33,7 @@ function mockUpcoming(rows) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  loadById.mockImplementation(async (id) => ({ id }));
   delete process.env[ENV];
 });
 afterAll(() => { delete process.env[ENV]; });
@@ -51,7 +52,6 @@ describe('portal tools', () => {
       { id: 2, scheduled_date: '2026-10-20', service_type: 'Lawn Care', window_start: '13:00', reschedule_token: 'tok_two' },
       { id: 3, scheduled_date: '2026-10-21', service_type: 'Termite', window_start: '08:00', reschedule_token: 'tok_three' },
       { id: 4, scheduled_date: '2026-10-22', service_type: 'Rodent', window_start: '08:00', reschedule_token: 'tok_four' },
-      { id: 5, scheduled_date: '2026-11-01', service_type: 'Mosquito', window_start: '09:00', reschedule_token: null },
     ]);
     // The page's own verdicts: inside the move notice window, awaiting
     // dispatch review, and an unreadable check all mean no button.
@@ -67,6 +67,8 @@ describe('portal tools', () => {
 
     expect(query.where).toHaveBeenCalledWith('customer_id', 'cust-1');
     expect(query.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed', 'rescheduled']);
+    // A legacy visit with no token never reaches the check.
+    expect(query.whereNotNull).toHaveBeenCalledWith('reschedule_token');
     expect(loadById.mock.calls.map(([id]) => id)).toEqual([1, 2, 3, 4]);
     expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 9', href: '/reschedule/tok_one' }]);
     expect(result.available).toBe(true);
@@ -89,6 +91,39 @@ describe('portal tools', () => {
     expect(result.visits).toHaveLength(3);
     // Stops checking once three buttons exist.
     expect(loadById).toHaveBeenCalledTimes(6);
+  });
+
+  test('visits at more than one property carry the street on the button', async () => {
+    mockUpcoming([
+      { id: 1, scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' },
+      { id: 2, scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '13:00', reschedule_token: 'tok_two' },
+    ]);
+    loadById.mockImplementation(async (id) => ({ id, address_line1: id === 1 ? '100 Example Ave' : '200 Sample Ct' }));
+    pageEligibility.mockResolvedValue({ ok: true });
+    const actions = [];
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
+
+    expect(actions.map((a) => a.label)).toEqual([
+      'Reschedule Pest Control, Oct 9, 100 Example Ave',
+      'Reschedule Pest Control, Oct 9, 200 Sample Ct',
+    ]);
+    expect(result.visits.map((v) => v.property)).toEqual(['100 Example Ave', '200 Sample Ct']);
+  });
+
+  test('every button a tool reports as shown is in the reply, whatever came before it', async () => {
+    const actions = [];
+    for (const section of ['billing', 'upcoming_visits', 'service_reports', 'plan', 'documents', 'referrals']) {
+      expect((await executeToolCall('open_portal_section', { section }, 'cust-1', actions)).shown).toBe(true);
+    }
+    mockUpcoming([1, 2, 3].map((id) => ({ id, scheduled_date: `2026-10-1${id}`, service_type: 'Pest Control', window_start: '10:00', reschedule_token: `tok_${id}` })));
+    pageEligibility.mockResolvedValue({ ok: true });
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions);
+
+    expect(result.visits).toHaveLength(3);
+    expect(actions.filter((a) => a.type === 'link')).toHaveLength(3);
+    expect(actions).toHaveLength(9);
   });
 
   test('no movable visit tells the model to hand off, and shows no button', async () => {
@@ -157,7 +192,7 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     mockEscalationDb();
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', category: 'alert', deduped: false });
 
-    const result = await assistant.escalate(conversation, 'Why was I charged twice on 2026-09-30?!', 'billing question');
+    const result = await assistant.escalate(conversation, 'Why was I charged twice on 2026-09-30?!', 'billing question', { topic: 'billing' });
 
     // composeAdminAlert ran for real (it throws in tests on any rule break).
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -178,6 +213,22 @@ describe('a portal hand-off rings the office and says only what happened', () =>
     expect(result.teamNotified).toBe(true);
     expect(result.reply).toMatch(/I've sent this to our team/);
     expect(result.reply).not.toMatch(/connecting you/i);
+  });
+
+  test('the bell names the topic the hand-off carried, never a keyword guess, and keeps the whole message', async () => {
+    mockEscalationDb();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', deduped: false });
+    // "change" would read as a schedule change to the legacy keyword classifier.
+    const long = `Please change my email to a new one. ${'More detail. '.repeat(250)}`;
+
+    await assistant.escalate(conversation, long, 'email change', { topic: 'account_change' });
+    await assistant.escalate(conversation, 'something odd', 'unclear');
+
+    const calls = NotificationService.notifyAdmin.mock.calls;
+    expect(calls[0][2]).toBe('Jordan Sample asked the portal assistant about an account change');
+    expect(calls[0][3].detail).toBe(long);
+    expect(long.length).toBeGreaterThan(3000);
+    expect(calls[1][2]).toBe('Jordan Sample asked the portal assistant about a request it could not handle');
   });
 
   test('when the bell does not ring the customer is not told anyone was notified', async () => {
