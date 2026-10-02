@@ -4503,12 +4503,13 @@ function visitLoopText(value, cap) {
   if (!text || EXEMPLAR_INJECTION_RE.test(text)) return '';
   return text;
 }
-// " (today's Lawn Care visit, 9-11 AM)" — which of today's visits a line is about.
+// " (the Lawn Care visit, 9-11 AM)" — which visit a line is about. Never "today's":
+// a prior-day visit whose window runs past midnight is carried into these facts.
 function visitLoopWhich(item) {
   const type = visitLoopText(item && item.visitType, 60);
   const win = visitLoopText(item && item.windowDisplay, 40);
   if (!type && !win) return '';
-  return ` (today's ${type ? `${type} ` : ''}visit${win ? `, ${win}` : ''})`;
+  return ` (the ${type ? `${type} ` : ''}visit${win ? `, ${win}` : ''})`;
 }
 function visitLoopLateLine(late) {
   if (!late || typeof late !== 'object') return null;

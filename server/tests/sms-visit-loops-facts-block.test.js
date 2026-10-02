@@ -44,7 +44,7 @@ describe('renderVisitLoopsSection', () => {
     // no tech position line: where the tech is comes only from LIVE STATUS / LIVE ETA on the visit line
     expect(out).not.toContain('Tech position');
     // no minutes: the alert's figure is frozen and measured from the internal job block
-    expect(out).toContain('- DELAY FLAGGED (today\'s Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
+    expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
     expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
     expect(out).not.toContain('no tech location');
     expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology\n');
@@ -61,6 +61,12 @@ describe('renderVisitLoopsSection', () => {
   test('late alert without minutes still renders', () => {
     expect(renderVisitLoopsSection({ lateAlert: { type: 'unassigned_overdue', severity: 'high' } }))
       .toContain('- DELAY FLAGGED: dispatch flagged this visit past its window');
+  });
+
+  test('a line names its visit neutrally, never "today\'s" (a prior-day visit can run past midnight)', () => {
+    const out = renderVisitLoopsSection({ lateAlert: { type: 'tech_late', visitType: 'Pest Control', windowDisplay: '11 PM-1 AM', scheduledDate: '2026-09-30' } });
+    expect(out).toContain('(the Pest Control visit, 11 PM-1 AM)');
+    expect(out).not.toContain("today's Pest Control");
   });
 
   test('a missing-tracking alert renders as a tracking gap, never DELAY FLAGGED', () => {
@@ -118,7 +124,7 @@ describe('buildFactsBlock', () => {
   test('gate on: renders the fixture lines, before BILLING and clear of the SLA/RE-SERVICE/COMPANY tail', () => {
     process.env[GATE] = 'true';
     const facts = buildFactsBlock({ ...baseContext, visitLoops: fullLoops() }, { now: NOW });
-    expect(facts).toContain("- DELAY FLAGGED (today's Quarterly Pest visit, 8-10am)");
+    expect(facts).toContain("- DELAY FLAGGED (the Quarterly Pest visit, 8-10am)");
     expect(facts).toContain('- WE OWE THEM: callback');
     const at = facts.indexOf(HEADER);
     expect(at).toBeGreaterThan(facts.indexOf('UPCOMING SERVICES:'));

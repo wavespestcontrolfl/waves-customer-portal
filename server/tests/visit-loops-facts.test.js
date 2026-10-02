@@ -264,6 +264,20 @@ describe('pastWindow', () => {
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ ...sibling, window_start: '13:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
   });
 
+  test('distinct visit groups, or rows that cannot be shown to share a stop, never collapse into one', async () => {
+    const conn = (row, advanced) => fakeConn({ scheduled_services: (ops) => {
+      if (hasOp(ops, 'leftJoin')) return [todayRow(row)];
+      if (hasOp(ops, 'whereIn', (a) => a[0] === 'scheduled_date')) return advanced;
+      return [];
+    } });
+    // same tech/day/window but a DIFFERENT visit group finished: still passed
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', visit_id: 'g1' }, [{ visit_id: 'g2', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+    // the SAME visit group finished: not passed
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', visit_id: 'g1' }, [{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toBeNull();
+    // an unassigned row has no stop identity: an unassigned finished row never hides it
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', technician_id: null }, [{ technician_id: null, scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+  });
+
   test('a window that crosses midnight (23:00-01:00) is not passed in the evening', async () => {
     const out = await run({ status: 'confirmed', window_start: '23:00:00', window_end: '23:30:00' }, new Date('2026-10-02T02:00:00Z')); // 22:00 ET
     expect(out.pastWindow).toBeNull();
