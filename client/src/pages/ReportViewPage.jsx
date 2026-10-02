@@ -9146,8 +9146,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              Print on the live view, where the floating Ask-Waves bar and
              other controls would otherwise stamp into the paper document. */
           .waves-ask-card { display: none; }
-          /* The re-service card's "Still seeing …? Tell us" link is an
-             action, not report content (the PDF has no equivalent). */
+          /* The re-service card's call-to-action link is an action, not
+             report content (the PDF has no equivalent). This comment
+             renders into the page text, so it never quotes the CTA copy. */
           .reservice-card-cta { display: none; }
           /* The accordion is a control, not content: never print the
              "More information / Details" toggle bar or its frame. An open
