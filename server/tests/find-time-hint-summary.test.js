@@ -158,6 +158,39 @@ test('summary gate on: one row per date, empty days carry a status, hours in clo
   expect(body.rejections_by_date).toBeUndefined();
 });
 
+test('gap mode lists every start in a multi-hour gap, vetoing only the occupied hours', async () => {
+  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
+  // The gap engine emits ONE candidate per route gap: earliest start plus
+  // latest_start_min. A free 09:00–13:00 gap fits a one-hour visit at 9, 10,
+  // 11 and 12.
+  findAvailableSlots.mockResolvedValue({
+    slots: [slot('2026-09-01', '09:00', 4, { latest_start_min: 12 * 60 })], evaluated: 1,
+  });
+  loadOccupancy.mockResolvedValue({
+    ...emptyOccupancy(),
+    rows: [{
+      id: 'unassigned-1', date: '2026-09-01', startMin: 10 * 60, endMin: 11 * 60, customer_id: 'c1',
+      technician_id: null, service_type: 'Pest Control', reservation_expires_at: null,
+    }],
+  });
+  let body = await (await post({ ...BASE, dateTo: '2026-09-01', summary: true, topN: 3 })).json();
+  expect(body.summary.days[0].hours.map((hour) => [hour.start_time, hour.end_time, hour.detour_minutes])).toEqual([
+    ['09:00', '10:00', 4], ['11:00', '12:00', 4], ['12:00', '13:00', 4],
+  ]);
+  // The ranked top-N stays one start per gap, as the plain hint answers.
+  expect(body.slots.map((s) => s.start_time)).toEqual(['09:00']);
+  // Both passes read the day's occupancy once.
+  expect(loadOccupancy).toHaveBeenCalledTimes(1);
+  // No step sent: a summary is hourly, never the engine's exact-minute default.
+  body = await (await post({ ...BASE, slotStepMinutes: undefined, dateTo: '2026-09-01', summary: true })).json();
+  expect(findAvailableSlots.mock.calls[1][0].slotStepMinutes).toBe(60);
+  expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '11:00', '12:00']);
+  // Occupancy snapshot down: fail open, every start in the gap listed.
+  loadOccupancy.mockRejectedValue(new Error('snapshot unavailable'));
+  body = await (await post({ ...BASE, dateTo: '2026-09-01', summary: true })).json();
+  expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '10:00', '11:00', '12:00']);
+});
+
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {
   process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const body = await (await post({ ...BASE, hint: undefined, summary: true })).json();

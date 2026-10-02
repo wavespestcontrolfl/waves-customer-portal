@@ -85,13 +85,34 @@ function markUnknownDetours(slots) {
  * first wins) BEFORE slicing, or the chips row collapses below the
  * requested count. Fail-open like checkSlots: a snapshot failure keeps the
  * engine's answer, minus hours the picker itself would refuse.
+ *
+ * `allStarts` (summary mode) answers a different question — not "the best
+ * start in this gap" but "every start that fits": each gap is walked to
+ * latest_start_min and EVERY clear start is kept, so a free 09:00–12:00 gap
+ * lists 09:00, 10:00 and 11:00 for a one-hour visit. The plain hint keeps
+ * its one-start-per-gap answer.
  */
-async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN }) {
+async function guardHintSlots(slots, {
+  today, sameDayFloorMin, step, spanMin, excluded, topN, allStarts = false, occupancyCache,
+}) {
   const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
+  const restart = (s, baseMin, m) => (m === baseMin ? s : { ...s, start_time: toHHMM(m), end_time: toHHMM(m + spanMin) });
+  // A gap's starts at the request's step, from the picker's floor through
+  // the last start whose end still clears the drive out.
+  const gapStarts = (s) => {
+    const baseMin = toMin(s.start_time);
+    if (baseMin == null) return [];
+    const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
+    const starts = [];
+    for (let m = Math.max(baseMin, Math.ceil(floorFor(s.date) / step) * step); m <= latest; m += step) starts.push(m);
+    return starts;
+  };
   let guarded = slots;
   try {
-    const occupancyByDate = new Map();
-    await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
+    // `occupancyCache` lets a request that guards the same list twice (the
+    // summary's every-start pass and its ranked top-N) read each day once.
+    const occupancyByDate = occupancyCache || new Map();
+    await Promise.all([...new Set(slots.map((s) => s.date))].filter((d) => !occupancyByDate.has(d)).map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
     guarded = slots.flatMap((s) => {
@@ -101,20 +122,24 @@ async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, ex
       // promise to nominal work blocks here would recreate the bug.
       if (s.route_mode === 'arrival_windows') return toMin(s.start_time) >= floorMin ? [s] : [];
       const baseMin = toMin(s.start_time);
-      if (baseMin == null) return [];
-      const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
-      for (let m = Math.max(baseMin, Math.ceil(floorMin / step) * step); m <= latest; m += step) {
+      const kept = [];
+      for (const m of gapStarts(s)) {
         const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
         const clear = conflictsForTarget(
           occupancyByDate.get(s.date), null, s.date, window, { excludeServiceIds: excluded },
         ).length === 0;
-        if (clear) return [m === baseMin ? s : { ...s, start_time: window.start, end_time: window.end }];
+        if (!clear) continue;
+        kept.push(restart(s, baseMin, m));
+        if (!allStarts) break;
       }
-      return [];
+      return kept;
     });
   } catch (guardErr) {
     logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
-    guarded = slots.filter((s) => (toMin(s.start_time) ?? 0) >= floorFor(s.date));
+    guarded = slots.flatMap((s) => {
+      if (allStarts && s.route_mode !== 'arrival_windows') return gapStarts(s).map((m) => restart(s, toMin(s.start_time), m));
+      return (toMin(s.start_time) ?? 0) >= floorFor(s.date) ? [s] : [];
+    });
   }
   const seenStarts = new Set();
   return guarded.filter((s) => {

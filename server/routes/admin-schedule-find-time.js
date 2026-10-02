@@ -293,7 +293,7 @@ router.post('/', async (req, res) => {
     // and the response carries no `summary`. The strip shows about eleven
     // days; the search is capped at SUMMARY_MAX_DAYS so a caller cannot turn
     // a debounced picker hint into a 90-day full enumeration.
-    const summaryMode = hint === true && summary === true && gateEnvValue('GATE_RESCHEDULE_AVAILABILITY');
+    const summaryMode = !!hint && summary === true && gateEnvValue('GATE_RESCHEDULE_AVAILABILITY');
     const startedAt = Date.now();
     const rangeTo = to > maxTo ? maxTo : to;
     const clampedTo = summaryMode ? summaryRangeEnd(from, rangeTo) : rangeTo;
@@ -332,6 +332,10 @@ router.post('/', async (req, res) => {
       : undefined;
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
+    // Appointment windows start on the hour (owner directive), and a
+    // summary lists EVERY start in a gap — so a summary search with no step
+    // of its own is hourly, never the engine's exact-minute default.
+    const stepMinutes = slotStepMinutes !== undefined ? Number(slotStepMinutes) : (summaryMode ? 60 : undefined);
     const result = await findAvailableSlots({
       lat: target.lat,
       lng: target.lng,
@@ -353,7 +357,7 @@ router.post('/', async (req, res) => {
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
       ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
-      slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
+      slotStepMinutes: stepMinutes,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
       includeBlackoutDates: true,
@@ -366,16 +370,23 @@ router.post('/', async (req, res) => {
     // slice, the picked-hour verdict) lives in scheduling/find-time-hints.js;
     // the ungated Find-a-Time search only gets unknown detours marked.
     const excluded = (excludeServiceIds || []).map(String);
-    const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
+    const step = stepMinutes !== undefined ? stepMinutes : 1;
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
     // Summary mode keeps every guarded hour (one per day + start) for the
     // per-day rows; `slots` is still the ranked top-N the plain hint answers.
+    const occupancyCache = new Map();
     const guarded = hint
       ? await guardHintSlots(rawSlots, {
         today, sameDayFloorMin, step, spanMin, excluded, topN: summaryMode ? Number.POSITIVE_INFINITY : requestedTopN,
+        allStarts: summaryMode, occupancyCache,
       })
       : rawSlots;
-    const slots = summaryMode ? guarded.slice(0, requestedTopN) : guarded;
+    // `slots` stays the plain hint's answer in both modes: one start per gap,
+    // ranked, sliced — a summary request must not turn the top-N into the
+    // first N hours of the single best gap.
+    const slots = summaryMode
+      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, occupancyCache })
+      : guarded;
     const picked = hint && pickedStart
       ? await scorePickedHour({
         rawSlots, from: verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
