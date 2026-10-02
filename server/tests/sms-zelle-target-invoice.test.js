@@ -513,3 +513,12 @@ describe('an unmodeled own invoice (legacy unpaid) leaves the Zelle target unres
     } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
   });
 });
+
+// Codex round-64 P2: an unmodeled own invoice may be payable too - only an explicit identification selects the lone modeled row
+test('one modeled open invoice + an unmodeled one: unreferenced => unresolved; an invoice number or invoice-tied amount => that row', () => {
+  const both = { ...billing([MIDDLE]), hasUnmodeledInvoice: true };
+  expect(resolveZelleTargetInvoice(both, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'unmodeled_invoice' });
+  expect(resolveZelleTargetInvoice(both, 'I paid $50 last time — can I Zelle this time?').invoiceId).toBeNull();
+  expect(resolveZelleTargetInvoice(both, 'Can I Zelle invoice WPC-2026-0202?').invoiceId).toBe('inv-2');
+  expect(resolveZelleTargetInvoice(both, 'Can I Zelle the $120 invoice?').invoiceId).toBe('inv-2');
+});

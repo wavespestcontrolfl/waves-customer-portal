@@ -875,3 +875,15 @@ describe('a copied payment sentence and a relative day the customer named', () =
   });
 });
 
+// Codex round-64 P2: a generic receipt never answers a question about a NAMED invoice
+test('a copied receipt that does not name the invoice the customer named is off target', () => {
+  const inbound = 'Did you receive the payment for invoice #0001?';
+  expect(c.copiesOffTarget(['We received your $100.00 payment on Sep 12, 2026.'], inbound, { today: '2026-09-13' })).toBe(true);
+  expect(c.copiesOffTarget(['Invoice WPC-2026-0001 for $100.00 is paid.'], inbound, { today: '2026-09-13' })).toBe(false);
+});
+
+// Codex round-64 P2: a retained payment in an unresolved state (disputed, requires_action, unknown) blocks "no balance due"
+test.each(['disputed', 'requires_action', 'mystery'])('a %s payment row suppresses the no-balance sentence', (status) => {
+  expect(texts(billing({ recentPayments: [row()] }))).toContain('Your account has no balance due.');
+  expect(texts(billing({ recentPayments: [row(), row({ id: 'p9', status })] }))).not.toContain('Your account has no balance due.');
+});

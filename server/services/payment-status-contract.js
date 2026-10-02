@@ -114,10 +114,12 @@ const hasUnmodeledInvoice = (billing) => billing?.hasUnmodeledInvoice === true
 const onActivePaymentPlan = (billing) => billing?.hasActivePaymentPlan === true;
 
 // An obligation exists (or money is in flight / unknown): settlement is then neither stated nor implied.
+// Codex round-64 P2: a retained payment in any state other than these (disputed, requires_action, an unknown status) is unresolved money.
+const RESOLVED_PAYMENT_STATUSES = new Set(['paid', 'succeeded', 'refunded', 'failed', 'canceled', 'cancelled', 'void', 'voided']);
 function hasOutstandingObligation(billing) {
   const b = billing || {};
   const inFlight = b.hasProcessingPayment !== false
-    || (b.recentPayments || []).some((p) => ['pending', 'processing', 'requires_action'].includes(String(p?.status || '').toLowerCase()));
+    || (b.recentPayments || []).some((p) => !RESOLVED_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()));
   return Number(b.outstandingBalance) > 0 || Number(b.openInvoice?.amountDue) > 0 || inFlight || b.hasUncountedPartialDue === true
     || hasUnmodeledInvoice(b) || onActivePaymentPlan(b);
 }
@@ -606,6 +608,8 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
     }
     if (namedTenders.length && /\bpayment\b/i.test(t) && !/\binvoice\b/i.test(t) && !namedTenders.some((tender) => sentenceTender(t) === tender)) return true;
     const inv = /\binvoice\s+([A-Za-z0-9][A-Za-z0-9-]{0,29})\b/i.exec(t);
+    // Codex round-64 P2: the customer named an invoice - a receipt that does not name it is not proven to be that invoice's payment
+    if (!inv && (named.full.length || named.tail.length) && /\bpayment\b/i.test(t)) return true;
     if (inv && (named.full.length || named.tail.length)) {
       const num = inv[1].toUpperCase();
       return !(named.full.includes(num) || namedTails.has(stripZeros(num.split('-').pop())));

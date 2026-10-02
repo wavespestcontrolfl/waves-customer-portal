@@ -198,8 +198,15 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
-/** Any send-time recheck that could not read its state (live ETA or label facts): refuse, keep the decision retryable. */
-const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason);
+// Codex round-64 P2: a BILLING recheck that could not read the billing / Stripe state says nothing about the message either.
+const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed']);
+function blockReasonIsBillingInfrastructure(blockReason) {
+  const m = /^amount no longer authorized \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && BILLING_RECHECK_INFRASTRUCTURE_REASONS.has(m[1]);
+}
+/** Any send-time recheck that could not read its state (live ETA, label facts or billing): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason)
+  || blockReasonIsBillingInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -472,4 +479,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

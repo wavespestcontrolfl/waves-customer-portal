@@ -817,3 +817,13 @@ describe('follow-up (#5416 r31 P2): an unreadable label recheck keeps the decisi
     expect(read('../services/scheduler.js')).toContain("if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {");
   });
 });
+
+// Codex round-64 P2: a billing recheck that could not read billing / Stripe keeps the Agent Review card (retryable)
+test('billing recheck outages are infrastructure; billing verdicts are not', () => {
+  for (const r of ['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed']) {
+    expect(blockReasonIsRecheckInfrastructure(`amount no longer authorized (${r})`)).toBe(true);
+  }
+  for (const r of ['payment_status_changed', 'payment_status_unauthorized', 'zelle_recipient_stale', 'amount_no_longer_authorized', 'amount_recheck_no_customer']) {
+    expect(blockReasonIsRecheckInfrastructure(`amount no longer authorized (${r})`)).toBe(false);
+  }
+});

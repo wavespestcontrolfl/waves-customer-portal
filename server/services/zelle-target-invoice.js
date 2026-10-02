@@ -149,6 +149,9 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   const namedAmounts = invoiceAmountsNamed(inboundMessage);
   const bareAmounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
   return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), namedAmounts)
+    // Codex round-64 P2: an unmodeled own invoice may be payable too - the lone MODELED row is not "the" open invoice, and only an
+    // explicit identification (a number above, or an amount tied to an invoice) selects a modeled row; anything else is unresolved
+    || (billing?.hasUnmodeledInvoice === true && !namedAmounts.length ? { invoiceId: null, reason: 'unmodeled_invoice' } : null)
     || (open.length === 1 && !partialDue ? resolveLoneOpen(open[0], namedAmounts, bareAmounts) : null)
     || resolveByAmount(open, billing, namedAmounts, bareAmounts);
 }
