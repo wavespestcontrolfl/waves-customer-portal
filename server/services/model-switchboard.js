@@ -102,6 +102,7 @@ const SELECTORS = [
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_PHOTO_ID_PEST', env: 'MODEL_GEMINI_PHOTO_ID_PEST', description: 'App Photo ID pest engine (Gemini-only, owner 2026-10-01)', accepts: { providers: ['gemini'], cap: 'vision' } },
+  { key: 'GEMINI_PHOTO_ID_PLANT', env: 'MODEL_GEMINI_PHOTO_ID_PLANT', description: 'App lawn + tree/shrub/palm Photo ID (Gemini-only, owner 2026-10-02)', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_VISION_FALLBACK', env: 'GEMINI_VISION_FALLBACK_MODEL', description: 'Gemini photo retry model', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_TEXT_BEST', env: 'MODEL_GEMINI_TEXT', description: 'Sealed-eval Gemini leg (measurement only)', accepts: { providers: ['gemini'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'OPENAI_EMBEDDING', env: 'MODEL_OPENAI_EMBEDDING', description: 'Knowledge embeddings (1536-dim)', accepts: { providers: ['openai'], cap: 'embedding' }, lock: { kind: 'migration', label: 'Requires re-embed', detail: 'changing it re-embeds the whole corpus' } },
@@ -148,6 +149,7 @@ const POLICY_SELECTOR = {
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPestV2: { primary: 'GEMINI_PHOTO_ID_PEST', fallback: 'OPENAI_FRONTIER' },
+  photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
@@ -390,6 +392,10 @@ const LANES = [
   // low, or disagrees. L3 only — no route wires it in yet (Codex #5307 r7
   // finding 3: this lane previously had zero entries, so the switchboard
   // showed zero blast radius for both PLANT_ID_VISION legs).
+  // Customer app lawn + tree/shrub/palm Photo ID (owner 2026-10-02,
+  // TEXT_POLICIES.photoIdPlantV2): one Gemini read (Call A + Call C) answers;
+  // OpenAI only when Gemini returns nothing usable. No verify, no referee.
+  L('plant_id_app', 'Plant/tree/shrub/palm photo ID (customer app)', 'photo-id-v2/plant-engine.js', 'multimodal', P('photoIdPlantV2', 'primary'), P('photoIdPlantV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-02); OpenAI stands in on a Gemini miss' }),
   L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('plantIdVision', 'fallback'), { inbound: true, note: `L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28) · ${SHARED_GEMINI_PIN}` }),
   // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
   // 09-28): identify mode only, and only for an identity lane where Gemini
@@ -648,6 +654,7 @@ const LANE_AREA = {
   pest_id: 'photos',
   pest_id_app: 'photos',
   plant_id: 'photos',
+  plant_id_app: 'photos',
   plant_id_referee: 'photos',
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
@@ -799,6 +806,7 @@ const LANE_DESCRIBE = {
   pest_id: 'Identifies the pest in a customer photo',
   pest_id_app: "Identifies the pest in a photo a customer takes in the app's Photo ID",
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
+  plant_id_app: "Identifies the grass, weed, shrub or palm in a photo a customer takes in the app's Photo ID, and what may be wrong with it",
   plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',
   typed_decisions_clef: 'The same fixed questions put to a second provider (Cloudflare Clef) for comparison, recorded for review only (dark)',
