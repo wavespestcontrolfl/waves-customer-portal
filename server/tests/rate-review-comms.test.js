@@ -77,8 +77,19 @@ function draft(n, overrides = {}) {
   return fixture.noticeRow(n, { status: 'draft', email_sent: false, sms_sent: false, sent_at: null, notice_token: `${String(n).repeat(32)}`.slice(0, 32), ...overrides });
 }
 
+// One open application per per-application notice on its plan line, on its
+// effective date (the line-open check reads them through the fixture's
+// synthetic _line / _cadence tags).
+function openVisitsFor(notices) {
+  return notices.filter((n) => (n.billing_lane || 'per_application') === 'per_application').map((n, i) => ({
+    id: `70000000-0000-4000-8000-00000000000${i + 1}`, customer_id: n.customer_id, scheduled_date: n.effective_date, status: 'pending', estimated_price: '117.00',
+    is_callback: false, is_recurring: true, recurring_parent_id: null, _line: n.family_key, _cadence: 'quarterly',
+  }));
+}
+
 function book({ customers = [customer(1)], notices = [draft(1)], snapshots = null, costBlock = COST_BLOCK } = {}) {
   return {
+    scheduled_services: openVisitsFor(notices),
     rate_review_batches: [fixture.batchRow()],
     rate_review_snapshots: snapshots || notices.map((nt, i) => fixture.snapshotRow(i + 1, { id: nt.rate_review_row_id, customer_id: nt.customer_id, notice_id: nt.id, treatment_minutes_median: 31 })),
     rate_review_config: [{ id: 1, cost_block: costBlock }],
@@ -181,12 +192,20 @@ describe('sendPreview', () => {
       });
       const data = {
         notices: [notice], snapshots: new Map([[String(notice.id), fixture.snapshotRow(1)]]), customers: new Map([[CUSTOMER(1), customer(1)]]),
-        prefs: new Map(), firstVisits: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'annual_prepay']]), ratesMoved: new Set(),
+        prefs: new Map(), firstVisits: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'annual_prepay']]), ratesMoved: new Set(), linesGone: new Set(),
       };
       return comms._private.planBatch(data, { today: '2026-11-02', now: NOW })[0];
     };
     expect(plan('2026-12-03').suppressedLines[0].reason).toBe('too_late'); // 31 days
     expect(plan('2026-12-04').lines).toHaveLength(1); // 32 days
+  });
+
+  test('a plan line cancelled since the notice was prepared (no open application left) is held (line_gone)', async () => {
+    mockDb.reset(book());
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    mockDb.store.scheduled_services.forEach((v) => { v.status = 'cancelled'; });
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].suppressedLines[0].reason).toBe('line_gone');
   });
 
   test('a prepaid term whose renewal date moved since the notice is held (rate_moved)', async () => {
@@ -440,7 +459,7 @@ describe('letter wording and order', () => {
   test('the first application is stated as the rule ("on or after"), never one visit\'s date', async () => {
     const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
     const b = book({ notices: [n] });
-    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed', estimated_price: '117.00' }];
+    b.scheduled_services.push({ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed', estimated_price: '117.00' });
     mockDb.reset(b);
     const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
@@ -544,10 +563,10 @@ describe('customer surfaces', () => {
   test('portal: a per-application change whose first visit was repriced since is not upcoming', async () => {
     const n = draft(1, { status: 'sent', sent_at: NOW, metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
     const b = book({ notices: [n] });
-    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '117.00' }];
+    b.scheduled_services.push({ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '117.00' });
     mockDb.reset(b);
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
-    mockDb.store.scheduled_services[0].estimated_price = '140.00';
+    mockDb.store.scheduled_services.find((v) => v.id === 'v-1').estimated_price = '140.00';
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 

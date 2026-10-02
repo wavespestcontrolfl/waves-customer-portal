@@ -81,6 +81,7 @@ const REASONS = Object.freeze({
   renewal_declined: 'Customer declined to renew the prepaid plan',
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
   rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
+  line_gone: 'No open application left on this plan line (cancelled since the notice was prepared)',
 });
 
 function badInput(message, status = 400) {
@@ -291,6 +292,27 @@ async function liveMonthlyCents(dbh, n, customer) {
   return cents(customer?.monthly_rate);
 }
 
+// Per-application notices whose plan line has no open application on or
+// after the effective date any more (the line was cancelled or emptied
+// since the notice was prepared): nothing would ever bill the new rate, so
+// the letter is not sent and nothing is shown as upcoming. Unreadable =
+// treated as gone (held).
+async function linesGoneFor(dbh, notices, { snapshots }) {
+  const { loadLineOpenVisits } = require('./rate-review-apply')._private;
+  const cadenceByNotice = new Map((snapshots || []).map((s) => [String(s.notice_id), s.cadence]));
+  const gone = new Set();
+  for (const n of notices.filter((x) => x.billing_lane === 'per_application')) {
+    try {
+      const visits = await loadLineOpenVisits(dbh, { customerId: n.customer_id, familyKey: n.family_key, cadence: cadenceByNotice.get(String(n.id)) || null, fromDate: ymd(n.effective_date) });
+      if (!visits.some((v) => !v.is_callback)) gone.add(String(n.id));
+    } catch (err) {
+      logger.warn(`[rate-review-comms] open visits unreadable for notice ${n.id}: ${err.message}`);
+      gone.add(String(n.id));
+    }
+  }
+  return gone;
+}
+
 // The live lane per unsent notice; an unreadable lane reads as null (held).
 async function liveLanesFor(dbh, notices, { snapshots, customers, today, includeSent = false }) {
   const { resolveLiveLane } = require('./rate-review-apply')._private;
@@ -356,6 +378,7 @@ async function loadBatch(dbh, batchKey, today) {
     declinedTerms: await declinedPrepayTermIds(dbh, notices),
     liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
     ratesMoved: await ratesMovedFor(dbh, notices.filter((n) => !n.sent_at), { customers, visitById }),
+    linesGone: await linesGoneFor(dbh, notices.filter((n) => !n.sent_at), { snapshots }),
     unscheduled: approvedUnscheduled.length,
   };
 }
@@ -372,6 +395,7 @@ const LINE_RULES = [
   // change the apply refuses.
   ['lane_changed', ({ notice, liveLanes }) => liveLanes.get(String(notice.id)) !== notice.billing_lane],
   ['rate_moved', ({ notice, ratesMoved }) => ratesMoved.has(String(notice.id))],
+  ['line_gone', ({ notice, linesGone }) => linesGone.has(String(notice.id))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
   ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
@@ -394,7 +418,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer);
-    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes, ratesMoved: data.ratesMoved });
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes, ratesMoved: data.ratesMoved, linesGone: data.linesGone });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -855,6 +879,7 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const lanes = await liveLanesFor(dbh, pending, { snapshots: [], customers: customer ? [customer] : [], today, includeSent: true });
   const perApp = pending.filter((n) => n.billing_lane === 'per_application');
   const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp) });
+  for (const id of await linesGoneFor(dbh, perApp, { snapshots: [] })) moved.add(id);
   return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
