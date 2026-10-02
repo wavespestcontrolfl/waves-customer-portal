@@ -74,3 +74,15 @@ test('palm spacing is one three-calendar-month rule shared with Fast Complete', 
   expect(warn('2028-07-19')).toHaveLength(1);
   expect(warn('2028-07-30')).toHaveLength(0);
 });
+
+test('history older than 12 months never holds a suggestion; undated rows still do', () => {
+  const due = rows => treeShrubDueReason('snapshot', rows, '2028-07-01', 'property-a');
+  expect(due([application('Snapshot 2.5TG', '2026-03-01', { property_id: null })])).toBeNull();
+  expect(due([application('Snapshot 2.5TG', '2028-03-01', { property_id: null })])).toMatch(/unconfirmed property/);
+  expect(due([application('Snapshot 2.5TG', null)])).toMatch(/unconfirmed property or date/);
+});
+
+test('a rate unit written with a comma ("lb/1,000 sq ft") is recognized', () => {
+  const due = rows => treeShrubDueReason('snapshot', rows, '2028-07-01', 'property-a');
+  expect(due([application('Snapshot 2.5TG', '2028-04-01', { rate_unit: 'lb/1,000 sq ft' })])).toBeNull();
+});

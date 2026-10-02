@@ -40,10 +40,10 @@ function palmFeedingTooSoon(lastApplicationDate, visitDate) {
 // unreviewable.
 const SNAPSHOT_LABEL_MAX_LB_PER_1000 = 4.6;
 function snapshotRatePer1000(row) {
-  const unit = String(row.rate_unit || '').toLowerCase().replace(/\s/g, '');
+  const unit = String(row.rate_unit || '').toLowerCase().replace(/[\s,]/g, '');
   const rate = Number(row.application_rate);
   if (row.application_rate != null && row.application_rate !== '') {
-    return ['lb', 'lb/1000sf', 'lb/1000sqft'].includes(unit) && Number.isFinite(rate) && rate > 0 ? rate : null;
+    return ['lb', 'lb/1000sf', 'lb/1000sqft', 'lb/1000ft2'].includes(unit) && Number.isFinite(rate) && rate > 0 ? rate : null;
   }
   const total = Number(row.total_amount);
   const totalUnit = String(row.amount_unit || '').toLowerCase().replace(/\s|\./g, '');
@@ -58,8 +58,11 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
   const matches = name => key === 'snapshot' ? SNAPSHOT.test(name) : PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim());
+  // Only the past 12 months can affect a due decision. An older row (even an
+  // unlinked one) never holds a suggestion; an undated row still does.
   const relevant = history.filter(row => matches(row.product_name || '') &&
-    (!row.property_id || String(row.property_id) === String(propertyId)));
+    (!row.property_id || String(row.property_id) === String(propertyId)) &&
+    !(Number.isFinite(dayNumber(row.application_date)) && today >= monthsAfter(row.application_date, 12)));
   if (relevant.some(row => !row.property_id || !Number.isFinite(dayNumber(row.application_date)))) {
     return 'Review application history with an unconfirmed property or date.';
   }

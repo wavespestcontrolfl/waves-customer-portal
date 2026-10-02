@@ -394,8 +394,11 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     });
 
     let holds = [];
-    if (resolved.programKey === 'tree_shrub') {
-      if (!gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE')) return { ...empty, programKey: 'tree_shrub' };
+    if (resolved.programKey === 'tree_shrub' && !gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE')) {
+      // Gate dark: the new protocol-visit entries stay hidden, and every other
+      // source keeps main's pre-#5089 behavior unchanged.
+      if (resolved.source === 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
+    } else if (resolved.programKey === 'tree_shrub') {
       // Legacy service defaults are not reviewed T&S treatment choices.
       if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
       const applicable = await filterTreeShrubDefaults({ db, scheduled, entries: resolved.entries });
