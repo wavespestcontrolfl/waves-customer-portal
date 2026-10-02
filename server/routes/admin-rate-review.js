@@ -6,15 +6,27 @@
  *
  *   GET  /api/admin/rate-review/batches                    every batch with counts + the config
  *   GET  /api/admin/rate-review/batches/:key               rows + summary + digest + the batch's references
- *   POST /api/admin/rate-review/batches/:key/build         recompute (refused 409 once any row was sent)
+ *   POST /api/admin/rate-review/batches/:key/build         recompute (refused 409 once any row was sent,
+ *                                                          approved, or scheduled)
  *   PUT  /api/admin/rate-review/batches/:key/rows/:id      proposed amount / green ↔ skipped (409 once sent, on a locked
  *                                                          row, or on an exception without includeException)
  *   POST /api/admin/rate-review/batches/:key/approve       { expectedDigest } → green rows become 'approved' (NO send)
  *   PUT  /api/admin/rate-review/config                     the knobs + the owner's cost block (audit_log row)
+ *   POST /api/admin/rate-review/batches/:key/schedule      draft notice rows for the batch's
+ *        approved rows (services/rate-review-apply.js scheduleNoticeRows —
+ *        NOTHING is sent; 409 when nothing is approved); body
+ *        { plannedSendDate?: 'YYYY-MM-DD' } (default today) — the 30-day
+ *        rule is measured from it
+ *   DELETE /api/admin/rate-review/batches/:key/schedule    retire the batch's DRAFT
+ *        (never delivered) notice rows, unlink their ranking rows and return
+ *        every approved row left without a notice to green — the undo before
+ *        the send, and what an edit or rebuild of a scheduled batch needs first
+ *   GET  /api/admin/rate-review/apply-holds                rate-review notices the nightly
+ *        apply refused, with the reason
  *
- * No customer sends and no rate writes here — the notices (letter preview
- * included), the reply-APPROVE path and the apply job are later PRs. The
- * admin screen is client/src/pages/admin/RateReviewPage.jsx (Pricing hub →
+ * No customer sends here — the notices are sent by the comms PR, and the
+ * nightly apply lives in services/rate-review-apply.js (scheduler 3:10 AM ET).
+ * The admin screen is client/src/pages/admin/RateReviewPage.jsx (Pricing hub →
  * Rate review).
  */
 const express = require('express');
@@ -25,6 +37,7 @@ const { validCalendarDate } = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const logger = require('../services/logger');
 const rateReview = require('../services/rate-review');
+const rateReviewApply = require('../services/rate-review-apply');
 
 // The same advisory lock the monthly tick holds (scheduler.js
 // runExclusive('rate-review-monthly')): a build and its digest never
@@ -149,6 +162,7 @@ const BUILD_REFUSALS = {
   batch_has_sent_rows: 'This batch already has rows that were sent to customers — it cannot be recomputed.',
   batch_has_approved_rows: 'This batch has rows you approved — it cannot be recomputed over your decision.',
   batch_changed: 'This batch was edited while it was being recomputed — build it again.',
+  batch_has_scheduled_rows: 'This batch has notice rows scheduled — retire its draft notices first (DELETE …/schedule), then recompute.',
 };
 
 router.post('/batches/:key/build', async (req, res) => {
@@ -199,6 +213,56 @@ router.post('/batches/:key/build', async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[admin-rate-review] build failed for ${key}: ${err.message}`);
     return res.status(500).json({ error: 'Could not build the rate review batch' });
+  }
+});
+
+// Draft notice rows for the batch's approved rows. Nothing is sent here —
+// the comms PR sends and marks them sent; the nightly apply writes rates.
+router.post('/batches/:key/schedule', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const plannedSendDate = req.body && req.body.plannedSendDate != null ? String(req.body.plannedSendDate) : null;
+  if (plannedSendDate && !validCalendarDate(plannedSendDate)) {
+    return res.status(400).json({ error: 'plannedSendDate must be a real calendar date, YYYY-MM-DD' });
+  }
+  try {
+    const result = await rateReviewApply.scheduleNoticeRows(key, { plannedSendDate, actorId: req.technicianId || null });
+    if (!result.ok && (result.reason === 'nothing_approved' || result.reason === 'no_positive_delta')) {
+      return res.status(409).json({ error: 'No approved rate changes to schedule in this batch', reason: result.reason, approved: result.approved || 0 });
+    }
+    if (!result.ok) return res.status(409).json({ error: 'Notice rows could not be scheduled', reason: result.reason });
+    return res.json({
+      ok: true, batchKey: key, batchId: result.batchId, plannedSendDate: result.plannedSendDate,
+      created: result.created, alreadyScheduled: result.alreadyScheduled, held: result.held,
+      firstEffectiveDate: result.firstEffectiveDate, lastEffectiveDate: result.lastEffectiveDate, notices: result.notices,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] schedule failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not schedule the rate review notices' });
+  }
+});
+
+router.delete('/batches/:key/schedule', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  try {
+    const result = await rateReviewApply.retireDraftNotices(key);
+    if (!result.ok) return res.status(409).json({ error: 'Draft notice rows could not be retired', reason: result.reason });
+    return res.json({ ok: true, batchKey: key, retired: result.retired, keptDelivered: result.keptDelivered, revoked: result.revoked });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] retire drafts failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not retire the draft notice rows' });
+  }
+});
+
+router.get('/apply-holds', async (req, res) => {
+  try {
+    res.json({ enabled: true, holds: await rateReviewApply.listApplyHolds() });
+  } catch (err) {
+    logger.error(`[admin-rate-review] apply-holds read failed: ${err.message}`);
+    res.status(500).json({ error: 'Could not list the rate review apply holds' });
   }
 });
 

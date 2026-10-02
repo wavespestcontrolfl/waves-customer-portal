@@ -21,6 +21,7 @@ const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = 
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
+const { buildSinceLastCopy } = require('./lawn-since-last-copy');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -65,6 +66,7 @@ const {
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
+const { buildReserviceReportCard } = require('./reservice-report-card');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
@@ -5656,6 +5658,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       if (reportV2 && lawnProgress) {
         Object.defineProperty(reportV2, 'progress', { value: lawnProgress, enumerable: false, writable: true, configurable: true });
       }
+      // GATE_LAWN_SINCE_LAST: the "Since your last visit" sentences, selected
+      // here because the progress block never leaves this process. Handed to
+      // the lead (applyLawnReportReconciliation) the same non-enumerable way,
+      // so the payload gains a key only through reportV2.lead.sinceLast.
+      // LIVE VIEWS ONLY: the PDF and static builds mount the same lead card,
+      // and their cache key does not vary on this gate, the expectation rows'
+      // approvals or the photo confidence these lines depend on, so a stored
+      // PDF never carries the block (codex P1 #5597 r1).
+      if (reportV2 && visitMemorySinceLast && opts.mode === 'live' && featureGates.lawnSinceLastLive()) {
+        try {
+          const sinceLastCopy = buildSinceLastCopy({
+            sinceLast: visitMemorySinceLast,
+            progress: lawnProgress,
+            insights: reportV2.insights,
+            bannerPresent: Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0,
+          });
+          if (sinceLastCopy) {
+            Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the block */ }
+      }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
       reportV2 = null;
@@ -6605,6 +6628,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   );
   const callbackNonPerformed = Boolean(reserviceReportBlock)
     && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
+  // Re-service report card (GATE_RESERVICE_REPORT_CARD, reservice-report-card.js):
+  // null while the gate is dark or no reserviceReport block composed — and
+  // then NO key joins the payload, so a dark gate leaves it byte-identical.
+  // The customer's words come from the copy FROZEN on the record at
+  // completion (service_data.reserviceRequest), never from the live booking.
+  const reserviceReportCardBlock = buildReserviceReportCard(service, {
+    block: reserviceReportBlock,
+    products,
+    // The gauge's own per-record visibility decision (switches, service
+    // lines, recurring-only, one-time exclusion, typed specialty): no gauge
+    // on this report, no pressure word on the card (Codex r12).
+    pestPressureScore: pestPressure !== null ? (pestPressureRow || null) : null,
+  });
 
   // The four-section report's "What's next" visit: the next booking on this
   // report's own line AT this report's property (same-line-visit.js; a
@@ -6727,6 +6763,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
     reserviceReport: reserviceReportBlock,
+    ...(reserviceReportCardBlock ? { reserviceReportCard: reserviceReportCardBlock } : {}),
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.

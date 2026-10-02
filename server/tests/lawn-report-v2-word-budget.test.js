@@ -10,6 +10,7 @@ const { applyLawnReportReconciliation } = require('../services/service-report/re
 const { buildWateringBanner } = require('../services/service-report/report-data');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { leadWords, WATERING_WORDS } = require('../services/service-report/lawn-report-lead');
+const { buildSinceLastCopy } = require('../services/service-report/lawn-since-last-copy');
 
 const DYNAMIC_CONTEXT_READY = { reentry: { targets: [{ statusAtGeneratedAt: 'ready' }], petAdvisory: 'Keep pets off treated turf until dry.' } };
 const COMPLETED = '2026-09-30T18:40:00Z';
@@ -91,7 +92,28 @@ const CELSIUS = [{ product: { name: 'Celsius WG', category: 'herbicide', irrigat
 const LONG_WHY = Array.from({ length: 40 }, (_, i) => `reason${i + 1}`).join(' ');
 const LONG_APPLIED = Array.from({ length: 60 }, (_, i) => `product${i + 1}`).join(' ');
 
-function build(caseName, weekPlan, bannerKind, { long = false } = {}) {
+// The fullest "Since your last visit" block the builder can emit under no
+// banner (applied, overall, two metric lines, three watch topics), handed to
+// the lead the way report-data.js does: a non-enumerable sinceLastCopy.
+const fullSinceLast = (bannerPresent) => buildSinceLastCopy({
+  sinceLast: {
+    v: 1, priorAssessmentId: 'la-prior', priorDate: '2026-08-01',
+    applied: [{ name: 'A', kind: 'herbicide' }, { name: 'B', kind: 'fungicide' }, { name: 'C', kind: 'fertilizer' }],
+    checks: [{ key: 'water', status: 'watch' }, { key: 'weeds', status: 'watch' }, { key: 'mowing', status: 'watch' }],
+  },
+  progress: {
+    eligible: true,
+    overall: { direction: 'down' },
+    items: [
+      { kind: 'applied', metric: 'stress_damage', state: 'too_early', approved: true },
+      { kind: 'applied', metric: 'weed_suppression', state: 'behind', approved: true },
+    ],
+  },
+  insights: [{ category: 'water', status: 'watch' }, { category: 'weeds', status: 'watch' }, { category: 'mowing', status: 'watch' }],
+  bannerPresent,
+});
+
+function build(caseName, weekPlan, bannerKind, { long = false, sinceLast = false } = {}) {
   const base = CASES[caseName];
   const rules = BANNER_RULES[bannerKind];
   const instruction = rules ? buildWateringInstruction({ rules, completedAt: COMPLETED }) : null;
@@ -105,6 +127,10 @@ function build(caseName, weekPlan, bannerKind, { long = false } = {}) {
     if (banner) reportV2.banner = banner;
   }
   if (long) reportV2.snapshot = { ...reportV2.snapshot, rootCause: LONG_WHY, treatmentSummary: LONG_APPLIED };
+  if (sinceLast) {
+    const copy = fullSinceLast(Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0);
+    Object.defineProperty(reportV2, 'sinceLastCopy', { value: copy, enumerable: false, writable: true, configurable: true });
+  }
   const data = applyLawnReportReconciliation(
     { serviceLine: 'lawn', summary: base.aiSummary, lawnAssessment: base, reportV2 },
     DYNAMIC_CONTEXT_READY,
@@ -123,7 +149,7 @@ const norm = (s) => tokens(s).join(' ');
 
 function leadStrings(v2) {
   const { lead } = v2;
-  return [lead.headline, lead.why, lead.applied, lead.next, ...lead.yourPart].filter(Boolean);
+  return [lead.headline, lead.why, lead.applied, lead.next, ...lead.yourPart, ...(lead.sinceLast ? lead.sinceLast.lines : [])].filter(Boolean);
 }
 function bannerStrings(v2) {
   const banner = v2.banner;
@@ -194,4 +220,31 @@ describe('lawn report lead word budget', () => {
       }
     },
   );
+
+  // GATE_LAWN_SINCE_LAST: the fullest "Since your last visit" block rides the
+  // same budget, the same no-repeat rule and the same banner rule.
+  test.each(GRID)('%s / %s / banner %s: with the fullest since-last block the lead still fits, long fields included', (caseName, planName, bannerKind, plan) => {
+    for (const long of [false, true]) {
+      const v2 = build(caseName, plan, bannerKind, { long, sinceLast: true });
+      expect(leadWords(v2)).toBeLessThanOrEqual(WORD_BUDGET);
+      // The block is the last field given up: a long why or applied goes first.
+      expect(v2.lead.sinceLast.lines.length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test.each(GRID.filter(([, , bannerKind]) => bannerKind !== 'absent'))(
+    '%s / %s / banner %s: under a banner the since-last block carries no watering wording',
+    (caseName, planName, bannerKind, plan) => {
+      const v2 = build(caseName, plan, bannerKind, { long: true, sinceLast: true });
+      for (const text of leadStrings(v2)) {
+        expect({ text, watering: WATERING_WORDS.test(text) }).toEqual({ text, watering: false });
+      }
+    },
+  );
+
+  test('without the hand-off the lead has no sinceLast key (gate off is the same lead as before)', () => {
+    const v2 = build('healthy', null, 'absent');
+    expect(Object.prototype.hasOwnProperty.call(v2.lead, 'sinceLast')).toBe(false);
+    expect(JSON.stringify(build('healthy', null, 'absent', { sinceLast: true }))).not.toContain('sinceLastCopy');
+  });
 });

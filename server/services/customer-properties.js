@@ -750,11 +750,107 @@ async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { loc
   };
 }
 
+/**
+ * The one active property a recurring series' own visits agree on: the root
+ * and its live (not cancelled/skipped) children, among this customer's
+ * ACTIVE properties. null when they name none or more than one. Ops
+ * 2026-10-02: a series root left without a property (its visits were linked
+ * later by the 20260829000050 backfill, which skips terminal roots) made the
+ * nightly top-up add each next visit with no property for a multi-property
+ * customer, though every other visit in the series sat at one house.
+ */
+async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
+  if (!rootId || !customerId) return null;
+  const read = (c) => c('scheduled_services as ss')
+    .join('customer_properties as p', 'p.id', 'ss.property_id')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId, 'p.customer_id': customerId, 'p.active': true })
+    // A legacy NULL status is a live visit (20260829000050's rule).
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
+    .distinct('ss.property_id')
+    .limit(2);
+  // Live visits of the series with NO property are evidence too (the
+  // 20260829000050 backfill leaves ambiguous ones unlinked): one stamped
+  // with another address, or unstamped (it reads as the customer's primary)
+  // while the candidate is not the primary, makes the series unresolved.
+  const unlinked = (c) => c('scheduled_services as ss')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId })
+    .whereNull('ss.property_id')
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'skipped']))
+    .select('ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip');
+  const candidate = (c, id) => c('customer_properties').where({ id, customer_id: customerId, active: true })
+    .first('address_line1', 'address_line2', 'city', 'zip', 'is_primary');
+  const decide = async (c) => {
+    const rows = await read(c);
+    if (rows.length !== 1) return null;
+    const id = rows[0].property_id;
+    const [others, house] = await Promise.all([unlinked(c), candidate(c, id)]);
+    if (!house) return null;
+    const houseKey = addressKey(house);
+    for (const o of others) {
+      if (o.service_address_line1) {
+        if (addressKey({ address_line1: o.service_address_line1, address_line2: o.service_address_line2, city: o.service_address_city, zip: o.service_address_zip }) !== houseKey) return null;
+      } else if (!house.is_primary) {
+        return null;
+      }
+    }
+    return id;
+  };
+  try {
+    return await (conn.isTransaction ? conn.transaction((sp) => decide(sp)) : decide(conn));
+  } catch {
+    return null;
+  }
+}
+
+/** bookingPropertyStamp for a resolved id, or null (incomplete, gone, or a failed read). */
+async function propertyStampOrNull(customerId, propertyId, conn) {
+  try {
+    // Inside a caller's transaction the row is read FOR SHARE (the direct
+    // booking path's rule), held through the caller's commit, so the
+    // property cannot be deactivated or moved between this read and the
+    // child insert.
+    const read = (c) => bookingPropertyStamp({ customerId, propertyId: String(propertyId) }, c, { lock: !!conn.isTransaction });
+    return await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
+  } catch {
+    return null;
+  }
+}
+
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
-  if (cols.service_address_line1 && target.service_address_line1) return;
   if (cols.source_estimate_id && target.source_estimate_id) return;
+  const stamped = !!(cols.service_address_line1 && target.service_address_line1);
+  // A series child follows the house its series is already at, before the
+  // sole-property fallback (which only resolves a one-property customer).
+  if (target.recurring_parent_id) {
+    const agreed = await seriesAgreedPropertyId(target.recurring_parent_id, target.customer_id, conn);
+    const stamp = agreed ? await propertyStampOrNull(target.customer_id, agreed, conn) : null;
+    if (stamp) {
+      if (stamped) {
+        // An address copied from the root wins; the property is adopted only
+        // when it is that same address.
+        const copied = {
+          address_line1: target.service_address_line1, address_line2: target.service_address_line2,
+          city: target.service_address_city, zip: target.service_address_zip,
+        };
+        const own = { address_line1: stamp.service_address_line1, address_line2: stamp.service_address_line2, city: stamp.service_address_city, zip: stamp.service_address_zip };
+        if (addressKey(copied) === addressKey(own)) target.property_id = stamp.property_id;
+        return;
+      }
+      // Dispatch reads the visit's stamped address (falling back to the
+      // customer's primary), so the house's address and pin ride with its id.
+      // The zone copied from the root belonged to the root's address; it is
+      // cleared so routing derives it from this house (appointment-address.js
+      // does the same on an address change).
+      for (const [field, value] of Object.entries(stamp)) if (cols[field]) target[field] = value;
+      if (cols.zone) target.zone = null;
+      return;
+    }
+  }
+  if (stamped) return;
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 

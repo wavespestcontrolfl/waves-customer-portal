@@ -50,7 +50,10 @@ router.get('/:token', async (req, res) => {
     void db('price_change_notices').where({ id: notice.id }).update({
       view_count: db.raw('view_count + 1'),
       first_viewed_at: db.raw('COALESCE(first_viewed_at, now())'),
-      status: 'viewed',
+      // An in-flight send claim ('sending') is kept: the sender finalizes it
+      // to 'sent', and a viewed-but-unsent preview is what a draft
+      // retirement may delete — a claimed notice must never read as one.
+      status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
       updated_at: new Date(),
     }).catch((err) => logger.warn(`[price-change-public] view update failed: ${err.message}`));
 

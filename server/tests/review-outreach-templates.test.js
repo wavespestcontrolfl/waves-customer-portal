@@ -127,13 +127,14 @@ describe('review outreach templates', () => {
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 
-  test('the cadence Day-0 step is the controlled day0_ask (day-agnostic, uniform reply invite); legacy friendly_ask plans map onto it', () => {
+  test('the cadence Day-0 step is the controlled day0_ask (day-agnostic, neutral wording); legacy friendly_ask plans map onto it', () => {
     const { DAY0_ASK_TEMPLATE_KEY, isDay0ControlledAsk } = require('../services/review-outreach-templates');
     expect(DEFAULT_SEQUENCE_PLAN[0].templateKey).toBe(DAY0_ASK_TEMPLATE_KEY);
     expect(RECURRING_SEQUENCE_PLAN[0].templateKey).toBe(DAY0_ASK_TEMPLATE_KEY);
     const tpl = getOutreachTemplate(DAY0_ASK_TEMPLATE_KEY);
     expect(tpl.body).not.toMatch(/\btoday\b|\btonight\b/i);
-    expect(tpl.body).toContain("Reply if anything's off.");
+    // Neutral, no reply-instead-of-review invite (owner rulings 2026-09-30).
+    expect(tpl.body).not.toMatch(/if we earned|if you were happy|reply if anything/i);
     expect(tpl.body).toContain('{sender}');
     expect(tpl.body).toContain('{review_url}');
     expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'friendly_ask' })).toBe(true);

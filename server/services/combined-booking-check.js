@@ -5,16 +5,20 @@
  * For every accepted estimate with MORE THAN ONE recurring service (pest +
  * lawn, pest + lawn + tree & shrub, pest + rodent, ...), this verifies that
  * every UPCOMING visit the booking created has a time and a technician, and
- * posts ONE admin bell when one does not (owner rulings 2026-10-01: time and
- * technician only; upcoming visits, whenever the estimate was accepted). The
+ * that every upcoming priced series visit carries the price the customer
+ * accepted for it, and posts ONE admin bell when one does not (owner rulings
+ * 2026-10-01: upcoming visits, whenever the estimate was accepted; 2026-10-02:
+ * visit prices are back, visit prices only, no invoices). The
  * 2026-09-28 defect it guards: companion services were booked with no time and
  * no technician.
  *
  * NOT THIS CHECK'S (each has its own owner, and a second bell would conflict):
- *   - prices and invoices (an unpriced visit is the watchdog's unpriced-series
- *     alert's; split first-application invoices are the sibling-split
- *     workflow's). Owner ruling 2026-10-01: price checks may come back later as
- *     their own change, not here.
+ *   - invoices, and visits with no price at all (an unpriced visit is the
+ *     watchdog's unpriced-series alert's; first-application and split
+ *     invoices are the sibling-split workflow's). A first visit, a prepaid
+ *     visit, and any visit whose accepted price cannot be known for certain
+ *     (a discounted or credited plan, monthly-dues rodent) are not
+ *     price-checked: never guessed.
  *   - whether the right number of visits exist: the shared accepted-plan
  *     classifier (recurring-schedule-audit's acceptedScheduleFindings), the
  *     source of the watchdog's `accepted-schedule:*` alerts. An estimate with
@@ -73,6 +77,9 @@ const SETTLE_MINUTES = 3;
 const ROUTING_HORIZON_DAYS = 14;
 const addDaysET = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
 
+const PRICE_TOLERANCE_CENTS = 2;
+const money = (value) => `$${(Math.round(Number(value) * 100) / 100).toFixed(2)}`;
+
 const CANCELLED = new Set(['cancelled', 'canceled']);
 // Finished or parked visits are not judged: the shared terminal set
 // (completed, cancelled, rescheduled, skipped, no_show) plus the alternate
@@ -112,11 +119,12 @@ function parseJson(value, fallback = {}) {
 }
 
 /**
- * The service families an accepted estimate auto-schedules, from the
- * converter's own scheduling units. null for a one-time accept or a plan the
- * converter does not auto-schedule. Pure.
+ * What the customer accepted: the service families the converter
+ * auto-schedules (from its own scheduling units) and, per family, the accepted
+ * per-visit price (`prices`: null when it cannot be known for certain). null
+ * for a one-time accept or a plan the converter does not auto-schedule. Pure.
  */
-function acceptedFamilies(estimate) {
+function acceptedPlan(estimate) {
   const converter = require('./estimate-converter');
   const { acceptedRecurringBillingLines } = require('./plan-rate-ledger');
   const { inferFrequencyKeyFromEstimateData, legacyRodentRowPredicateFor } = require('./billing-cadence');
@@ -134,23 +142,74 @@ function acceptedFamilies(estimate) {
   })) return null;
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
+  const family = (line) => converter.seedingFamilyKey(line);
+  const supplements = converter.supplementalCompanionLines(data);
   const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(lines, {
-    acceptFrequency: acceptedFrequency, supplementalCompanions: converter.supplementalCompanionLines(data),
+    acceptFrequency: acceptedFrequency, supplementalCompanions: supplements,
   });
-  return new Set([
+  const families = new Set([
     ...[...remaining, ...standalone.map((unit) => unit.service)].map((service) => [service, [service]]),
     ...combos.map((combo) => [combo.service, combo.combinedFrom]),
   ]
     // Commercial lines, billing riders and contradictory terms are scheduled
     // by the office; they have no auto-seeded cadence to verify here.
     .filter(([service]) => converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency))
-    .flatMap(([, sources]) => sources.map((line) => converter.seedingFamilyKey(line))));
+    .flatMap(([, sources]) => sources.map(family)));
+  // A supplement (the legacy rodent monthly dues) counts toward the accepted
+  // total only for a family no line already bills, as the combiner dedupes it.
+  const lineFamilies = new Set(lines.map(family));
+  const dues = supplements.filter((line) => !lineFamilies.has(family(line)));
+  return { families, prices: acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family, dues }) };
 }
+
+// The accepted per-visit price of each family: the same per-line rule the
+// converter's own price split uses (lineAnnualPerVisitAmount), summed over the
+// family's lines. Known only when the lines add up to the accepted annual
+// total EXACTLY to the cent, legacy rodent dues included (a manual discount,
+// a plan credit or a cadence change breaks that, even by a cent, and a
+// guessed price would alert falsely), and only for a family billed by its
+// lines (a legacy rodent supplement is monthly dues: no line, no per-visit
+// price, but its dues are part of the accepted total).
+function acceptedPrices(converter, lines, families, { estimate, acceptedFrequency, family, dues }) {
+  const annualCents = Math.round([...lines, ...dues].reduce((sum, line) => sum + converter.recurringLineAnnualAmount(line), 0) * 100);
+  const reconciles = Number(estimate.annual_total) > 0 && annualCents === Math.round(Number(estimate.annual_total) * 100);
+  const prices = new Map();
+  for (const key of families) {
+    // One line per family: a family billed through two lines (a termite bond
+    // rider beside the bait) is priced by the converter as one whole-plan
+    // amount per application that the per-line rule cannot reproduce, so its
+    // price is unknown rather than guessed.
+    const perVisits = lines.filter((line) => family(line) === key)
+      .map((line) => converter.lineAnnualPerVisitAmount(line, acceptedFrequency));
+    const known = reconciles && perVisits.length === 1 && perVisits[0] > 0;
+    prices.set(key, known ? Math.round(perVisits.reduce((a, b) => a + b, 0) * 100) / 100 : null);
+  }
+  return prices;
+}
+
+/** The service families an accepted estimate auto-schedules (see acceptedPlan). */
+function acceptedFamilies(estimate) {
+  return acceptedPlan(estimate)?.families || null;
+}
+
+// The combined routes that perform two services (from the converter's own
+// route table; the bait + bond routes are one service plus a rider), by
+// catalog key and by name: when the catalog row is missing the converter
+// schedules the combined route by its name alone (no service_id, no key).
+function multiServiceRoutes() {
+  const converter = require('./estimate-converter');
+  return converter.COMBINED_SERVICE_ROUTES
+    .filter((route) => converter.comboRouteFamiliesFromCatalogKey(route.catalogServiceKey).length >= 2);
+}
+const multiServiceRouteKeys = () => [...new Set(multiServiceRoutes().map((route) => route.catalogServiceKey))];
+const multiServiceRouteNames = () => [...new Set(multiServiceRoutes().map((route) => route.name))];
 
 /** Service families a scheduled row performs (a combined route spans two). */
 function rowFamilies(row) {
   const converter = require('./estimate-converter');
-  const identity = row.catalog_service_key || row.service_key_snapshot;
+  // A name-only combined route (no catalog row) is read through its route.
+  const byName = multiServiceRoutes().find((route) => route.name === row.service_type);
+  const identity = row.catalog_service_key || row.service_key_snapshot || byName?.catalogServiceKey;
   const families = converter.comboRouteFamiliesFromCatalogKey(identity);
   return families.length ? families
     : [converter.seedingFamilyKey({ service: identity, name: row.service_type })];
@@ -188,6 +247,81 @@ function checkTimeAndTech(dated, families, { firstDay, byId, todayET }) {
   }));
 }
 
+// Price on every upcoming series child that carries one (owner ruling
+// 2026-10-02: visit prices only, no invoices). A child bills its own
+// estimated_price at completion, so it must be the accepted per-visit price of
+// the services it performs (a combined route row: their sum), within two
+// cents. Skipped, never guessed: a row with no price (the unpriced-series
+// alert's), a prepaid row (prepay coverage bills it), a first visit (the
+// first-application invoice's), and any row whose accepted price is unknown.
+function checkPrices(dated, families, prices, { timeTechOnly = false } = {}) {
+  // The hourly urgent pass is about time and technician only.
+  if (timeTechOnly) return [];
+  const off = new Map();
+  for (const row of dated) {
+    const price = billedServicePrice(row);
+    // Unreadable, or no price anywhere (the unpriced-series alert's). A primary
+    // stamped $0 beside a positive visit price IS checked: invoicing bills that
+    // $0 service line, so the accepted charge would go missing.
+    if (!row.recurring_parent_id || row.is_recurring === false || price == null) continue;
+    if (!(price > 0) && !(Number(row.estimated_price) > 0)) continue;
+    // Fully covered by a prepayment (markPrepayCovered): its price never bills.
+    if (row.prepay_covered) continue;
+    // Every service the row performs must have a known accepted price (one
+    // the customer did not accept, or whose price is unknown, means the row's
+    // price cannot be judged); it is reported under the services being judged.
+    const performs = rowFamilies(row);
+    const judged = performs.filter((family) => families.has(family));
+    const shares = performs.map((family) => (prices.has(family) ? prices.get(family) : null));
+    if (!judged.length || shares.some((share) => share == null)) continue;
+    const expected = Math.round(shares.reduce((a, b) => a + b, 0) * 100) / 100;
+    // In whole cents: float subtraction makes $150.02 - $150 read as just over two cents.
+    if (Math.abs(Math.round(price * 100) - Math.round(expected * 100)) <= PRICE_TOLERANCE_CENTS) continue;
+    for (const family of judged) {
+      const entry = off.get(family) || { count: 0, earliest: row.day, expected, prices: new Map() };
+      entry.count += 1;
+      entry.prices.set(money(price), (entry.prices.get(money(price)) || 0) + 1);
+      off.set(family, entry);
+    }
+  }
+  return [...families].filter((family) => off.has(family)).map((family) => {
+    const { count, earliest, expected, prices: seen } = off.get(family);
+    // Every distinct wrong price is named; one shared price reads plainly.
+    const priced = seen.size === 1 ? [...seen.keys()][0] : [...seen].map(([amount, n]) => `${amount} x${n}`).join(', ');
+    return { code: 'price_mismatch', families: [family], earliest, text: `${count} ${lowerLabel(family)} visits priced ${priced}, accepted ${money(expected)}` };
+  });
+}
+
+// The service charge a visit bills, the way invoicing builds it
+// (invoice.js buildScheduledServiceInvoiceLines): the primary line is
+// primary_line_price when stamped, plus the add-on lines; when those add up
+// to MORE than a positive estimated_price, a "Scheduled price adjustment"
+// brings the invoice down to estimated_price (never up). So, with no add-ons,
+// the service bills min(primary, estimated_price); with add-ons it bills the
+// primary only when no adjustment is needed (an adjustment across service and
+// add-ons cannot be apportioned). With no primary stamp the service is
+// estimated_price less the add-ons, as invoicing derives it. null when it cannot be read:
+// those cases, any line / appointment discount, or an authoritative $0
+// (billing-lane.js hasAuthoritativeZeroPrice: a fully discounted application
+// frozen at $0, or a stamped $0 under GATE_STAMPED_ZERO_FREE), which invoicing
+// bills at $0 on purpose: a discount like the others, never guessed at.
+function billedServicePrice(row) {
+  const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+  const discounted = row.line_discount_id || Number(row.line_discount_amount) > 0 || Number(row.line_discount_dollars) > 0
+    || row.discount_id || Number(row.discount_amount) > 0 || Number(row.discount_dollars) > 0;
+  if (discounted || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) return null;
+  const estimated = Number(row.estimated_price);
+  const addons = Number(row.addon_total) || 0;
+  // No primary stamp: invoicing derives the service as the visit price less
+  // the add-ons, which then add back up to it exactly (no adjustment). Add-ons
+  // above the visit price clamp the service to $0 and adjust across the lines:
+  // not apportionable, so not read.
+  if (row.primary_line_price == null || row.primary_line_price === '') return estimated >= addons ? estimated - addons : null;
+  const primary = Number(row.primary_line_price);
+  if (!(estimated > 0) || primary + addons <= estimated + 0.005) return primary;
+  return addons > 0 ? null : estimated;
+}
+
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, excludedFamilies: Set, scheduleGaps,
@@ -203,8 +337,9 @@ function evaluateCombinedBooking(ctx) {
     scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleOnHoldFamilies = new Set(), scheduleUnjudged = false,
     todayET = null,
   } = ctx;
-  const accepted = acceptedFamilies(estimate);
-  if (!accepted || accepted.size < 2) return null;
+  const plan = acceptedPlan(estimate);
+  if (!plan || plan.families.size < 2) return null;
+  const accepted = plan.families;
   const isPlanRow = (row, scope) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
     && rowFamilies(row).some((family) => scope.has(family));
@@ -244,10 +379,22 @@ function evaluateCombinedBooking(ctx) {
     .filter((row) => !todayET || row.day >= todayET)
     .sort((a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
   const byId = new Map(allRows.map((row) => [String(row.id), row]));
-  const problems = checkTimeAndTech(dated, families, { firstDay, byId, todayET });
+  const problems = [
+    ...checkTimeAndTech(dated, families, { firstDay, byId, todayET }),
+    ...checkPrices(dated, families, plan.prices, { timeTechOnly: ctx.timeTechOnly }),
+  ];
+  const unpricedFamilies = uncheckedPriceFamilies(families, plan.prices, ctx.timeTechOnly);
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
-  return { ok: !problems.length && !deferred, deferred, heldFamilies, problems, labels };
+  return { ok: !problems.length && !deferred, deferred, heldFamilies, unpricedFamilies, problems, labels };
+}
+
+// Families whose prices this run did not check: every one on the hourly
+// (time-only) pass, else those whose accepted price is unknown. A standing
+// price finding about one is kept (the runner's heldProblems).
+function uncheckedPriceFamilies(families, prices, timeTechOnly) {
+  if (timeTechOnly) return [...families];
+  return [...families].filter((family) => prices.get(family) == null);
 }
 
 function shortName(customer) {
@@ -264,7 +411,12 @@ function shortName(customer) {
  */
 function composeAlert(verdict, { customerName, customerId, estimateId }) {
   const { cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
-  const texts = verdict.problems.map((problem) => `${problem.text}${problem.held ? ' (on hold)' : ''}`);
+  const HELD_NOTE = { hold: ' (on hold)', price: ' (not re-checked)' };
+  const HELD_DETAIL = {
+    hold: ' (service on hold; checked again when the hold ends)',
+    price: ' (its accepted price cannot be confirmed right now, so it was not re-checked)',
+  };
+  const texts = verdict.problems.map((problem) => `${problem.text}${HELD_NOTE[problem.held] || ''}`);
   const why = `${texts.slice(0, 2).join('; ')}${texts.length > 2 ? ` (+${texts.length - 2} more)` : ''}`;
   return {
     area: AREA,
@@ -275,12 +427,55 @@ function composeAlert(verdict, { customerName, customerId, estimateId }) {
     subject: { type: 'estimate', id: String(estimateId) },
     doneWhen: DONE_WHEN,
     who: 'person',
-    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a time and technician on every visit.`,
-      ...verdict.problems.map((problem) => `- ${problem.text}${problem.held ? ' (service on hold; checked again when the hold ends)' : ''}`)].join('\n'),
+    detail: [`${customerName || 'Customer'}: ${verdict.labels.join(' + ')} booking needs a look.`,
+      ...verdict.problems.map((problem) => `- ${problem.text}${HELD_DETAIL[problem.held] || ''}`)].join('\n'),
   };
 }
 
 // --- database side ---------------------------------------------------------
+
+// row.prepay_covered: the visit is fully paid ahead, so its own price never
+// bills and is not price-checked. An out-of-band payment (cash, check, Zelle)
+// covers it only when it is at least the visit's price (completion bills the
+// rest of a partial one); an annual-prepay stamp only when annualPrepayCoversVisit
+// confirms it against a live, paid term, the same authority completion
+// trusts (fail-closed: unverifiable reads as not covered). A visit billed to a
+// third-party payer is never covered by the homeowner's prepay (completion
+// still invoices the payer), so the payer is resolved first, fail-closed too.
+async function payerBilled(conn, row) {
+  try {
+    const resolved = await require('./payer').resolveForInvoice({ database: conn,
+      customerId: row.customer_id, scheduledServiceId: row.id, throwOnError: true });
+    return Boolean(resolved?.payerId);
+  } catch (err) {
+    logger.warn(`[combined-booking-check] payer unresolvable for a visit: ${err.message}`);
+    return true;
+  }
+}
+
+async function markPrepayCovered(conn, rows) {
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
+  for (const row of rows) {
+    row.prepay_covered = false;
+    const paid = Number(row.prepaid_amount);
+    // The charge completion bills (billing-lane.js completionInvoiceAmount
+    // precedence): a positive estimated_price, else the primary line.
+    const charge = Number(row.estimated_price) > 0 ? Number(row.estimated_price) : Number(row.primary_line_price) || 0;
+    if (!(charge > 0)) continue;
+    const mayBeCovered = paid > 0 || row.annual_prepay_term_id || rowFamilies(row).includes('termite_bait');
+    if (!mayBeCovered || await payerBilled(conn, row)) continue;
+    if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= charge; continue; }
+    // The coverage authority also covers an UNSTAMPED termite renewal visit
+    // during the payment-pending grace window, so a termite visit is asked
+    // even with no stamp; any other unstamped visit has nothing to ask about.
+    try {
+      row.prepay_covered = await annualPrepayCoversVisit(row, conn) === true;
+    } catch (err) {
+      logger.warn(`[combined-booking-check] prepay coverage unverifiable for a visit: ${err.message}`);
+    }
+  }
+}
 
 async function loadContext(conn, estimate) {
   const estimateId = estimate.id;
@@ -307,10 +502,21 @@ async function loadContext(conn, estimate) {
         this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
       });
     })
-    .select('s.id', 's.status', 's.recurring_parent_id', 's.is_recurring', 's.is_callback', 's.followup_included',
-      's.service_type', 's.service_key_snapshot', 's.window_start', 's.technician_id',
-      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+    // Whole row: annualPrepayCoversVisit validates prepay coverage from the row itself.
+    .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
+  await markPrepayCovered(conn, rows);
+  // A visit's add-on total (each add-on at its base price, else its price, as
+  // invoicing bills it): billedServicePrice needs it to read the service line.
+  const addonTotals = new Map();
+  if (rows.length) {
+    for (const addon of await conn('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((row) => row.id))
+      .select('scheduled_service_id', 'base_price', 'estimated_price')) {
+      const amount = Number(addon.base_price) > 0 ? Number(addon.base_price) : Math.max(0, Number(addon.estimated_price) || 0);
+      addonTotals.set(String(addon.scheduled_service_id), (addonTotals.get(String(addon.scheduled_service_id)) || 0) + amount);
+    }
+  }
+  for (const row of rows) row.addon_total = addonTotals.get(String(row.id)) || 0;
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,
@@ -321,11 +527,12 @@ async function loadContext(conn, estimate) {
 
 // `coverage` is the classifier's { skipped, onHold } for this estimate;
 // undefined when it did not judge the estimate (never declared OK then).
-async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage, todayET = null } = {}) {
+async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage, todayET = null, timeTechOnly = false } = {}) {
   const ctx = {
     ...await loadContext(conn, estimate),
     scheduleGaps,
     todayET,
+    timeTechOnly,
     scheduleSkippedFamilies: coverage ? coverage.skipped : new Set(),
     scheduleOnHoldFamilies: coverage ? coverage.onHold : new Set(),
     scheduleUnjudged: !coverage,
@@ -338,17 +545,24 @@ function dedupeKeyFor(estimateId) {
   return `${OPS_KEY}:${estimateId}`;
 }
 
-// A problem's stable identities: one per affected service family, so a fixed
-// lawn problem replaced by a new pest one rings.
+// A problem's ring identities: the service families it affects. A bell rings
+// again only when a NEW family joins it (a fixed lawn problem replaced by a
+// pest one), never for a second kind of problem on a family it already carries.
 function problemKeys(problem) {
-  return (problem.families || []).map((family) => `${problem.code}:${family}`);
+  return problem.families || [];
+}
+
+// A bell's stored identities as families: bells written before identities
+// became family-only carry `code:family` (e.g. missing_time_tech:lawn_care).
+function storedFamilies(itemKeys) {
+  return new Set((Array.isArray(itemKeys) ? itemKeys : []).map((key) => String(key).split(':').pop()));
 }
 
 // A refresh rings only when a problem is new: an identity the standing row
 // did not already carry.
 function ringOnNewProblem(keys) {
   return (existing, existingMeta) => {
-    const known = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : []);
+    const known = storedFamilies(existingMeta?.itemKeys);
     return keys.some((key) => !known.has(key));
   };
 }
@@ -422,12 +636,20 @@ async function retireAbandoned(conn) {
   return retireStanding(conn, [...new Set(gone.map((row) => row.estimate_id))], RESOLVED_GONE);
 }
 
-// A standing bell's findings about a service now on hold: not re-judged
-// this run, so they stay on the bell (marked) instead of closing as fixed.
+// A standing bell's findings this run could not re-judge stay on the bell
+// (marked) instead of closing as fixed: any finding about a service now on
+// hold, and a price finding about a service whose accepted price is unknown.
 function heldProblems(verdict, standingProblems = []) {
-  const held = new Set(verdict.heldFamilies || []);
-  return standingProblems.filter((problem) => (problem?.families || []).some((family) => held.has(family)))
-    .map((problem) => ({ code: problem.code, families: problem.families, text: problem.text, held: true }));
+  const onHold = new Set(verdict.heldFamilies || []);
+  const unpriced = new Set(verdict.unpricedFamilies || []);
+  const reasonFor = (problem) => {
+    const families = problem?.families || [];
+    if (families.some((family) => onHold.has(family))) return 'hold';
+    if (problem?.code === 'price_mismatch' && families.some((family) => unpriced.has(family))) return 'price';
+    return null;
+  };
+  return standingProblems.filter(reasonFor)
+    .map((problem) => ({ code: problem.code, families: problem.families, text: problem.text, held: reasonFor(problem) }));
 }
 
 // What a sweep does with one verdict, given the standing bell's findings:
@@ -453,9 +675,10 @@ async function standingEstimateIds(conn) {
 }
 
 // Accepted estimates to judge: every one that still has an UPCOMING live
-// visit with no time or no technician (whenever it was accepted: a problem
-// still ahead is worth a bell; one in the past is history), plus every one
-// with an open bell (so a fix or a cancelled plan closes it).
+// visit with no time or no technician, or (daily run) an upcoming priced
+// series child to price-check, whenever it was accepted (a problem still ahead
+// is worth a bell; one in the past is history), plus every one with an open
+// bell (so a fix or a cancelled plan closes it).
 // `lastDay` (urgent pass) limits the untimed visits that make a candidate to
 // today and tomorrow.
 function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
@@ -477,8 +700,30 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
           })
           .where('s.scheduled_date', '>=', todayET)
           .modify((query) => { if (lastDay) query.where('s.scheduled_date', '<=', lastDay); })
-          .whereNotIn('s.status', [...NOT_LIVE])
-          .where(function untimed() { this.whereNull('s.window_start').orWhereNull('s.technician_id'); });
+          // A NULL status is a live visit (the watchdog reads it so too).
+          .where((live) => live.whereNull('s.status').orWhereNotIn('s.status', [...NOT_LIVE]))
+          .where(function untimedOrPriced() {
+            this.whereNull('s.window_start').orWhereNull('s.technician_id');
+            // The daily run also judges every upcoming PRICED series child
+            // (checkPrices), but only on a booking whose series come from two or
+            // more services, or one combined route that performs two (pest +
+            // termite bait, lawn + T&S), or that kept another service's existing
+            // series (the duplicate-series guard), decided in SQL so the large
+            // single-service population is never loaded; the urgent pass is
+            // about time and technician only.
+            if (!lastDay) {
+              this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id')
+                .where((anyPrice) => anyPrice.where('s.estimated_price', '>', 0).orWhere('s.primary_line_price', '>', 0))
+                .whereRaw(`((SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
+                  WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
+                    AND r.is_recurring IS TRUE) >= 2
+                  OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id
+                    WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL
+                      AND (COALESCE(cat.service_key, r.service_key_snapshot) = ANY(?) OR r.service_type = ANY(?)))
+                  OR EXISTS (SELECT 1 FROM activity_log a WHERE a.customer_id = e.customer_id
+                    AND a.action = 'recurring_series_skipped' AND a.metadata->>'estimateId' = e.id::text))`, [multiServiceRouteKeys(), multiServiceRouteNames()]));
+            }
+          });
       });
     })
     .where('c.active', true).whereNull('c.deleted_at')
@@ -539,7 +784,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'itemKeys' as item_keys"),
       conn.raw("metadata->'problems' as problems")))
     .map((row) => [String(row.estimate_id), {
-      keys: new Set(Array.isArray(row.item_keys) ? row.item_keys : []),
+      keys: storedFamilies(row.item_keys),
       problems: Array.isArray(row.problems) ? row.problems : [],
     }]));
   // No longer a combined booking (the accepted snapshot was corrected to one
@@ -576,6 +821,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
         coverage: coverage.get(id),
         todayET,
+        timeTechOnly: urgentOnly,
       });
       const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome !== 'problems') {
@@ -627,6 +873,8 @@ module.exports = {
   outcomeOf,
   heldProblems,
   acceptedFamilies,
+  acceptedPlan,
+  markPrepayCovered,
   shortName,
   OPS_KEY,
   DONE_WHEN,

@@ -118,6 +118,8 @@ function isEtaInfrastructureFailure(reason) {
 }
 // Does an agentDecisionSendBlockReason string ('live ETA unsendable (<reason>)') carry an
 // infrastructure failure rather than a verdict about the message?
+// The open-loop recheck's unreadable read (PR #5499) is infrastructure too: the
+// composer keeps the card for a retry instead of superseding it.
 function blockReasonIsEtaInfrastructure(blockReason) {
   const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
@@ -130,8 +132,11 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
-/** Any send-time recheck that could not read its state (live ETA or label facts): refuse, keep the decision retryable. */
-const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason);
+// OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
+const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason)
+  || blockReasonIsLabelInfrastructure(blockReason) || blockReasonIsOpenLoopsInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -286,6 +291,82 @@ function markRepeatable(check) {
   return check;
 }
 
+// Open-loop commitments at the provider boundary, for a caller holding the ids in
+// memory (the auto-send executor's claim). Closed → refused; an unreadable recheck
+// → refused retryably (nothing is known to be stale). No ids → undefined (no check).
+function openLoopsProviderPreSendCheck({ commitmentIds, customerId = null, status = null, factsGeneratedAt = null }) {
+  const ids = Array.isArray(commitmentIds) ? commitmentIds.filter((id) => typeof id === 'string' && id) : [];
+  if (!ids.length && !status) return undefined;
+  const generatedIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime()) ? factsGeneratedAt.toISOString() : factsGeneratedAt;
+  const check = async ({ dbi } = {}) => {
+    const snapshot = {
+      visit_loop_commitment_ids: ids,
+      ...(status ? { visit_loop_status: status } : {}),
+      ...(generatedIso ? { facts_generated_at: generatedIso } : {}),
+    };
+    const reason = await openLoopsBlockReason({ decision: { input_snapshot: snapshot }, customerId, dbh: dbi });
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
+// The gratitude lane's fixed thank-you (PR #5499 audit): it sends after a quiet
+// period, so a window can pass, a delay appear, or a promise be recorded
+// while it waits. At the provider boundary the customer's facts are rebuilt (strict,
+// commitments included); anything that must be answered refuses the courtesy
+// reply. An unreadable rebuild refuses retryably. Gate-off: no check.
+function gratitudeOpenLoopsProviderPreSendCheck({ customerId }) {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') || !customerId) return undefined;
+  const check = async ({ dbi } = {}) => {
+    let fresh;
+    try {
+      fresh = await require('./visit-loops-facts').loadVisitLoops({ customerId, conn: dbi || require('../models/db'), strict: true, withCommitments: true });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] gratitude open-loop recheck failed: ${err.message}; blocking send`);
+      return { ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true };
+    }
+    return require('./sms-shadow-drafter').visitLoopsNeedAnswer({ visitLoops: fresh })
+      ? { ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY', reason: 'open-loop facts need an answer (gratitude refused)' }
+      : { ok: true };
+  };
+  return markRepeatable(check);
+}
+
+// The decision-row form (reviewer composer send, scheduled replay): reads the
+// decision through the handoff's connection, then the same verdicts. Like the
+// LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
+// (the earlier send-time check already failed closed on it); a read error refuses
+// retryably.
+function openLoopsDecisionProviderPreSendCheck({ decisionId }) {
+  const check = async ({ dbi } = {}) => {
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'customer_id');
+      reason = await openLoopsBlockReason({ decision: row || {}, dbh: conn });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] open-loop boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
+      reason = 'open_loops_recheck_failed';
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
 // Run several provider-boundary predicates in order; the first refusal wins.
 // undefined entries are skipped; returns undefined when there is nothing to run.
 function composeProviderPreSendChecks(...checks) {
@@ -334,6 +415,104 @@ async function reserviceBlock({ decision, outgoingBody }) {
   return reason ? `re-service promise unsendable (${reason})` : null;
 }
 
+// OPEN LOOPS (PR #5499): a draft grounded on "WE OWE THEM" / "THEY ARE WAITING ON
+// US FOR" lines can sit in review while that promise is fulfilled, dismissed,
+// superseded by a call reprocess, or edited by staff. The draft persisted each
+// rendered call_commitments row as "id:rev" (rev = visit-loops-facts
+// commitmentRevision of what it restated); every one must still be open, live and
+// unedited at send time.
+// VISIT STATUS (visit_loop_status): a draft that showed a delay or a passed window
+// has its facts rebuilt for the customer at send: any change to that
+// signature (a reschedule, a completion, a resolved alert) refuses — one check for
+// every such line, whatever wording the reply used.
+// Fails closed on a read error. Returns null or a reason code.
+// A commitment line's relative wording ("later today") means the ET day the facts
+// were built: past that day the reply is refused rather than sent with a shifted
+// meaning. No stamp = refused.
+function commitmentDayChanged(snapshot, now) {
+  const at = Date.parse(snapshot?.facts_generated_at || '');
+  const { etDateString } = require('../utils/datetime-et');
+  return !Number.isFinite(at) || etDateString(new Date(at)) !== etDateString(now);
+}
+// Each ref must still be in THIS customer's open list from the same canonical
+// readers the facts came from: that one question covers closed, dismissed,
+// superseded-by-reprocess (staleAiRowSql) and relinked-to-another-customer rows;
+// the revision covers a staff edit to a row that stayed open.
+async function commitmentsChanged(conn, refs, customerId) {
+  if (!customerId) return true;
+  const { commitmentRevision, allOpenCallCommitments, allSmsLane } = require('./visit-loops-facts');
+  // each rendered SMS/email lane on its own page, as the facts loader reads them, and
+  // only the channels whose gate is still on: a row from a lane rolled back since the
+  // draft is no longer live, so the reply is refused
+  const { smsCommitmentsEnabled } = require('./sms-operational-actions');
+  const { gateEnvValue } = require('../config/feature-gates');
+  const channels = [smsCommitmentsEnabled() && 'sms', gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS') && 'email'].filter(Boolean);
+  const lane = async (name) => (channels.length
+    ? ((await allSmsLane(conn, { customerId, channels, lane: name })) || []).filter((r) => channels.includes(r.channel === 'email' ? 'email' : 'sms'))
+    : []);
+  const [calls, promises, requests] = await Promise.all([
+    allOpenCallCommitments(conn, { customerId }),
+    lane('promise'),
+    lane('request'),
+  ]);
+  const live = new Map([...(calls || []), ...(promises || []), ...(requests || [])].map((r) => [String(r.id), r]));
+  return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
+}
+// The same question for VISIT STATUS: rebuild the facts for the customer (strict —
+// a failed read throws — and with commitments) and compare their signature with
+// the draft's; an open promise or request the draft did not show (recorded since,
+// or unreadable when it was drafted) refuses too, so it goes to review.
+async function visitStatusReason(conn, signature, customerId, refs) {
+  if (!customerId) return 'visit_status_changed';
+  const facts = require('./visit-loops-facts');
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true });
+  if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
+  // the displayed commitments, from this same rebuild (a second read could miss one
+  // closed between the two): each must still be listed, unedited
+  const listed = new Map([...(fresh.weOwe || []), ...(fresh.customerWaiting || [])]
+    .filter((c) => c && c.id != null).map((c) => [String(c.id), c]));
+  if (refs.some(({ id, rev }) => !listed.has(id) || (rev && listed.get(id).rev && listed.get(id).rev !== rev))) return 'commitment_closed';
+  const shown = new Set(refs.map((r) => r.id));
+  const unseen = [...(fresh.weOwe || []), ...(fresh.customerWaiting || [])].some((c) => c && c.id != null && !shown.has(String(c.id)));
+  return unseen ? 'commitment_appeared' : null;
+}
+const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+async function openLoopsBlockReason({ decision, customerId = decision?.customer_id, dbh, now = new Date() }) {
+  const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
+  const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
+    .filter((ref) => typeof ref === 'string' && ref)
+    .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
+  // a persisted status is checked even when its signature is null: the section was
+  // rendered with nothing time-sensitive, and a fact that appeared since refuses
+  const status = objectOrNull(snapshot.visit_loop_status);
+  if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
+  if (!refs.length && !status) return null;
+  try {
+    const conn = dbh || require('../models/db');
+    if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
+    return status ? await visitStatusReason(conn, status.signature || null, customerId, refs) : null;
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+async function openLoopsBlock({ decision }) {
+  const reason = await openLoopsBlockReason({ decision });
+  return reason ? `open-loop facts stale (${reason})` : null;
+}
+// The scheduler's queued-send form: reads the decision row itself; fails closed.
+async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
+  try {
+    const conn = dbh || require('../models/db');
+    const row = await conn('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id');
+    if (!row) throw new Error('agent decision row not found');
+    return await openLoopsBlockReason({ decision: row, dbh: conn });
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send`);
+    return 'open_loops_recheck_failed';
+  }
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -344,6 +523,7 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
+    || (await openLoopsBlock({ decision }))
     || (await etaBlock({ decision, outgoingBody }));
 }
 
@@ -376,4 +556,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
