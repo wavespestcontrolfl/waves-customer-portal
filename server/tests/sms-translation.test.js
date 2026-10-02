@@ -129,9 +129,23 @@ describe('tokenParity', () => {
     expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 a. m.?', { strictTimes: false })).toMatchObject({ ok: false });
   });
 
-  test('one-word foreign replies are asked about; English ones are not', () => {
+  test('short foreign or code-switched replies are asked about; English ones are not', () => {
     expect(needsTranslation('Ndiyo')).toBe(true);
+    expect(needsTranslation('service kesho')).toBe(true);
     expect(needsTranslation('Yes')).toBe(false);
+    expect(needsTranslation('ok thanks')).toBe(false);
+  });
+
+  test('a time written in words keeps its half of the day in the strict check', () => {
+    expect(tokenParity('We can come at 2 in the afternoon.', 'Podemos ir a las 14:00.')).toMatchObject({ ok: true });
+    expect(tokenParity('We can come at 2 in the afternoon.', 'Podemos ir a las 2:00.')).toMatchObject({ ok: false });
+  });
+
+  test('a signed number keeps its sign; a range dash is not a sign', () => {
+    expect(tokenParity('It may drop to -2°F tonight.', 'Puede bajar a 2°F esta noche.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your credit is $-45.', 'Su crédito es de $45.')).toMatchObject({ ok: false });
+    expect(tokenParity('Your credit is $-45.', 'Su crédito es de -$45.')).toMatchObject({ ok: true });
+    expect(tokenParity('Allow 2-3 days.', 'Espere 2-3 días.')).toMatchObject({ ok: true });
   });
 
   test('an amount keeps its currency and sign', () => {

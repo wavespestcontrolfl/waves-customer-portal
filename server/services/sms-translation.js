@@ -40,8 +40,8 @@ function trialEnabled() {
 function needsTranslation(inbound) {
   if (typeof inbound !== 'string' || !inbound.trim()) return false;
   const labelFacts = require('./sms-label-facts');
-  // (a one-word reply is English to the guards' two-word language checks: ask about an unknown one too)
-  return !labelFacts.isEnglishInbound(inbound) || labelFacts.isUnknownSingleWord(inbound);
+  // (a short reply can read as English to the guards' majority checks: ask about one with an unknown word too)
+  return !labelFacts.isEnglishInbound(inbound) || labelFacts.hasUnknownShortWord(inbound);
 }
 
 // A model's English output, checked with the same language guard. That guard
@@ -266,11 +266,11 @@ const LOCAL_AM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:ma[nñ]ana|madrugada)|da\s+man
 // "14 h" are all t:14; "2 AM" is t:2), so AM/PM cannot flip or drop. Our own
 // translation is asked to write 24-hour times, so it is checked this way; a
 // customer's text (written their way, "2 de la tarde") is not.
-function clockValue(raw, after) {
+function clockValue(raw, half) {
   const [h, mm] = raw.split(':');
   let hour = Number(h);
-  if (PM_RE.test(after) && hour >= 1 && hour <= 11) hour += 12;
-  else if (AM_RE.test(after) && hour === 12) hour = 0;
+  if (half === 'pm' && hour >= 1 && hour <= 11) hour += 12;
+  else if (half === 'am' && hour === 12) hour = 0;
   return `t:${hour}${mm && mm !== '00' ? `:${mm}` : ''}`;
 }
 
@@ -291,6 +291,9 @@ function currencySymbol(mark) {
 }
 
 function moneyPrefix(before, after) {
+  // "$-45" spells the sign after the symbol
+  const symbolThenSign = /(US\$|[$€£¥])\s*[-\u2212]$/i.exec(before);
+  if (symbolThenSign) return `-${currencySymbol(symbolThenSign[1])}`;
   const pre = CURRENCY_BEFORE_RE.exec(before);
   const post = pre ? null : CURRENCY_AFTER_RE.exec(after);
   if (!pre && !post) return '';
@@ -329,8 +332,9 @@ function numberValues(text, { strictTimes = false } = {}) {
       half: PM_RE.test(after) || LOCAL_PM_RE.test(after) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) ? 'am' : null),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
     };
-    if (strictTimes && /^\d{1,2}(?::\d{2})?$/.test(raw) && (raw.includes(':') || CLOCK_MARK_RE.test(after) || flags.pm || AM_RE.test(after))) {
-      out.push({ value: clockValue(raw, after), ...flags });
+    // "2 PM", "2 a. m.", "2 in the afternoon", "2 de la tarde" all carry their half of the day
+    if (strictTimes && /^\d{1,2}(?::\d{2})?$/.test(raw) && (raw.includes(':') || CLOCK_MARK_RE.test(after) || flags.half)) {
+      out.push({ value: clockValue(raw, flags.half), ...flags });
       continue;
     }
     let values;
@@ -346,6 +350,11 @@ function numberValues(text, { strictTimes = false } = {}) {
     else values = raw.split(/[.,:]/);
     if ((money || percent) && values.length === 1) {
       out.push({ value: `${money}${values[0].replace(/^\d+/, trimZeros)}${percent ? '%' : ''}`, ...flags });
+      continue;
+    }
+    // a signed plain number ("-2°F", "(-3)") keeps its sign; a range's dash ("2-3") follows a digit and is not one
+    if (values.length === 1 && /(?:^|[\s(])[-\u2212]$/.test(str.slice(0, m.index))) {
+      out.push({ value: `-${values[0].replace(/^\d+/, trimZeros)}`, ...flags });
       continue;
     }
     // only the whole part loses leading zeros: cents and minutes keep theirs ($45.05 is not $45.50 or $45.5)
