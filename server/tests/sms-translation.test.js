@@ -147,6 +147,7 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     const base = mockDispatch.getMockImplementation();
     mockDispatch.mockImplementation(async (policy, payload) => {
+      if (!payload.system.startsWith('You read')) return base(policy, payload);
       if (payload.text.includes(OLDER)) return { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Thanks, can the cats go out too?' } };
       if (payload.text.includes('jueves')) return { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Would you like us to come Thursday morning?' } };
       return base(policy, payload);
@@ -250,7 +251,7 @@ describe('runTranslationTrial', () => {
     ctx.getContextForCustomer.mockResolvedValueOnce({ customer: { id: 'c1' }, smsHistory: [{ direction: 'inbound', body: OLDER, fromPhone: '+19415550100' }] });
     scriptModels({ inbound: SPANISH_INBOUND });
     const base = mockDispatch.getMockImplementation();
-    mockDispatch.mockImplementation(async (policy, payload) => (payload.text.includes(OLDER)
+    mockDispatch.mockImplementation(async (policy, payload) => (payload.system.startsWith('You read') && payload.text.includes(OLDER)
       ? { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'My gate code is 4812, can you come Thursday?' } }
       : base(policy, payload)));
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'thread_translation_failed:figures_changed' });
