@@ -250,7 +250,8 @@ describe('loadReplayRows', () => {
       season: 'peak',
       isBaseline: false,
       scores: { turf_density: 80, weed_suppression: 60, color_health: 70, stress_damage: 40, overall: expect.any(Number) },
-      photos: ['80.00', null, 'adequate'],
+      photos: ['80.00', null, 'limited'],
+      photosTrustingLegacy: ['80.00', null, 'adequate'],
       divergenceFlags: [{ metric: 'color_health', gap: 30 }],
       // Shaped like the frozen visit memory (appliedFromProducts).
       applied: [{ name: 'Celsius WG', activeIngredient: null, kind: 'other', tag: 'lawn treatment', targets: ['Clover'] }],
@@ -351,6 +352,28 @@ describe('loadReplayRows', () => {
     expect(by.v2b).toMatchObject({ superseded: false, priorId: 'v1', date: '2026-06-01' });
     const pairs = pairAssessments(rows);
     expect(pairs.map((p) => [p.current.id, p.prior?.id || null])).toEqual([['v1', null], ['v2b', 'v1']]);
+  });
+});
+
+describe('--trust-legacy-photos (calibration only)', () => {
+  const legacyRow = (id, date, isBaseline = false) => ({
+    id, customerId: 'cust-l', propertyId: 'prop-l', date, season: 'peak', isBaseline,
+    scores: S(id === 'l2' ? { weed_suppression: 85 } : {}),
+    photos: ['limited', 'limited'], photosTrustingLegacy: ['adequate', 'adequate'],
+    applied: id === 'l1' ? [{ name: 'Celsius WG' }] : [],
+  });
+  const rows = [legacyRow('l1', '2026-05-01', true), legacyRow('l2', '2026-06-01')];
+  it('off (the report\'s reading): legacy-only visits are low confidence, every item unclear', () => {
+    const r = replayLawnProgress(rows);
+    expect(r.summary.trustLegacyPhotos).toBe(false);
+    expect(r.summary.itemStates.unclear).toBeGreaterThan(0);
+    expect(r.summary.judgedItems).toBe(0);
+  });
+  it('on: the pass reads as adequate, items are judged, and the report header says so', () => {
+    const r = replayLawnProgress(rows, { trustLegacyPhotos: true });
+    expect(r.summary.trustLegacyPhotos).toBe(true);
+    expect(r.summary.judgedItems).toBeGreaterThan(0);
+    expect(formatReport(r)).toMatch(/ASSUMPTION --trust-legacy-photos/);
   });
 });
 

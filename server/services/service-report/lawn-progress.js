@@ -154,13 +154,18 @@ function divergentMetricsFrom(divergenceFlags) {
  * color_health, while the one-call path stores the model's photo-quality
  * read and leaves those null. A health blend must never read as photo
  * quality (a clear photo of a sick lawn would look unusable), so a legacy
- * row is judged by its quality gate alone: passed = adequate, failed = poor.
+ * row is judged by its quality gate alone. That gate is binary (it passes at
+ * a readability score of 35 and fails OPEN on an error) and its score is not
+ * stored, so a pass proves only "usable", never "adequate": passed = limited,
+ * failed = poor. A legacy visit therefore never reaches a comparable level on
+ * photos alone (codex r7 #5566); real readability scores come from the
+ * one-call path.
  */
 function photoQualityForConfidence(row) {
   if (!row || typeof row !== 'object') return null;
   if (row.quality_gate_passed === false) return 'poor';
   const legacyHealthBlend = row.turf_density != null || row.weed_coverage != null || row.color_health != null;
-  if (legacyHealthBlend) return 'adequate';
+  if (legacyHealthBlend) return 'limited';
   return row.quality_score ?? null;
 }
 

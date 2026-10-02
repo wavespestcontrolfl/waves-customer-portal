@@ -616,12 +616,17 @@ describe('photo quality provenance (legacy health blend is never photo quality)'
     expect(photoQualityForConfidence({ quality_score: '82.00', quality_gate_passed: true })).toBe('82.00');
   });
 
-  it('a legacy row (per-photo lawn scores) is judged by its gate, never by the health blend', () => {
-    // A clear photo of a struggling lawn: blend 31 would read as poor quality.
-    expect(photoQualityForConfidence({ quality_score: 31, turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true })).toBe('adequate');
+  it('a legacy row (per-photo lawn scores) is judged by its binary gate, never by the health blend', () => {
+    // A clear photo of a struggling lawn: blend 31 would read as poor quality;
+    // a lush lawn's blend 95 would read as adequate. Neither is readability.
+    expect(photoQualityForConfidence({ quality_score: 31, turf_density: 20, weed_coverage: 70, color_health: 3, quality_gate_passed: true })).toBe('limited');
+    expect(photoQualityForConfidence({ quality_score: 95, turf_density: 95, quality_gate_passed: true })).toBe('limited');
     expect(photoQualityForConfidence({ quality_score: 95, turf_density: 95, quality_gate_passed: false })).toBe('poor');
-    const rows = [{ quality_score: 31, turf_density: 20, quality_gate_passed: true }, { quality_score: 35, color_health: 3, quality_gate_passed: true }];
-    expect(deriveAssessmentConfidence({ photos: rows.map(photoQualityForConfidence) }).level).toBe('moderate');
+  });
+
+  it('a binary pass (threshold 35, fails open) never proves adequate: legacy photos alone are low confidence', () => {
+    const rows = [1, 2, 3].map(() => ({ quality_score: 88, turf_density: 90, quality_gate_passed: true }));
+    expect(deriveAssessmentConfidence({ photos: rows.map(photoQualityForConfidence) }).level).toBe('low');
   });
 
   it('a failed gate is poor on either path; no row is null', () => {

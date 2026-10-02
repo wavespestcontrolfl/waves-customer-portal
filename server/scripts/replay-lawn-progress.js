@@ -26,6 +26,7 @@
  *   node server/scripts/replay-lawn-progress.js --database-url postgres://...
  *   node server/scripts/replay-lawn-progress.js --since-days 90 --json
  *   node server/scripts/replay-lawn-progress.js --band 10 --overall-band 5
+ *   node server/scripts/replay-lawn-progress.js --trust-legacy-photos   (calibration only: legacy gate pass = adequate)
  *   node server/scripts/replay-lawn-progress.js --fixture assessments.json   (no database)
  *   (falls back to DATABASE_URL)
  */
@@ -107,22 +108,26 @@ function pairAssessments(rows) {
   return pairs.sort((a, b) => String(a.current.date).localeCompare(String(b.current.date)) || String(a.current.id).localeCompare(String(b.current.id)));
 }
 
-function sideOf(row) {
+function sideOf(row, { trustLegacyPhotos = false } = {}) {
+  // --trust-legacy-photos (replay only, never the report): read a legacy
+  // binary-gate pass as adequate, so the band can still be calibrated on
+  // history where no readability score was stored.
+  const photos = trustLegacyPhotos && Array.isArray(row.photosTrustingLegacy) ? row.photosTrustingLegacy : row.photos;
   return {
     date: row.date,
     season: row.season || null,
     isBaseline: Boolean(row.isBaseline),
     scores: row.scores,
     confidence: deriveAssessmentConfidence({
-      photos: Array.isArray(row.photos) ? row.photos : null,
+      photos: Array.isArray(photos) ? photos : null,
       divergenceFlags: row.divergenceFlags,
     }),
   };
 }
 
-function progressFor({ current, prior }, { band, overallBand }) {
-  const cur = sideOf(current);
-  const pri = prior ? sideOf(prior) : null;
+function progressFor({ current, prior }, { band, overallBand, trustLegacyPhotos = false }) {
+  const cur = sideOf(current, { trustLegacyPhotos });
+  const pri = prior ? sideOf(prior, { trustLegacyPhotos }) : null;
   // Like the report: the prior's own photo confidence AND its divergence
   // flags count (sideOf already carries the flags inside confidence).
   if (pri) pri.divergentMetrics = divergentMetricsFrom(prior.divergenceFlags);
@@ -244,19 +249,21 @@ const judgedPairs = (pairs, opts) => pairs
  * @param {ReplayRow[]} rows
  * @param {{band?:number, overallBand?:number, since?:string|null}} [opts]
  */
-function replayLawnProgress(rows, { band = CATEGORY_BAND, overallBand = OVERALL_BAND, since = null } = {}) {
+function replayLawnProgress(rows, {
+  band = CATEGORY_BAND, overallBand = OVERALL_BAND, since = null, trustLegacyPhotos = false,
+} = {}) {
   // `since` (YYYY-MM-DD) limits which visits are judged; earlier rows still serve as priors.
   const pairs = pairAssessments(Array.isArray(rows) ? rows : []).filter((p) => !since || p.current.date >= since);
-  const results = judgedPairs(pairs, { band, overallBand });
+  const results = judgedPairs(pairs, { band, overallBand, trustLegacyPhotos });
   const eligible = results.filter((r) => r.progress.eligible);
 
   const bandSweep = BAND_SWEEP.map((b) => {
-    const st = behindStats(judgedPairs(pairs, { band: b, overallBand }).filter((r) => r.progress.eligible));
+    const st = behindStats(judgedPairs(pairs, { band: b, overallBand, trustLegacyPhotos }).filter((r) => r.progress.eligible));
     return { band: b, judgedItems: st.judged, behind: st.behind, behindShare: Math.round(st.behindShare * 1000) / 1000 };
   });
 
   return {
-    summary: summarize(results, eligible, { band, overallBand }),
+    summary: { ...summarize(results, eligible, { band, overallBand }), trustLegacyPhotos },
     bandSweep,
     oddities: findOddities(eligible),
     pairs: eligible.map((r) => ({
@@ -277,6 +284,10 @@ function formatReport(result) {
   const { summary: s, bandSweep, oddities: o } = result;
   const lines = [];
   lines.push(`Lawn progress replay (band ${s.band} per category, ${s.overallBand} overall)`);
+  if (s.trustLegacyPhotos) {
+    lines.push('ASSUMPTION --trust-legacy-photos: legacy photos that passed the binary quality gate read as adequate.');
+    lines.push('  The report never does this; use it only to calibrate the band on history.');
+  }
   lines.push(`Assessments ${s.assessments}: first visits ${s.noPrior}, baseline ${s.baseline}, compared pairs ${s.pairs} (${s.pairsWithItems} with a judged item)`);
   lines.push(`Confidence: ${Object.entries(s.confidence).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`);
   lines.push(`Overall direction: ${Object.entries(s.overall).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`);
@@ -329,7 +340,9 @@ function parseFlags(raw) {
 }
 
 /** One loaded assessment as a ReplayRow: the frozen memory when present, else live products. */
-function toReplayRow(a, { canonical, stored, photos, liveProducts }) {
+function toReplayRow(a, {
+  canonical, stored, photos, photosTrustingLegacy, liveProducts,
+}) {
   const currentDate = stored?.serviceDate || canonical.date;
   return {
     id: a.id,
@@ -342,6 +355,7 @@ function toReplayRow(a, { canonical, stored, photos, liveProducts }) {
     superseded: canonical.superseded,
     scores: scoresFromAssessmentRow(a),
     photos,
+    photosTrustingLegacy,
     divergenceFlags: parseFlags(a.divergence_flags),
     // Shaped exactly as visit memory freezes it (support products out, at most
     // 8 products and 3 targets each), so the replay judges what the deployed
@@ -350,6 +364,30 @@ function toReplayRow(a, { canonical, stored, photos, liveProducts }) {
     ...(stored ? { frozenSinceLast: stored.sinceLast || null, issues: Array.isArray(stored.issues) ? stored.issues : [] } : {}),
     order: a.confirmed_order || '',
   };
+}
+
+const isLegacyPhotoRow = (p) => p.turf_density != null || p.weed_coverage != null || p.color_health != null;
+
+/**
+ * Per assessment, its top photos' readings: the report's own reading (a legacy
+ * health blend is never photo quality, a legacy gate pass is only "limited")
+ * and the --trust-legacy-photos reading (that pass read as adequate).
+ */
+function photoQualitiesBy(photoRows) {
+  const photosBy = new Map();
+  const trustingBy = new Map();
+  for (const p of photoRows) {
+    const list = photosBy.get(p.assessment_id) || [];
+    const trusting = trustingBy.get(p.assessment_id) || [];
+    if (list.length < TOP_PHOTOS) {
+      const quality = photoQualityForConfidence(p);
+      list.push(quality);
+      trusting.push(quality === 'limited' && isLegacyPhotoRow(p) ? 'adequate' : quality);
+    }
+    photosBy.set(p.assessment_id, list);
+    trustingBy.set(p.assessment_id, trusting);
+  }
+  return { photosBy, trustingBy };
 }
 
 /**
@@ -389,13 +427,7 @@ async function loadReplayRows(db) {
       [recordIds],
     )).rows : [];
 
-    const photosBy = new Map();
-    for (const p of photoRows) {
-      const list = photosBy.get(p.assessment_id) || [];
-      // Same reading as the report: a legacy health blend is never photo quality.
-      if (list.length < TOP_PHOTOS) list.push(photoQualityForConfidence(p));
-      photosBy.set(p.assessment_id, list);
-    }
+    const { photosBy, trustingBy } = photoQualitiesBy(photoRows);
     // Visits whose report already froze its memory (P12): production judges
     // THAT entry (frozen applied, frozen prior identity and date), never the
     // mutable service_products, so the replay must too.
@@ -448,6 +480,7 @@ async function loadReplayRows(db) {
       canonical: canonicalBy.get(a.id),
       stored: a.service_record_id ? storedVisitMemoryFor(notesBy.get(String(a.service_record_id)), a.id) : null,
       photos: photosBy.get(a.id) || [],
+      photosTrustingLegacy: trustingBy.get(a.id) || [],
       liveProducts: a.service_record_id ? productsBy.get(a.service_record_id) || [] : [],
     }));
   }, { readOnly: true });
@@ -469,6 +502,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   const sinceDays = numberArg(argv, '--since-days', null);
   const band = numberArg(argv, '--band', CATEGORY_BAND);
   const overallBand = numberArg(argv, '--overall-band', OVERALL_BAND);
+  const trustLegacyPhotos = argv.includes('--trust-legacy-photos');
   const databaseUrl = argValue(argv, '--database-url') || env.DATABASE_URL;
 
   let db = null;
@@ -484,7 +518,9 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     // The cutoff is a calendar day, so it takes the clock only here at the edge.
     // Eastern calendar, like service_date (a UTC slice is a day ahead after 8 PM ET).
     const since = sinceDays ? etDateString(addETDays(new Date(), -sinceDays)) : null;
-    const result = replayLawnProgress(rows, { band, overallBand, since });
+    const result = replayLawnProgress(rows, {
+      band, overallBand, since, trustLegacyPhotos,
+    });
     console.log(json ? JSON.stringify(result, null, 2) : formatReport(result));
     if (result.oddities.invariantViolations.length) process.exitCode = 1;
   } finally {
