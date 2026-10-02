@@ -133,13 +133,16 @@ function currentValuesFor(type, raw) {
   return current;
 }
 
-// The form's present values a fill is judged beside: those the completion
-// accepts on their own, less both sides of any pair it already refuses
-// together. A clash that predates the read (a legacy value, or "None
-// observed" beside "Live roaches") is the person's to fix at submit; judged
-// with it, every fill would be refused, unrelated ones too (Codex P2 on
-// #5632). A clash no pair explains leaves nothing to judge beside.
-function acceptedBaseline(type, current) {
+// The form's present values a fill is judged beside. `standing`: those the
+// completion accepts on their own; a fill that contradicts any one of them
+// is left for a person. `baseline`: the same less both sides of any pair it
+// already refuses together, for judging the fills as a whole. A clash that
+// predates the read (a legacy value, or "None observed" beside "Live
+// roaches") is the person's to fix at submit; judged as a whole with it,
+// every fill would be refused, unrelated ones too (Codex P2 on #5632), but
+// each of its sides still refuses a fill that contradicts it (Codex P2 r2).
+// A clash no pair explains leaves no baseline.
+function presentValues(type, current) {
   const alone = Object.entries(current).filter(([key, value]) => !refused(type, { [key]: value }));
   const clashing = new Set();
   alone.forEach(([a, valueA], i) => {
@@ -148,7 +151,7 @@ function acceptedBaseline(type, current) {
     }
   });
   const baseline = Object.fromEntries(alone.filter(([key]) => !clashing.has(key)));
-  return refused(type, baseline) ? {} : baseline;
+  return { standing: Object.fromEntries(alone), baseline: refused(type, baseline) ? {} : baseline };
 }
 
 // What the record keeps from the model's answer, in the form's own encoding
@@ -181,10 +184,18 @@ function validateTypedFacts(type, json, note, current = {}) {
     values[field.key] = kept.map((p) => p.value).join(', ');
     heard[field.key] = kept;
   }
-  // Fills are judged beside what the form already holds that the completion
-  // accepts (acceptedBaseline).
-  const baseline = acceptedBaseline(type, current);
+  // Fills are judged beside what the form already holds (presentValues).
+  const { standing: present, baseline } = presentValues(type, current);
   const judged = (fills) => refused(type, { ...baseline, ...fills });
+  const settled = (dropped) => {
+    for (const key of dropped) {
+      delete values[key];
+      delete heard[key];
+      unclear.add(key);
+    }
+  };
+  // A fill that contradicts a present value is left for a person.
+  settled(Object.keys(values).filter((key) => Object.entries(present).some(([field, value]) => refused(type, { [field]: value, [key]: values[key] }))));
   if (judged(values)) {
     // Every side of a clash is left for a person: a field the completion
     // refuses on its own (chips that contradict each other), and both fields
@@ -201,13 +212,6 @@ function validateTypedFacts(type, json, note, current = {}) {
         if (judged({ [a]: values[a], [b]: values[b] })) involved.add(a).add(b);
       }
     });
-    const settled = (dropped) => {
-      for (const key of dropped) {
-        delete values[key];
-        delete heard[key];
-        unclear.add(key);
-      }
-    };
     settled(involved);
     if (judged(values)) settled(Object.keys(values));
   }

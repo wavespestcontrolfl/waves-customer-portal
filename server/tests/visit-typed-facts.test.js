@@ -250,6 +250,18 @@ describe('the form\'s present values (slice 2: the office form sends them)', () 
     expect(facts.unclearFields).toEqual([]);
   });
 
+  test('each side of a clash the form already holds still refuses a fill that contradicts it (Codex P2 r2 on #5632)', () => {
+    // "Kitchen" as an activity location contradicts "None observed", even
+    // with "None observed" itself in a clash of its own.
+    const note = 'German roaches in the kitchen.';
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      activity_locations: [{ value: 'Kitchen', quote: 'in the kitchen' }],
+    }), note, { activity_level: 'None observed', evidence_observed: 'Live roaches' });
+    expect(facts.values).toEqual({ species: 'German' });
+    expect(facts.unclearFields).toEqual(['activity_locations']);
+  });
+
   test('the present values keep only the form\'s own fields, as text', () => {
     expect(currentValuesFor('cockroach', {
       species: 'German', made_up: 'x', activity_level: 3, evidence_observed: ['Live roaches'], customer_prep: '   ',
