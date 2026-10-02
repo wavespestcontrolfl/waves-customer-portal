@@ -31,6 +31,8 @@ jest.mock('../config/feature-gates', () => ({
   // canonical reader; off here — it only ever runs behind
   // bookInsertionOffersLive() anyway (also off).
   bookArrivalGraceLive: jest.fn(() => false),
+  // GATE_RESERVICE_DETAILS_REQUIRED canonical reader, driven by gateState.
+  reserviceDetailsRequiredLive: jest.fn(() => gateState.reserviceDetailsRequired === true),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
@@ -651,6 +653,49 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest' });
     expect(arg.customer_notes).toBe('Re-service requested via self-serve link');
     expect(arg.callbackVisit.customerRequest).toBeUndefined();
+  });
+  // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a
+  // pest chip alone does not replace the box).
+  describe('GATE_RESERVICE_DETAILS_REQUIRED', () => {
+    afterEach(() => { delete gateState.reserviceDetailsRequired; });
+
+    test('gate off: GET carries no detailsRequired key', async () => {
+      const res = await callHandler(getHandler(), { params: { token: 'a'.repeat(64) }, query: {} });
+      expect(res.json.mock.calls[0][0]).not.toHaveProperty('detailsRequired');
+    });
+
+    test('gate on: GET carries detailsRequired', async () => {
+      gateState.reserviceDetailsRequired = true;
+      const res = await callHandler(getHandler(), { params: { token: 'a'.repeat(64) }, query: {} });
+      expect(res.json.mock.calls[0][0].detailsRequired).toBe(true);
+    });
+
+    test.each([
+      ['missing', {}],
+      ['whitespace only', { details: '   ' }],
+      ['pest chip only', { pests: ['ants'] }],
+    ])('gate on: POST with %s details is refused before any booking', async (_label, extra) => {
+      gateState.reserviceDetailsRequired = true;
+      gateState.reservicePestChips = true;
+      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking');
+      try {
+        const res = await callHandler(postHandler(), {
+          params: { token: 'a'.repeat(64) },
+          body: { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', ...extra },
+        });
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json.mock.calls[0][0].code).toBe('DETAILS_REQUIRED');
+        expect(csb).not.toHaveBeenCalled();
+      } finally {
+        csb.mockRestore();
+      }
+    });
+
+    test('gate on: any text books', async () => {
+      gateState.reserviceDetailsRequired = true;
+      const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });
+      expect(arg.customer_notes).toBe('Re-service request: ants');
+    });
   });
 });
 

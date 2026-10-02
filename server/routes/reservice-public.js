@@ -83,6 +83,12 @@ const {
   pestLabels,
 } = require('../services/reservice-request');
 
+// GATE_RESERVICE_DETAILS_REQUIRED: GET's detailsRequired key and POST's
+// blank-box refusal. Off = byte-identical to before this gate existed.
+function detailsRequired() {
+  return require('../config/feature-gates').reserviceDetailsRequiredLive();
+}
+
 // GATE_RESERVICE_PEST_CHIPS (nested inside reserviceSelfServe — see
 // feature-gates.js): GET's optional pestChoices key and POST's `pests`
 // normalization. Off = byte-identical to before this gate existed.
@@ -355,6 +361,8 @@ router.get('/:token', async (req, res, next) => {
       ...(pestChipsEnabled() && bookableLanes.length
         ? { pestChoices: Object.fromEntries(bookableLanes.map((key) => [key, RESERVICE_PEST_CHOICES[key]])) }
         : {}),
+      // GATE_RESERVICE_DETAILS_REQUIRED off: key omitted (byte-identical).
+      ...(detailsRequired() && bookableLanes.length ? { detailsRequired: true } : {}),
     };
     if (bookableLanes.length === 0) {
       return res.json({ ...base, availability: null });
@@ -481,6 +489,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const details = typeof req.body?.details === 'string'
     ? req.body.details.trim().slice(0, MAX_DETAILS_LENGTH)
     : '';
+  // Owner 2026-10-02: any text counts; a pest chip alone does not replace it.
+  if (detailsRequired() && !details) {
+    return res.status(400).json({
+      error: 'Tell us what you\'re seeing so your tech comes prepared.',
+      code: 'DETAILS_REQUIRED',
+    });
+  }
   // Gate off: ignored outright, regardless of what a crafted body sends.
   const requestedPests = pestChipsEnabled() ? normalizeRequestPests(req.body?.pests, lane) : null;
   const requestedPestLabels = requestedPests ? pestLabels(requestedPests, lane) : [];

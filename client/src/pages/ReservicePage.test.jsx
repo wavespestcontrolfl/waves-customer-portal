@@ -518,3 +518,49 @@ describe('ReservicePage pest chips (GATE_RESERVICE_PEST_CHIPS)', () => {
     expect(screen.getByText('(optional — helps your tech prep)')).toBeInTheDocument();
   });
 });
+
+// Required details box (GATE_RESERVICE_DETAILS_REQUIRED, owner 2026-10-02:
+// any text counts). The server signals the gate with detailsRequired on GET;
+// the omitted-key case is covered by the byte-identical test above.
+describe('ReservicePage required details (GATE_RESERVICE_DETAILS_REQUIRED)', () => {
+  const BOOKED = {
+    success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+    date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+    startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+  };
+
+  it('keeps Book disabled until any text is typed, then posts it', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(bookablePayload({ detailsRequired: true })),
+      post: jsonResponse(BOOKED),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    const box = screen.getByLabelText(/What are you seeing\?/);
+    expect(box).toBeRequired();
+    expect(screen.queryByText('(optional — helps your tech prep)')).not.toBeInTheDocument();
+    const blocked = screen.getByRole('button', { name: /Tell us what you.re seeing above/ });
+    expect(blocked).toBeDisabled();
+    fireEvent.change(box, { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: /Tell us what you.re seeing above/ })).toBeDisabled();
+    fireEvent.change(box, { target: { value: 'ants' } });
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const commit = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    expect(JSON.parse(commit[1].body).details).toBe('ants');
+  });
+
+  it('a pest chip alone does not unlock Book', async () => {
+    stubFetch({
+      get: jsonResponse(bookablePayload({
+        detailsRequired: true,
+        pestChoices: { pest: [{ key: 'ants', label: 'Ants' }] },
+      })),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    expect(screen.getByLabelText(/Tell us a little more/)).toBeRequired();
+    expect(screen.getByRole('button', { name: /Tell us what you.re seeing above/ })).toBeDisabled();
+  });
+});

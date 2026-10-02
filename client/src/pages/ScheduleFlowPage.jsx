@@ -914,7 +914,11 @@ function ReserviceHero({
           </div>
         ) : null}
         <label htmlFor="reservice-details" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-          {pestChoices ? (
+          {data?.detailsRequired ? (
+            // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02): any text
+            // counts; a pest chip alone does not replace the box.
+            <>{pestChoices ? 'Tell us a little more' : 'What are you seeing?'} <span style={{ fontWeight: 500, color: S.body }}>(helps your tech come prepared)</span></>
+          ) : pestChoices ? (
             <>Anything else? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span></>
           ) : (
             <>What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span></>
@@ -927,6 +931,8 @@ function ReserviceHero({
           onChange={(e) => onDetails(e.target.value)}
           maxLength={400}
           rows={2}
+          required={!!data?.detailsRequired}
+          aria-required={data?.detailsRequired ? 'true' : undefined}
           placeholder="Ants are back along the kitchen window"
           style={{
             width: '100%', boxSizing: 'border-box', resize: 'vertical',
@@ -1358,8 +1364,13 @@ const FLOWS = {
     },
     Hero: ReserviceHero,
     Success: ({ result }) => <ReserviceSuccessCard result={result} />,
-    canConfirm: ({ lane }) => !!lane,
-    actionLabel: ({ submitting, lane }) => (submitting ? 'Booking…' : !lane ? 'Pick what needs another look above' : `Book ${'→'} free`),
+    canConfirm: ({ lane, data, details }) => !!lane && (!data?.detailsRequired || !!details?.trim()),
+    actionLabel: ({ submitting, lane, data, details }) => {
+      if (submitting) return 'Booking…';
+      if (!lane) return 'Pick what needs another look above';
+      if (data?.detailsRequired && !details?.trim()) return 'Tell us what you’re seeing above';
+      return `Book ${'→'} free`;
+    },
     payload: ({ slot, lane, details, pests }) => ({
       lane,
       date: slot.date,
@@ -1370,7 +1381,8 @@ const FLOWS = {
       ...(pests && pests.length ? { pests } : {}),
     }),
     // ALREADY_BOOKED / NOT_ELIGIBLE: office booked one, plan lapsed.
-    stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE'],
+    // DETAILS_REQUIRED: GATE_RESERVICE_DETAILS_REQUIRED flipped on after load.
+    stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE', 'DETAILS_REQUIRED'],
     stateChangedMessage: 'Your re-service options just updated — here is the latest.',
     pickedNote: () => null,
   },
@@ -1717,7 +1729,7 @@ export default function ScheduleFlowPage({ flow }) {
   // its own emailed time — still bookable after the customer browsed another
   // day (which clears the selection). fromTop routes errors to that card.
   const confirm = async (slotToBook, fromTop) => {
-    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
+    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
@@ -1956,9 +1968,9 @@ export default function ScheduleFlowPage({ flow }) {
                 data-glass-accent=""
                 className="wpk-action-btn"
                 onClick={() => confirm(selectedSlot, false)}
-                disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
+                disabled={submitting || !cfg.canConfirm({ lane: selectedLane, data, details })}
               >
-                {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
+                {cfg.actionLabel({ submitting, lane: selectedLane, slot, data, details })}
               </button>
               {cfg.pickedNote(data, slot)}
             </>
