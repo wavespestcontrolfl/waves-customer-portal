@@ -553,7 +553,7 @@ describe('every selected visit value needs words that support it', () => {
   test.each([
     ['pests', 'Roaches', 'cockroaches by the stove'], ['pests', 'Roaches', 'palmetto bugs'], ['pests', 'Ants', 'an ant trail'], ['pests', 'Wasps', 'a mud dauber nest'],
     ['areas', 'Outside', 'around the eaves'], ['areas', 'Outside', 'out front by the entry'], ['areas', 'Inside', 'under the sink'], ['areas', 'Garage', 'the garage door track'],
-    ['activity', 'none', 'no activity today'], ['activity', 'light', 'a few ants'], ['activity', 'moderate', 'some activity'], ['activity', 'heavy', 'a lot of them'],
+    ['activity', 'none', 'no activity today'], ['activity', 'light', 'a few ants'], ['activity', 'moderate', 'some activity'], ['activity', 'heavy', 'a lot of ants'],
     ['method', 'perimeter_spray', 'ran the perimeter'], ['method', 'spot_treatment', 'spot-treated the corners'],
   ])('lexicon: %s %s is backed by "%s"', (field, value, words) => {
     const key = field === 'pests' || field === 'areas' ? field : field;
@@ -724,5 +724,152 @@ describe('linear feet need a quantity said with a distance word', () => {
     const out = run(200, 'sprayed 180 linear feet outside, 200 ounces');
     expect(out.visit.linearFt).toBeNull();
     expect(out.unclear[0].reason).toBe('linear_ft_not_heard');
+  });
+});
+
+describe('audit round 4: carrier volume, negation, field context, same-as-last, units', () => {
+  const run = (rows, transcript) => validateFill(answer({ products: rows }), ctx, transcript);
+  const row = (productId, amount, unit, heard, extra = {}) => product({ productId, amount, unit, heard, ...extra });
+
+  describe('a carrier volume is not a product amount', () => {
+    test('"a gallon of Taurus solution": the model\'s 1 gal is rejected as carrier_volume, the tap stays (the audit case)', () => {
+      const text = 'Mixed up a gallon of Taurus solution in the sprayer';
+      const out = run([row('p-taurus', 1, 'gal', 'a gallon of Taurus solution')], text);
+      expect(out.products).toHaveLength(1);
+      expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: null, unit: '' });
+      expect(out.unclear).toEqual([{ heard: 'a gallon of Taurus solution', reason: 'carrier_volume' }]);
+    });
+
+    test.each([
+      ['a gallon of mix', 'Taurus, a gallon of mix'],
+      ['gallons of mix', 'two gallons of mix with the Taurus'],
+      ['in a gallon', 'Taurus in a gallon'],
+      ['a gallon of water', 'Taurus, a gallon of water'],
+    ])('carrier phrase "%s" never becomes the product\'s amount', (_name, text) => {
+      const amount = /two/.test(text) ? 2 : 1;
+      const out = run([row('p-taurus', amount, 'gal', text)], text);
+      expect(out.products).toHaveLength(1);
+      expect(out.products[0].amount).toBeNull();
+      expect(out.unclear).toHaveLength(1);
+    });
+
+    test('the product amount beside the carrier volume still passes; the carrier volume is not accepted for it', () => {
+      const text = 'Taurus four ounces in a gallon of water';
+      expect(run([row('p-taurus', 4, 'fl_oz', text)], text).products[0]).toMatchObject({ amount: 4, unit: 'fl_oz' });
+      const swapped = run([row('p-taurus', 1, 'gal', text)], text);
+      expect(swapped.products[0].amount).toBeNull();
+    });
+
+    test('"four ounces of Taurus in the tank" is still four ounces of Taurus', () => {
+      const text = 'four ounces of Taurus in the tank';
+      expect(run([row('p-taurus', 4, 'fl_oz', text)], text).products[0].amount).toBe(4);
+    });
+  });
+
+  describe('a negated mention is not a use of the product', () => {
+    test.each([
+      ['Did not use four ounces of Taurus', 'p-taurus', 4, 'four ounces of Taurus'],
+      ['We skipped the Talstar today', 'p-talak', 0, 'skipped the Talstar'],
+      ['no surfactant this time', 'p-surf', 0, 'no surfactant this time'],
+      ['Did not use Taurus this time, just the Talstar', 'p-taurus', 0, 'Did not use Taurus'],
+      ['ran out of Taurus', 'p-taurus', 0, 'ran out of Taurus'],
+      ['Talstar instead of Taurus', 'p-taurus', 0, 'instead of Taurus'],
+      ['I used Taurus not', 'p-taurus', 0, 'Taurus not'],
+    ])('"%s" does not apply %s', (transcript, productId, amount, heard) => {
+      const out = run([row(productId, amount, amount ? 'fl_oz' : 'not_said', heard)], transcript);
+      expect(out.products).toEqual([]);
+      expect(out.unclear).toEqual([{ heard, reason: 'negated_product' }]);
+    });
+
+    test('the product used in the next clause is still applied', () => {
+      const out = run([row('p-talak', 4, 'fl_oz', 'just the Talstar, four ounces')], 'Did not use Taurus this time, just the Talstar, four ounces');
+      expect(out.products[0]).toMatchObject({ productId: 'p-talak', amount: 4 });
+    });
+
+    test('"no wait" is a correction, not a negation', () => {
+      const text = 'Taurus, four ounces, no wait, five ounces';
+      expect(run([row('p-taurus', 5, 'fl_oz', text)], text).products[0].amount).toBe(5);
+    });
+
+    test('a product with a positive mention elsewhere stays, and only the positive mention\'s quantities count', () => {
+      const text = 'Did not use four ounces of Taurus on the front. Later used Taurus, six ounces on the back.';
+      const six = run([row('p-taurus', 6, 'fl_oz', 'Later used Taurus, six ounces')], text);
+      expect(six.products[0]).toMatchObject({ amount: 6 });
+      const four = run([row('p-taurus', 4, 'fl_oz', 'Later used Taurus, six ounces')], text);
+      expect(four.products).toHaveLength(1);
+      expect(four.products[0].amount).toBeNull();
+      // even when the heard words point at the negated mention, its quantity is not the product's
+      const pointed = run([row('p-taurus', 4, 'fl_oz', 'four ounces of Taurus')], text);
+      expect(pointed.products[0].amount).toBeNull();
+    });
+  });
+
+  describe('units follow the same evidence as the sheet', () => {
+    test('a usual unit in grams makes the row weight; an inventory unit still wins over it', () => {
+      expect(productMeasure({ name: 'Mystery', formulation: 'SC', usual_unit: 'g' })).toBe('weight');
+      expect(productMeasure({ name: 'Mystery', inventory_unit: 'fl_oz', usual_unit: 'g' })).toBe('liquid');
+      expect(productMeasure({ name: 'Mystery', usual_unit: 'oz', formulation: 'SC' })).toBe('liquid');
+      expect(productMeasure({ name: 'Mystery', formulation: 'SC' })).toBe('liquid');
+    });
+  });
+
+  describe('field context for visit values', () => {
+    const visitRun = (v, transcript, extraProducts = []) => validateFill(
+      answer({ visit: visit(v) }),
+      { ...ctx, products: [...ctx.products, ...extraProducts] },
+      transcript,
+    );
+
+    test('a pest word inside a product name is not evidence for the pest', () => {
+      const text = 'Placed Advion Ant Gel in the kitchen';
+      const out = visitRun({ pests: ['Ants'], areas: ['Inside'], heard: 'Placed Advion Ant Gel in the kitchen' }, text);
+      expect(out.visit.pests).toEqual([]);
+      expect(out.visit.areas).toEqual(['Inside']);
+      expect(out.unclear).toEqual([{ heard: 'Ants', reason: 'value_not_heard' }]);
+    });
+
+    test('the same word used as a pest still counts ("ants in the kitchen" beside the product)', () => {
+      const text = 'Ants in the kitchen. Placed Advion Ant Gel.';
+      expect(visitRun({ pests: ['Ants'], heard: 'Ants in the kitchen' }, text).visit.pests).toEqual(['Ants']);
+    });
+
+    test('"Used some Taurus" is not moderate activity', () => {
+      const out = visitRun({ activity: 'moderate', heard: 'Used some Taurus' }, 'Used some Taurus');
+      expect(out.visit.activity).toBe('');
+      expect(out.unclear).toEqual([{ heard: 'moderate', reason: 'value_not_heard' }]);
+    });
+
+    test.each([
+      ['moderate', 'We saw some activity out back'], ['moderate', 'some roaches in the pantry'], ['light', 'a few ants by the door'],
+      ['heavy', 'a lot of ants out front'], ['heavy', 'lots of roaches'], ['light', 'saw a little activity'],
+      ['light', 'Activity was light'], ['moderate', 'moderate'], ['heavy', 'heavy pressure'], ['none', 'no activity today'],
+    ])('activity %s is backed by "%s"', (level, words) => {
+      expect(visitRun({ activity: level, heard: words }, words).visit.activity).toBe(level);
+    });
+
+    test.each([
+      ['light', 'a few minutes later we left'], ['heavy', 'bad gate, locked'], ['moderate', 'some of the Taurus'], ['heavy', 'lots of Taurus'],
+    ])('loose activity word without activity context: %s from "%s" is dropped', (level, words) => {
+      expect(visitRun({ activity: level, heard: words }, words).visit.activity).toBe('');
+    });
+  });
+
+  describe('"same as last time" needs a positive dose or mix phrase', () => {
+    const same = (heard, transcript = heard) => run([row('p-taurus', 0, 'not_said', heard, { sameAsLast: true })], transcript).products[0];
+
+    test.each([
+      'Taurus same as last time', 'same mix as last time, Taurus', 'Taurus, same amount', 'Taurus same rate', 'the usual mix, Taurus', 'Taurus, the usual amount', 'Taurus like last time',
+    ])('"%s" is accepted', (heard) => {
+      expect(same(heard).sameAsLast).toBe(true);
+    });
+
+    test.each([
+      ['Taurus, last time I used four ounces', 'last time I used'], ['Taurus same as last time but not today', 'but not today'],
+      ['Taurus on the same area', 'same area'], ['Taurus as before', 'as before'], ['Taurus, usual', 'usual'], ['Taurus same mix, but not today', 'but not today'],
+    ])('"%s" is not (%s)', (heard) => {
+      const out = run([row('p-taurus', 0, 'not_said', heard, { sameAsLast: true })], heard);
+      expect(out.products[0].sameAsLast).toBe(false);
+      expect(out.unclear).toEqual([{ heard, reason: 'same_as_last_not_heard' }]);
+    });
   });
 });

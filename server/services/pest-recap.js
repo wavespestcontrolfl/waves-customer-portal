@@ -1592,4 +1592,5 @@ module.exports = {
   recapVisitIdentityChanged,
   recapServiceIdentity,
   loadRecapCatalogProducts,
+  loadCommonProducts,
 };

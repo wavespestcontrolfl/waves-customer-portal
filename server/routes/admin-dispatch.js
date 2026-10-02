@@ -4268,7 +4268,7 @@ router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillLimiter
     if (!(await assertRecapOwnership(req, res))) return;
     const VoiceFill = require('../services/fast-complete-voice-fill');
     const { sheet, transcript } = req.body || {};
-    if (typeof sheet !== 'string' || !Object.prototype.hasOwnProperty.call(VoiceFill.SHEETS, sheet)) {
+    if (sheet !== VoiceFill.SHEET) {
       return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
     }
     const trimmed = typeof transcript === 'string' ? transcript.trim() : '';
@@ -4277,7 +4277,7 @@ router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillLimiter
     }
     const result = await VoiceFill.voiceFill({ serviceId: req.params.serviceId, sheet, transcript: trimmed });
     if (!result.ok) {
-      if (result.reason === 'model_failed') {
+      if (result.reason === 'model_failed' || result.reason === 'catalog_unavailable') {
         logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=false`);
         return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
       }

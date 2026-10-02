@@ -35,6 +35,7 @@ jest.mock('../services/pest-recap', () => ({
   ...jest.requireActual('../services/pest-recap'),
   resolveEligibility: jest.fn(),
   loadRecapCatalogProducts: jest.fn(),
+  loadCommonProducts: jest.fn(),
 }));
 jest.mock('../services/llm/call', () => ({
   ...jest.requireActual('../services/llm/call'),
@@ -42,7 +43,7 @@ jest.mock('../services/llm/call', () => ({
 }));
 
 const logger = require('../services/logger');
-const { resolveEligibility, loadRecapCatalogProducts } = require('../services/pest-recap');
+const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('../services/pest-recap');
 const { callAnthropic } = require('../services/llm/call');
 const MODELS = require('../config/models');
 const router = require('../routes/admin-dispatch');
@@ -103,6 +104,7 @@ describe('POST fast-complete/voice-fill', () => {
     mockDbCurrent = dbWithOwner('tech-1');
     eligible();
     loadRecapCatalogProducts.mockResolvedValue(CATALOG);
+    loadCommonProducts.mockResolvedValue([]);
     callAnthropic.mockResolvedValue({ ok: true, json: MODEL_ANSWER });
   });
   afterEach(() => {
@@ -204,6 +206,34 @@ describe('POST fast-complete/voice-fill', () => {
     expect(request.text).toContain('p-talak | Atticus Talak 7.9 F | also called: Talstar P');
     expect(request.text).not.toContain('Yard sign');
     expect(request.text).toContain(TRANSCRIPT);
+  });
+
+  test('the units the model may choose follow the product\'s usual unit on recent visits (grams makes a row weight)', async () => {
+    // no stock unit on file for the row, so the usual unit decides (the sheet's precedence)
+    loadRecapCatalogProducts.mockResolvedValue([CATALOG[0], { id: 'p-talak', name: 'Atticus Talak 7.9 F', category: 'insecticide' }]);
+    loadCommonProducts.mockResolvedValue([{ productId: 'p-talak', visits: 12, usualUnit: 'g', usualAmount: 30 }]);
+    await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const { text } = callAnthropic.mock.calls[0][0];
+    expect(text).toContain('p-talak | Atticus Talak 7.9 F | also called: Talstar P | units: g, oz, lb');
+    expect(text).toContain('p-taurus | Taurus SC | units: tsp, fl_oz, gal');
+    // and with a stock unit on file, that wins over the usual unit
+    loadRecapCatalogProducts.mockResolvedValue(CATALOG);
+    await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    expect(callAnthropic.mock.calls[1][0].text).toContain('p-talak | Atticus Talak 7.9 F | also called: Talstar P | units: tsp, fl_oz, gal');
+  });
+
+  test('an empty catalog fails closed: 502, and the model is never called', async () => {
+    loadRecapCatalogProducts.mockResolvedValue([]);
+    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    expect(res.statusCode).toBe(502);
+    expect(res.body).toEqual({ error: 'Voice fill is unavailable right now. Keep typing.' });
+    expect(callAnthropic).not.toHaveBeenCalled();
+  });
+
+  test('a catalog of only hidden categories is empty too', async () => {
+    loadRecapCatalogProducts.mockResolvedValue([{ id: 'p-supply', name: 'Yard sign', category: 'supplies' }]);
+    expect((await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } })).statusCode).toBe(502);
+    expect(callAnthropic).not.toHaveBeenCalled();
   });
 
   test('an off-list product from the model comes back as unclear, not as a tap', async () => {
