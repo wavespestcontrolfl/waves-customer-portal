@@ -153,11 +153,11 @@ postgres('annual prepay charged after the first visit', () => {
     return f;
   }
 
-  async function perform(visitId, customerId, outcome = 'completed') {
+  async function perform(visitId, customerId, outcome = 'completed', notes = {}) {
     await trx('scheduled_services').where({ id: visitId }).update({ status: 'completed', completed_at: new Date() });
     await trx('service_records').insert({ id: randomUUID(), customer_id: customerId, scheduled_service_id: visitId,
       service_type: 'Quarterly Pest Control', service_date: day(0), status: 'completed',
-      structured_notes: JSON.stringify({ visitOutcome: outcome }) });
+      structured_notes: JSON.stringify({ visitOutcome: outcome, ...notes }) });
   }
 
   const jobOf = async (f) => {
@@ -296,6 +296,13 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').where({ id: bank.invoiceId }).update({ payment_method: 'us_bank_account' });
       await release();
       expect((await jobOf(bank)).status).toBe('pending');
+    });
+
+    it('a quiet backfill closeout never releases the charge', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId, 'completed', { backfill: true });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
     it('releases on a performed child visit of the series', async () => {
@@ -450,6 +457,22 @@ postgres('annual prepay charged after the first visit', () => {
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'invoice', id: f.invoiceId } }),
         { dedupeKey: `paf-prepay-charge-failed:${f.estimateId}` });
+    });
+
+    it('a bank payment on the pay link closes the R2 alert, and a returned one rings it again', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', charge_alert_raised_at: new Date().toISOString() } });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'processing', payment_method: 'us_bank_account' });
+      const episodes = require('../services/admin-alert-episodes');
+      const closeSpy = jest.spyOn(episodes, 'closeAdminAlertKeys');
+      await release();
+      expect(closeSpy).toHaveBeenCalledWith(expect.anything(), [`paf-prepay-charge-failed:${f.estimateId}`], 'resolved', expect.anything());
+      expect(await jobOf(f)).toMatchObject({ charge_alert_round: 1 });
+      expect(await jobOf(f)).not.toHaveProperty('charge_alert_closed_at');
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent' });
+      await release();
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.anything(), { dedupeKey: `paf-prepay-charge-failed:${f.estimateId}:1` });
+      closeSpy.mockRestore();
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

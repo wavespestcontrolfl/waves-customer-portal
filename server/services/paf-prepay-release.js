@@ -48,7 +48,9 @@ const DEAD_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refun
 const JOB = "estimate_data -> 'prepayAutoChargeJob'";
 
 const staleAlertKey = (estimateId) => `paf-prepay-no-first-visit:${estimateId}`;
-const chargeAlertKey = (estimateId) => `paf-prepay-charge-failed:${estimateId}`;
+// A returned bank payment on the pay link reopens the year: each such round
+// raises under its own key so the comeback rings again.
+const chargeAlertKey = (estimateId, round = 0) => `paf-prepay-charge-failed:${estimateId}${round ? `:${round}` : ''}`;
 const unbilledAlertKey = (estimateId) => `paf-prepay-cancelled-after-visit:${estimateId}`;
 
 function parseData(raw) {
@@ -83,6 +85,10 @@ async function firstPerformedVisit(estimateId, customerId) {
     .where('s.status', 'completed')
     .where('r.status', 'completed')
     .whereRaw("COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])", [NOT_PERFORMED_OUTCOMES])
+    // A quiet backfill closeout (backdated, every charge and send suppressed)
+    // never releases a charge (waves-billing: backfill suppresses every money
+    // path); the office bills that work itself.
+    .whereRaw("COALESCE(r.structured_notes ->> 'backfill', '') <> 'true'")
     .orderBy('s.scheduled_date', 'asc')
     .first('s.id');
 }
@@ -201,23 +207,32 @@ async function reconcileJobAlerts(estimateId) {
     // initiated BANK debit is settled. A card intent parked 'processing' is
     // unfinished — leave the alert as it is until reconciliation decides.
     const outcome = invoice ? require('./recurring-card-on-file').classifySavedMethodChargeInvoice(invoice) : 'unexpected';
-    if (outcome === 'card_incomplete') return;
-    const stillOwed = !!invoice && outcome === 'unexpected' && !DEAD_INVOICE_STATUSES.includes(invStatus);
-    if (stillOwed && !job.charge_alert_raised_at) {
+    const round = Number(job.charge_alert_round) || 0;
+    const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus);
+    if (outcome === 'paid' || dead) {
+      // Closed whether or not the raised stamp landed: a raise that persisted
+      // just before a failed stamp must not stay open. Closing a key with no
+      // alert is a no-op.
+      await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice settled or was closed.');
+      await patchJob(estimateId, { charge_alert_closed_at: nowIso });
+    } else if (outcome === 'bank_processing') {
+      // A bank payment is under way: close the alert but keep watching — a
+      // returned debit reopens the invoice and the next round rings again.
+      if (job.charge_alert_raised_at) {
+        await close(chargeAlertKey(estimateId, round), 'A bank payment for the annual prepay is processing.');
+        await patchJob(estimateId, { charge_alert_raised_at: null, charge_alert_round: round + 1 });
+      }
+    } else if (outcome === 'unexpected' && !job.charge_alert_raised_at) {
+      // Still owed (a card intent parked 'processing' is left alone until
+      // reconciliation decides).
       await raise({
         action: 'Collect an annual prepay that failed after visit 1',
         why: 'The card charge after the first visit failed; the pay link went out and later visits are held, not billed.',
         link: `/admin/invoices?invoice=${job.invoice_id}`,
         subject: { type: 'invoice', id: String(job.invoice_id) },
         doneWhen: 'invoice_paid',
-      }, chargeAlertKey(estimateId));
+      }, chargeAlertKey(estimateId, round));
       await patchJob(estimateId, { charge_alert_raised_at: nowIso }, whileUnset('charge_alert_raised_at'));
-    } else if (!stillOwed) {
-      // Closed whether or not the raised stamp landed: a raise that persisted
-      // just before a failed stamp must not stay open. Closing a key with no
-      // alert is a no-op.
-      await close(chargeAlertKey(estimateId), 'The annual prepay invoice settled or was closed.');
-      await patchJob(estimateId, { charge_alert_closed_at: nowIso });
     }
   }
 
