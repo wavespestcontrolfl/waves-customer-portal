@@ -2325,6 +2325,19 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
     });
 
+    test('an empty Call C with a named plant hands the conditions to OpenAI and keeps the plant (Codex #5596 r2 P1)', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9)] }),
+        conditionsLeg([]),
+        escalationLeg({ turf: [{ ...idItem('fixture-bahia', 0.95), cues_visible: [1], cues_not_visible: [] }], conditions: [['fixture-large-patch', 0.9]] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', ...GEMINI_ONLY });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['gemini_missed']);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine' });
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+    });
+
     test('callers that do not ask (visit prep) keep the full ladder on plantIdVision', async () => {
       queue(
         candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.6)] }),

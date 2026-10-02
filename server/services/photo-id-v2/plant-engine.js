@@ -1714,11 +1714,12 @@ function identitySlotTriggers(identity, run) {
 function conditionTriggerReasons(conditions, singleRead = false) {
   const [first, second] = conditions.possibilities;
   // Gemini-only: escalate only when Call C gave nothing usable — a failed
-  // leg, or a read that named conditions none of which is in the index.
+  // leg, or a read with no possibility in the index (an empty selection, or
+  // only slugs the index does not list), the same rule as above (Codex
+  // #5596 r2 P1). The scoped merge keeps the identity Gemini read.
   if (singleRead) {
-    const named = Array.isArray(conditions.json?.candidates) ? conditions.json.candidates.length : 0;
     return reasonsFrom([
-      [conditions.index.length > 0 && (!conditions.json || (named > 0 && !first)), 'gemini_missed'],
+      [conditions.index.length > 0 && (!conditions.json || !first), 'gemini_missed'],
     ]);
   }
   return reasonsFrom([
