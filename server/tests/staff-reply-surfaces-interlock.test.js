@@ -12,7 +12,8 @@ const OWN_LIFECYCLE = new Set(['admin-communications.js', 'tech-line.js']);
 const OPERATOR_ROUTES = fs.readdirSync(routesDir)
   .filter((f) => /^admin-.*\.js$/.test(f) || f === 'ai-assistant.js' || f === 'tech-line.js');
 
-// Notifications, not replies: a receipt or a delivered document landing next
+// Notifications and nudges, not replies: a receipt, a delivered document or a
+// follow-up nudge landing next
 // to an automatic answer is not a double answer, several of these callers
 // cannot surface a refusal (a charge receipt is logged and dropped), and while
 // the lane can claim they already publish a provider-handoff reservation on
@@ -21,6 +22,11 @@ const NOTIFICATION_SENDS = new Set([
   'admin-billing-health.js:purpose=payment_receipt', // charge-now receipt: no entryPoint, keyed by purpose
   'admin-customer-intel.js:admin_customer_intel_retention_approve',
   'admin-estimates.js:admin_estimate_send',
+  // outbound nudges: the wrapper would park the customer's open question as
+  // answered by staff and log a false 'ignored' outcome (pre-push audit, r6)
+  'admin-estimates.js:admin_estimate_follow_up',
+  'admin-estimates.js:admin_estimate_send_booking_link',
+  'admin-pricing-strategy.js:admin_pricing_strategy_upsell',
   'admin-projects.js:admin_project_report_send',
   'admin-projects.js:project_report_hold_release',
   'admin-projects.js:admin_project_report_with_invoice',
@@ -52,8 +58,6 @@ describe('staff SMS surfaces use the interlocked wrapper', () => {
     ['ai-assistant.js', 'ai_assistant_admin_reply'],
     ['admin-leads.js', 'admin_leads_send_sms'],
     ['admin-drafts.js', 'admin_draft_approve'],
-    ['admin-estimates.js', 'admin_estimate_follow_up'],
-    ['admin-estimates.js', 'admin_estimate_send_booking_link'],
   ])('%s %s sends through sendManualCustomerSms', (file, entryPoint) => {
     const src = fs.readFileSync(path.join(routesDir, file), 'utf8');
     const at = src.indexOf(`entryPoint: '${entryPoint}'`);

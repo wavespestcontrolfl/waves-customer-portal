@@ -40,7 +40,7 @@ card; a crash between send and label is repaired by the next sweep.
 
 While the variable is present (`true` or `false`), staff sends (admin composer, scheduled sends,
 tech line, and every operator REPLY route through `sendManualCustomerSms`, pinned by
-`staff-reply-surfaces-interlock.test.js`; notifications such as receipts and delivered documents
+`staff-reply-surfaces-interlock.test.js`; notifications and nudges (receipts, delivered documents, follow-ups, upsells)
 stay on the direct sender and are covered by the provider-handoff reservation) take the same
 thread interlock as Phase E auto-send: a staff
 reply backs off while an AI claim is mid-send, and a staff reply in flight keeps the AI from

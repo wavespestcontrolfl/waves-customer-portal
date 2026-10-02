@@ -17,7 +17,6 @@ const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -5101,7 +5100,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
 
-    const smsResult = await sendManualCustomerSms({
+    const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
       body: msg,
       channel: 'sms',
@@ -5266,7 +5265,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     ));
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_accepted_onetime is missing or inactive' });
 
-    const smsResult = await sendManualCustomerSms({
+    const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
       body: msg,
       channel: 'sms',
