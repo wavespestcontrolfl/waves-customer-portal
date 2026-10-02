@@ -1047,3 +1047,27 @@ describe('internal matters never reach the customer note, labeled or not', () =>
     expect(out.officeNote).toBe(said);
   });
 });
+
+describe('a number said right before a product name', () => {
+  const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+  const fill = (rows, transcript) => validateFill(answer({ products: rows }), ctx, transcript);
+
+  test('"4 ounces Taurus and 5 ounces Talstar": each name keeps its own number, never the next one\'s', () => {
+    const t = 'Used 4 ounces Taurus and 5 ounces Talstar.';
+    expect(fill([row('p-taurus', 5, t)], t).products[0].amount).toBeNull();
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBe(4);
+    expect(fill([row('p-talak', 5, t)], t).products[0].amount).toBe(5);
+    expect(fill([row('p-talak', 4, t)], t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus 4 ounces Talstar": either product could own the 4, so neither does', () => {
+    const t = 'Taurus 4 ounces Talstar.';
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBeNull();
+    expect(fill([row('p-talak', 4, t)], t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus, 4 ounces, Talstar": the pause keeps the 4 with Taurus', () => {
+    const t = 'Taurus, 4 ounces, Talstar.';
+    expect(fill([row('p-taurus', 4, t)], t).products[0].amount).toBe(4);
+  });
+});

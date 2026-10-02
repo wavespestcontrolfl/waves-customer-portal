@@ -772,17 +772,34 @@ const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
 
 // The spoken quantities that belong to ONE mention of a product. A quantity joined
 // to a name by "of" ("four ounces of Taurus", "five of Talstar") belongs to that
-// name. Otherwise a quantity belongs to the product whose name it follows, up to
-// the next product's name ("Taurus four ounces and Talstar five ounces"); failing
-// that, a number right before the first name said. Position only.
+// name. A number between two names with no pause goes by the tech's habit: to
+// the next name when the name before it also had its number first ("4 ounces
+// Taurus and 5 ounces Talstar"), to the name before when the next name has its
+// own number after it ("taurus four ounces talstar five ounces"), else to
+// neither ("Taurus 4 ounces Talstar"). Any other number belongs to the product
+// whose name it follows, up to the next product's name; failing that, a number
+// right before the first name said. Position only.
 function mentionQuantities(mention, world) {
   const joinedToMe = world.quantities.filter((q) => q.nameAt === mention.start);
   if (joinedToMe.length) return joinedToMe;
   const joined = (q) => q.nameAt !== null && world.mentions.some((m) => m.start === q.nameAt);
-  const { from, to } = afterSpan(mention, world);
-  const after = world.quantities.filter((q) => !joined(q) && q.start >= from && q.end <= to);
+  const trailing = (m) => {
+    const { from, to } = afterSpan(m, world);
+    return world.quantities.filter((q) => !joined(q) && q.start >= from && q.end <= to);
+  };
+  const prefixes = (q, m) => !joined(q) && q.end === m.start && !world.breaks[m.start];
+  // The owner of a number said right before mention m: m, the mention before it, or null.
+  const ownerOfPrefix = (q, m) => {
+    const prev = world.mentions.filter((p) => p.end <= q.start && afterSpan(p, world).to >= q.end).sort((x, y) => y.start - x.start)[0];
+    if (!prev) return m;
+    // the name before had its OWN number first (moves left, so this ends)
+    if (world.quantities.some((p) => p.end <= prev.start && prefixes(p, prev) && ownerOfPrefix(p, prev) === prev)) return m;
+    return trailing(m).some((t) => t !== q) ? prev : null;
+  };
+  const after = trailing(mention).filter((q) => world.mentions.every((m) => m === mention || !prefixes(q, m) || ownerOfPrefix(q, m) === mention));
   if (after.length) return after;
-  return world.quantities.filter((q) => q.end === mention.start && !world.mentions.some((m) => m.start < q.start));
+  return world.quantities.filter((q) => !joined(q) && q.end === mention.start
+    && (prefixes(q, mention) ? ownerOfPrefix(q, mention) === mention : !world.mentions.some((m) => m.start < q.start)));
 }
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
