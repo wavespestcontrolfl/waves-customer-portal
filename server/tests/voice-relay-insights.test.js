@@ -3,7 +3,7 @@
 // same-millisecond ties resolved by sequence_number), with synthetic SIDs.
 
 const {
-  fetchConversationRelayEvents, buildTurnTimeline, joinTurnStats, summarizeTimeline,
+  fetchConversationRelayEvents, parseTimeline, alignByTime, buildCallTimeline, summarizeTimeline,
 } = require('../services/voice-agent/relay-insights');
 const { storedTurnStats, buildTranscriptUpdate } = require('../services/voice-agent/relay-transcript');
 const { storedStatsFor } = require('../scripts/voice-relay-turn-timing');
@@ -26,9 +26,20 @@ const connection = (atMs, name) => ({ call_sid: SID, group: 'connection', name, 
 
 beforeEach(() => { seq = 0; });
 
-describe('buildTurnTimeline', () => {
-  test('a spoken turn splits the heard gap into hearing, us and voice', () => {
-    const turns = buildTurnTimeline([
+// Our stored stat for a turn: prompt at `promptMs`, first send `sendMs`
+// later (null = never replied), on our own clock that runs `skewMs` behind
+// Twilio's.
+function ours(turn, promptMs, sendMs, { toolCount = 0, skewMs = 0, ...rest } = {}) {
+  return {
+    turn, promptAt: 10000 + promptMs, promptWallAt: T0 + promptMs - skewMs,
+    firstSendAt: sendMs == null ? null : 10000 + promptMs + sendMs,
+    modelMs: 900, toolMs: toolCount ? 1500 : 0, toolCount, tools: [], rounds: 1, renderer: 'block', ...rest,
+  };
+}
+
+describe('buildCallTimeline — reply attribution comes from our stats only', () => {
+  test('a spoken turn splits the heard gap into three spans that add up; Twilio STT/TTS stay diagnostics', () => {
+    const [t] = buildCallTimeline([
       connection(0, 'answered'),
       ev(1000, 'start_of_customer_speech'),
       ev(3000, 'stt_latency', { stt_latency: { latency_ms: 80 } }),
@@ -38,201 +49,139 @@ describe('buildTurnTimeline', () => {
       ev(5600, 'tts_latency', { tts_latency: { latency_ms: 200 } }),
       ev(5600, 'start_of_agent_speech'),
       ev(9000, 'end_of_agent_speech'),
-    ]);
-    expect(turns).toHaveLength(1);
-    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 2600, endpointMs: 0, appMs: 2400, voiceMs: 200, sttMs: 80, ttsMs: 200, agentOverCaller: false, callerBargeIns: 0 });
-    // The three spans add up to the heard gap; provider STT/TTS are diagnostics.
-    expect(turns[0].endpointMs + turns[0].appMs + turns[0].voiceMs).toBe(turns[0].heardGapMs);
+    ], [ours(1, 3000, 2390)]);
+    expect(t).toMatchObject({ outcome: 'spoke', heardGapMs: 2600, endpointMs: 0, appMs: 2400, voiceMs: 200, sttMs: 80, ttsMs: 200, agentOverCaller: false });
+    expect(t.endpointMs + t.appMs + t.voiceMs).toBe(t.heardGapMs);
   });
 
-  test('events out of order in the payload are sorted by time, then sequence number', () => {
-    const events = [
-      ev(3000, 'end_of_customer_speech'),
-      ev(3000, 'prompt_sent'),
-      ev(4000, 'first_token_received'),
-      ev(4100, 'start_of_agent_speech'),
-    ];
-    const turns = buildTurnTimeline([...events].reverse());
-    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 1100, appMs: 1000 });
+  test('without stats of ours a prompt is unattributed — Twilio alone never yields a latency', () => {
+    const rows = buildCallTimeline([ev(1000, 'prompt_sent'), ev(2000, 'first_token_received'), ev(2100, 'start_of_agent_speech')], []);
+    expect(rows[0]).toMatchObject({ outcome: 'unattributed', heardGapMs: null });
+    expect(summarizeTimeline(rows).all.heard_gap.n).toBe(0);
   });
 
-  test('the caller speaking again before any agent audio supersedes the turn (not a latency sample)', () => {
-    const turns = buildTurnTimeline([
+  test('a late reply to an earlier prompt is never credited to the newer one (overlapping prompts)', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'), // A
+      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
+      ev(1600, 'first_token_received'), ev(1700, 'start_of_agent_speech'), ev(3000, 'end_of_agent_speech'), // A's reply
+      ev(3800, 'first_token_received'), ev(3900, 'start_of_agent_speech'), // B's reply
+    ], [ours(1, 1000, 600), ours(2, 1500, 2300)]);
+    expect(rows.map((t) => [t.outcome, t.heardGapMs])).toEqual([['spoke', 700], ['spoke', 2400]]);
+  });
+
+  test('audio still being synthesized for an earlier reply is not the newer reply\'s audio', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'prompt_sent'),
+      ev(1400, 'first_token_received'), // A's text
+      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
+      ev(1600, 'first_token_received'), // B's text
+      ev(1650, 'start_of_agent_speech'), // A's audio (after B's text, before any later text)
+    ], [ours(1, 1000, 400), ours(2, 1500, 100)]);
+    // A's audio starts after the NEXT text Twilio got, so A has no attributable start;
+    // the start belongs to the text it follows (B's).
+    expect(rows[0].outcome).toBe('no_audio_event');
+    expect(rows[1]).toMatchObject({ outcome: 'spoke', heardGapMs: 150 });
+  });
+
+  test('a multi-part reply (acknowledgement, then the answer) is measured from its FIRST text', () => {
+    const rows = buildCallTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1500, 'start_of_customer_speech'),
-      ev(2500, 'end_of_customer_speech'), ev(2500, 'prompt_sent'),
-      ev(3500, 'first_token_received'), ev(3700, 'start_of_agent_speech'),
-    ]);
-    // The reply that follows may be the first prompt's late answer, so the
-    // second prompt is ambiguous too: neither is a latency sample.
-    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous']);
-    expect(turns.map((t) => t.heardGapMs)).toEqual([null, null]);
-    expect(summarizeTimeline(joinTurnStats(turns, [])).all.heard_gap.n).toBe(0);
+      ev(1300, 'first_token_received'), ev(1400, 'start_of_agent_speech'), ev(2000, 'end_of_agent_speech'), // "let me check"
+      ev(2200, 'end_of_customer_speech'), ev(2200, 'prompt_sent'), // caller adds something
+      ev(3500, 'first_token_received'), ev(3600, 'start_of_agent_speech'), // turn 1's answer — our turn 2 sent later
+      ev(5000, 'end_of_agent_speech'),
+      ev(5200, 'first_token_received'), ev(5300, 'start_of_agent_speech'), // turn 2's reply
+    ], [ours(1, 1000, 300), ours(2, 2200, 3000)]);
+    expect(rows.map((t) => [t.outcome, t.heardGapMs])).toEqual([['spoke', 400], ['spoke', 3100]]);
   });
 
-  test('a reply that lands while earlier agent audio is still playing is queued, not superseded', () => {
-    const turns = buildTurnTimeline([
+  test('clock skew between our server and Twilio is measured on the prompts and removed', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(2000, 'first_token_received'), ev(2100, 'start_of_agent_speech'),
+    ], [ours(1, 1000, 1000, { skewMs: 1200 })]);
+    expect(rows[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 1100 });
+  });
+
+  test('outcomes: no reply sent, reply queued behind playing audio, reply with no audio start', () => {
+    const rows = buildCallTimeline([
       ev(500, 'start_of_agent_speech'), // the welcome greeting
       ev(900, 'end_of_customer_speech'), ev(900, 'prompt_sent'),
-      ev(1900, 'first_token_received'),
+      ev(1900, 'first_token_received'), // queued behind the greeting
       ev(6000, 'end_of_agent_speech'),
-      ev(8000, 'end_of_customer_speech'), ev(8000, 'prompt_sent'),
-    ]);
-    expect(turns[0]).toMatchObject({ outcome: 'queued', heardGapMs: null, appMs: 1000 });
-    expect(turns[1].outcome).toBe('silent');
+      ev(8000, 'end_of_customer_speech'), ev(8000, 'prompt_sent'), // never answered
+      ev(9000, 'end_of_customer_speech'), ev(9000, 'prompt_sent'),
+      ev(9800, 'first_token_received'), // call ends before audio
+    ], [ours(1, 900, 1000), ours(2, 8000, null), ours(3, 9000, 800)]);
+    expect(rows.map((t) => t.outcome)).toEqual(['queued', 'no_reply', 'no_audio_event']);
+    expect(rows.every((t) => t.heardGapMs === null)).toBe(true);
+  });
+
+  test('agent audio that starts mid-utterance is flagged as talking over the caller', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
+      ev(1800, 'start_of_customer_speech'),
+      ev(2000, 'first_token_received'), ev(2100, 'start_of_agent_speech'),
+      ev(2600, 'interrupt'),
+    ], [ours(1, 1000, 1000, { interrupted: true })]);
+    expect(rows[0]).toMatchObject({ outcome: 'spoke', agentOverCaller: true });
+    const s = summarizeTimeline(rows, { interrupts: parseTimeline([ev(0, 'interrupt')]).interrupts });
+    expect(s).toMatchObject({ agent_over_caller: 1, caller_barge_ins: 1, twilio_interrupts: 1 });
   });
 
   test('a back-to-back prompt with no end-of-speech marker uses the prompt time, flagged', () => {
-    const turns = buildTurnTimeline([
+    const rows = buildCallTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1200, 'first_token_received'), ev(1250, 'start_of_agent_speech'), ev(1400, 'end_of_agent_speech'),
       ev(2500, 'prompt_sent'),
       ev(3000, 'first_token_received'), ev(3200, 'start_of_agent_speech'),
-    ]);
-    expect(turns[0].endOfSpeechInferred).toBe(false);
-    expect(turns[1]).toMatchObject({ endOfSpeechInferred: true, heardGapMs: 700 });
+    ], [ours(1, 1000, null), ours(2, 2500, 500)]);
+    expect(rows[1]).toMatchObject({ endOfSpeechInferred: true, outcome: 'spoke', heardGapMs: 700 });
   });
 
-  test('overlap classes: agent audio starting mid-utterance, and caller barge-ins during playback', () => {
-    const turns = buildTurnTimeline([
+  test('a new relay session (reconnect) carries no speech state and never takes audio across the boundary', () => {
+    const second = (atMs, name, n) => ({ ...ev(atMs, name), conversation_relay_data: { session_id: 'VX-second', sequence_number: n } });
+    const rows = buildCallTimeline([
+      ev(1000, 'start_of_customer_speech'),
+      ev(1000, 'prompt_sent'), ev(1800, 'first_token_received'), // session A replies, then drops
+      second(9000, 'start_of_agent_speech', 1), second(11000, 'end_of_agent_speech', 2), // B's resume greeting
+      second(12000, 'end_of_customer_speech', 3), second(12000, 'prompt_sent', 4),
+      second(12900, 'first_token_received', 5), second(13000, 'start_of_agent_speech', 6),
+    ], [ours(1, 1000, 800), ours(1, 12000, 900)]);
+    expect(rows.map((t) => t.outcome)).toEqual(['no_audio_event', 'spoke']);
+    expect(rows[1]).toMatchObject({ heardGapMs: 1000, agentOverCaller: false });
+  });
+
+  test('plain and tool turns are reported apart; model/tool time is whole-turn work', () => {
+    const rows = buildCallTimeline([
       ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1800, 'start_of_customer_speech'), // caller resumes…
-      ev(2000, 'first_token_received'),
-      ev(2100, 'start_of_agent_speech'), // …and Sandy starts over them
-      ev(2600, 'interrupt'),
-    ]);
-    expect(turns[0]).toMatchObject({ outcome: 'spoke', agentOverCaller: true, callerBargeIns: 1 });
-    const s = summarizeTimeline(joinTurnStats(turns, []));
-    expect(s.agent_over_caller).toBe(1);
-    expect(s.caller_barge_ins).toBe(1);
-  });
-
-  test('audio that starts before a prompt has its own first token belongs to an earlier reply, never the newer prompt', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1800, 'first_token_received'), // reply A, not playing yet
-      ev(1900, 'end_of_customer_speech'), ev(1900, 'prompt_sent'), // prompt B
-      ev(1950, 'start_of_agent_speech'), // A's audio
-      ev(2800, 'first_token_received'), // B's reply, queued behind A
-    ]);
-    expect(turns[1].heardGapMs).toBeNull();
-    expect(turns[1].outcome).toBe('ambiguous'); // A's text arrived but its audio had not started
-  });
-
-  test('a prompt that arrives while an earlier one still awaits its first text is ambiguous: the late reply is never credited to it', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'), // A, still generating…
-      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
-      ev(1600, 'first_token_received'), ev(1700, 'start_of_agent_speech'), // A's late reply
-      ev(4000, 'end_of_agent_speech'),
-    ]);
-    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous']);
-    expect(turns[1].heardGapMs).toBeNull();
-    expect(summarizeTimeline(joinTurnStats(turns, [])).all.heard_gap.n).toBe(0);
-  });
-
-  test('doubt reaches one turn only: after a reply is seen, the next prompt is measured again', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'prompt_sent'), // A, cut off for good — never answered
-      ev(1500, 'prompt_sent'), // B: ambiguous
-      ev(2500, 'first_token_received'), ev(2600, 'start_of_agent_speech'), ev(4000, 'end_of_agent_speech'),
-      ev(5000, 'end_of_customer_speech'), ev(5000, 'prompt_sent'), // C
-      ev(5900, 'first_token_received'), ev(6000, 'start_of_agent_speech'),
-    ]);
-    expect(turns.map((t) => t.outcome)).toEqual(['superseded', 'ambiguous', 'spoke']);
-    expect(turns[2].heardGapMs).toBe(1000);
-  });
-
-  test('a prior reply whose text arrived but whose audio had not started makes the next prompt ambiguous', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1400, 'first_token_received'), // A's text, audio still synthesizing
-      ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
-      ev(1600, 'first_token_received'), // B's text
-      ev(1650, 'start_of_agent_speech'), // A's audio
-    ]);
-    expect(turns[1]).toMatchObject({ outcome: 'ambiguous', heardGapMs: null, agentOverCaller: false });
-  });
-
-  test('a second agent audio start in the same turn that lands mid-utterance still counts as talking over the caller', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1500, 'first_token_received'), ev(1600, 'start_of_agent_speech'), // "let me check"
-      ev(2500, 'end_of_agent_speech'),
-      ev(3000, 'start_of_customer_speech'), // caller adds something
-      ev(4000, 'first_token_received'), ev(4100, 'start_of_agent_speech'), // the result, over them
-    ]);
-    expect(turns[0]).toMatchObject({ outcome: 'spoke', heardGapMs: 600, agentOverCaller: true });
-  });
-
-  test('a reply with no agent audio before the call ends is no_audio_event; no reply is silent', () => {
-    expect(buildTurnTimeline([ev(0, 'prompt_sent'), ev(900, 'first_token_received')])[0].outcome).toBe('no_audio_event');
-    expect(buildTurnTimeline([ev(0, 'prompt_sent')])[0].outcome).toBe('silent');
-  });
-
-  test('a new relay session (reconnect) closes the old one\'s pending turn and carries no state across', () => {
-    const turns = buildTurnTimeline([
-      ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-      ev(1800, 'first_token_received'), // session A replies, then drops
-      { ...ev(9000, 'start_of_agent_speech'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 1 } }, // B's resume greeting
-      { ...ev(12000, 'end_of_customer_speech'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 2 } },
-      { ...ev(12000, 'prompt_sent'), conversation_relay_data: { session_id: 'VX-second', sequence_number: 3 } },
-    ]);
-    expect(turns[0]).toMatchObject({ outcome: 'no_audio_event', heardGapMs: null });
-    expect(turns[1]).toMatchObject({ endOfCustomerSpeechAt: T0 + 12000 });
+      ev(2000, 'first_token_received'), ev(2200, 'start_of_agent_speech'), ev(4000, 'end_of_agent_speech'),
+      ev(6000, 'end_of_customer_speech'), ev(6000, 'prompt_sent'),
+      ev(9000, 'first_token_received'), ev(9300, 'start_of_agent_speech'),
+    ], [ours(1, 1000, 1000), ours(2, 6000, 3000, { toolCount: 1 })]);
+    const s = summarizeTimeline(rows);
+    expect(s.plain).toMatchObject({ turns: 1, heard_gap: { p50: 1200 } });
+    expect(s.tool).toMatchObject({ turns: 1, heard_gap: { p50: 3300 }, tools_turn_total: { p50: 1500 } });
   });
 
   test('connection events and garbage are ignored', () => {
-    expect(buildTurnTimeline([connection(0, 'answered'), null, { group: 'conversation_relay', name: 'prompt_sent', timestamp: 'nope' }])).toEqual([]);
-    expect(buildTurnTimeline(undefined)).toEqual([]);
+    expect(buildCallTimeline([connection(0, 'answered'), null, { group: 'conversation_relay', name: 'prompt_sent', timestamp: 'nope' }], [])).toEqual([]);
+    expect(buildCallTimeline(undefined)).toEqual([]);
   });
 });
 
-describe('joinTurnStats', () => {
-  const timeline = () => buildTurnTimeline([
-    ev(1000, 'end_of_customer_speech'), ev(1000, 'prompt_sent'),
-    ev(2000, 'first_token_received'), ev(2200, 'start_of_agent_speech'), ev(4000, 'end_of_agent_speech'),
-    ev(6000, 'end_of_customer_speech'), ev(6000, 'prompt_sent'),
-    ev(9000, 'first_token_received'), ev(9300, 'start_of_agent_speech'),
-  ]);
-
-  test('pairs by wall clock and splits plain from tool turns', () => {
-    const ours = [
-      { turn: 1, promptWallAt: T0 + 1040, modelMs: 900, toolMs: 0, toolCount: 0, tools: [], rounds: 1, renderer: 'block' },
-      { turn: 2, promptWallAt: T0 + 6030, modelMs: 1100, toolMs: 1800, toolCount: 1, tools: [{ name: 'lookup_customer', ms: 1800, ok: true }], rounds: 2, renderer: 'block' },
-    ];
-    const joined = joinTurnStats(timeline(), ours);
-    expect(joined[0].ours).toMatchObject({ turn: 1, toolCount: 0 });
-    expect(joined[1].ours.tools).toEqual([{ name: 'lookup_customer', ms: 1800, ok: true }]);
-    const s = summarizeTimeline(joined);
-    expect(s.plain.turns).toBe(1);
-    expect(s.plain.heard_gap.p50).toBe(1200);
-    expect(s.tool.turns).toBe(1);
-    expect(s.tool.tools_turn_total.p50).toBe(1800);
-    expect(s.unclassified).toBe(0);
+describe('alignByTime', () => {
+  const at = (x) => x;
+  test('keeps every valid pair, order-preserving (greedy nearest-first would strand one)', () => {
+    expect([...alignByTime([0, 1000], [900, 2500], at, at, 2000)]).toEqual([[0, 0], [1, 1]]);
   });
 
-  test('a stat further than the window from every prompt stays unpaired — never guessed', () => {
-    const joined = joinTurnStats(timeline(), [{ turn: 1, promptWallAt: T0 + 60000, toolCount: 0 }]);
-    expect(joined.every((t) => t.ours === null)).toBe(true);
-    expect(summarizeTimeline(joined).unclassified).toBe(2);
+  test('an earlier unmatched item never takes a later item\'s closer match', () => {
+    expect([...alignByTime([1000, 1500], [1510], at, at, 2000)]).toEqual([[1, 0]]);
   });
 
-  test('an earlier unmatched prompt never takes a later prompt\'s closer match', () => {
-    const tl = buildTurnTimeline([ev(1000, 'prompt_sent'), ev(1500, 'prompt_sent')]);
-    const joined = joinTurnStats(tl, [{ turn: 7, promptWallAt: T0 + 1510, toolCount: 0 }]);
-    expect(joined.map((t) => t.ours && t.ours.turn)).toEqual([null, 7]);
-  });
-
-  test('nearby prompts keep every valid pair (order-preserving, most pairs first)', () => {
-    const tl = buildTurnTimeline([ev(0, 'prompt_sent'), ev(1000, 'prompt_sent')]);
-    const joined = joinTurnStats(tl, [{ turn: 1, promptWallAt: T0 + 900, toolCount: 0 }, { turn: 2, promptWallAt: T0 + 2500, toolCount: 1 }]);
-    expect(joined.map((t) => t.ours && t.ours.turn)).toEqual([1, 2]);
-  });
-
-  test('rows stored before the wall clock existed pair by position only when the counts agree', () => {
-    expect(joinTurnStats(timeline(), [{ turn: 1, toolCount: 0 }, { turn: 2, toolCount: 1 }]).map((t) => t.ours && t.ours.turn)).toEqual([1, 2]);
-    expect(joinTurnStats(timeline(), [{ turn: 1, toolCount: 0 }]).every((t) => t.ours === null)).toBe(true);
+  test('nothing pairs outside the window', () => {
+    expect(alignByTime([0], [60000], at, at, 2000).size).toBe(0);
   });
 });
 

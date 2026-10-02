@@ -22,7 +22,7 @@
 
 const fs = require('fs');
 const {
-  fetchConversationRelayEvents, buildTurnTimeline, joinTurnStats, summarizeTimeline,
+  fetchConversationRelayEvents, parseTimeline, buildCallTimeline, summarizeTimeline,
 } = require('../services/voice-agent/relay-insights');
 const { compareSegments } = require('../services/voice-agent/relay-segments');
 
@@ -111,7 +111,8 @@ function printGroup(label, g) {
 
 function printSummary(title, s) {
   console.log(`\n${title}`);
-  console.log(`  prompts ${s.prompts}  outcomes ${JSON.stringify(s.outcomes)}  agent-over-caller ${s.agent_over_caller}  caller barge-ins ${s.caller_barge_ins}  unpaired ${s.unclassified}`);
+  console.log(`  prompts ${s.prompts}  outcomes ${JSON.stringify(s.outcomes)}  agent-over-caller ${s.agent_over_caller}  caller barge-ins ${s.caller_barge_ins}  Twilio interrupts ${s.twilio_interrupts}`);
+  if (s.outcomes.unattributed) console.log('  (unattributed = no stats of ours to say which reply answers that prompt; calls before PR 0a have none)');
   printGroup('all spoken', s.all);
   printGroup('plain turns', s.plain);
   printGroup('tool turns', s.tool);
@@ -126,6 +127,7 @@ async function main() {
   }
   const allJoined = [];
   const perCall = [];
+  let allInterrupts = 0;
   for (const row of rows) {
     const sid = row.twilio_call_sid;
     let fetched;
@@ -135,12 +137,14 @@ async function main() {
       console.log(`${sid}: Voice Insights read failed (${e.message})`);
       continue;
     }
-    const timeline = buildTurnTimeline(fetched.events);
-    if (!timeline.length) { console.log(`${sid}: no ConversationRelay turns in Voice Insights${fetched.available ? '' : ' (not available yet)'}`); continue; }
-    const joined = joinTurnStats(timeline, storedStatsFor(row));
+    const joined = buildCallTimeline(fetched.events, storedStatsFor(row));
+    if (!joined.length) { console.log(`${sid}: no ConversationRelay turns in Voice Insights${fetched.available ? '' : ' (not available yet)'}`); continue; }
+    const { interrupts } = parseTimeline(fetched.events);
+    allInterrupts += interrupts;
+    const summary = summarizeTimeline(joined, { interrupts });
     allJoined.push(...joined.map((t) => ({ callSid: sid, ...t })));
-    perCall.push({ callSid: sid, createdAt: row.created_at, summary: summarizeTimeline(joined), turns: joined });
-    printSummary(`${sid}  ${new Date(row.created_at).toISOString()}  ${row.source || ''}`, summarizeTimeline(joined));
+    perCall.push({ callSid: sid, createdAt: row.created_at, summary, turns: joined });
+    printSummary(`${sid}  ${new Date(row.created_at).toISOString()}  ${row.source || ''}`, summary);
   }
   if (!perCall.length) {
     // Every Insights read failed or came back empty: an outage or bad
@@ -149,9 +153,10 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (perCall.length > 1) printSummary(`ALL ${perCall.length} CALLS`, summarizeTimeline(allJoined));
+  const aggregate = summarizeTimeline(allJoined, { interrupts: allInterrupts });
+  if (perCall.length > 1) printSummary(`ALL ${perCall.length} CALLS`, aggregate);
   if (ARGS.json) {
-    fs.writeFileSync(String(ARGS.json), JSON.stringify({ generatedAt: new Date().toISOString(), calls: perCall, aggregate: summarizeTimeline(allJoined) }, null, 2));
+    fs.writeFileSync(String(ARGS.json), JSON.stringify({ generatedAt: new Date().toISOString(), calls: perCall, aggregate }, null, 2));
     console.log(`\nWrote ${ARGS.json}`);
   }
 }

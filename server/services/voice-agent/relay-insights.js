@@ -7,7 +7,10 @@
  * stopwatch the release criteria are written against (end of customer speech
  * → start of agent speech), so this module reads it and splits each gap into
  * hearing (STT), us (application) and voice (TTS). Our own per-turn stats
- * (relay-transcript.storedTurnStats) then split "us" into model vs tools.
+ * (relay-transcript.storedTurnStats) then split "us" into model vs tools,
+ * and they alone say which reply answers which prompt: Twilio's events carry
+ * no link between a prompt and the text or audio that follows it, so a turn
+ * with no stats of ours is never given a latency.
  *
  * Read-only: one GET per page against insights.twilio.com. Events carry no
  * spoken text — only names, timestamps, sequence numbers and latencies.
@@ -20,6 +23,9 @@ const REQUEST_TIMEOUT_MS = 15000;
 // Our prompt clock and Twilio's prompt_sent are the same instant seen from
 // two machines; anything further apart than this is a different turn.
 const JOIN_WINDOW_MS = 2000;
+// Our first send vs Twilio's first_token_received, after removing the clock
+// offset measured on the prompts: the same instant plus one network hop.
+const SEND_WINDOW_MS = 750;
 
 /** Fetch every ConversationRelay event for one call (all pages, carrier edge). */
 async function fetchConversationRelayEvents(callSid, {
@@ -71,213 +77,182 @@ function relayEvents(events = []) {
 const span = (from, to) => (from != null && to != null && to >= from ? to - from : null);
 
 /**
- * One row per prompt Twilio sent us. Each turn opens at `prompt_sent` and
- * closes at the next one. Outcomes:
- *   spoke            — agent audio started for this turn
- *   superseded       — the caller spoke again before any agent audio
- *                      (a merged or abandoned turn; not a latency sample)
- *   queued           — our reply arrived while earlier agent audio was still
- *                      playing, so Twilio logged no new start (the greeting
- *                      case); heard, but not a latency sample
- *   ambiguous        — the previous prompt's reply had not both arrived and
- *                      started playing when this one came in. Twilio's events
- *                      do not say which prompt a reply or an audio start
- *                      belongs to, so this turn's reply and audio are never
- *                      attributed (not a latency sample). One rule covers
- *                      every interleaving; doubt clears at the first turn
- *                      whose reply both arrives and plays.
- *   no_audio_event   — we replied but no agent audio start followed before
- *                      the call ended
- *   silent           — we never replied before the call ended
- *
- * Overlap classes (scope §2.4), from the speech state Twilio reports:
- *   agentOverCaller — agent audio started while the caller was mid-utterance
- *   callerBargeIns  — Twilio `interrupt` events during this turn's playback
+ * Twilio's raw timeline, unattributed: the prompts it sent us (with the end
+ * of speech and STT latency that produced each), every first text it got
+ * back and every agent audio start, each stamped with the speech state at
+ * that instant. Speech state never crosses a relay session boundary (a
+ * reconnected call runs a second session on the same CallSid).
  */
-function freshState() {
-  return {
-    current: null,
-    customerSpeaking: false,
-    agentSpeaking: false,
-    lastEndOfCustomerSpeech: null,
-    lastSttMs: null,
-    pendingTtsMs: null,
-  };
-}
-
-function closeTurn(turn, byNextPrompt) {
-  if (!turn || turn.outcome != null) return;
-  if (turn.firstTokenAt != null && turn.agentPlayingAtFirstToken) turn.outcome = 'queued';
-  else if (byNextPrompt) turn.outcome = 'superseded';
-  else turn.outcome = turn.firstTokenAt != null ? 'no_audio_event' : 'silent';
+function parseTimeline(events = []) {
+  const out = { prompts: [], tokens: [], audioStarts: [], interrupts: 0 };
+  let st = null;
+  let sessionId = null;
+  const fresh = () => ({ customerSpeaking: false, agentSpeaking: false, lastEnd: null, lastStt: null, pendingTts: null });
+  for (const e of relayEvents(events)) {
+    if (!st || (e.sessionId && sessionId && e.sessionId !== sessionId)) st = fresh();
+    if (e.sessionId) sessionId = e.sessionId;
+    const handle = PARSE_HANDLERS[e.name];
+    if (handle) handle(st, e, out, sessionId);
+  }
+  return out;
 }
 
 // One handler per Twilio event name; unlisted names are ignored.
-const TIMELINE_HANDLERS = {
+const PARSE_HANDLERS = {
   start_of_customer_speech: (st) => { st.customerSpeaking = true; },
-  end_of_customer_speech: (st, e) => {
-    st.customerSpeaking = false;
-    st.lastEndOfCustomerSpeech = e.at;
-  },
-  stt_latency: (st, e) => { st.lastSttMs = e.latencyMs; },
-  tts_latency: (st, e) => { st.pendingTtsMs = e.latencyMs; },
-  prompt_sent: (st, e, turns) => {
-    // Clean only when the previous prompt's reply both arrived and started
-    // playing (or queued behind audio already playing); otherwise a reply or
-    // audio start that follows may still be the previous one's.
-    const earlierPending = Boolean(st.current && !st.current.resolved);
-    closeTurn(st.current, true);
-    st.current = {
-      index: turns.length + 1,
+  end_of_customer_speech: (st, e) => { st.customerSpeaking = false; st.lastEnd = e.at; },
+  stt_latency: (st, e) => { st.lastStt = e.latencyMs; },
+  tts_latency: (st, e) => { st.pendingTts = e.latencyMs; },
+  prompt_sent: (st, e, out, sessionId) => {
+    out.prompts.push({
+      index: out.prompts.length + 1,
+      sessionId,
       promptSentAt: e.at,
       // Twilio sends the prompt the instant it marks end of speech (same
       // millisecond in every observed call), but a back-to-back second
       // prompt can arrive with no end marker of its own; the prompt time
       // stands in, flagged.
-      endOfCustomerSpeechAt: st.lastEndOfCustomerSpeech ?? e.at,
-      endOfSpeechInferred: st.lastEndOfCustomerSpeech == null,
-      sttMs: st.lastSttMs,
-      firstTokenAt: null,
-      agentSpeechStartAt: null,
-      ttsMs: null,
-      responses: 0,
-      sawReply: false,
-      resolved: false, // reply text seen AND its audio started (or queued)
-      agentPlayingAtFirstToken: false,
-      agentOverCaller: false,
-      callerBargeIns: 0,
-      earlierPending,
-      outcome: earlierPending ? 'ambiguous' : null,
-    };
-    st.lastEndOfCustomerSpeech = null;
-    st.lastSttMs = null;
-    turns.push(st.current);
+      endOfCustomerSpeechAt: st.lastEnd ?? e.at,
+      endOfSpeechInferred: st.lastEnd == null,
+      sttMs: st.lastStt,
+    });
+    st.lastEnd = null;
+    st.lastStt = null;
   },
-  first_token_received: (st, e) => {
-    const t = st.current;
-    if (!t) return;
-    t.responses += 1;
-    t.sawReply = true;
-    if (st.agentSpeaking) t.resolved = true; // queued behind audio already playing
-    if (t.firstTokenAt == null && t.outcome == null) {
-      t.firstTokenAt = e.at;
-      t.agentPlayingAtFirstToken = st.agentSpeaking;
-    }
+  first_token_received: (st, e, out, sessionId) => {
+    out.tokens.push({ at: e.at, sessionId, agentPlaying: st.agentSpeaking });
   },
-  start_of_agent_speech: (st, e) => {
-    const t = st.current;
-    if (t && t.sawReply) t.resolved = true;
-    // Only audio that starts AFTER this prompt's own first token can be its
-    // reply; earlier audio is a previous reply still reaching the line.
-    if (t && t.firstTokenAt != null && t.outcome == null) {
-      t.agentSpeechStartAt = e.at;
-      t.ttsMs = st.pendingTtsMs;
-      t.agentOverCaller = st.customerSpeaking;
-      t.outcome = 'spoke';
-    } else if (t && t.outcome === 'spoke' && st.customerSpeaking) {
-      // A later start in the same turn (an acknowledgement, then the result)
-      // can still talk over the caller.
-      t.agentOverCaller = true;
-    }
-    st.pendingTtsMs = null;
+  start_of_agent_speech: (st, e, out, sessionId) => {
+    out.audioStarts.push({ at: e.at, sessionId, customerSpeaking: st.customerSpeaking, ttsMs: st.pendingTts });
+    st.pendingTts = null;
     st.agentSpeaking = true;
   },
   end_of_agent_speech: (st) => { st.agentSpeaking = false; },
   preempted: (st) => { st.agentSpeaking = false; },
-  interrupt: (st) => {
-    if (st.current) st.current.callerBargeIns += 1;
-    st.agentSpeaking = false;
-  },
+  interrupt: (st, e, out) => { out.interrupts += 1; st.agentSpeaking = false; },
 };
 
-function buildTurnTimeline(events = []) {
-  const turns = [];
-  let st = freshState();
-  let sessionId = null;
-  for (const e of relayEvents(events)) {
-    // A reconnected call (GATE_VOICE_RELAY_RECOVERY) runs a second relay
-    // session on the same CallSid: nothing carries across the boundary.
-    if (e.sessionId && sessionId && e.sessionId !== sessionId) {
-      closeTurn(st.current, false);
-      st = freshState();
+/**
+ * Order-preserving one-to-one alignment of two chronological lists: the most
+ * pairs within `windowMs`, then the smallest total distance. Pairs never
+ * cross, and greedy nearest-first can never strand a valid pair. Returns a
+ * Map of left index → right index.
+ */
+function alignByTime(left, right, leftAt, rightAt, windowMs) {
+  const n = left.length;
+  const m = right.length;
+  const better = (a, b) => (a.count !== b.count ? a.count > b.count : a.dist < b.dist);
+  // best[i][j]: the best alignment of left i.. with right j.. (the last row
+  // and column, nothing left on one side, stay empty alignments).
+  const best = Array.from({ length: n + 1 }, () => Array.from({ length: m + 1 }, () => ({ count: 0, dist: 0, move: null })));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      let pick = { ...best[i + 1][j], move: 'skipLeft' };
+      if (better(best[i][j + 1], pick)) pick = { ...best[i][j + 1], move: 'skipRight' };
+      const d = Math.abs(leftAt(left[i]) - rightAt(right[j]));
+      const take = d <= windowMs ? { count: best[i + 1][j + 1].count + 1, dist: best[i + 1][j + 1].dist + d, move: 'pair' } : null;
+      if (take && better(take, pick)) pick = take;
+      best[i][j] = pick;
     }
-    if (e.sessionId) sessionId = e.sessionId;
-    const handle = TIMELINE_HANDLERS[e.name];
-    if (handle) handle(st, e, turns);
   }
-  closeTurn(st.current, false);
+  const pairs = new Map();
+  for (let i = 0, j = 0; i < n && j < m;) {
+    const { move } = best[i][j];
+    if (move === 'pair') { pairs.set(i, j); i += 1; j += 1; } else if (move === 'skipRight') j += 1; else i += 1;
+  }
+  return pairs;
+}
 
-  return turns.map((t) => ({
+function median(values) {
+  const v = [...values].sort((a, b) => a - b);
+  return v.length ? v[Math.floor((v.length - 1) / 2)] : 0;
+}
+
+function oursView(s) {
+  return {
+    turn: s.turn,
+    modelMs: Number.isFinite(s.modelMs) ? Math.round(s.modelMs) : null,
+    toolMs: Number.isFinite(s.toolMs) ? Math.round(s.toolMs) : null,
+    toolCount: Number.isFinite(s.toolCount) ? s.toolCount : null,
+    tools: Array.isArray(s.tools) ? s.tools : [],
+    rounds: Number.isFinite(s.rounds) ? s.rounds : null,
+    renderer: s.renderer || null,
+    interrupted: s.interrupted === true,
+  };
+}
+
+/**
+ * One row per prompt Twilio sent us, attributed by OUR stats only:
+ *   1. prompts ↔ our turns by wall clock (promptWallAt vs prompt_sent);
+ *   2. the clock offset between the two machines = median of those pairs;
+ *   3. each turn's first send (promptWallAt + firstSendAt − promptAt, offset
+ *      applied) ↔ Twilio's first_token_received — the reply that answers
+ *      that prompt, whatever else was in flight;
+ *   4. the first agent audio start after that text, in the same session and
+ *      before the next text Twilio received, is that reply's audio.
+ * Outcomes:
+ *   spoke          — the reply's audio start is known: a latency sample
+ *   queued         — the reply landed while earlier audio was still playing,
+ *                    so Twilio logged no start of its own (not a sample)
+ *   no_reply       — we sent nothing for this prompt (caller kept talking,
+ *                    or the turn was cut off)
+ *   no_audio_event — our reply reached Twilio but no attributable audio
+ *                    start followed it
+ *   unattributed   — no stats of ours for this prompt, or our send matched
+ *                    no Twilio text: never guessed, never a sample
+ */
+function buildCallTimeline(events = [], turnStats = []) {
+  const parsed = parseTimeline(events);
+  const ours = (Array.isArray(turnStats) ? turnStats : []).filter((s) => s && typeof s === 'object' && Number.isFinite(s.promptWallAt))
+    .sort((a, b) => a.promptWallAt - b.promptWallAt);
+  const promptPairs = alignByTime(parsed.prompts, ours, (p) => p.promptSentAt, (s) => s.promptWallAt, JOIN_WINDOW_MS);
+  const offset = median([...promptPairs].map(([i, j]) => parsed.prompts[i].promptSentAt - ours[j].promptWallAt));
+
+  const sends = [];
+  for (const [i, j] of promptPairs) {
+    const s = ours[j];
+    if (Number.isFinite(s.firstSendAt) && Number.isFinite(s.promptAt)) sends.push({ i, at: s.promptWallAt + offset + (s.firstSendAt - s.promptAt) });
+  }
+  sends.sort((a, b) => a.at - b.at);
+  const sendPairs = alignByTime(sends, parsed.tokens, (x) => x.at, (t) => t.at, SEND_WINDOW_MS);
+  const tokenFor = new Map([...sendPairs].map(([k, ti]) => [sends[k].i, ti]));
+
+  return parsed.prompts.map((p, i) => {
+    const j = promptPairs.get(i);
+    const row = { ...p, ours: j == null ? null : oursView(ours[j]), firstTokenAt: null, agentSpeechStartAt: null, ttsMs: null, agentOverCaller: false };
+    const outcome = attributeReply(row, parsed, tokenFor.get(i), j == null ? null : ours[j]);
+    return finishRow({ ...row, ...outcome });
+  });
+}
+
+function attributeReply(row, parsed, tokenIndex, stat) {
+  if (!stat) return { outcome: 'unattributed' };
+  if (!Number.isFinite(stat.firstSendAt)) return { outcome: 'no_reply' };
+  if (tokenIndex == null) return { outcome: 'unattributed' };
+  const token = parsed.tokens[tokenIndex];
+  if (token.agentPlaying) return { outcome: 'queued', firstTokenAt: token.at };
+  const nextToken = parsed.tokens[tokenIndex + 1];
+  const audio = parsed.audioStarts.find((a) => a.at >= token.at && a.sessionId === token.sessionId && (!nextToken || a.at < nextToken.at));
+  if (!audio) return { outcome: 'no_audio_event', firstTokenAt: token.at };
+  return { outcome: 'spoke', firstTokenAt: token.at, agentSpeechStartAt: audio.at, ttsMs: audio.ttsMs, agentOverCaller: audio.customerSpeaking };
+}
+
+function finishRow(t) {
+  const spoke = t.outcome === 'spoke';
+  return {
     ...t,
     // The release-criteria gap: caller stops → caller hears Sandy.
-    heardGapMs: t.outcome === 'spoke' ? span(t.endOfCustomerSpeechAt, t.agentSpeechStartAt) : null,
+    heardGapMs: spoke ? span(t.endOfCustomerSpeechAt, t.agentSpeechStartAt) : null,
     // Three non-overlapping boundary spans that add up to the heard gap:
     // end of speech → prompt sent (Twilio's turn handoff, usually 0),
     // prompt → first text back (us, incl. the websocket round trip),
     // first text → agent audio (synthesis + playout).
-    endpointMs: t.outcome === 'spoke' ? span(t.endOfCustomerSpeechAt, t.promptSentAt) : null,
+    endpointMs: spoke ? span(t.endOfCustomerSpeechAt, t.promptSentAt) : null,
     appMs: span(t.promptSentAt, t.firstTokenAt),
-    voiceMs: t.outcome === 'spoke' ? span(t.firstTokenAt, t.agentSpeechStartAt) : null,
+    voiceMs: spoke ? span(t.firstTokenAt, t.agentSpeechStartAt) : null,
     // sttMs / ttsMs stay as Twilio's provider diagnostics — they overlap the
     // spans above and are never added to them.
-  }));
-}
-
-/**
- * Pair Twilio turns with our stored turn stats (relay-transcript
- * storedTurnStats) by wall clock: our `promptWallAt` vs Twilio's
- * `prompt_sent`, nearest first, each used once. Older rows without a wall
- * clock pair by position only when the counts agree — otherwise unpaired,
- * never guessed.
- */
-function joinTurnStats(timeline = [], turnStats = []) {
-  const ours = (Array.isArray(turnStats) ? turnStats : []).filter((s) => s && typeof s === 'object');
-  const withClock = ours.filter((s) => Number.isFinite(s.promptWallAt));
-  const pairs = new Map(); // timeline index → stat
-  if (withClock.length) {
-    // Both sides are chronological, so pairs never cross. An order-preserving
-    // alignment keeps the most pairs within the window, then the smallest
-    // total distance (greedy nearest-first could strand a valid pair).
-    const stats = [...withClock].sort((a, b) => a.promptWallAt - b.promptWallAt);
-    const n = timeline.length;
-    const m = stats.length;
-    const better = (a, b) => (a.count !== b.count ? a.count > b.count : a.dist < b.dist);
-    // best[i][j]: the best alignment of prompts i.. with stats j.. (the last
-    // row and column, nothing left on one side, stay empty alignments).
-    const best = Array.from({ length: n + 1 }, () => Array.from({ length: m + 1 }, () => ({ count: 0, dist: 0, move: null })));
-    for (let i = n - 1; i >= 0; i -= 1) {
-      for (let j = m - 1; j >= 0; j -= 1) {
-        let pick = { ...best[i + 1][j], move: 'skipPrompt' };
-        if (better(best[i][j + 1], pick)) pick = { ...best[i][j + 1], move: 'skipStat' };
-        const d = Math.abs(stats[j].promptWallAt - timeline[i].promptSentAt);
-        const take = d <= JOIN_WINDOW_MS ? { count: best[i + 1][j + 1].count + 1, dist: best[i + 1][j + 1].dist + d, move: 'pair' } : null;
-        if (take && better(take, pick)) pick = take;
-        best[i][j] = pick;
-      }
-    }
-    for (let i = 0, j = 0; i < n && j < m;) {
-      const { move } = best[i][j];
-      if (move === 'pair') { pairs.set(i, stats[j]); i += 1; j += 1; } else if (move === 'skipStat') j += 1; else i += 1;
-    }
-  } else if (ours.length === timeline.length) {
-    ours.forEach((s, i) => pairs.set(i, s));
-  }
-  return timeline.map((t, i) => {
-    const s = pairs.get(i);
-    if (!s) return { ...t, ours: null };
-    return {
-      ...t,
-      ours: {
-        turn: s.turn,
-        modelMs: Number.isFinite(s.modelMs) ? Math.round(s.modelMs) : null,
-        toolMs: Number.isFinite(s.toolMs) ? Math.round(s.toolMs) : null,
-        toolCount: Number.isFinite(s.toolCount) ? s.toolCount : null,
-        tools: Array.isArray(s.tools) ? s.tools : [],
-        rounds: Number.isFinite(s.rounds) ? s.rounds : null,
-        renderer: s.renderer || null,
-      },
-    };
-  });
+  };
 }
 
 function percentile(values, p) {
@@ -294,47 +269,45 @@ function stage(values) {
 
 /**
  * Where the seconds go, for the turns that spoke. Plain and tool turns are
- * reported apart (release criteria §2.3); a turn we could not pair with our
- * own stats is `unclassified` rather than assumed plain.
+ * reported apart (release criteria §2.3).
  */
-function summarizeTimeline(joined = []) {
-  const spoke = joined.filter((t) => t.outcome === 'spoke');
-  const group = (rows) => ({
-    turns: rows.length,
-    heard_gap: stage(rows.map((t) => t.heardGapMs)),
-    endpoint: stage(rows.map((t) => t.endpointMs)),
-    app: stage(rows.map((t) => t.appMs)),
-    voice: stage(rows.map((t) => t.voiceMs)),
-    stt_provider: stage(rows.map((t) => t.sttMs)),
-    tts_provider: stage(rows.map((t) => t.ttsMs)),
+function summarizeTimeline(rows = [], { interrupts = 0 } = {}) {
+  const spoke = rows.filter((t) => t.outcome === 'spoke');
+  const group = (list) => ({
+    turns: list.length,
+    heard_gap: stage(list.map((t) => t.heardGapMs)),
+    endpoint: stage(list.map((t) => t.endpointMs)),
+    app: stage(list.map((t) => t.appMs)),
+    voice: stage(list.map((t) => t.voiceMs)),
+    stt_provider: stage(list.map((t) => t.sttMs)),
+    tts_provider: stage(list.map((t) => t.ttsMs)),
     // WHOLE-TURN work (every model round and tool call, including any after
     // the first reply was sent), not slices of the first-response gap.
-    model_turn_total: stage(rows.map((t) => t.ours && t.ours.modelMs)),
-    tools_turn_total: stage(rows.map((t) => t.ours && t.ours.toolMs)),
+    model_turn_total: stage(list.map((t) => t.ours && t.ours.modelMs)),
+    tools_turn_total: stage(list.map((t) => t.ours && t.ours.toolMs)),
   });
-  const plain = spoke.filter((t) => t.ours && t.ours.toolCount === 0);
-  const tool = spoke.filter((t) => t.ours && t.ours.toolCount > 0);
-  const unclassified = spoke.filter((t) => !t.ours);
   const outcomes = {};
-  for (const t of joined) outcomes[t.outcome] = (outcomes[t.outcome] || 0) + 1;
+  for (const t of rows) outcomes[t.outcome] = (outcomes[t.outcome] || 0) + 1;
   return {
-    prompts: joined.length,
+    prompts: rows.length,
     outcomes,
     all: group(spoke),
-    plain: group(plain),
-    tool: group(tool),
-    unclassified: unclassified.length,
-    agent_over_caller: joined.filter((t) => t.agentOverCaller).length,
-    caller_barge_ins: joined.reduce((s, t) => s + t.callerBargeIns, 0),
+    plain: group(spoke.filter((t) => t.ours.toolCount === 0)),
+    tool: group(spoke.filter((t) => t.ours.toolCount > 0)),
+    agent_over_caller: rows.filter((t) => t.agentOverCaller).length,
+    caller_barge_ins: rows.filter((t) => t.ours && t.ours.interrupted).length,
+    twilio_interrupts: interrupts,
   };
 }
 
 module.exports = {
   fetchConversationRelayEvents,
   relayEvents,
-  buildTurnTimeline,
-  joinTurnStats,
+  parseTimeline,
+  alignByTime,
+  buildCallTimeline,
   summarizeTimeline,
   percentile,
   JOIN_WINDOW_MS,
+  SEND_WINDOW_MS,
 };
