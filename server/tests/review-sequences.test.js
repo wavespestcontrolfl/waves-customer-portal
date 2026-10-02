@@ -56,7 +56,7 @@ jest.mock('../utils/cron-lock', () => {
 });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null, allShortUrlsFor: async () => [] }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.

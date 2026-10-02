@@ -58,6 +58,40 @@ describe('deriveLawnLead', () => {
     expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf({ banner: HOLD_BANNER })), 'progress')).toBe(false);
   });
 
+  describe('sinceLast (GATE_LAWN_SINCE_LAST)', () => {
+    const COPY = { priorDate: '2026-08-01', lines: ['Last visit we applied weed control.', 'Weed control is on track.'] };
+
+    test('no block handed in: the lead has no sinceLast key at all', () => {
+      expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf()), 'sinceLast')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf(), { sinceLast: null }), 'sinceLast')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf(), { sinceLast: { priorDate: '2026-08-01', lines: [] } }), 'sinceLast')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(deriveLawnLead(reportOf(), { sinceLast: { priorDate: 'bad', lines: COPY.lines } }), 'sinceLast')).toBe(false);
+    });
+
+    test('a handed-in block is carried as given, and the other fields are untouched', () => {
+      const without = deriveLawnLead(reportOf());
+      const lead = deriveLawnLead(reportOf(), { sinceLast: COPY });
+      expect(lead.sinceLast).toEqual(COPY);
+      expect({ ...lead, sinceLast: undefined }).toEqual({ ...without, sinceLast: undefined });
+    });
+
+    test('over its word cap it loses whole lines from the end, never a cut sentence', () => {
+      const long = Array.from({ length: 30 }, () => 'word').join(' ');
+      const lead = deriveLawnLead(reportOf(), { sinceLast: { priorDate: '2026-08-01', lines: [COPY.lines[0], long, COPY.lines[1]] } });
+      expect(lead.sinceLast.lines).toEqual([COPY.lines[0], long]);
+      const onlyLong = deriveLawnLead(reportOf(), { sinceLast: { priorDate: '2026-08-01', lines: [`${long} ${long}`] } });
+      expect(Object.prototype.hasOwnProperty.call(onlyLong, 'sinceLast')).toBe(false);
+    });
+
+    test('its lines and label count toward the lead word budget', () => {
+      const r = reportOf();
+      const base = leadWords({ ...r, lead: deriveLawnLead(r) });
+      const withBlock = leadWords({ ...r, lead: deriveLawnLead(r, { sinceLast: COPY }) });
+      // 6 + 5 line words, plus the "Since your last visit, <Mon D>" label.
+      expect(withBlock - base).toBe(11 + 6);
+    });
+  });
+
   test('why prefers rootCause over scoreExplanation; missing statusHeadline is null', () => {
     const r = reportOf();
     r.snapshot.rootCause = 'The main driver is mowing height.';

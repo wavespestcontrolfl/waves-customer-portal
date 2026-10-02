@@ -83,6 +83,9 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 // these route tests only need the hooks to succeed quietly.
 jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  // GATE_SMS_SCHEDULING_SUGGEST rollback filter: a pass-through here; its SQL
+  // is covered in sms-scheduling-suggest.test.js.
+  excludeGatedSchedulingSuggestions: jest.fn((query) => query),
   HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
@@ -150,6 +153,7 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
   existingShortUrlFor: jest.fn(async () => null),
+  allShortUrlsFor: jest.fn(async () => []),
   createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',

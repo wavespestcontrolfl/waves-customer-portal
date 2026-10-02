@@ -21,6 +21,7 @@ const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = 
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
+const { buildSinceLastCopy } = require('./lawn-since-last-copy');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
@@ -1080,7 +1081,7 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
       // transient failure preserves the exterior dry-down guidance rather
       // than silently dropping customer re-entry advice.
       try {
-        return !!(await knex('treatment_zone_maps')
+        return judgedTraceRow(record, await knex('treatment_zone_maps')
           .where({ scheduled_service_id: record.scheduled_service_id })
           .first());
       } catch (traceErr) {
@@ -1114,13 +1115,24 @@ async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVe
     } catch { /* label fallback above already ran; proceed to the lookup */ }
   }
   try {
-    return !!(await knex('treatment_zone_maps')
+    return judgedTraceRow(record, await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
       .first());
   } catch (traceErr) {
     return !(traceErr?.code === '42P01'
       || /no such table|does not exist/i.test(String(traceErr?.message || '')));
   }
+}
+
+// A trace counts as exterior evidence only when it is one the record may
+// show: a Fast Complete report-flow record froze the trace it was judged
+// against (traceJudged), and a trace it never saw (kept while the map gate
+// was dark, or saved after) drives no exterior dry-down guidance in the
+// report, the re-entry context, the lifecycle email or the completion text
+// either (Codex #5538). Any other record counts its trace as before.
+function judgedTraceRow(record, row) {
+  if (!row) return false;
+  return require('../treatment-zone-maps').traceJudgedAllows(parseJsonObject(record.structured_notes), row);
 }
 
 function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
@@ -4733,7 +4745,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
         .catch(() => null);
-      if (tracedRow?.snapshot_s3_key && PhotoService) {
+      // A report-flow record shows only the trace it was judged against.
+      if (tracedRow?.snapshot_s3_key && PhotoService
+        && require('../treatment-zone-maps').traceJudgedAllows(structured, tracedRow)) {
         const tracedSnapshotUrl = await PhotoService.getViewUrl(
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
@@ -5656,6 +5670,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // no state word reaches a customer before P14's guarded copy does.
       if (reportV2 && lawnProgress) {
         Object.defineProperty(reportV2, 'progress', { value: lawnProgress, enumerable: false, writable: true, configurable: true });
+      }
+      // GATE_LAWN_SINCE_LAST: the "Since your last visit" sentences, selected
+      // here because the progress block never leaves this process. Handed to
+      // the lead (applyLawnReportReconciliation) the same non-enumerable way,
+      // so the payload gains a key only through reportV2.lead.sinceLast.
+      // LIVE VIEWS ONLY: the PDF and static builds mount the same lead card,
+      // and their cache key does not vary on this gate, the expectation rows'
+      // approvals or the photo confidence these lines depend on, so a stored
+      // PDF never carries the block (codex P1 #5597 r1).
+      if (reportV2 && visitMemorySinceLast && opts.mode === 'live' && featureGates.lawnSinceLastLive()) {
+        try {
+          const sinceLastCopy = buildSinceLastCopy({
+            sinceLast: visitMemorySinceLast,
+            progress: lawnProgress,
+            insights: reportV2.insights,
+            bannerPresent: Array.isArray(reportV2.banner?.lines) && reportV2.banner.lines.length > 0,
+          });
+          if (sinceLastCopy) {
+            Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the block */ }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
@@ -6712,6 +6747,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         technicianFirstName: String(service.technician_first_name || '').trim()
           || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
       }
+      : null,
+    // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the
+    // client renders it above the footer): the post the record froze, its
+    // title and live URL checked again against the site's own host
+    // (report-blog-post.js). Null unless the gate is on; the switch hides
+    // frozen posts too. Read here only, never onto the protocol object the
+    // payload also returns, so this gated field is the post's one way out
+    // (pre-push P0 on #5547).
+    blogPost: featureGates.reportBlogPostLive?.() === true
+      ? require('./report-blog-post').frozenBlogPost(structured.blogPost)
       : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the

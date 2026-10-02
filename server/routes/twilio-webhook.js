@@ -932,7 +932,7 @@ router.post('/sms', async (req, res) => {
         }
         if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
           try {
-            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+            const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
@@ -1252,7 +1252,7 @@ router.post('/sms', async (req, res) => {
         ? `🌐 Lead from ${numberConfig.domain}: ${From} — "${(Body || '').slice(0, 80)}"`
         : numberConfig.type === 'van_tracking'
           ? `🚛 Lead from van wrap: ${From} — "${(Body || '').slice(0, 80)}"`
-          : `📱 SMS from ${customer ? `${customer.first_name} ${customer.last_name}` : From}: "${(Body || '').slice(0, 80)}"`,
+          : `📱 SMS from ${customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From}: "${(Body || '').slice(0, 80)}"`,
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
@@ -1370,7 +1370,7 @@ router.post('/sms', async (req, res) => {
 
     if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
-        const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+        const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
         const mediaText = inboundMedia.length
           ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
           : '';

@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { greetingFirstToken } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -135,7 +136,8 @@ function classifyEstimateSmsIntent(body, context = {}) {
 
   blockedActions.push('create_subscription', 'charge_card');
 
-  const firstName = firstNameFrom(context.customer?.first_name || context.estimate?.customer_name);
+  const firstName = firstNameFrom(context.customer?.first_name
+    || greetingFirstToken({ customerName: context.estimate?.customer_name, customer: context.customer }));
   let suggestedMessage = null;
   if (homeQuestion && scheduleWindow) {
     suggestedMessage = `Hello ${firstName}! You do not need to be home for the first visit as long as we have access to the exterior areas. I can look at openings for that week and send you the best available options.`;
@@ -254,7 +256,7 @@ function classifyCustomerSmsTriageIntent(body, context = {}) {
   const hasKnownContext = !!context.customer || !!context.estimate || !!context.lead;
   const firstName = firstNameFrom(
     context.customer?.first_name
-      || context.estimate?.customer_name
+      || greetingFirstToken({ customerName: context.estimate?.customer_name, customer: context.customer })
       || context.lead?.first_name
   );
   const blockedActions = ['send_without_human_review', 'create_subscription', 'charge_card'];

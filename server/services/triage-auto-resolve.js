@@ -125,7 +125,7 @@ const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // (account-holder confirmation), rental_or_tenant_occupied (access/
 // property confirmation), second_service_address and
 // secondary_contact_captured (captured data awaiting application),
-// missing_last_name (owed full-name capture — the name_moot rule closes it
+// missing_first_name / missing_last_name (owed name capture — first_name_moot / name_moot close it
 // on independent surname evidence), missing_unit_number (owed unit capture
 // for a multi-unit building — street+zip on file does NOT answer it), and
 // low_extraction_confidence / name_email_mismatch (the office owes
@@ -144,6 +144,7 @@ const ADVISORY_AGE_CODES = new Set([
 const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
+  first_name_moot: 'Auto-resolved: customer record now has a first name (the card was filed while it was blank); flag is moot.',
   // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
@@ -1018,6 +1019,18 @@ const CLASSIFY_RULES = [
       && callerMatchesCustomerFirstName(item)
       && !surnameCameFromCall(item)
       && filled(item.customer_last_name) },
+  // GATE_CALL_FIRST_NAME_ADVISORY's missing_first_name card lists EVERY customer the
+  // call left owing a first name (payload.customer_ids; a pre-list card's scalar
+  // customer_id counts as one). Each is loaded directly — never through the call's
+  // current link — and the ask is fulfilled when ALL of them are live with a nonblank
+  // first name, whatever its spelling: a name that later appears on the record IS the
+  // fulfilment (Customer 360's save does not bump updated_at, so no timestamp is
+  // needed). An empty list, or a listed customer that is gone or still blank, keeps
+  // the card.
+  { rule: 'first_name_moot', action: 'resolve',
+    when: (item) => item.reason_code === 'missing_first_name'
+      && Number(item.owed_total) > 0
+      && Number(item.owed_named) === Number(item.owed_total) },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
@@ -1106,6 +1119,19 @@ function loadCandidateItems(conn, itemIds = null) {
   const q = conn('triage_items as t')
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
+    // The customers a missing_first_name card is owed on (payload.customer_ids, or the scalar
+    // customer_id of a pre-list card), each read directly: how many, and how many are
+    // fulfilled (live with a nonblank first name, following an active merge to its survivor —
+    // the shared owedCustomerNamedSql). A listed id whose row is gone counts as owed, not named.
+    .joinRaw(`left join lateral (
+      select count(*) as owed_total,
+        count(*) filter (where ${require('../utils/missing-first-name-card').owedCustomerNamedSql('ids.id')}) as owed_named
+      from jsonb_array_elements_text(
+        case when jsonb_typeof(t.payload->'customer_ids') = 'array' then t.payload->'customer_ids'
+             when t.payload->>'customer_id' is not null then jsonb_build_array(t.payload->>'customer_id')
+             else '[]'::jsonb end) as ids(id)
+      where t.reason_code = 'missing_first_name'
+    ) fnc on true`)
     .where('t.status', 'open')
     .select(
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
@@ -1124,6 +1150,8 @@ function loadCandidateItems(conn, itemIds = null) {
       'cl.bridged_at as call_bridged_at',
       'cl.twilio_call_sid as call_twilio_call_sid',
       'cl.metadata as call_metadata',
+      'fnc.owed_total',
+      'fnc.owed_named',
       'c.created_at as customer_created_at',
       'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',

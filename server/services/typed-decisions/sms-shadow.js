@@ -73,7 +73,7 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
   const conn = require('../../models/db');
   const { askPackage } = require('./jev');
   const { recordDecisions } = require('./shadow-recorder');
-  const { packageFor } = require('./packages');
+  const { packageFor, DEFAULT_DECISION_PROVIDER } = require('./packages');
 
   let previous = lastOutboundBody;
   if (previous === undefined) {
@@ -93,6 +93,7 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
       const flag = typeof rules[rule] === 'boolean' ? rules[rule] : undefined;
       const recorded = await recordDecisions({
         capability: packageFor(packageId).capability,
+        provider: DEFAULT_DECISION_PROVIDER,
         pkg: packageFor(packageId),
         subjectType: 'sms_log',
         subjectId: smsLogId,
