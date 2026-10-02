@@ -895,6 +895,22 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
     });
 
+    it('an after-visit year whose payer still resolves is stamped to the payer before delivery, never the homeowner (pre-push audit)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', deferred_to_first_visit: false, after_visit_attested: true } });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      payer.resolveForInvoice.mockImplementation(async () => ({ payerId: 7, snapshot: null }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
     it('a year routed to a payer, authorized for after the first visit, is never charged to the card once the payer is gone (pre-push audit P0)', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'pending', deferred_to_first_visit: false, after_visit_attested: true } });
       await sweep();

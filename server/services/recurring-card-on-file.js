@@ -1730,8 +1730,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           throwOnError: true,
         });
         if (livePayer?.payerId) {
-          await deliverToPayerAndResolve();
-          continue;
+          // The shared payer-guard handler below re-resolves, returns any
+          // applied credit and STAMPS the payer before confirmed payer
+          // delivery (deferring if it can't) — never a delivery by an
+          // unstamped invoice (pre-push audit P0).
+          throw Object.assign(new Error('payer resolves for an after-visit year — re-routing to the payer'), { code: 'PAYER_BILLED_GUARD' });
         }
         throw new Error('after-visit authorization only and no payer — delivering pay link');
       }
