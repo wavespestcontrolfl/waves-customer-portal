@@ -298,6 +298,32 @@ describe('loadReplayRows', () => {
     expect(pair.days).toBe(31);
   });
 
+  it('a frozen prior that left the visit\'s canonical history (replaced or out of scope) judges nothing', async () => {
+    const row = (id, date, rec) => ({
+      id, customer_id: 'c1', property_id: 'p1', date, season: 'peak', is_baseline: false, service_record_id: rec, divergence_flags: null,
+      turf_density: 70, weed_suppression: 70, color_health: 70, fungus_control: 70, thatch_level: 70, stress_damage: 70, overall_score: 70, confirmed_order: '',
+    });
+    const trx = {
+      raw: jest.fn(async (sql) => {
+        if (/FROM lawn_assessments/.test(sql)) return { rows: [row('v1', '2026-05-01', 'r1'), row('v2', '2026-06-01', 'r2')] };
+        if (/FROM service_records/.test(sql)) {
+          return { rows: [{ id: 'r2', structured_notes: { lawnVisitMemory: { v2: { v: 1, assessmentId: 'v2', serviceDate: '2026-06-01', applied: [], checks: [], sinceLast: { v: 1, priorAssessmentId: 'v1', priorDate: '2026-05-01', applied: [{ name: 'Celsius WG', targets: [] }], checks: [] } } } } }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
+    historyForAssessment.mockReset();
+    // v1 is no longer in v2's canonical history (a reset or a scope change).
+    const V2 = { id: 'v2', visit_date: '2026-06-01', service_record_id: 'r2' };
+    historyForAssessment.mockImplementation(async ({ id }) => (id === 'v1'
+      ? { current: { id: 'v1', visit_date: '2026-05-01', service_record_id: 'r1' }, rows: [], previous: null, isBaseline: true }
+      : { current: V2, rows: [V2], previous: null, isBaseline: false }));
+    const rows = await loadReplayRows(db);
+    expect(rows.find((r) => r.id === 'v2').priorId).toBeNull();
+    expect(replayLawnProgress(rows).pairs.find((p) => p.assessment === 'v2')).toBeUndefined();
+  });
+
   it('takes the prior, visit date and baseline from canonical history, and marks re-done attempts superseded', async () => {
     const row = (id, date) => ({
       id, customer_id: 'c1', property_id: 'p1', date, season: 'peak', is_baseline: false, service_record_id: null, divergence_flags: null,

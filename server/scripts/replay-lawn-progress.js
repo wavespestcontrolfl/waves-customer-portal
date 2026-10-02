@@ -309,6 +309,50 @@ function formatReport(result) {
 
 // ── Database loader (read only) ───────────────────────────────────────────
 /**
+ * The prior a replayed visit compares against. A frozen entry pins its prior
+ * (or none), but like report-data priorInputFor only while that prior is still
+ * in THIS visit's canonical history and strictly earlier; a pre-memory visit
+ * uses the report's live selector, the only reading available for it.
+ */
+function replayPriorId(stored, canonical, currentDate) {
+  if (!stored) return canonical.priorId;
+  const frozenPriorId = stored.sinceLast?.priorAssessmentId;
+  if (frozenPriorId == null || canonical.superseded) return null;
+  const frozenPriorDate = canonical.priorDateById.get(String(frozenPriorId));
+  return frozenPriorDate && frozenPriorDate < currentDate ? String(frozenPriorId) : null;
+}
+
+function parseFlags(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string') return [];
+  try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+}
+
+/** One loaded assessment as a ReplayRow: the frozen memory when present, else live products. */
+function toReplayRow(a, { canonical, stored, photos, liveProducts }) {
+  const currentDate = stored?.serviceDate || canonical.date;
+  return {
+    id: a.id,
+    customerId: a.customer_id,
+    propertyId: a.property_id || null,
+    date: currentDate,
+    season: a.season || null,
+    isBaseline: canonical.isBaseline,
+    priorId: replayPriorId(stored, canonical, currentDate),
+    superseded: canonical.superseded,
+    scores: scoresFromAssessmentRow(a),
+    photos,
+    divergenceFlags: parseFlags(a.divergence_flags),
+    // Shaped exactly as visit memory freezes it (support products out, at most
+    // 8 products and 3 targets each), so the replay judges what the deployed
+    // engine would see.
+    applied: stored ? (Array.isArray(stored.applied) ? stored.applied : []) : appliedFromProducts(liveProducts),
+    ...(stored ? { frozenSinceLast: stored.sinceLast || null, issues: Array.isArray(stored.issues) ? stored.issues : [] } : {}),
+    order: a.confirmed_order || '',
+  };
+}
+
+/**
  * Every confirmed lawn assessment with the inputs the engine reads. One READ
  * ONLY transaction. The window is applied by replayLawnProgress, so a visit
  * inside it still finds its prior from before it.
@@ -388,7 +432,11 @@ async function loadReplayRows(db) {
       // selectPriorVisit (strictly earlier day, has a service record).
       const historyRows = (h.rows || []).map((row) => ({ ...row, service_date: row.visit_date }));
       const priorVisit = installed ? selectPriorVisit(historyRows, a.id) : null;
+      // Like report-data priorInputFor: a frozen prior counts only while it is
+      // still in THIS visit's canonical history and strictly earlier.
+      const priorDateById = new Map(historyRows.map((row) => [String(row.id), String(row.service_date || '').slice(0, 10)]));
       canonicalBy.set(a.id, {
+        priorDateById,
         superseded: !installed,
         priorId: priorVisit ? priorVisit.assessmentId : null,
         isBaseline: installed ? h.isBaseline : false,
@@ -396,36 +444,12 @@ async function loadReplayRows(db) {
       });
     }
 
-    return assessments
-      .map((a) => {
-        const canonical = canonicalBy.get(a.id);
-        const stored = a.service_record_id ? storedVisitMemoryFor(notesBy.get(String(a.service_record_id)), a.id) : null;
-        let flags = a.divergence_flags;
-        if (typeof flags === 'string') { try { flags = JSON.parse(flags); } catch { flags = []; } }
-        return {
-          id: a.id,
-          customerId: a.customer_id,
-          propertyId: a.property_id || null,
-          date: stored?.serviceDate || canonical.date,
-          season: a.season || null,
-          isBaseline: canonical.isBaseline,
-          // A frozen entry pins its prior (or none); pre-memory visits use the
-          // report's live selector, the only reading available for them.
-          priorId: stored ? (stored.sinceLast?.priorAssessmentId ?? null) : canonical.priorId,
-          superseded: canonical.superseded,
-          scores: scoresFromAssessmentRow(a),
-          photos: photosBy.get(a.id) || [],
-          divergenceFlags: Array.isArray(flags) ? flags : [],
-          // Shaped exactly as visit memory freezes it (support products out,
-          // at most 8 products and 3 targets each), so the replay judges what
-          // the deployed engine would see.
-          applied: stored
-            ? (Array.isArray(stored.applied) ? stored.applied : [])
-            : (a.service_record_id ? appliedFromProducts(productsBy.get(a.service_record_id) || []) : []),
-          ...(stored ? { frozenSinceLast: stored.sinceLast || null, issues: Array.isArray(stored.issues) ? stored.issues : [] } : {}),
-          order: a.confirmed_order || '',
-        };
-      });
+    return assessments.map((a) => toReplayRow(a, {
+      canonical: canonicalBy.get(a.id),
+      stored: a.service_record_id ? storedVisitMemoryFor(notesBy.get(String(a.service_record_id)), a.id) : null,
+      photos: photosBy.get(a.id) || [],
+      liveProducts: a.service_record_id ? productsBy.get(a.service_record_id) || [] : [],
+    }));
   }, { readOnly: true });
 }
 
