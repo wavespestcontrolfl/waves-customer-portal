@@ -13798,8 +13798,13 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Re-added phone that already confirmed its own opt-in here: restore
         // the account stamp a contact edit may have cleared (same coverage
-        // rule as its YES).
-        if (onSiteAlreadyConfirmed && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))) {
+        // rule as its YES). And a YES that landed between the status read
+        // above and the hold write (its own follow-up found no hold to
+        // remove) is applied now: re-read after the write, release the hold.
+        const heldOnWrite = onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed && result === 'written';
+        const confirmedSinceRead = heldOnWrite
+          && (await db('recipient_optin').where({ customer_id: customerId, phone_key: lastTen(secondaryEntry.phone) }).first('status'))?.status === 'confirmed';
+        if ((onSiteAlreadyConfirmed && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))) || confirmedSinceRead) {
           await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));
         }
         // Recipient double opt-in parity with the portal flow (#2956): a
@@ -18787,7 +18792,9 @@ const CallRecordingProcessor = {
                     }).onConflict(['customer_id', 'phone_key']).merge({
                       status: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END"),
                       visit_id: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
-                      dispatched_at: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN NULL ELSE recipient_optin.dispatched_at END"),
+                      // Only a FAILED ask restarts as undispatched; a pending ask
+                      // that already went out keeps its marker (never re-sent).
+                      dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),
                       updated_at: new Date(),
                     }).catch(() => {});
                     await markOptinAsk(entry, 'not_sent:claim_failed_retrying');

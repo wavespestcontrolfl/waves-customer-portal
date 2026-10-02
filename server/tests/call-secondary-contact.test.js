@@ -865,6 +865,9 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain('if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
     // A re-added phone that already confirmed here gets the account stamp back.
     expect(src).toContain("await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));");
+    // A YES that landed between the status read and the hold write is applied after the write.
+    expect(src).toContain("const heldOnWrite = onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed && result === 'written';");
+    expect(src).toContain("|| confirmedSinceRead) {");
     // A phone NEW to the account is durably blocked (ask_failed, reclaimable)
     // BEFORE the slot write, so the account's existing consent stamp stays; a
     // phone already on record is left alone.
@@ -908,6 +911,8 @@ describe('on-site contact opt-in ask', () => {
     // A failed claim stays on the visit-bound retry rail (pending + visit_id), not a dead ask_failed.
     expect(block).toContain("status: db.raw(\"CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END\"),");
     expect(block).toContain("await markOptinAsk(entry, 'not_sent:claim_failed_retrying');");
+    // An already-dispatched pending ask keeps its dispatch marker (never re-sent).
+    expect(block).toContain("dispatched_at: db.raw(\"CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END\"),");
     // 'wait' (office-review hold) and 'unknown' claim the ask without sending it.
     expect(block).toContain("if (claims.length && onSiteAskVisitState !== 'live') {");
     expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");
