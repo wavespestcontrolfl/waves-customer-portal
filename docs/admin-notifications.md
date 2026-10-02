@@ -71,6 +71,9 @@ customer's message by this rule.
    (`server/services/admin-alert-relevance.js`) is the backstop for one-shot classes only.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
    day in total. A class that would push past that becomes a standing count.
+   Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
+   tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
+   rings; tomorrow it may be too late to act.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,

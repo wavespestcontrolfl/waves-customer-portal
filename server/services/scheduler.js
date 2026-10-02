@@ -8128,11 +8128,28 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.combinedBookingCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''}${result.combinedBookingCheckFailed ? ' COMBINED-BOOKING-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY :25, 7 AM-8 PM ET — the combined-booking check's urgent pass: a
+  // booking with a visit TODAY or TOMORROW that has no time or technician
+  // rings now, not at the next 6:40 run (by then a today visit is history).
+  // Catches bookings made, and technicians removed, after the daily tick, and
+  // retries a failed write. Same gate as the watchdog it belongs to.
+  cron.schedule('25 7-20 * * *', async () => {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('scheduleIntegrityWatchdog')) return;
+      const result = await runExclusive('combined-booking-check-urgent', () =>
+        require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
+      if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`[combined-booking-check] urgent pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

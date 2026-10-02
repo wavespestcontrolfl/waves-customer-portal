@@ -53,7 +53,12 @@ jest.mock('../services/recurring-schedule-audit', () => ({
   findAcceptedRecurringScheduleGaps: jest.fn(async () => []),
 }));
 
+jest.mock('../services/combined-booking-check', () => ({
+  runCombinedBookingCheck: jest.fn(async () => ({ checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0 })),
+}));
+
 const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
+const { runCombinedBookingCheck } = require('../services/combined-booking-check');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
@@ -630,6 +635,31 @@ describe('accepted-plan schedule detection', () => {
     const lastCall = NotificationService.notifyAdmin.mock.calls.at(-1);
     expect(lastCall[3].dedupeKey).toBe('accepted-schedule:e-1:pest_control');
     expect(lastCall[3].dedupeVersion).toBe('evidence-2');
+  });
+
+  test('the combined-booking check runs as the last pass of the watchdog tick, after the accepted-plan alerts', async () => {
+    const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
+      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
+    runCombinedBookingCheck.mockClear();
+    runCombinedBookingCheck.mockImplementationOnce(async () => {
+      // The accepted-schedule bell has already been rung when the check starts.
+      expect(NotificationService.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toContain('accepted-schedule:e-1:pest_control');
+      return { checked: 2, ok: 1, problems: 1, deferred: 0, skipped: 0, failed: 0 };
+    });
+    makeDbMock();
+    const result = await runInner({ now: NOW });
+    // It rings within what is left of the run's shared budget.
+    expect(runCombinedBookingCheck).toHaveBeenCalledWith({ now: NOW, ringBudget: expect.any(Number) });
+    expect(runCombinedBookingCheck.mock.calls[0][0].ringBudget).toBeLessThanOrEqual(10);
+    expect(result).toMatchObject({ combinedBooking: { checked: 2, problems: 1 }, combinedBookingCheckFailed: false, alerted: 1 });
+  });
+
+  test('a failing combined-booking check is reported and never stops the watchdog output', async () => {
+    runCombinedBookingCheck.mockRejectedValueOnce(new Error('boom'));
+    makeDbMock();
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ combinedBooking: null, combinedBookingCheckFailed: true });
   });
 
   test('an unavailable acceptance check is reported while existing checks keep running', async () => {
