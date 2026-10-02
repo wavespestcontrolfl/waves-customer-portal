@@ -13,8 +13,19 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The writer and the fact check share the dispatcher; route by lane.
 const mockRejectCall = jest.fn();
+// Like dispatchWithFallback: the caller's validate hook judges each answer; a
+// rejection fails that leg (here the only leg) with a validator failure.
+const mockWithValidate = async (fn, args) => {
+  const res = await fn(...args);
+  const validate = args[2]?.validate;
+  if (res && res.ok && !res.alreadyValidated && typeof validate === 'function') {
+    const reason = validate(res);
+    if (reason) return { ok: false, reason: 'all_providers_failed', failures: [{ validator: true, reason }] };
+  }
+  return res;
+};
 jest.mock('../services/llm/call', () => ({
-  dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a) : mockDispatch(...a)),
+  dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a) : mockWithValidate(mockDispatch, a)),
   rejectCall: (...a) => mockRejectCall(...a),
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
@@ -302,7 +313,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     // A fixed visit date: the message must sit inside the visit window whatever day the suite runs.
     await Drafter.draftTechVoice({ ...INPUT, serviceDate: '2026-09-15' });
     const text = mockDispatch.mock.calls[0][1].text;
-    expect(text).toContain('[customer, 2026-09-10] I saw ants today');
+    expect(text).toMatch(/\[customer, 2026-09-10 \d{2}:\d{2} ET\] I saw ants today/);
     expect(text).toMatch(/Today: \d{4}-\d{2}-\d{2}/);
   });
 
@@ -325,11 +336,13 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(policy.fallback.provider).toBe('openai');
   });
 
-  test('GitHub r1: a refused draft is marked failed on the call ledger; an unavailable checker is not', async () => {
+  test('GitHub r1 / #5524 r19: a draft failing the code checks fails its leg in the dispatcher (so the other provider gets a turn); an unavailable checker marks nothing', async () => {
     const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
     mockDispatch.mockResolvedValue(reply(ungrounded));
     await Drafter.draftTechVoice(INPUT);
-    expect(mockRejectCall.mock.calls[0][1]).toBe('ungrounded_detail');
+    // The dispatcher's validator is what refuses it (real dispatchWithFallback then tries the fallback leg).
+    expect(mockDispatch.mock.calls[0][2].validate(reply(ungrounded))).toBe('ungrounded_detail');
+    expect(mockDispatch.mock.calls[0][2].validate(reply(GOOD))).toBeNull();
     mockRejectCall.mockClear();
     mockDispatch.mockReset().mockResolvedValue(reply(GOOD));
     mockFactCheck.mockReset().mockResolvedValue({ ok: false });
@@ -337,16 +350,15 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(mockRejectCall).not.toHaveBeenCalled();
   });
 
-  test('GitHub r3: the ledger row marked failed is the adapter result the validate hook saw, not the dispatcher copy', async () => {
-    const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
+  test('GitHub r3: a fact-check refusal marks the adapter result the validator saw, not the dispatcher copy', async () => {
     const adapterResults = [];
-    // Like dispatchWithFallback: hand the adapter's own object to validate, return a spread copy.
     mockDispatch.mockImplementation(async (_policy, _payload, opts) => {
-      const adapter = { ...reply(ungrounded), provider: 'anthropic' };
+      const adapter = { ...reply(GOOD), provider: 'anthropic' };
       adapterResults.push(adapter);
       expect(opts.validate(adapter)).toBeNull();
-      return { ...adapter };
+      return { ...adapter, alreadyValidated: true }; // the real dispatcher validates once, on the adapter's own result
     });
+    judge([{ ask_only: false, supported: false, quotes: [] }, { ask_only: false, supported: false, quotes: [] }, { ask_only: true, supported: false, quotes: [] }]);
     await Drafter.draftTechVoice(INPUT);
     expect(mockRejectCall).toHaveBeenCalledTimes(2);
     expect(mockRejectCall.mock.calls[0][0]).toBe(adapterResults[0]);
@@ -580,7 +592,12 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(timingUnsupported('You saw ants today.', ['I saw ants by the door'], lines, '2026-09-10')).toBe(true);
     expect(timingUnsupported('You saw ants today.', ['the ants are back by the door'], lines, '2026-09-10')).toBe(false);
     // An undated report line is the visit day: fine for "today" on a same-day visit, not otherwise.
-    expect(timingUnsupported('I found moisture under the sink this morning.', ['Moisture under the kitchen sink'], lines, today)).toBe(false);
+    expect(timingUnsupported('I found moisture under the sink today.', ['Moisture under the kitchen sink'], lines, today)).toBe(false);
+    // #5524 r19: a part of the day needs a clock time or the word itself; an undated report line has neither.
+    expect(timingUnsupported('I found moisture under the sink this morning.', ['Moisture under the kitchen sink'], lines, today)).toBe(true);
+    const timed = [`- [customer, ${today} 08:14 ET] the ants are back by the door`, `- [customer, ${today} 19:40 ET] ants again tonight`];
+    expect(timingUnsupported('You saw the ants back by the door this morning.', ['the ants are back by the door'], timed, today)).toBe(false);
+    expect(timingUnsupported('You saw ants again this morning.', ['ants again tonight'], timed, today)).toBe(true);
     expect(timingUnsupported('I found moisture under the sink this morning.', ['Moisture under the kitchen sink'], lines, '2026-09-10')).toBe(true);
     expect(timingUnsupported('I found moisture under the sink.', ['Moisture under the kitchen sink'], lines, '2026-09-10')).toBe(false);
   });

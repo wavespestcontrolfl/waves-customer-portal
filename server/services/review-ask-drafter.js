@@ -584,6 +584,16 @@ function dayTag(value) {
   if (!value) return "date unknown";
   try { return etCalendarDayOf(value); } catch { return "date unknown"; }
 }
+// Date and ET clock time ("2026-10-02 08:14 ET") for a timestamped source, so
+// "this morning" can be proved by the hour, not only the date.
+function stampTag(value) {
+  if (!value) return "date unknown";
+  try {
+    const { etParts } = require("../utils/datetime-et");
+    const p = etParts(new Date(value));
+    return `${etCalendarDayOf(value)} ${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")} ET`;
+  } catch { return dayTag(value); }
+}
 
 function buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx }) {
   const lines = [];
@@ -599,18 +609,18 @@ function buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo,
   if (ctx.calls.length) {
     lines.push("", "PHONE CALLS (newest first):");
     ctx.calls.forEach((c, i) => {
-      if (c.call_summary) lines.push(`- Call ${i + 1} (${c.direction || "inbound"}, ${dayTag(c.created_at)}): ${String(c.call_summary).slice(0, 600)}`);
+      if (c.call_summary) lines.push(`- Call ${i + 1} (${c.direction || "inbound"}, ${stampTag(c.created_at)}): ${String(c.call_summary).slice(0, 600)}`);
     });
     const withTranscript = ctx.calls.find((c) => c.transcript);
-    if (withTranscript) lines.push("", `NEWEST CALL TRANSCRIPT (${dayTag(withTranscript.created_at)}, excerpt):`, String(withTranscript.transcript).slice(0, MAX_TRANSCRIPT_CHARS));
+    if (withTranscript) lines.push("", `NEWEST CALL TRANSCRIPT (${stampTag(withTranscript.created_at)}, excerpt):`, String(withTranscript.transcript).slice(0, MAX_TRANSCRIPT_CHARS));
   }
   if (ctx.sms.length) {
     lines.push("", "TEXT THREAD (oldest first):");
-    ctx.sms.forEach((m) => lines.push(`- [${m.direction}, ${dayTag(m.date)}] ${m.body}`));
+    ctx.sms.forEach((m) => lines.push(`- [${m.direction}, ${stampTag(m.date)}] ${m.body}`));
   }
   if (ctx.emails.length) {
     lines.push("", "EMAILS FROM THE CUSTOMER (newest first):");
-    ctx.emails.forEach((e) => lines.push(`- [${dayTag(e.date)}] ${e.subject ? `${e.subject}: ` : ""}${e.text}`));
+    ctx.emails.forEach((e) => lines.push(`- [${stampTag(e.date)}] ${e.subject ? `${e.subject}: ` : ""}${e.text}`));
   }
   if (ctx.priorTouches.length) {
     lines.push("", "REVIEW MESSAGES ALREADY SENT IN THIS SERIES (do not repeat their subject or question):");
@@ -1089,6 +1099,24 @@ function timingUnsupported(sentence, quotes, recordLines, visitDay) {
       if (!recent) return true;
     }
   }
+  // A part of the day ("this morning", "tonight") is more than the date can
+  // prove: a cited quote must itself say it, as well as be dated today.
+  // A part of the day ("this morning") is proved by the cited line's ET
+  // clock time (before noon / noon-5pm / after 5pm), or by the quote itself
+  // saying it (an undated report line has no time).
+  const partOfDay = /\b(?:this\s+)?(morning|afternoon|evening|tonight)\b/i.exec(rest);
+  if (partOfDay) {
+    const part = partOfDay[1].toLowerCase() === "tonight" ? "evening" : partOfDay[1].toLowerCase();
+    const inPart = (h) => (part === "morning" ? h < 12 : part === "afternoon" ? h >= 12 && h < 17 : h >= 17);
+    const proved = quotes.some((q) => {
+      if (new RegExp(`\\b${partOfDay[1]}\\b`, "i").test(q)) return true;
+      const nq = normalizeForMatch(q);
+      const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
+      const clock = line && /\b\d{4}-\d{2}-\d{2} (\d{2}):\d{2} ET\b/.exec(line);
+      return !!clock && inPart(parseInt(clock[1], 10));
+    });
+    if (!proved) return true;
+  }
   const required = SAME_DAY_RE.test(rest) ? today
     : YESTERDAY_RE.test(rest) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
   if (!required) return false;
@@ -1180,7 +1208,21 @@ async function factCheckTechVoice(body, { record, firstName, techName, deadline,
 async function techVoiceAttempt({ system, facts, channel, check, record }, note, deadline) {
   const timeoutMs = deadline - Date.now();
   if (timeoutMs < TECH_VOICE_MIN_STAGE_MS) return { reject: "out_of_time" };
-  const leg = legCapture();
+  // The parse and every code check run INSIDE the dispatcher's validator, so
+  // a bad draft from one provider fails that leg and the other provider gets
+  // its turn in the same call (and the ledger records the failed leg). The
+  // accepted leg's draft and adapter result are kept for the fact check.
+  let accepted = null;
+  const validate = (legResult) => {
+    const parsed = legResult?.json && typeof legResult.json === "object" ? { ...legResult.json } : parseTechVoiceJson(legResult?.text);
+    if (!parsed || typeof parsed.body !== "string") return "bad_json";
+    const flat = normalizeSmsPunctuation(parsed.body);
+    parsed.body = (channel === "email" ? flat.replace(/\s*\n+\s*/g, " ") : flat).trim();
+    const reason = verifyTechVoiceDraft(parsed, check);
+    if (reason) return reason;
+    accepted = { draft: parsed, legResult };
+    return null;
+  };
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: "review_ask",
     // The redraft reason is OUR instruction, so it rides the system channel,
@@ -1190,23 +1232,18 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
     jsonMode: true,
     maxTokens: 700,
     timeoutMs,
-  }, { reserveFallbackBudget: true, hardDeadline: true, validate: leg.validate });
-  if (!result.ok) return { reject: "provider_unavailable" };
-  // The dispatcher's tolerant parse (fences, preambles, trailing commas)
-  // first; the raw text only when it produced nothing.
-  const draft = result.json && typeof result.json === "object" ? { ...result.json } : parseTechVoiceJson(result.text);
-  if (!draft || typeof draft.body !== "string") {
-    leg.reject("bad_json");
-    return { reject: "bad_json" };
+  }, { reserveFallbackBudget: true, hardDeadline: true, validate });
+  if (!result.ok || !accepted) {
+    // Every leg answered but every draft failed a check: that check's reason
+    // (for the redraft note). No answer at all: the providers are down.
+    const refused = (result.failures || []).filter((f) => f.validator).pop();
+    return { reject: refused ? String(refused.reason) : "provider_unavailable" };
   }
-  const flat = normalizeSmsPunctuation(draft.body);
-  draft.body = (channel === "email" ? flat.replace(/\s*\n+\s*/g, " ") : flat).trim();
-  const reject = verifyTechVoiceDraft(draft, check)
-    || await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider, serviceDate: check.serviceDate });
-  // A draft the checks refused is a failed writer call on the ledger, so the
-  // lane's success rate shows systematic bad output; an unavailable checker
-  // or an exhausted budget says nothing about the draft.
-  if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) leg.reject(reject);
+  const { draft } = accepted;
+  const reject = await factCheckTechVoice(draft.body, { record, firstName: check.firstName, techName: check.techName, deadline, writerProvider: result.provider, serviceDate: check.serviceDate });
+  // A draft the fact check refused is a failed writer call on the ledger; an
+  // unavailable checker or an exhausted budget says nothing about the draft.
+  if (reject && !["fact_check_unavailable", "out_of_time"].includes(reject)) rejectCall(accepted.legResult, reject);
   return reject ? { reject } : { body: draft.body };
 }
 

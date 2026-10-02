@@ -4685,6 +4685,15 @@ const ReviewService = {
     // The request row (rate page name / photo / date, tech attribution) must
     // describe the same visit the text speaks about: the linked record's
     // fields replace the scheduled row's before the row is written.
+    // Same for a cadence anchored to its record from the start: the record's
+    // own type and technician replace the sequence's cached ones.
+    if (voiceVisit && serviceRecordId && !linkedRecord && voiceAnchor) {
+      serviceType = voiceVisit.serviceType;
+      if ((voiceVisit.technicianId || null) !== (technicianId || null)) {
+        technicianId = voiceVisit.technicianId || null;
+        techName = null;
+      }
+    }
     if (linkedRecord) {
       serviceRecordId = linkedRecord.id;
       serviceDate = voiceVisit.serviceDate;
@@ -4700,7 +4709,7 @@ const ReviewService = {
         : null;
     // The request row carries the same technician's name the text speaks as
     // (the rate page shows it next to their photo).
-    if (linkedRecord && !techName && voiceTechName) techName = voiceTechName;
+    if (voiceVisit && !techName && voiceTechName) techName = voiceTechName;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template

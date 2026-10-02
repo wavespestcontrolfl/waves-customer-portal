@@ -4984,6 +4984,11 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       });
       expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
       expect(mockDraftTechVoice.mock.calls[0][0].techName).toBeNull();
+      // #5524 r19: the request row follows the record too (no technician, the record's type).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.technician_id == null).toBe(true);
+      expect(row.tech_name == null).toBe(true);
+      expect(row.service_type).toBe('Quarterly Pest Control');
     });
 
     test('#5524 pre-push: a linked record with no technician drafts with no name, never the scheduled tech', async () => {
