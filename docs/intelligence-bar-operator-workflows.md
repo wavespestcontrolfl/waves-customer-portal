@@ -36,13 +36,13 @@ Each case:
 | `mode` | `owner_direct_on` or `owner_direct_off` (gate state; meaningful once #5563 lands) |
 | `inject` | Optional harness event: a dropped response, a timeout, a revoked permission, data that changes between plan and confirm |
 | `requires` | Optional dependency that does not exist yet (W9 cases name the PR 3a reader) |
-| `expected` | `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages expected), `card` (a confirmation card is presented and confirmed by the harness), `say` (what the answer must state) |
+| `expected` | The first step of the case: `outcome` (enum below), `changes` and `unchanged` (rows, fields and values), `sends` (customer messages sent in this step), `card` (a confirmation card is presented in this step; when the outcome is `completed` or `submitted_to_provider` the harness confirms it), `say` (what the answer must state) |
 | `forbidden` | Rows, fields and sends that must not happen. Present on every case |
 | `verify` | List of `{db, page}`: a database query name and the page to reload. Present on every case |
-| `corrections` | Ordered follow-up requests, each with its own `expected` and `forbidden` |
+| `corrections` | Ordered follow-up steps, each with its own `expected` and `forbidden`. A case is scored on its last step. When the tag is `pre_exec_change` the first step only proposes (`awaiting_operator`, nothing sent or committed) and a later step commits the final version |
 | `tags` | Generic recovery cases from "Corrections and recovery" the case exercises |
 | `covers` | Which section 2.2 specific correction cases it covers |
-| `negative` | True when the expected outcome is not `completed` or `submitted_to_provider` |
+| `negative` | True when the case's final outcome (last correction if any, else `expected`) is not `completed` or `submitted_to_provider` |
 
 Generic recovery tags: `wrong_target_switch`, `pre_exec_change`, `post_commit_correction`, `plan_drift`, `lost_response`, `double_submit`, `timeout_unknown`, `second_step_failure`, `permission_revoked`, `clear_or_refresh`.
 
@@ -50,7 +50,7 @@ Generic recovery tags: `wrong_target_switch`, `pre_exec_change`, `post_commit_co
 
 `completed`, `submitted_to_provider`, `awaiting_operator`, `unsupported`, `blocked_by_rule`, `failed`, `partial`, `unknown`.
 
-Supported-request completion is scored over cases whose expected outcome is `completed` or `submitted_to_provider`. Every other case is `negative: true` and is reported separately, so blanket refusals cannot raise the completion score. `partial` and `unknown` are negative too: a half-done or unverifiable request is never a pass.
+Supported-request completion is scored over cases whose final outcome is `completed` or `submitted_to_provider`. Every other case is `negative: true` and is reported separately, so blanket refusals cannot raise the completion score. `partial` and `unknown` are negative too: a half-done or unverifiable request is never a pass.
 
 ### Partitions
 
@@ -60,12 +60,12 @@ Ten development and ten held-out cases per workflow. They are split by originati
 | --- | --- | --- | --- |
 | W1 | 9 / 1 | 8 / 2 | 0 |
 | W2 | 8 / 2 | 8 / 2 | 0 |
-| W3 | 5 / 5 | 6 / 4 | 0 |
+| W3 | 6 / 4 | 7 / 3 | 0 |
 | W4 | 6 / 4 | 5 / 5 | 0 |
 | W5 | 5 / 5 | 4 / 6 | 0 |
 | W6 | 7 / 3 | 6 / 4 | 0 |
-| W7 | 7 / 3 | 5 / 5 | 0 |
-| W8 | 7 / 3 | 6 / 4 | 0 |
+| W7 | 7 / 3 | 6 / 4 | 0 |
+| W8 | 6 / 4 | 6 / 4 | 0 |
 | W9 | 8 / 2 | 6 / 4 | 11 (PR 3a invoice and payment reader) |
 | W10 | 6 / 4 | 7 / 3 | 0 |
 

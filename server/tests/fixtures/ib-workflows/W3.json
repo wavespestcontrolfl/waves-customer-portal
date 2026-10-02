@@ -50,7 +50,7 @@
         "say": "Picks the one unlinked lead with no first name, or asks one question listing the candidates. Never refuses, never says tools are erroring."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -96,7 +96,7 @@
         "say": "First commit lands on the forced lead."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -165,7 +165,7 @@
         "say": "Direct edit with a receipt, no card."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -210,7 +210,7 @@
         "say": "Direct internal edit, receipt shown."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -251,7 +251,7 @@
         "say": "A card appears and its disclosure names the opt-in confirmation email; nothing changes until confirmed."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer",
@@ -291,11 +291,11 @@
           "leads[*].first_name"
         ],
         "sends": 0,
-        "card": false,
+        "card": true,
         "say": "Gate off: the edit is carded, nothing changes until confirmed, and the card names the lead."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -314,14 +314,16 @@
         {
           "request": "actually put Jason",
           "expected": {
-            "outcome": "awaiting_operator",
-            "changes": [],
+            "outcome": "completed",
+            "changes": [
+              "leads[murphy-lead-3].first_name = Jason"
+            ],
             "unchanged": [
-              "leads[*].first_name"
+              "leads[murphy-lead-1,2,4].first_name"
             ],
             "sends": 0,
-            "card": false,
-            "say": "The first card is discarded; a new card shows Jason; only the final value can ever commit."
+            "card": true,
+            "say": "The first card is discarded; a new card shows Jason; only the final value commits."
           },
           "forbidden": [
             "Jay written to any lead"
@@ -332,7 +334,7 @@
         "pre_exec_change"
       ],
       "covers": [],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W3-dev-07",
@@ -359,7 +361,7 @@
         "say": "Reload finds the existing receipt; the second submit does not write again and no second receipt exists."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -403,7 +405,7 @@
         "say": "Pipeline stage keeps its card even in owner-direct; nothing changes until confirmed."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -445,7 +447,7 @@
         "say": "Merging is not part of this request family; says so and points to the native duplicates page."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -487,7 +489,7 @@
         "say": "Honors the current rule and reports it; does not enable any gate to finish."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -532,7 +534,7 @@
         "say": "Same fitting-lead rule as the canonical case, different wording; no refusal."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -578,7 +580,7 @@
         "say": "Both requested fields change under one receipt; nothing else changes."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -621,7 +623,7 @@
         "say": "Edits the viewed customer first."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -681,7 +683,7 @@
         "say": "Card with the opt-in email disclosure; no change before confirm."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -724,7 +726,7 @@
         "say": "Two Murphy customers and no page: one short question listing both; never guesses and never refuses."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -769,7 +771,7 @@
         "say": "Only the two named fields change; notes were named so clearing it is intended."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -806,11 +808,11 @@
           "customers[cust-murphy-a].phone"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Gate off: carded."
+        "card": true,
+        "say": "Gate off: carded; nothing changes until confirmed."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -829,14 +831,16 @@
         {
           "request": "make it 555-0162",
           "expected": {
-            "outcome": "awaiting_operator",
-            "changes": [],
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].phone = 555-0162"
+            ],
             "unchanged": [
-              "customers[cust-murphy-a].phone"
+              "customers[cust-murphy-b]"
             ],
             "sends": 0,
-            "card": false,
-            "say": "Old card discarded, new card shows 555-0162."
+            "card": true,
+            "say": "Old card discarded, new card shows 555-0162; only that value commits."
           },
           "forbidden": [
             "555-0161 committed"
@@ -847,7 +851,7 @@
         "pre_exec_change"
       ],
       "covers": [],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W3-held-08",
@@ -871,7 +875,7 @@
         "say": "Technician session cannot edit leads or customers and does not inherit owner-direct."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -915,7 +919,7 @@
         "say": "Reports unknown readback, then finds the receipt on resume; does not write a second time."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"
@@ -962,7 +966,7 @@
         "say": "A new explicit operation with its own receipt; the first receipt stays and is not claimed never to have happened."
       },
       "forbidden": [
-        "a second same-surname lead or customer row changed",
+        "a same-surname record other than the one the operator identified changed (a stated correction is its own operation)",
         "any field not named in the request cleared or overwritten",
         "opt-in confirmation email sent without a card",
         "a lead merged into a customer"

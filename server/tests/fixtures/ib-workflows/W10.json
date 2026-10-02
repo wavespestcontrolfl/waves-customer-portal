@@ -60,7 +60,7 @@
         "say": "One receipt movement, never a set_total; reports the new on-hand with the converted units."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -107,7 +107,7 @@
         "say": "The open Taurus request is marked received with the delivered quantity and the answer says so; no purchase or supplier action."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -151,7 +151,7 @@
         "say": "First movement committed."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -214,7 +214,7 @@
         "say": "Matches the 25 lb and 50 lb rows: asks one short question; never guesses."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -259,7 +259,7 @@
         "say": "The Talak request is already marked received: reports the no-op truthfully and asks for the quantity before recording any movement."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -303,7 +303,7 @@
         "say": "No unit given: asks one short question; does not assume jugs or gallons."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -350,7 +350,7 @@
         "say": "Records the receipt; says it cannot place the supplier order from here; says what remains."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -396,7 +396,7 @@
         "say": "Gate off: carded; the confirm recomputes on-hand from the live count and states the difference."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -440,7 +440,7 @@
         "say": "Technicians have read-only inventory."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -485,7 +485,7 @@
         "say": "Reload finds the receipt; the repeat does not add a second movement."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -531,7 +531,7 @@
         "say": "Reads on-hand with units; changes nothing."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -576,7 +576,7 @@
         "say": "Product identity resolves to Talak 96 oz by ruling; says so; one movement."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -621,7 +621,7 @@
         "say": "Only the Taurus request is marked received; no request for another product is touched."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -665,7 +665,7 @@
         "say": "Lists the week's movements with type, quantity, unit and date; nothing is written."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -707,7 +707,7 @@
         "say": "Lists open and received requests accurately; changes none."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -752,7 +752,7 @@
         "say": "Says the read-back is unknown, finds the receipt on resume, never records a second movement."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -796,7 +796,7 @@
         "say": "A liquid product given in pounds: asks one short question about the unit; never converts by guess."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -840,7 +840,7 @@
         "say": "Non-owner admin: carded; one movement after confirm."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -883,7 +883,7 @@
         "say": "Confirm refused under current rules; reported; nothing recorded."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",
@@ -929,7 +929,7 @@
         "say": "The 2 gallon proposal is discarded; only 3 gallons can commit."
       },
       "forbidden": [
-        "two movements",
+        "a second movement for the same receipt (a stated correction is its own movement with its own receipt)",
         "a set_total when a receipt was described",
         "a unit converted by guess",
         "a restock request marked received for a different product",

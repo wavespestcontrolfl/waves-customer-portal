@@ -44,6 +44,9 @@ const manifests = WORKFLOW_IDS.map((id) => ({ id, file: `${id}.json`, doc: JSON.
 
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
 const isStringArray = (v) => Array.isArray(v) && v.every(isNonEmptyString);
+// A case is scored on its LAST step: the final correction if there are any,
+// otherwise the initial request.
+const finalOutcome = (c) => (c.corrections.length ? c.corrections[c.corrections.length - 1].expected.outcome : c.expected.outcome);
 const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
 
 describe('manifest files', () => {
@@ -103,7 +106,13 @@ describe('case shape', () => {
     if (c.expected.changes.length === 0) expect(c.expected.unchanged.length).toBeGreaterThan(0);
 
     // negative cases are marked so the completion score excludes them
-    expect(c.negative).toBe(!SCORED_OUTCOMES.includes(c.expected.outcome));
+    expect(c.negative).toBe(!SCORED_OUTCOMES.includes(finalOutcome(c)));
+    // a change of mind before execution: the initial step only proposes, so nothing is sent or committed yet
+    if (c.tags.includes('pre_exec_change') && c.corrections.length) {
+      expect(c.expected.outcome).toBe('awaiting_operator');
+      expect(c.expected.sends).toBe(0);
+      expect(c.expected.changes).toEqual([]);
+    }
 
     // forbidden: every write case has a list, and so does every read case here
     expect(isStringArray(c.forbidden)).toBe(true);
@@ -199,7 +208,7 @@ describe.each(manifests)('$id coverage', ({ id, doc }) => {
       expect(part.filter((c) => !c.negative).length).toBeGreaterThanOrEqual(4);
     }
     // negatives cover at least two of the three negative outcomes named in the scope
-    const negOutcomes = new Set(doc.cases.filter((c) => c.negative).map((c) => c.expected.outcome));
+    const negOutcomes = new Set(doc.cases.filter((c) => c.negative).map(finalOutcome));
     const named = ['unsupported', 'blocked_by_rule', 'awaiting_operator'].filter((o) => negOutcomes.has(o));
     expect(named.length).toBeGreaterThanOrEqual(2);
   });
@@ -228,8 +237,8 @@ describe.each(manifests)('$id coverage', ({ id, doc }) => {
 describe('scorecard counts', () => {
   test('completion is scored over completed and submitted_to_provider cases only', () => {
     const summary = manifests.map(({ id, doc }) => {
-      const scored = doc.cases.filter((c) => SCORED_OUTCOMES.includes(c.expected.outcome));
-      const negative = doc.cases.filter((c) => !SCORED_OUTCOMES.includes(c.expected.outcome));
+      const scored = doc.cases.filter((c) => SCORED_OUTCOMES.includes(finalOutcome(c)));
+      const negative = doc.cases.filter((c) => !SCORED_OUTCOMES.includes(finalOutcome(c)));
       expect(scored.length + negative.length).toBe(20);
       expect(negative.every((c) => c.negative)).toBe(true);
       expect(scored.every((c) => !c.negative)).toBe(true);

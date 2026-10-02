@@ -312,19 +312,14 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "scheduled_services[new].customer = cust-pellham",
-          "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
-          "scheduled_services[new].price = 149"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "scheduled_services[Wednesday 9:00 window]"
+          "scheduled_services row count"
         ],
-        "sends": 1,
+        "sends": 0,
         "card": true,
-        "say": "First card shows 9 AM."
+        "say": "Card shows 9 AM; nothing is booked until it is confirmed."
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -350,14 +345,15 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern"
+              "scheduled_services[new].window = Wednesday 10:00-12:00 Eastern",
+              "scheduled_services[new].price = 149"
             ],
             "unchanged": [
               "scheduled_services[Wednesday 9:00 window]"
             ],
             "sends": 1,
             "card": true,
-            "say": "The 9 AM proposal is discarded and cannot commit; a new card shows 10 AM; only 10 AM commits."
+            "say": "The 9 AM proposal is discarded and cannot commit; a new card shows 10 AM; only 10 AM commits, with one confirmation text."
           },
           "forbidden": [
             "a 9 AM row"
@@ -537,21 +533,14 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "scheduled_services[new].customer = cust-larkspur",
-          "scheduled_services[new].service = one-time pest treatment",
-          "scheduled_services[new].window = Tuesday 13:00-15:00 Eastern",
-          "scheduled_services[new].price = catalog one-time pest price",
-          "scheduled_services[new].property = cust-larkspur rental 27 Sample Court"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "scheduled_services[existing rows]",
-          "customer_properties[*].is_primary"
+          "scheduled_services row count"
         ],
-        "sends": 1,
+        "sends": 0,
         "card": true,
-        "say": "Uses the named rental property, not the primary."
+        "say": "Card names the rental property and Tuesday 1 PM; nothing is booked until it is confirmed."
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -577,19 +566,28 @@
           "expected": {
             "outcome": "completed",
             "changes": [
-              "scheduled_services[new].window = Wednesday 13:00-15:00 Eastern"
+              "scheduled_services[new].customer = cust-larkspur",
+              "scheduled_services[new].service = one-time pest treatment",
+              "scheduled_services[new].window = Wednesday 13:00-15:00 Eastern",
+              "scheduled_services[new].price = catalog one-time pest price",
+              "scheduled_services[new].property = cust-larkspur rental 27 Sample Court"
             ],
-            "unchanged": [],
+            "unchanged": [
+              "scheduled_services[existing rows]",
+              "customer_properties[*].is_primary"
+            ],
             "sends": 1,
             "card": true,
-            "say": "Tuesday proposal discarded; Wednesday card; only Wednesday commits."
+            "say": "Tuesday proposal discarded; Wednesday card; only Wednesday commits, with one confirmation text."
           },
           "forbidden": [
             "a Tuesday row"
           ]
         }
       ],
-      "tags": [],
+      "tags": [
+        "pre_exec_change"
+      ],
       "covers": [
         "W5-C1"
       ],

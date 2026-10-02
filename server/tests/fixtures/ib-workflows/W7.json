@@ -41,22 +41,17 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "submitted_to_provider",
-        "changes": [
-          "sms_log[new].customer = cust-pellham",
-          "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "sms_log[other customers]"
+          "sms_log rows"
         ],
-        "sends": 1,
-        "card": true,
-        "say": "Shows a draft first, then a card after the operator approves; one send; receipt status says submitted until a callback."
+        "sends": 0,
+        "card": false,
+        "say": "Shows a draft only; nothing is sent until the operator approves."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -85,10 +80,12 @@
               "sms_log[new].status = submitted",
               "sms_log[new].body = last approved draft, no signature"
             ],
-            "unchanged": [],
+            "unchanged": [
+              "sms_log[other customers]"
+            ],
             "sends": 1,
             "card": true,
-            "say": "Sends the approved draft byte for byte (no signature added)."
+            "say": "One card, then one send of the approved draft byte for byte (no signature added); the receipt status says submitted until a callback."
           },
           "forbidden": []
         }
@@ -108,22 +105,17 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "submitted_to_provider",
-        "changes": [
-          "sms_log[new].customer = cust-pellham",
-          "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "sms_log[other customers]"
+          "sms_log rows"
         ],
-        "sends": 1,
-        "card": true,
-        "say": "Draft 1."
+        "sends": 0,
+        "card": false,
+        "say": "Draft 1 only; nothing sent."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -146,14 +138,14 @@
         {
           "request": "shorter",
           "expected": {
-            "outcome": "completed",
+            "outcome": "awaiting_operator",
             "changes": [],
             "unchanged": [
               "sms_log rows"
             ],
             "sends": 0,
             "card": false,
-            "say": "Draft 2, shorter; nothing sent."
+            "say": "Draft 2, shorter; still nothing sent."
           },
           "forbidden": []
         },
@@ -167,12 +159,16 @@
               "sms_log[new].status = submitted",
               "sms_log[new].body = last approved draft, no signature"
             ],
-            "unchanged": [],
+            "unchanged": [
+              "sms_log[other customers]"
+            ],
             "sends": 1,
             "card": true,
             "say": "Draft 3 includes the window; after the operator approves, only draft 3 is sent, once."
           },
-          "forbidden": []
+          "forbidden": [
+            "draft 1 or draft 2 sent"
+          ]
         }
       ],
       "tags": [
@@ -209,7 +205,7 @@
         "say": "A new card names the number ending 0102; the primary-number proposal, if shown first, is discarded and cannot send."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -258,7 +254,7 @@
         "say": "Uses the queued-message cancel for the staff-scheduled text; confirms it did not send."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -310,7 +306,7 @@
         "say": "Says submitted with delivery unknown; refuses to resend until reconciled; reconciliation then reports the real status."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -359,7 +355,7 @@
         "say": "Opted out: refuses with the reason and suggests a call; no send attempt."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -403,7 +399,7 @@
         "say": "Shows a draft only; no card for a send; nothing submitted."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -450,7 +446,7 @@
         "say": "Customer texts are never signed: the draft carries no sign-off and the answer says so."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -495,7 +491,7 @@
         "say": "Two Murphy customers: asks one short question; sends nothing."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -545,7 +541,7 @@
         "say": "Exactly one send across the double confirm and the resume."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -582,20 +578,17 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "submitted_to_provider",
-        "changes": [
-          "sms_log[new].customer = cust-pellham",
-          "sms_log[new].to_phone = primary ending 0101",
-          "sms_log[new].status = submitted",
-          "sms_log[new].body = last approved draft, no signature"
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "sms_log rows"
         ],
-        "unchanged": [],
-        "sends": 1,
-        "card": true,
-        "say": "Draft 1."
+        "sends": 0,
+        "card": false,
+        "say": "Draft 1 only; nothing sent."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -618,7 +611,7 @@
         {
           "request": "make it warmer",
           "expected": {
-            "outcome": "completed",
+            "outcome": "awaiting_operator",
             "changes": [],
             "unchanged": [
               "sms_log rows"
@@ -644,7 +637,9 @@
             "card": true,
             "say": "Only draft 2 is sent, once."
           },
-          "forbidden": []
+          "forbidden": [
+            "draft 1 sent"
+          ]
         }
       ],
       "tags": [
@@ -677,7 +672,7 @@
         "say": "One card, one send, brand Waves, no sign-off."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -722,7 +717,7 @@
         "say": "Lists the one staff-scheduled queued text with its send time; sends and cancels nothing."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -767,7 +762,7 @@
         "say": "Truthful: it already went to the provider and cannot be canceled; offers a follow-up text."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -819,7 +814,7 @@
         "say": "Recipient changed before execution: the Pellham proposal is discarded and a new card names the Fennimore number; only that one sends."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -867,7 +862,7 @@
         "say": "Deactivated billing templates stay off; says so and offers a manual text instead."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -913,7 +908,7 @@
         "say": "Reports failed (definitive); a retry is offered under the existing policy and sends once if the operator approves."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -957,7 +952,7 @@
       "covers": [
         "W7-C4"
       ],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W7-held-08",
@@ -983,7 +978,7 @@
         "say": "Non-owner admin: card then one send."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -1027,7 +1022,7 @@
         "say": "On main a technician session cannot send through the bar; the scope matrix's own-visit-customer case is recorded as a difference, not asserted."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
@@ -1072,7 +1067,7 @@
         "say": "Confirm is refused under the current rules and reported; nothing sent."
       },
       "forbidden": [
-        "a superseded draft sent",
+        "a superseded draft sent (an earlier draft in the same conversation)",
         "a send to a secondary number that was not asked for",
         "a second send on resume",
         "delivered reported without a provider callback",
