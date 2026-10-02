@@ -291,19 +291,25 @@ function checkPrices(dated, families, prices) {
 }
 
 // The service charge a visit bills, the way invoicing builds it
-// (invoice.js buildScheduledServiceInvoiceLines): a stamped primary_line_price
-// is its own line, add-ons or not; with no stamp the visit price is the
-// service only when the visit has no add-ons (otherwise it is the appointment
-// total). null when it cannot be read on its own: any line or appointment
-// discount (it cannot be apportioned to the service), or add-ons with no
-// primary stamp.
+// (invoice.js buildScheduledServiceInvoiceLines): the primary line is
+// primary_line_price when stamped, plus the add-on lines; when those add up
+// to MORE than a positive estimated_price, a "Scheduled price adjustment"
+// brings the invoice down to estimated_price (never up). So, with no add-ons,
+// the service bills min(primary, estimated_price); with add-ons it bills the
+// primary only when no adjustment is needed (an adjustment across service and
+// add-ons cannot be apportioned). With no primary stamp, estimated_price is
+// the service only when there are no add-ons. null when it cannot be read:
+// those cases, or any line / appointment discount.
 function billedServicePrice(row) {
   const discounted = row.line_discount_id || Number(row.line_discount_amount) > 0 || Number(row.line_discount_dollars) > 0
     || row.discount_id || Number(row.discount_amount) > 0 || Number(row.discount_dollars) > 0;
   if (discounted) return null;
-  const primary = row.primary_line_price;
-  if (primary != null && primary !== '') return Number(primary);
-  return row.has_addons ? null : Number(row.estimated_price);
+  const estimated = Number(row.estimated_price);
+  const addons = Number(row.addon_total) || 0;
+  if (row.primary_line_price == null || row.primary_line_price === '') return addons > 0 ? null : estimated;
+  const primary = Number(row.primary_line_price);
+  if (!(estimated > 0) || primary + addons <= estimated + 0.005) return primary;
+  return addons > 0 ? null : estimated;
 }
 
 /**
@@ -469,11 +475,17 @@ async function loadContext(conn, estimate) {
     .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   await markPrepayCovered(conn, rows);
-  // A visit with add-ons: its estimated_price is the appointment total, not the service.
-  const withAddons = rows.length ? new Set((await conn('scheduled_service_addons')
-    .whereIn('scheduled_service_id', rows.map((row) => row.id)).distinct('scheduled_service_id'))
-    .map((addon) => String(addon.scheduled_service_id))) : new Set();
-  for (const row of rows) row.has_addons = withAddons.has(String(row.id));
+  // A visit's add-on total (each add-on at its base price, else its price, as
+  // invoicing bills it): billedServicePrice needs it to read the service line.
+  const addonTotals = new Map();
+  if (rows.length) {
+    for (const addon of await conn('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((row) => row.id))
+      .select('scheduled_service_id', 'base_price', 'estimated_price')) {
+      const amount = Number(addon.base_price) > 0 ? Number(addon.base_price) : Math.max(0, Number(addon.estimated_price) || 0);
+      addonTotals.set(String(addon.scheduled_service_id), (addonTotals.get(String(addon.scheduled_service_id)) || 0) + amount);
+    }
+  }
+  for (const row of rows) row.addon_total = addonTotals.get(String(row.id)) || 0;
   const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name');
   return {
     estimate,

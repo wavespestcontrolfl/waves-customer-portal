@@ -251,16 +251,22 @@ describe('visit prices', () => {
 
   test('the billed service price is compared: primary_line_price when stamped; add-ons or a discount skip the visit', () => {
     const lawn = priced(lawnRows(), 175).map((row, i) => {
-      if (i === 1) return { ...row, primary_line_price: 100 }; // $100 service + $75 add-on total: correct
-      if (i === 2) return { ...row, has_addons: true }; // add-ons, no primary stamp: not readable, skipped
-      if (i === 5) return { ...row, has_addons: true, primary_line_price: 100 }; // add-ons + stamped primary: the primary is checked
+      if (i === 1) return { ...row, primary_line_price: 100, addon_total: 75 }; // $100 service + $75 add-on = $175: correct
+      if (i === 2) return { ...row, addon_total: 75 }; // add-ons, no primary stamp: not readable, skipped
+      if (i === 5) return { ...row, addon_total: 75, primary_line_price: 100 }; // add-ons + stamped primary: the primary is checked
       if (i === 3) return { ...row, estimated_price: 90, line_discount_amount: 10 }; // discounted: skipped
       if (i === 4) return { ...row, estimated_price: 90, discount_id: 'disc-1' };
       return { ...row, estimated_price: 100 };
     });
     expect(verdictFor(priced(pestRows(), 150), lawn).ok).toBe(true);
-    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90, has_addons: true } : row));
+    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90, addon_total: 75 } : row));
     expect(texts(verdictFor(priced(pestRows(), 150), wrongPrimary))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // No add-ons, primary $100 above a $90 visit price: invoicing adjusts down to $90, so it bills $90.
+    const adjustedDown = priced(lawnRows(), 90).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), adjustedDown))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
+    // With add-ons and an adjustment needed, the service share cannot be read: skipped.
+    const ambiguous = priced(lawnRows(), 150).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 100, addon_total: 75 } : row));
+    expect(verdictFor(priced(pestRows(), 150), ambiguous).ok).toBe(true);
   });
 
   test('a primary stamped $0 beside a positive visit price is a mismatch (the service line would bill nothing)', () => {
