@@ -77,6 +77,19 @@ const whileUnset = (key) => (q) => q.whereRaw(`${JOB} ->> '${key}' IS NULL`);
 // The first performed visit of the accepted plan: a visit (or a child of a
 // series parent) carrying this estimate as its source.
 async function firstPerformedVisit(estimateId, customerId) {
+  const candidates = await performedVisitCandidates(estimateId, customerId);
+  const { pafDeferredPrepayCoversVisit } = require('./annual-prepay-renewals');
+  // Only a visit the year HOLDS releases its charge — the same sold-coverage
+  // check (count, window, callbacks out, price drift) that kept that visit
+  // from billing. A visit outside it billed on its own and never stands in
+  // for the first visit of the year.
+  for (const visit of candidates) {
+    if (await pafDeferredPrepayCoversVisit(visit, db, { throwOnError: true })) return visit;
+  }
+  return null;
+}
+
+async function performedVisitCandidates(estimateId, customerId) {
   return db('scheduled_services as s')
     .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
     .join('service_records as r', 'r.scheduled_service_id', 's.id')
@@ -98,7 +111,7 @@ async function firstPerformedVisit(estimateId, customerId) {
         .whereIn('a.status', ['pending', 'side_effects_pending', 'side_effects_running']);
     })
     .orderBy('s.scheduled_date', 'asc')
-    .first('s.id');
+    .select('s.*');
 }
 
 async function releaseOne(row, now) {
@@ -115,9 +128,10 @@ async function releaseOne(row, now) {
   // never releases the job before the first visit.
   const settled = !dead && (['paid', 'prepaid'].includes(invStatus)
     || (invStatus === 'processing' && String(invoice.payment_method || '') === 'us_bank_account'));
-  const visit = invoice ? await firstPerformedVisit(row.id, invoice.customer_id) : null;
-
   if (dead) {
+    // The year is dead, so nothing is held any more: any performed visit of
+    // the plan is work done while it was pending, for the office to bill.
+    const visit = invoice ? (await performedVisitCandidates(row.id, invoice.customer_id))[0] || null : null;
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
     const moved = await patchJob(row.id, {
       // Work already done was held, not billed: it must reach the office.
@@ -129,6 +143,7 @@ async function releaseOne(row, now) {
     }, whileAwaiting);
     return moved ? 'cancelled' : null;
   }
+  const visit = await firstPerformedVisit(row.id, invoice.customer_id);
   if (settled || visit) {
     // Due date first, so the transition stays retryable until it lands: a
     // declined charge's pay link and follow-ups then age from after the
@@ -157,6 +172,10 @@ async function releaseOne(row, now) {
         status: 'pending',
         released_at: now.toISOString(),
         released_for_visit_id: visit?.id || null,
+        // The sweep's payer checks (in-lock self-pay guard, re-route) judge the
+        // visit that actually released the charge: a visit-specific payer on
+        // it routes the year to that payer, never the homeowner's card.
+        ...(visit ? { payer_scope_scheduled_service_id: visit.id } : {}),
       }, whileAwaiting, trx);
       return released ? 'released' : null;
     });

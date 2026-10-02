@@ -17419,6 +17419,22 @@ router.post('/:id/invoice', async (req, res, next) => {
     // would double-bill at the door. Fail-closed (a stale/refunded stamp is NOT
     // covered and still bills). Charging add-ons on a covered visit is part of the
     // deferred annual-prepay settlement/split-billing follow-up.
+    // GATE_PAF_PREPAY: an unstamped visit held by a year whose charge waits for
+    // (or failed after) the first visit is covered too; read strictly — a
+    // failed read refuses (retryable), never mints a door invoice beside the
+    // year's charge.
+    if (!svc.prepaid_method) {
+      let deferredCovered = false;
+      try {
+        deferredCovered = await require('../services/annual-prepay-renewals').pafDeferredPrepayCoversVisit(svc, db, { throwOnError: true });
+      } catch (e) {
+        logger.warn(`[admin-schedule] deferred annual-prepay check failed on charge-now for service ${svc.id}: ${e.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this visit is covered by an annual prepay — try again in a moment.', code: 'deferred_prepay_lookup_failed' });
+      }
+      if (deferredCovered) {
+        return res.status(409).json({ error: 'Visit is covered by an active annual prepay — no charge is due at the door.' });
+      }
+    }
     if (await require('../services/annual-prepay-renewals').annualPrepayCoversVisit(svc)) {
       return res.status(409).json({ error: 'Visit is covered by an active annual prepay — no charge is due at the door.' });
     }

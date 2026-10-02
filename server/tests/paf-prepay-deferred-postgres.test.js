@@ -349,11 +349,23 @@ postgres('annual prepay charged after the first visit', () => {
       spy.mockRestore();
     });
 
+    it('a performed visit outside the sold coverage never releases the year', async () => {
+      const f = await deferredAccept();
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ coverage_visit_count: 1 });
+      await perform(f.childId, f.customerId);
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      expect(await jobOf(f)).toMatchObject({ released_for_visit_id: f.parentId, payer_scope_scheduled_service_id: f.parentId });
+    });
+
     it('releases on a performed child visit of the series', async () => {
       const f = await deferredAccept();
       await perform(f.childId, f.customerId);
       expect(await release()).toMatchObject({ released: 1 });
-      expect((await jobOf(f)).released_for_visit_id).toBe(f.childId);
+      // The sweep's payer checks judge the visit that released the charge.
+      expect(await jobOf(f)).toMatchObject({ released_for_visit_id: f.childId, payer_scope_scheduled_service_id: f.childId });
     });
 
     it('charges nothing when the year invoice was voided before any visit', async () => {
