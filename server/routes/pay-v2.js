@@ -413,7 +413,14 @@ async function zelleFinalPass(inv, { dbh, readOnly }) {
     if (await zelleDeniedByPayerOrSiblings(fresh, { readOnly, database: dbh })) return { reason: 'invoice_changed' };
   } catch { return { reason: 'eligibility_unverifiable' }; }
   const owned = await zellePayerOwnership(fresh, dbh);
-  return owned ? { reason: owned } : { reason: null, invoice: fresh };
+  if (owned) return { reason: owned };
+  // Codex round-68 P0: the active-collection guards close the pass - a saved-card charge claim (read-only: this pass never releases or
+  // promotes anything) and the attached PaymentIntent's live Stripe state, re-read after every other check
+  try {
+    if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };
+    if (await withTimeout(zelleDeniedByPaymentIntent(fresh), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
+  } catch { return { reason: 'eligibility_unverifiable' }; }
+  return { reason: null, invoice: fresh };
 }
 
 const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
@@ -499,6 +506,9 @@ async function payPageZelleVisibility({
   // projectedCredit rides the verdict so GET /:token reuses it instead of another credit read (Codex round-13 P1).
   let projectedCredit;
   try { projectedCredit = await invoiceProjectedCreditApplied(final.invoice, { database: dbh }); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
+  // Codex round-68 P0: a credit that grew to cover the WHOLE invoice since the final pass's coverage check is full coverage, never
+  // "pending" (the GET exposes the transfer details only for a partial credit)
+  if (projectedCredit > 0 && projectedCredit >= invoiceAmountDue(final.invoice)) return { visible: false, reason: 'credit_covers' };
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
   return { visible: true, reason: null, projectedCredit };
 }

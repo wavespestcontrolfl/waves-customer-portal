@@ -278,10 +278,15 @@ describe('GET /pay/:token manualPayOptions', () => {
   test('env set ⇒ block rides beside the page\'s own still-cancelable PaymentIntent', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
-    StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_fresh', status: 'requires_payment_method' });
-    const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
-    expect(body.manualPayOptions).toMatchObject({ zelle: { recipient: 'pay@example.com' }, amountDue: 150 });
-    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    // (both reads: the eligibility pass and the final pass's closing PaymentIntent guard - Codex round-68 P0)
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_fresh', status: 'requires_payment_method' });
+    try {
+      const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
+      expect(body.manualPayOptions).toMatchObject({ zelle: { recipient: 'pay@example.com' }, amountDue: 150 });
+      expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    } finally {
+      StripeService.retrievePaymentIntent.mockResolvedValue(null);
+    }
   });
 
   // Pre-push audit P1 (supersedes "still propagates"): the public page fails CLOSED, not 500.
@@ -777,5 +782,53 @@ test('a partial account credit that appears during the probes => credit_pending 
     gates.autoApplyAccountCredit = false;
     delete process.env.ZELLE_RECIPIENT;
   }
+});
+
+// Codex round-68 P0s: the final pass closes with the active-collection guards, and a credit that grew to full coverage is never "pending"
+describe('the final pass: active collection and full coverage', () => {
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  test('a saved-card charge claim that starts after the first pass => withheld', async () => {
+    const StripeService = require('../services/stripe');
+    const inv = invoiceData({ status: 'overdue' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: inv }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    StripeService.assertNoInvoiceChargeReconciliationPending
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true });
+  });
+  test('the attached PaymentIntent moved to processing after the first pass => withheld', async () => {
+    const StripeService = require('../services/stripe');
+    const inv = invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_1' });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: inv }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    StripeService.retrievePaymentIntent
+      .mockResolvedValueOnce({ id: 'pi_1', status: 'requires_payment_method' })
+      .mockResolvedValueOnce({ id: 'pi_1', status: 'processing' });
+    await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+  });
+  test('a credit that grew to cover the whole invoice => credit_covers (never credit_pending)', async () => {
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    const inv = invoiceData({ status: 'overdue' });
+    let creditReads = 0;
+    try {
+      setDbImpl((table) => {
+        if (table === 'invoices') return chain({ first: inv });
+        const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+        if (table === 'customers') {
+          q.first = jest.fn(async (...cols) => {
+            if (!cols.includes('account_credits')) return { billing_mode: null, monthly_rate: null };
+            creditReads += 1;
+            // reads: first-pass coverage, final-pass coverage, then the projection - the credit grows only at the last one
+            return { account_credits: creditReads >= 3 ? 1000 : 0, auto_apply_account_credit: true };
+          });
+        }
+        return q;
+      });
+      await expect(visibilityOf({ invoice: inv, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'credit_covers' });
+      expect(creditReads).toBe(3);
+    } finally { gates.autoApplyAccountCredit = false; }
+  });
 });
 
