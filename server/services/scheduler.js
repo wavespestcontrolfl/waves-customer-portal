@@ -849,6 +849,20 @@ function initScheduledJobs() {
   cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — SMS offer ledger backfill (GATE_SMS_OFFER_LEDGER, dark):
+  // re-records an offer whose post-send write failed after the carrier took
+  // the text. Gate off, the sweep returns before touching the database.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    try {
+      await runExclusive('sms-offer-ledger-backfill', async () => {
+        const result = await require('./sms-offers').backfillMissedOffers();
+        if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+      });
+    } catch (err) {
+      logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8

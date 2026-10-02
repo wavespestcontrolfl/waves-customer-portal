@@ -95,6 +95,23 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     expect(byId[older.id]).toMatchObject({ status: 'superseded', superseded_by: newer.id });
   }));
 
+  test('backfill re-records an accepted decision send whose ledger write was lost, once', () => inTrx(async (trx) => {
+    const decisionId = await insertDecision(trx, { lookup: { scheduledServiceId: '11111111-1111-4111-8111-111111111111' } });
+    const sid = `SM${'b'.repeat(32)}`;
+    await trx('sms_log').insert({
+      direction: 'outbound', from_phone: '+19415550199', to_phone: '+19415550105', message_body: BODY,
+      twilio_sid: sid, status: 'sent', metadata: JSON.stringify({ agent_decision_id: decisionId }), created_at: SENT_AT,
+    });
+    const now = new Date(SENT_AT.getTime() + 3600000);
+    const first = await offers.backfillMissedOffers({ now, dbh: trx });
+    expect(first.recorded).toBeGreaterThanOrEqual(1);
+    const row = await trx('sms_offers').where({ agent_decision_id: decisionId }).first();
+    expect(row).toMatchObject({ provider_message_id: sid, phone_last10: '9415550105', status: 'open' });
+    const again = await offers.backfillMissedOffers({ now, dbh: trx });
+    expect(await trx('sms_offers').where({ agent_decision_id: decisionId }).count('* as n').first()).toMatchObject({ n: '1' });
+    expect(again.scanned).toBe(first.scanned - first.recorded);
+  }));
+
   test('the database refuses a second open offer for one phone and kind', () => inTrx(async (trx) => {
     const base = { phone_last10: '9415550103', kind: 'move_visit', slots: '[]', sent_at: SENT_AT, expires_at: SENT_AT, status: 'open' };
     await trx('sms_offers').insert({ ...base, agent_decision_id: await insertDecision(trx) });

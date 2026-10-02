@@ -158,6 +158,19 @@ describe('recordOfferForSend', () => {
     warn.mockRestore();
   });
 
+  test('backfill, gate off: the database is never touched', async () => {
+    const dbh = jest.fn();
+    await expect(offers.backfillMissedOffers({ dbh })).resolves.toMatchObject({ recorded: 0, reason: 'gate_off' });
+    expect(dbh).not.toHaveBeenCalled();
+  });
+
+  test('backfill, gate on: a failed scan is reported, never thrown', async () => {
+    process.env[GATE] = 'true';
+    const dbh = jest.fn(() => { throw new Error('connection lost'); });
+    dbh.raw = jest.fn();
+    await expect(offers.backfillMissedOffers({ dbh })).resolves.toMatchObject({ recorded: 0, reason: 'error' });
+  });
+
   test('gate on: a send with no decision records nothing', async () => {
     process.env[GATE] = 'true';
     const dbh = jest.fn();

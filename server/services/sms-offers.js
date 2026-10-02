@@ -196,9 +196,67 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
   }
 }
 
+// How far back the backfill looks: an offer older than its own expiry has
+// nothing left to match a reply against.
+const BACKFILL_LOOKBACK_HOURS = OFFER_TTL_HOURS;
+const BACKFILL_BATCH = 200;
+
+/**
+ * Re-record offers whose post-send write was lost (a transient database
+ * error after the carrier already accepted the text). sms_log keeps the
+ * durable link: every decision send is stamped metadata.agent_decision_id.
+ * Picks accepted Twilio sends from the last 48h whose decision quoted OPEN
+ * TIMES and has no ledger row, and hands each to recordOfferForSend with the
+ * sent row's body, sid, destination and time; the writer's own checks, its
+ * idempotency per decision and its send-order supersede rule all still apply.
+ * The logged body may carry rewritten links; only offer spans that survived
+ * verbatim count, the same rule as a reviewer-edited reply. Never throws.
+ */
+async function backfillMissedOffers({ now = new Date(), dbh = db } = {}) {
+  if (!offerLedgerLive()) return { scanned: 0, recorded: 0, skipped: 0, reason: 'gate_off' };
+  let rows;
+  try {
+    const since = new Date(new Date(now).getTime() - BACKFILL_LOOKBACK_HOURS * 3600000);
+    rows = await dbh('sms_log as sl')
+      .join('agent_decisions as ad', dbh.raw("ad.id::text = sl.metadata->>'agent_decision_id'"))
+      .where('sl.direction', 'outbound')
+      .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+      .whereRaw("sl.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'")
+      .where('sl.created_at', '>=', since)
+      .whereRaw("ad.input_snapshot->'open_times_snapshot' IS NOT NULL")
+      .whereNotExists(function missing() {
+        this.select(dbh.raw('1')).from('sms_offers as o').whereRaw('o.agent_decision_id = ad.id');
+      })
+      .orderBy('sl.created_at', 'asc')
+      .limit(BACKFILL_BATCH)
+      .select('ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
+  } catch (err) {
+    logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return { scanned: 0, recorded: 0, skipped: 0, reason: 'error' };
+  }
+  let recorded = 0;
+  const seen = new Set();
+  for (const r of rows) {
+    // A decision sent as several rows is one offer: its first accepted row.
+    if (seen.has(r.agent_decision_id)) continue;
+    seen.add(r.agent_decision_id);
+    const result = await recordOfferForSend({
+      agentDecisionId: r.agent_decision_id,
+      outgoingBody: r.message_body,
+      providerMessageId: r.twilio_sid,
+      to: r.to_phone,
+      sentAt: new Date(r.created_at),
+      dbh,
+    });
+    if (result.recorded) recorded += 1;
+  }
+  return { scanned: seen.size, recorded, skipped: seen.size - recorded };
+}
+
 module.exports = {
   offerLedgerLive,
   recordOfferForSend,
+  backfillMissedOffers,
   buildOfferRow,
   isoDateForLabel,
   windowForLabel,

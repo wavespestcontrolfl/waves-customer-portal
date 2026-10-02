@@ -107,3 +107,17 @@ test('a person reply counts only when the provider took it (failed, blocked or s
   const outbound = queries.find((q) => q.calls.some(([m, a]) => m === 'where' && a[0]?.direction === 'outbound'));
   expect(outbound.calls).toContainEqual(['whereIn', ['status', ['queued', 'sent', 'delivered']]]);
 });
+
+test('a tapback quoting our appointment text is not a scheduling request', () => {
+  expect(isSchedulingText('Liked \u201cYour appointment is tomorrow between 10 AM and 12 PM. Reply to reschedule.\u201d')).toBe(false);
+  expect(isSchedulingText('Can we reschedule my appointment to Friday?')).toBe(true);
+});
+
+test('a reply counts only inside the 48h follow window', () => {
+  const summary = summarizeFunnel({
+    inbound: [{ customer_id: A, body: 'Can we reschedule my appointment to Friday?', created_at: at('2026-09-29T14:00:00Z') }],
+    personReplies: [{ customer_id: A, created_at: at('2026-10-05T14:00:00Z') }],
+  });
+  expect(summary.person_replied).toBe(0);
+  expect(summary.person_reply_median_minutes).toBeNull();
+});

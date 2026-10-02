@@ -18,7 +18,7 @@
  * the rebooker and are logged, so the after-number is not short.
  */
 
-const { hasSchedulingIntent, hasRescheduleOrAwayIntent } = require('./sms-intent');
+const { hasSchedulingIntent, hasRescheduleOrAwayIntent, isSmsReaction } = require('./sms-intent');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const FOLLOW_WINDOW_MS = 48 * 3600000;
@@ -29,7 +29,9 @@ const PERSON_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const PERSON_REPLY_STATUSES = ['queued', 'sent', 'delivered'];
 
 function isSchedulingText(body) {
-  return Boolean(body) && (hasSchedulingIntent(body) || hasRescheduleOrAwayIntent(body));
+  // A tapback ("Liked “Your appointment is tomorrow…”") quotes our own
+  // scheduling words; it is not a request (the webhook drops it the same way).
+  return Boolean(body) && !isSmsReaction(body) && (hasSchedulingIntent(body) || hasRescheduleOrAwayIntent(body));
 }
 
 // The Monday (Eastern) of the week an instant falls in, as YYYY-MM-DD.
@@ -127,8 +129,10 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     if (cancelled) followed.cancels_or_skips += 1;
     if (booked) followed.new_bookings += 1;
     if (moved || cancelled || booked) followed.any += 1;
-    // Strictly after the text: a reply stamped in the same millisecond is not an answer to it.
-    const reply = firstWithin(replyTimes.get(r.customer_id), t0 + 1, Number.MAX_SAFE_INTEGER);
+    // Strictly after the text, and inside the same 48h follow window: a reply
+    // days later answers something else, and an unbounded search would let a
+    // past report's numbers drift as new texts arrive.
+    const reply = firstWithin(replyTimes.get(r.customer_id), t0 + 1, until);
     if (reply !== null) replyMinutes.push((reply - t0) / 60000);
   }
 
@@ -190,7 +194,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
     dbh('sms_log').where({ direction: 'outbound' }).whereIn('customer_id', customerIds).whereIn('message_type', PERSON_REPLY_TYPES)
-      .whereIn('status', PERSON_REPLY_STATUSES).where('created_at', '>=', from).select('customer_id', 'created_at'),
+      .whereIn('status', PERSON_REPLY_STATUSES).where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
   return summarizeFunnel({ inbound, moves, cancels, bookings, personReplies, offers, now: to });
 }
