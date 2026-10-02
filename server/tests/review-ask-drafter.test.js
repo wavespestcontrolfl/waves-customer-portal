@@ -53,6 +53,8 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(verify('Aaron, if everything looks good, would you leave a Google review? {review_url}')).toBe('satisfaction_condition');
     expect(verify('Aaron, if all went well, a Google review helps: {review_url}')).toBe('satisfaction_condition');
     expect(verify('Aaron, if you get a chance, a Google review would be great: {review_url}')).toBeNull();
+    // #5524 r11: the older writer's email intro must name a Google review too.
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out. Would you leave us a review?', { firstName: 'Aaron' })).toBe('missing_google_review');
     // #5511 GitHub r2: the condition and the ask split across sentences.
     expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us. If anything still looks off, just reply. Otherwise leave a Google review.', { firstName: 'Aaron' })).toBe('steers_from_review');
     expect(verify("Aaron, text me if something's not right. Google review: {review_url}")).toBe('steers_from_review');
@@ -323,7 +325,7 @@ describe('name matching is word-bounded (codex #3235 r7)', () => {
 
   test('the name as its own word passes', () => {
     expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick Google review: {review_url}', { firstName: 'Al' })).toBeNull();
-    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. A Google review would mean a lot.', { firstName: 'Al' })).toBeNull();
   });
 });
 

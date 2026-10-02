@@ -338,7 +338,10 @@ function verifyEmailIntro(body, { firstName } = {}) {
   if (firstName && !containsNameAsWord(text, firstName)) {
     return "missing_name";
   }
-  return neutralityReject(text);
+  const unneutral = neutralityReject(text);
+  if (unneutral) return unneutral;
+  // Every review ask names a Google review (owner ruling 2026-10-01).
+  return /google review/i.test(text) ? null : "missing_google_review";
 }
 
 // Step-aware email instruction (codex #3235 r1 P2): the email touch is
@@ -811,6 +814,7 @@ const CONTENT_CHECKS = [
   ["steers_from_review", (b) => STEER_RE.test(b) || REPLY_ROUTE_RE.test(b)],
   ["satisfaction_condition", (b) => satisfactionConditioned(b)],
   ["termite_off_service", (b, c) => !c.termite && TERMITE_RE.test(b)],
+  ["not_tech_voice", (b, c) => notTechVoice(b, c.techName)],
   ["coached_review", (b) => COACHED_REVIEW_RE.test(b)],
 ];
 const withoutLink = (b) => b.replace(/\{review_url\}/g, "");
@@ -841,6 +845,21 @@ function withoutNames(body, { firstName, techName }) {
   // Only the capitalized name: "Bill, ..." is the customer, "the bill" is not.
   const cap = (n) => `${n[0].toUpperCase()}${n.slice(1).toLowerCase()}`;
   return names.reduce((text, n) => text.replace(new RegExp(`\\b${cap(n)}\\b`, "g"), " "), body);
+}
+// The text is the technician speaking. Their name appears only as their own
+// introduction ("It's Adam", "This is Adam", "Adam here"); anywhere else
+// ("Adam found ants") it is third-person narration. Office / team narration
+// is not the technician's voice either.
+const OFFICE_NARRATION_RE = /\b(?:our|the|your)\s+(?:team|office|crew|staff|technicians?|tech|company)\b|\bwaves\s+(?:team|technicians?|staff)\b/i;
+function notTechVoice(body, techName) {
+  if (OFFICE_NARRATION_RE.test(body)) return true;
+  const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
+  return names.some((n) => {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const uses = String(body).match(new RegExp(`\\b${esc}\\b`, "gi")) || [];
+    const intros = String(body).match(new RegExp(`\\b(?:it'?s|this is|i'?m|i am)\\s+${esc}\\b|\\b${esc}\\s+here\\b`, "gi")) || [];
+    return uses.length > intros.length;
+  });
 }
 const firstFailure = (checks, body, ctx) => (checks.find(([, fails]) => fails(body, ctx)) || [null])[0];
 
@@ -1276,7 +1295,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;

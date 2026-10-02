@@ -556,6 +556,17 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(text).toContain('Moisture under the kitchen sink');
   });
 
+  test('#5524 r11: third-person or office narration is not the technician\'s voice', () => {
+    const rec = 'German cockroaches in the kitchen. I need to go to work.';
+    const v = (body) => Drafter.verifyTechVoiceDraft(
+      { body, details: [{ text: 'had to get to work', source_quote: 'I need to go to work' }] },
+      { channel: 'sms', firstName: 'Marta', techName: 'Adam Benetti', termite: false, corpus: rec, ownWords: rec },
+    );
+    expect(v('Adam knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
+    expect(v('Our team knows you had to get to work. A Google review would help: {review_url}')).toBe('not_tech_voice');
+    expect(v("It's Adam, I know you had to get to work. A Google review would help: {review_url}")).toBeNull();
+  });
+
   test('a bare link after a question stays with its sentence', () => {
     const { techVoiceSentences } = Drafter.__private;
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
