@@ -117,13 +117,12 @@ describe('matcher', () => {
     expect(scope.technicianMayReach(method, path)).toBe(expected);
   });
 
-  test('the shadow-log key carries no record identifiers (ids, SIDs, phone numbers, tokens)', () => {
-    expect(scope.shadowKey('DELETE', '/api/admin/call-recordings/blocked/+15555550123')).toBe('DELETE /api/admin/call-recordings/blocked/:x');
-    expect(scope.shadowKey('DELETE', '/api/admin/communications/blocked-numbers/%2B15555550123')).toBe('DELETE /api/admin/communications/blocked-numbers/:x');
-    expect(scope.shadowKey('POST', '/api/admin/call-recordings/process/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('POST /api/admin/call-recordings/process/:x');
-    expect(scope.shadowKey('GET', '/api/admin/kb/11111111-2222-4333-8444-555555555555')).toBe('GET /api/admin/kb/:x');
-    expect(scope.shadowKey('GET', '/api/admin/email/thread/someone@example.com')).toBe('GET /api/admin/email/thread/:x');
-    expect(scope.shadowKey('GET', '/api/admin/kb/stats')).toBe('GET /api/admin/kb/stats');
+  test('the shadow-log key is the matched route template: no record values, lowercase words included (codex #5568 r10)', () => {
+    const at = (baseUrl, path) => ({ baseUrl, route: { path } });
+    expect(scope.shadowRouteKey('DELETE', at('/api/admin/call-recordings', '/blocked/:phone'))).toBe('DELETE /api/admin/call-recordings/blocked/:phone');
+    expect(scope.shadowRouteKey('POST', at('/api/admin/seo-diagnosis', '/tools/:tool'))).toBe('POST /api/admin/seo-diagnosis/tools/:tool');
+    expect(scope.shadowRouteKey('GET', at('/api/admin/kb', '/stats'))).toBe('GET /api/admin/kb/stats');
+    expect(scope.shadowRouteKey('GET', { baseUrl: '/api/admin/kb' })).toBe('GET (unmatched)');
   });
 
   test('a trailing slash does not widen or narrow the match', () => {
@@ -132,14 +131,50 @@ describe('matcher', () => {
   });
 });
 
-describe('shadow log cap', () => {
+describe('shadow log', () => {
+  const EventEmitter = require('events');
+  const finish = (req) => { const res = new EventEmitter(); scope.enforceTechnicianScope(req, res); return res; };
+
+  test('varying a lowercase parameter on one route logs one line (codex #5568 r10)', () => {
+    scope._shadowLoggedForTests.clear();
+    const { info } = logger;
+    info.mockClear();
+    for (const tool of ['a', 'b', 'c', 'dd', 'eee']) {
+      const req = { techRole: 'technician', method: 'POST', baseUrl: '/api/admin/seo-diagnosis', path: `/tools/${tool}` };
+      const res = finish(req);
+      req.route = { path: '/tools/:tool' };
+      res.emit('finish');
+    }
+    const lines = info.mock.calls.filter(([m]) => m.includes('would-deny technician'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0][0]).toContain('POST /api/admin/seo-diagnosis/tools/:tool');
+    scope._shadowLoggedForTests.clear();
+  });
+
+  test('a request through two staff routers logs once', () => {
+    scope._shadowLoggedForTests.clear();
+    const { info } = logger;
+    info.mockClear();
+    const req = { techRole: 'technician', method: 'GET', baseUrl: '/api/admin/zz', path: '/x' };
+    const res = new EventEmitter();
+    scope.enforceTechnicianScope(req, res);
+    scope.enforceTechnicianScope(req, res);
+    req.route = { path: '/x' };
+    res.emit('finish');
+    expect(info.mock.calls.filter(([m]) => m.includes('would-deny technician'))).toHaveLength(1);
+    scope._shadowLoggedForTests.clear();
+  });
+
   test('the set stops growing at the cap and says so once', () => {
     scope._shadowLoggedForTests.clear();
     const { info, warn } = logger;
-    // Distinct lowercase route words (digits would collapse to :x).
-    const word = (n) => n.toString(26).split('').map((c) => String.fromCharCode(97 + parseInt(c, 26))).join('');
+    info.mockClear();
+    warn.mockClear();
     for (let i = 0; i < scope.SHADOW_LOG_CAP + 25; i += 1) {
-      scope.enforceTechnicianScope({ techRole: 'technician', method: 'GET', baseUrl: `/api/admin/zz-${word(i)}`, path: '/' }, {});
+      const req = { techRole: 'technician', method: 'GET', baseUrl: `/api/admin/zz-${i}`, path: '/' };
+      const res = finish(req);
+      req.route = { path: '/' };
+      res.emit('finish');
     }
     expect(info.mock.calls.filter(([m]) => m.includes('would-deny technician')).length).toBe(scope.SHADOW_LOG_CAP);
     expect(warn.mock.calls.filter(([m]) => m.includes('reached')).length).toBe(1);
@@ -193,7 +228,7 @@ describe('gate OFF (today)', () => {
       expect(await (await call(base, tokenFor('tech-1'), 'GET', '/api/admin/kb')).json()).toEqual({ ok: 'listed' });
     });
     const lines = logger.info.mock.calls.map(([m]) => m).filter((m) => m.includes('[staff-scope] would-deny'));
-    expect(lines).toEqual([expect.stringContaining('POST /api/admin/kb/:x/verify')]);
+    expect(lines).toEqual([expect.stringContaining('POST /api/admin/kb/:id/verify')]);
     expect(lines[0]).not.toMatch(/1111|2222/);
   });
 });

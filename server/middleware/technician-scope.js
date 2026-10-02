@@ -154,17 +154,19 @@ function staffDefaultDenyEnabled() {
   }
 }
 
-// Once per (method, path-shape) per process, and bounded: every path segment
-// that is not a plain lowercase route word (ids, SIDs, phone numbers, tokens,
-// emails) collapses to :x before the key is built or logged, and the set stops
-// growing at SHADOW_LOG_CAP distinct shapes (one final line says so). A
-// technician varying a lowercase parameter cannot flood the log (codex #5568
-// r1 P2).
+// Once per (method, route template) per process, and bounded. The key is the
+// route Express actually matched (req.baseUrl + req.route.path, read when the
+// response finishes), so every parameter position is its template name and a
+// technician varying any path value — ids, phone numbers, or a plain
+// lowercase word — maps to the same key (codex #5568 r1 P2, r10 P2). A request
+// no route matched keys as one '(unmatched)' per method. The set also stops
+// growing at SHADOW_LOG_CAP keys (one final line says so).
 const SHADOW_LOG_CAP = 200;
 const shadowLogged = new Set();
-function shadowKey(method, fullPath) {
-  const shape = fullPath.split('/').map((seg) => (seg === '' || /^[a-z][a-z-]*$/.test(seg) ? seg : ':x')).join('/');
-  return `${method} ${shape}`;
+function shadowRouteKey(method, req) {
+  const route = req.route && req.route.path;
+  if (route === undefined || route === null) return `${method} (unmatched)`;
+  return `${method} ${req.baseUrl || ''}${String(route)}`;
 }
 
 function shadowLogOnce(key) {
@@ -194,7 +196,12 @@ function enforceTechnicianScope(req, res) {
   const fullPath = normalizePath(req);
   if (technicianMayReach(method, fullPath)) return false;
   if (!staffDefaultDenyEnabled()) {
-    shadowLogOnce(shadowKey(method, fullPath));
+    // Keyed on the matched route template once the response is done; a
+    // request reaching here through several staff routers logs once.
+    if (!req._staffScopeShadowArmed && res && typeof res.once === 'function') {
+      req._staffScopeShadowArmed = true;
+      res.once('finish', () => shadowLogOnce(shadowRouteKey(method, req)));
+    }
     return false;
   }
   res.status(403).json({ error: 'Admin access required', code: 'TECHNICIAN_SCOPE' });
@@ -206,7 +213,7 @@ module.exports = {
   technicianMayReach,
   enforceTechnicianScope,
   normalizePath,
-  shadowKey,
+  shadowRouteKey,
   SHADOW_LOG_CAP,
   _shadowLoggedForTests: shadowLogged,
 };
