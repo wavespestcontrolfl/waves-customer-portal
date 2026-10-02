@@ -977,6 +977,14 @@ describe('applyDueRateChanges — annual_prepay', () => {
     expect(out.holds.map((h) => h.reason)).toEqual(['successor_already_created']);
     expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
   });
+  test('a pinned term whose coverage now names ANOTHER plan line (re-labelled pest → lawn after the notice) holds — the notice is never written onto a different plan', async () => {
+    const out = await runApply(prepayBook({ coverage_service_type: 'Lawn Care Program' }));
+    expect(out.holds.map((h) => h.reason)).toEqual(['term_family_changed']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+    expect(notices()[0].applied_at == null).toBe(true);
+    // an unlabeled (legacy) pinned term still applies
+    expect((await runApply(prepayBook({ coverage_service_type: null }))).applied).toBe(1);
+  });
   test('the termite program is never reached', async () => {
     const out = await runApply(prepayBook({ annual_plan_version: 'v3' }));
     expect(out.holds.map((h) => h.reason)).toEqual(['termite_program']);
@@ -1172,32 +1180,34 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     await renew(468);
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(false);
   });
-  test('both admin prepay routes consult it with the requested coverage and term start, behind the gate, before AND inside the write transaction (under the lock), and 409 without the acknowledgement', () => {
+  test('both admin prepay routes consult it inside the write transaction (under the annual-prepay lock), with the EXACT amount the term records — tax-inclusive coverage money, setup carved out — and 409 without the acknowledgement', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
-    // The draft-invoice route's `amount` is coverage (the setup rides on top);
-    // the collected route's `amount` is the collected TOTAL with the setup
-    // inside it, so it compares the coverage share (amount − setup), the
-    // same figure the term records.
+    // The noticed renewal amount is the successor term's prepay_amount: what
+    // the customer pays for the year (invoice total, county tax included,
+    // gross of a deposit credit, minus the setup share). The request's
+    // `amount` is pretax (draft) or the collected total with setup inside —
+    // never the comparable figure, so no pre-check runs on it.
+    expect(src).not.toMatch(/noticedRenewalAmountConflictFor\(customer\.id, (amount|collectedCoverageAmount),/);
     const draftRoute = src.slice(src.indexOf("router.post('/:id/annual-prepay-invoice'"), src.indexOf("router.post('/:id/annual-prepay',"));
     const collectedRoute = src.slice(src.indexOf("router.post('/:id/annual-prepay',"));
-    expect(draftRoute.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart(, trx)? \}\)/g)).toHaveLength(2);
-    expect(collectedRoute.match(/noticedRenewalAmountConflictFor\(customer\.id, collectedCoverageAmount, \{ coverageServiceType, termStart(, trx)? \}\)/g)).toHaveLength(2);
-    expect(collectedRoute).toMatch(/const collectedCoverageAmount = collectedSetupFee > 0\s*\? Math\.round\(\(amount - collectedSetupFee\) \* 100\) \/ 100\s*: amount;/);
-    expect(collectedRoute).toMatch(/const collectedCoverage = collectedCoverageAmount;/);
+    const draftAmount = /const termPrepayAmount = Math\.round\(\(Number\(invoice\.total\) \+ appliedDepositCredit - setupShareOfTotal\) \* 100\) \/ 100;/;
+    const collectedAmount = /const termPrepayAmount = Math\.round\(\(Number\(updatedInvoice\.total\) - collectedSetupShare\) \* 100\) \/ 100;/;
+    for (const [route, amountRe] of [[draftRoute, draftAmount], [collectedRoute, collectedAmount]]) {
+      expect(route).toMatch(amountRe);
+      const calls = [...route.matchAll(/const noticedInTrx = await noticedRenewalAmountConflictFor\(customer\.id, termPrepayAmount, \{ coverageServiceType, termStart, trx \}\);\s*if \(noticedInTrx && req\.body\?\.acknowledgeNoticedAmount !== true\) throw noticedRenewalAmountError\(noticedInTrx\);/g)];
+      expect(calls).toHaveLength(1);
+      const at = calls[0].index;
+      expect(route.slice(at).search(amountRe)).toBe(-1); // the amount is computed before the check
+      const termCall = route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay(', at);
+      expect(termCall).toBeGreaterThan(at);
+      expect(route.slice(termCall, termCall + 2000)).toMatch(/prepayAmount: termPrepayAmount,/);
+      expect(route.slice(0, at)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
+    }
     expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
-    expect(src).toMatch(/noticedRenewalAmountConflict\(trx \|\| db, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: !!trx \}\)/);
-    expect(src.match(/acknowledgeNoticedAmount !== true/g)).toHaveLength(4);
-    expect(src.match(/throw noticedRenewalAmountError\(noticedInTrx\)/g)).toHaveLength(2);
+    expect(src).toMatch(/noticedRenewalAmountConflict\(trx, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: true \}\)/);
     expect(src.match(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/g)).toHaveLength(2);
-    // the pre-check sits AFTER termStart is known; the re-check sits right after the customer's annual-prepay lock
-    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, (amount|collectedCoverageAmount), \{ coverageServiceType, termStart \}\)/g)) {
-      expect(src.slice(Math.max(0, m.index - 1500), m.index)).toMatch(/const termStart = termStartInput\.date/);
-    }
-    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, (amount|collectedCoverageAmount), \{ coverageServiceType, termStart, trx \}\)/g)) {
-      expect(src.slice(Math.max(0, m.index - 600), m.index)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
-    }
   });
   test('the invoice route that marks an invoice as annual prepay (POST /api/admin/invoices/:id/annual-prepay) is a renewal writer too: it consults the guard inside its transaction, under the annual-prepay lock, with the term amount, coverage and start, and 409s without the acknowledgement', () => {
     const fs = require('fs');

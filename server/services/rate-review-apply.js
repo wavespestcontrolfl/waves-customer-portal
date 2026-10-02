@@ -154,6 +154,7 @@ const HOLD_COPY = Object.freeze({
   renewal_before_review_date: 'The prepaid term renews before this review date, so it is left for the next review.',
   renewal_notice_already_sent: 'The renewal reminder already went out for this term, so its amount stays as noticed.',
   term_not_live: 'The prepaid term is no longer live, so the renewal amount was not recorded.',
+  term_family_changed: 'The prepaid term now covers a different plan than the notice named, so nothing was changed.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
@@ -340,7 +341,11 @@ async function resolvePrepayTerm(dbh, { customerId, familyKey, cadence = null, t
   const live = terms.filter((t) => Number(t.prepay_amount) > 0);
   if (termId) {
     const pinned = live.find((t) => String(t.id) === String(termId));
-    return pinned ? { term: pinned } : { term: null, reason: 'term_not_live' };
+    if (!pinned) return { term: null, reason: 'term_not_live' };
+    // Re-labelled for another plan line since the notice (pest → lawn):
+    // never the noticed plan's term any more. Unlabeled stays as matched.
+    const labeled = familyOfCoverage(pinned.coverage_service_type);
+    return labeled && labeled !== familyKey ? { term: null, reason: 'term_family_changed' } : { term: pinned };
   }
   const visits = await loadLineOpenVisits(dbh, { customerId, familyKey, cadence, fromDate: today });
   const planLine = {

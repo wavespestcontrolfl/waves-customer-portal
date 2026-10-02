@@ -1553,16 +1553,18 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
 // The annual rate review's renewal consumer (services/rate-review-apply.js
 // noticedRenewalAmountConflict): null when the gate is off, no noticed
 // successor amount applies, or the amount matches. Read at call time.
-// `trx`: the write transaction — the re-check under the customer's
-// annual-prepay lock locks the candidate term rows too, so the nightly
-// apply's write of next_term_prepay_amount serializes against it.
-async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, trx = null }) {
+// Called inside the write transaction, under the customer's annual-prepay
+// lock, with the EXACT amount the new term records (the invoice total, tax
+// included, minus the setup share) — the noticed amount is that figure.
+// The candidate term rows are locked too, so the nightly apply's write of
+// next_term_prepay_amount serializes against it.
+async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, trx }) {
   if (!require('../config/feature-gates').rateReviewLive()) return null;
-  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx || db, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: !!trx });
+  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: true });
 }
 
-// The 409 both the pre-check and the in-transaction re-check return (the
-// handlers' catch returns err.noticedRenewalAmount as 409).
+// The 409 the in-transaction check throws (the handlers' catch returns
+// err.noticedRenewalAmount as 409).
 function noticedRenewalAmountError(conflict) {
   return require('../services/rate-review-apply').noticedRenewalAmountError(conflict);
 }
@@ -5329,16 +5331,6 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     if (!termEnd || termEnd <= termStart) {
       return res.status(400).json({ error: 'termEnd must be after termStart' });
     }
-    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
-    // renewal of a term that carries the noticed successor amount — the
-    // predecessor resolved by coverage family and the new term's start —
-    // charges exactly that amount ("notified amount is the charged amount")
-    // unless the operator confirms a different one deliberately
-    // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
-    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart });
-    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json(noticedRenewalAmountError(noticedConflict).noticedRenewalAmount);
-    }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
     if (activeTermEnd && termStart <= activeTermEnd && req.body?.allowOverlap !== true) {
@@ -5466,11 +5458,6 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an annual prepay term through',
       );
-      // Re-checked UNDER the lock, on the transaction (the pre-check above ran
-      // on the global handle): the nightly rate review apply can commit a
-      // noticed successor amount in between.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart, trx });
-      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       // The credit consumes ONLY the estimate the operator was shown in the
       // preview banner (echoed back as depositCreditEstimateId) — never a
       // server-side pick, so an unrelated job's rolled-forward deposit can't
@@ -5661,6 +5648,14 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // (the overlap lock above dedupes concurrent mints) and suppresses monthly
       // billing while unpaid; the webhook flips it active on payment, and an aborted
       // in-person charge is cleaned up by voiding the invoice (which cancels it).
+      const termPrepayAmount = Math.round((Number(invoice.total) + appliedDepositCredit - setupShareOfTotal) * 100) / 100;
+      // Annual rate review (GATE_RATE_REVIEW): a renewal of a term carrying a
+      // noticed successor amount records exactly that amount ("notified
+      // amount is the charged amount") unless the operator confirms a
+      // different one (acknowledgeNoticedAmount). Compared with what this
+      // term records — after tax, minus the setup — never the request.
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: invoice.id,
@@ -5677,7 +5672,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         // the deposit.
         // Minus the setup line's share of the total (tax-proportional): the
         // one-time setup is not coverage and must not be split across visits.
-        prepayAmount: Math.round((Number(invoice.total) + appliedDepositCredit - setupShareOfTotal) * 100) / 100,
+        prepayAmount: termPrepayAmount,
         termStart,
         termEnd,
         coverageServiceType,
@@ -5889,22 +5884,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     if (!termEnd || termEnd <= termStart) {
       return res.status(400).json({ error: 'termEnd must be after termStart' });
     }
-    // Annual rate review (services/rate-review-apply.js, GATE_RATE_REVIEW): a
-    // renewal of a term that carries the noticed successor amount — the
-    // predecessor resolved by coverage family and the new term's start —
-    // charges exactly that amount ("notified amount is the charged amount")
-    // unless the operator confirms a different one deliberately
-    // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
-    // `amount` here is the COLLECTED TOTAL with any setup inside it; the
-    // noticed renewal amount is coverage money, so compare the coverage
-    // share — the same figure the term records (collectedCoverage below).
-    const collectedCoverageAmount = collectedSetupFee > 0
-      ? Math.round((amount - collectedSetupFee) * 100) / 100
-      : amount;
-    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, collectedCoverageAmount, { coverageServiceType, termStart });
-    if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json(noticedRenewalAmountError(noticedConflict).noticedRenewalAmount);
-    }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
     if (activeTermEnd && termStart <= activeTermEnd && req.body?.allowOverlap !== true) {
@@ -5943,11 +5922,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
-      // Re-checked UNDER the lock, on the transaction (the pre-check above ran
-      // on the global handle): the nightly rate review apply can commit a
-      // noticed successor amount in between.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, collectedCoverageAmount, { coverageServiceType, termStart, trx });
-      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       // Fee-free TOCTOU guard under the trx (same posture as the draft
       // mint, codex #3591 r48/r50): a claim restored or a waiving family
       // lost in the gap must abort, not mint coverage-only.
@@ -5963,7 +5937,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // The entered amount is the COLLECTED TOTAL (codex #3591 r51 P1):
       // the setup rides INSIDE it as its own line, never on top — coverage
       // is the remainder.
-      const collectedCoverage = collectedCoverageAmount;
+      const collectedCoverage = collectedSetupFee > 0
+        ? Math.round((amount - collectedSetupFee) * 100) / 100
+        : amount;
       if (!(collectedCoverage > 0)) {
         const coverageErr = new Error(`The collected total ($${amount.toFixed(2)}) must exceed the $${collectedSetupFee.toFixed(2)} bait-station setup it includes.`);
         coverageErr.switchConflict = true;
@@ -6035,6 +6011,14 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         ? Math.round((Number(updatedInvoice.total) * (collectedSetupFee / amount)) * 100) / 100
         : 0;
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      const termPrepayAmount = Math.round((Number(updatedInvoice.total) - collectedSetupShare) * 100) / 100;
+      // Annual rate review (GATE_RATE_REVIEW): a renewal of a term carrying a
+      // noticed successor amount records exactly that amount ("notified
+      // amount is the charged amount") unless the operator confirms a
+      // different one (acknowledgeNoticedAmount). Compared with what this
+      // term records — after tax, minus the setup — never the request.
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: updatedInvoice.id,
@@ -6044,7 +6028,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         // the coverage ledger: commercial invoices add county tax, so the pretax
         // request amount would under-credit the prepaid visits. Coverage
         // money only — the setup share is carved out.
-        prepayAmount: Math.round((Number(updatedInvoice.total) - collectedSetupShare) * 100) / 100,
+        prepayAmount: termPrepayAmount,
         termStart,
         termEnd,
         coverageServiceType,
