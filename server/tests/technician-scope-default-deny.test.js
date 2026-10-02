@@ -75,15 +75,26 @@ describe('matcher', () => {
     ['PUT', '/api/admin/equipment-systems/calibrations/1/verify', false],
     ['GET', '/api/admin/inventory', true],
     ['POST', '/api/admin/inventory/1/adjust', false],
-    ['GET', '/api/admin/feature-flags', false],
     ['GET', '/api/admin/dashboard', false],
     ['GET', '/api/ai/admin/calls', false],
     ['GET', '/api/tech/timetracking/entries', true],
     ['POST', '/api/admin/timesheets/approve', false],
     ['POST', '/api/admin/timesheets/dispute', true],
     ['GET', '/api/admin/auth/me', true],
+    ['GET', '/api/admin/feature-flags', true],
+    ['GET', '/api/admin/feature-flags/all', false],
+    ['POST', '/api/admin/feature-flags/toggle', false],
   ])('%s %s → %s', (method, path, expected) => {
     expect(scope.technicianMayReach(method, path)).toBe(expected);
+  });
+
+  test('the shadow-log key carries no record identifiers (ids, SIDs, phone numbers, tokens)', () => {
+    expect(scope.shadowKey('DELETE', '/api/admin/call-recordings/blocked/+15555550123')).toBe('DELETE /api/admin/call-recordings/blocked/:x');
+    expect(scope.shadowKey('DELETE', '/api/admin/communications/blocked-numbers/%2B15555550123')).toBe('DELETE /api/admin/communications/blocked-numbers/:x');
+    expect(scope.shadowKey('POST', '/api/admin/call-recordings/process/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('POST /api/admin/call-recordings/process/:x');
+    expect(scope.shadowKey('GET', '/api/admin/kb/11111111-2222-4333-8444-555555555555')).toBe('GET /api/admin/kb/:x');
+    expect(scope.shadowKey('GET', '/api/admin/email/thread/someone@example.com')).toBe('GET /api/admin/email/thread/:x');
+    expect(scope.shadowKey('GET', '/api/admin/kb/stats')).toBe('GET /api/admin/kb/stats');
   });
 
   test('a trailing slash does not widen or narrow the match', () => {
@@ -132,6 +143,7 @@ describe('gate OFF (today)', () => {
       expect(await (await call(base, tokenFor('tech-1'), 'GET', '/api/admin/kb')).json()).toEqual({ ok: 'listed' });
     });
     const lines = logger.info.mock.calls.map(([m]) => m).filter((m) => m.includes('[staff-scope] would-deny'));
-    expect(lines).toEqual([expect.stringContaining('POST /api/admin/kb/:id/verify')]);
+    expect(lines).toEqual([expect.stringContaining('POST /api/admin/kb/:x/verify')]);
+    expect(lines[0]).not.toMatch(/1111|2222/);
   });
 });

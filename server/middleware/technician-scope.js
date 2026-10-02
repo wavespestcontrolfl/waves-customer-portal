@@ -32,6 +32,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'session', methods: ANY, pattern: /^\/api\/admin\/push(\/.*)?$/ },
   { bucket: 'session', methods: ANY, pattern: /^\/api\/admin\/notifications(\/.*)?$/ },
   { bucket: 'session', methods: ANY, pattern: /^\/api\/tech\/notifications(\/.*)?$/ },
+  // The flag read every staff screen boots from (useFeatureFlag fails closed
+  // on a 403 and would switch field features off). The admin-only flag
+  // routes under it carry their own requireAdmin.
+  { bucket: 'session', methods: READ, pattern: /^\/api\/admin\/feature-flags$/ },
 
   // Own schedule and visits (the routers scope to the assigned technician).
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/schedule(\/.*)?$/ },
@@ -117,10 +121,13 @@ function staffDefaultDenyEnabled() {
 }
 
 // Once per (method, path-shape) per process: the shadow log must not grow
-// with traffic. UUIDs and numeric ids collapse to :id for the key only.
+// with traffic, and it must never carry a record identifier. Every path
+// segment that is not a plain lowercase route word (ids, SIDs, phone numbers,
+// tokens, emails) collapses to :x before the key is built or logged.
 const shadowLogged = new Set();
 function shadowKey(method, fullPath) {
-  return `${method} ${fullPath.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id').replace(/\/\d+(?=\/|$)/g, '/:id')}`;
+  const shape = fullPath.split('/').map((seg) => (seg === '' || /^[a-z][a-z-]*$/.test(seg) ? seg : ':x')).join('/');
+  return `${method} ${shape}`;
 }
 
 // Middleware step. Call AFTER req.techRole is set. Admins pass untouched.
@@ -149,5 +156,6 @@ module.exports = {
   technicianMayReach,
   enforceTechnicianScope,
   normalizePath,
+  shadowKey,
   _shadowLoggedForTests: shadowLogged,
 };
