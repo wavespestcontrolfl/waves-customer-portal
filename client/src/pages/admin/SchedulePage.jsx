@@ -40,6 +40,14 @@ import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
+import {
+  TREATMENT_AREA_FIELD_KEYS, TYPED_TYPES_WITHOUT_PLACES, completionAreasForTypedFindings, parseApplicationAreas,
+  typedActivityScoreConflict, typedFieldRequiredNow, typedTreatmentAreaField, typedZeroStateRefusesBody,
+} from "../../lib/typed-findings-rules";
+// Typed findings rules live in lib/typed-findings-rules.js (shared with the
+// tech Fast Complete sheet, which never imports this module); re-exported
+// here for existing importers.
+export { completionAreasForTypedFindings, typedActivityScoreConflict, typedFieldRequiredNow, typedTreatmentAreaField };
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
@@ -152,7 +160,6 @@ import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsT
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
-const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
 // values stay visible (removable legacy chips) and block submit until replaced.
 // areas_inspected is inspection location, never treatment scope, so it is
@@ -304,29 +311,6 @@ function baseUnitOf(unit) {
 // server (typed area fields accept these as migrated values) via
 // shared/legacy-completion-areas.json.
 export const AREAS_BY_SERVICE = legacyCompletionAreas.categories;
-// Per-product treatment areas are multi-select but stored as ONE
-// comma-joined string in the existing applicationArea field
-// ("Kitchen, Bathrooms") so drafts, the submit payload, and the
-// service_products.application_area column keep their shape — only the
-// picker UI changed. Area labels are a controlled chip vocabulary and
-// never contain commas.
-function parseApplicationAreas(value) {
-  return String(value || "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-export function typedTreatmentAreaField(schema) {
-  return (schema?.fields || []).find((field) => TREATMENT_AREA_FIELD_KEYS.includes(field?.key)) || null;
-}
-export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
-  if (!typedAreaKey) return genericAreas || [];
-  const typedAreas = parseApplicationAreas(findingsValues?.[typedAreaKey]);
-  // Drafts saved before a lane gained its typed area field carry only the
-  // generic list. Preserve that scope until the technician picks a typed
-  // value; new typed selections remain authoritative once present.
-  return typedAreas.length ? typedAreas : (genericAreas || []);
-}
 // One parser for every marker line ("[Tag] text"), built from the same
 // grammar the server reads (shared/completion-marker-grammar.json): whitespace
 // after the closing bracket is optional, so "[Protocol]Label" is a live marker
@@ -378,15 +362,15 @@ function markerTexts(notes, tags) {
   const wanted = new Set(tags);
   return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
 }
-// Lane voice fill (GATE_LANE_VOICE_FILL): the words a lane field was filled
-// from on Generate, shown under the field while it still holds the filled
-// value; or, for a group the notes left unclear and nobody picked, an ask
-// to pick one.
-function LaneHeardLine({ quotes, unclear, color }) {
+// Lane and typed voice fill (GATE_LANE_VOICE_FILL, GATE_TYPED_VOICE_FILL):
+// the words a field was filled from on Generate, shown under the field while
+// it still holds the filled value; or, for a field the notes left unclear
+// and nobody picked, an ask to pick (one, or what applies for a list).
+function LaneHeardLine({ quotes, unclear, color, ask = "Pick one." }) {
   if (quotes?.length) {
     return <div style={{ fontSize: 14, color, marginTop: 4 }}>Heard: {quotes.map((quote) => `“${quote}”`).join(" · ")}</div>;
   }
-  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. Pick one.</div>;
+  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. {ask}</div>;
   return null;
 }
 export function labelsPresentInMarkerNotes(notes, labels) {
@@ -9353,48 +9337,6 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
-// Whether a typed findings field is required for the CURRENT values —
-// static `required` plus the schema's conditional `requiredUnless`
-// metadata ({ field, value } or { field, values }: required exactly when
-// the named sibling field holds a non-empty value other than `value` /
-// outside `values`). Mirrors the server's conditional enforcement so the
-// tech gets the normal pre-submit prompt instead of a post-submit 422
-// (Codex P2).
-export function typedFieldRequiredNow(field, values) {
-  if (field?.required) return true;
-  const rule = field?.requiredUnless;
-  if (!rule?.field) return false;
-  const driver = String(values?.[rule.field] ?? "").trim();
-  if (!driver) return false;
-  const excluded = Array.isArray(rule.values) ? rule.values : [rule.value];
-  return !excluded.includes(driver);
-}
-
-// Mirrors the server's final-score vs findings cleared-boundary rule
-// (validateActivityScoreConsistency / activity_score_inconsistent): a
-// pinned nonzero score beside cleared evidence — or a pinned 0 beside
-// positive evidence — would publish a headline that says the opposite of
-// the findings card. Returns the conflict message or null.
-const TYPED_SCORE_CLEARED_SELECT = {
-  flea: { field: "evidence_level", cleared: "None observed" },
-  german_roach_knockdown: { field: "activity_level", cleared: "None observed" },
-  palmetto_roach_knockdown: { field: "activity_level", cleared: "None observed" },
-};
-export function typedActivityScoreConflict(schemaType, values, score) {
-  if (score == null) return null;
-  const rule = TYPED_SCORE_CLEARED_SELECT[schemaType];
-  if (!rule) return null;
-  const selected = String(values?.[rule.field] ?? "").trim();
-  if (!selected) return null;
-  if (selected === rule.cleared && score > 0) {
-    return `Activity score ${score} conflicts with "${rule.cleared}" — set the score to 0 or update the recorded level`;
-  }
-  if (selected !== rule.cleared && score === 0) {
-    return `Activity score 0 conflicts with the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score`;
-  }
-  return null;
-}
-
 // Follow-up-only trap actions a declared Initial setup cannot carry —
 // mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
 // server/services/service-report/activity-indicators.js.
@@ -9558,35 +9500,6 @@ export function pruneRestoredFindingsValues(restored, fields, findingsType = nul
 
 // Render-time fallback for a companion section with no state yet. Never
 // mutated — every companion handler spreads into fresh objects.
-// Typed zero states whose renderer refuses generated copy at completion —
-// buildTodaysResult keeps the fixed template for them, so Generate must
-// hold: the tech would review (and the business be billed for) prose the
-// report never publishes. Bait/trap gauges refuse on a zero score; flea,
-// knockdown, and mosquito stories refuse on their cleared/none-observed
-// states (codex r43/r44 bait rule, generalized in r45).
-function typedZeroStateRefusesBody(type, values, score) {
-  // Story lanes (exclusion/inspection) consume the reviewed body in their
-  // own branches at every score, so a generation is never wasted there.
-  if (type === "rodent_exclusion" || type === "rodent_inspection") return false;
-  if (type === "mosquito_event") return String(values?.activity_level ?? "") === "None observed";
-  // Derived from the renderer's refusal rule rather than an enumeration
-  // (codex r48): buildTodaysResult keeps the fixed template on a zero
-  // indicator score for EVERY gauge lane (bait/trapping, bed bug,
-  // cockroach, termite inspection, wildlife trapping, knockdowns, flea) —
-  // a non-gauge schema never carries a score, so the check is safe
-  // unconditionally.
-  if (score === 0) return true;
-  // Cleared select states refuse the same way when no score is pinned —
-  // reuse the shared cleared-boundary map instead of re-listing the lanes.
-  const rule = TYPED_SCORE_CLEARED_SELECT[type];
-  if (rule && score == null) return String(values?.[rule.field] ?? "") === rule.cleared;
-  // Non-gauge cleared states keep the fixed template in buildTodaysResult's
-  // zeroSeverity branch (severity / activity_level "None observed" or
-  // "No activity") — Generate must hold for them too (codex r66).
-  const clearedSelect = String(values?.severity ?? values?.activity_level ?? "").trim();
-  if (clearedSelect === "None observed" || clearedSelect === "No activity") return true;
-  return false;
-}
 
 const EMPTY_COMPANION_ENTRY = {
   values: {},
@@ -9644,6 +9557,11 @@ export function TypedFindingsSection({
   onRecommendationsChange,
   pesticideProductPresent = true,
   frozen = false,
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
+  // came from ({ key: { value, quotes } }) and the fields the notes left
+  // unclear (keys). Null off.
+  heard = null,
+  unclear = null,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9696,7 +9614,11 @@ export function TypedFindingsSection({
   // the stale value would otherwise hide in the drawer and still reach the
   // server's contradiction check as a 422 (codex P1 r2 on #3536).
   const holdsValue = (f) => String(values?.[f.key] ?? "").trim() !== "";
-  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f);
+  // A field the notes left unclear asks to be picked, so it shows too.
+  const leftUnclear = (f) => !!unclear?.includes(f.key) && !holdsValue(f);
+  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f) || leftUnclear(f);
+  // The words a field was filled from, while it still holds that value.
+  const heardQuotes = (f) => (heard?.[f.key] && heard[f.key].value === values?.[f.key] ? heard[f.key].quotes : null);
   const primaryFields = visibleFields.filter(staysPrimary);
   const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
@@ -9736,6 +9658,12 @@ export function TypedFindingsSection({
         value={values[field.key] || ""}
         onChange={(value) => onFieldChange(field.key, value)}
         inputStyle={{ width: "100%", boxSizing: "border-box" }}
+      />
+      <LaneHeardLine
+        quotes={heardQuotes(field)}
+        unclear={leftUnclear(field)}
+        color={mutedColor}
+        ask={field.type === "chips" ? "Pick what applies." : "Pick one."}
       />
     </div>
   );
@@ -13651,6 +13579,8 @@ export function CompletionPanel({
   // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
   // from the notes (each field's words) and the groups it left for a person.
   const [laneHeard, setLaneHeard] = useState(null);
+  // Typed voice fill: { values: { key: { value, quotes } }, unclear: [keys] }.
+  const [typedHeard, setTypedHeard] = useState(null);
   // The fill's picks land on the next render; Generate then writes the
   // report from them.
   const [generateQueued, setGenerateQueued] = useState(0);
@@ -14023,10 +13953,7 @@ export function CompletionPanel({
   );
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
-    || [
-      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
-      "rodent_inspection", "rodent_bait_station", "bed_bug",
-    ].includes(service.completionProfile?.findingsType)
+    || TYPED_TYPES_WITHOUT_PLACES.includes(service.completionProfile?.findingsType)
     // Station visits have no meaningful "areas treated" — the station
     // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
     // termite lanes keep the termite area list, and a station visit that
@@ -14377,6 +14304,9 @@ export function CompletionPanel({
   // schedule payload says when Generate first fills this visit's own record
   // (its places and findings) from the notes.
   const laneVoiceFill = service.laneVoiceFillEnabled === true && !!specialtyCompletion && !isTypedFindings;
+  // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
+  // notes for a typed visit's own findings (the schedule row's flag).
+  const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -16761,7 +16691,13 @@ export function CompletionPanel({
         body: JSON.stringify({ note }),
       }).catch(() => null)
       : null;
-    if (heard?.status !== "read") return;
+    if (heard?.status !== "read") {
+      // A read that answered nothing usable leaves no group unclear: the asks
+      // always reflect the latest Generate (the typed fill's rule, #5632).
+      // Words beside values still standing stay.
+      setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      return;
+    }
     // A value fills only an unpicked group and only beside what is chosen:
     // the tap's own rules decide a clash (reconcile drops a value the new
     // one excludes; the selected actions refuse a value), and a clash is
@@ -16812,6 +16748,63 @@ export function CompletionPanel({
       setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
     }
   }
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): reads the tech's own words
+  // (groundingNotes) for the typed form's findings and fills only fields
+  // still empty. The server judges every fill beside the form's present
+  // values (sent only for that, never stored): a field set is never filled
+  // over and a clash is left for a person. Best effort: a failed read fills
+  // nothing and Generate carries on.
+  async function fillTypedFromNotes() {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/typed-facts`, {
+        method: "POST",
+        body: JSON.stringify({ note, current: findingsValues }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) {
+      // A read that answered nothing usable (it failed, named another form,
+      // or found nothing left to fill) leaves no field unclear: the asks
+      // always reflect the latest Generate (pre-push P1). Words beside
+      // values still standing stay.
+      setTypedHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      return;
+    }
+    const fills = Object.entries(heard.values || {}).filter(([key, value]) => (
+      typeof value === "string" && value && String(findingsValues[key] ?? "").trim() === ""
+    ));
+    if (fills.length) applyTypedFill(fills);
+    // Words heard earlier stay beside values still standing; a field filled
+    // again takes its new words.
+    setTypedHeard((prev) => ({
+      values: {
+        ...(prev?.values || {}),
+        ...Object.fromEntries(fills.map(([key, value]) => [key, { value, quotes: (heard.heard?.[key] || []).map((entry) => entry.quote) }])),
+      },
+      unclear: Array.isArray(heard.unclearFields) ? heard.unclearFields : [],
+    }));
+  }
+  // A fill changes what an installed report was written from, as a typed
+  // edit does (the report goes and the notes come back). It writes the
+  // values itself: handleTypedFindingChange refuses writes while generating,
+  // and the fill runs inside Generate. An untouched gauge follows its derive
+  // field, as a pick does.
+  function applyTypedFill(fills) {
+    invalidateGeneratedReportOnTypedEdit();
+    setFindingsValues((prev) => {
+      const next = { ...prev };
+      for (const [key, value] of fills) if (String(prev[key] ?? "").trim() === "") next[key] = value;
+      return next;
+    });
+    const activity = typedFindingsSchema?.activity;
+    const derive = activity?.deriveField && !typedActivityTouched
+      ? fills.find(([key]) => key === activity.deriveField)
+      : null;
+    if (derive) {
+      const derived = activity.deriveScores?.[String(derive[1])];
+      setTypedActivityScore(derived == null ? null : derived);
+    }
+  }
   // The report itself, from the form as it stands.
   async function runGenerate() {
     const { payload, hasReportInput } = buildAiReportPayload();
@@ -16829,8 +16822,8 @@ export function CompletionPanel({
     }
     setGenerating(false);
   }
-  // Generate AI report (computer and phone layouts). With the lane fill on,
-  // the record is filled from the notes first and the report is written on
+  // Generate AI report (computer and phone layouts). With the lane or typed
+  // fill on, the record is filled from the notes first and the report is written on
   // the next render, from the picks as they landed; the form stays locked
   // (generating) all the way through.
   async function handleGenerateClick() {
@@ -16853,13 +16846,14 @@ export function CompletionPanel({
       return;
     }
     if (dictation.listening) dictation.toggle();
-    if (!laneVoiceFill) {
+    if (!laneVoiceFill && !typedVoiceFill) {
       await runGenerate();
       return;
     }
     setGenerating(true);
     try {
-      await fillLaneFromNotes();
+      if (laneVoiceFill) await fillLaneFromNotes();
+      else await fillTypedFromNotes();
     } catch {
       // The fill is best effort: the report is written either way.
     }
@@ -17619,6 +17613,11 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
+    // A person's tick is theirs: the words the lane fill heard for this place
+    // go with it.
+    setLaneHeard((prev) => (prev?.areas?.some((entry) => entry.area === area)
+      ? { ...prev, areas: prev.areas.filter((entry) => entry.area !== area) }
+      : prev));
   }
   async function handlePhotoSelect(e) {
     // Photo count is a generation input (payload photoCount) — the set is
@@ -19127,6 +19126,12 @@ export function CompletionPanel({
         .trim());
     }
     setSelectedObservationLabels(reconciled);
+    // A person's pick is theirs: the edited group's heard words go, and so do
+    // those of a value the pick reconciled away, even when the filled value
+    // is picked again later (Codex P2 r3 on #5632, the typed fill's rule).
+    setLaneHeard((prev) => (prev
+      ? { ...prev, findings: prev.findings.filter((entry) => entry.group !== group?.key && reconciled.includes(entry.value)) }
+      : prev));
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -19281,6 +19286,12 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
+    // A person's edit is theirs: the words a fill stood on no longer show
+    // beside the field, even when the same value is picked again (Codex P2
+    // r3 on #5632).
+    setTypedHeard((prev) => (prev?.values?.[key]
+      ? { ...prev, values: Object.fromEntries(Object.entries(prev.values).filter(([field]) => field !== key)) }
+      : prev));
     // Derived prefill (contract §4): while the picker is untouched, the
     // score recomputes from the derive-field select on every change.
     const activity = typedFindingsSchema?.activity;
@@ -20891,6 +20902,8 @@ export function CompletionPanel({
                 onActivityTap={handleTypedActivityTap}
                 recommendations={typedRecommendations}
                 onRecommendationsChange={handleTypedRecommendationsChange}
+                heard={typedVoiceFill ? typedHeard?.values : null}
+                unclear={typedVoiceFill ? typedHeard?.unclear : null}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -23343,6 +23356,8 @@ export function CompletionPanel({
               onActivityTap={handleTypedActivityTap}
               recommendations={typedRecommendations}
               onRecommendationsChange={handleTypedRecommendationsChange}
+              heard={typedVoiceFill ? typedHeard?.values : null}
+              unclear={typedVoiceFill ? typedHeard?.unclear : null}
             />
           )}
           {/* Companion sections — one typed form per companion schema,

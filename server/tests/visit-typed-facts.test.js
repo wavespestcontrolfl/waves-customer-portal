@@ -61,7 +61,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readTypedFacts, validateTypedFacts, voiceFieldsFor, voiceTypeFor, typedSchema, typedSystemPrompt, VOICE_TYPES, NOT_SAID,
+  readTypedFacts, validateTypedFacts, currentValuesFor, voiceFieldsFor, voiceTypeFor, typedSchema, typedSystemPrompt, VOICE_TYPES, NOT_SAID,
 } = require('../services/visit-typed-facts');
 const { PROJECT_TYPES } = require('../services/project-types');
 const router = require('../routes/admin-dispatch');
@@ -210,6 +210,68 @@ describe('validateTypedFacts', () => {
   });
 });
 
+describe('the form\'s present values (slice 2: the office form sends them)', () => {
+  test('a field already set is never filled, even when the note says it', () => {
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      activity_level: { value: 'Heavy', quote: 'heavy' },
+    }), ROACH_NOTE, { species: 'American' });
+    expect(facts.values).toEqual({ activity_level: 'Heavy' });
+    expect(facts.heard).not.toHaveProperty('species');
+    expect(facts.unclearFields).toEqual([]);
+  });
+
+  test('a fill that clashes with a pick is left for a person; the rest stands', () => {
+    const note = 'German roaches, saw live ones under the sink.';
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      evidence_observed: [{ value: 'Live roaches', quote: 'saw live ones' }],
+    }), note, { activity_level: 'None observed' });
+    expect(facts.values).toEqual({ species: 'German' });
+    expect(facts.unclearFields).toEqual(['evidence_observed']);
+  });
+
+  test('a present value the completion refuses on its own does not switch the fill off; its field still counts as set', () => {
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      activity_level: { value: 'Heavy', quote: 'heavy' },
+    }), ROACH_NOTE, { activity_level: 'Some old value' });
+    expect(facts.values).toEqual({ species: 'German' });
+  });
+
+  test('a clash the form already holds takes no unrelated fill with it (Codex P2 on #5632)', () => {
+    // "None observed" beside "Live roaches": each stands alone, the pair is
+    // refused. The person fixes it at submit; the species the note says
+    // still fills.
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+    }), ROACH_NOTE, { activity_level: 'None observed', evidence_observed: 'Live roaches' });
+    expect(facts.values).toEqual({ species: 'German' });
+    expect(facts.unclearFields).toEqual([]);
+  });
+
+  test('each side of a clash the form already holds still refuses a fill that contradicts it (Codex P2 r2 on #5632)', () => {
+    // "Kitchen" as an activity location contradicts "None observed", even
+    // with "None observed" itself in a clash of its own.
+    const note = 'German roaches in the kitchen.';
+    const facts = validateTypedFacts('cockroach', fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      activity_locations: [{ value: 'Kitchen', quote: 'in the kitchen' }],
+    }), note, { activity_level: 'None observed', evidence_observed: 'Live roaches' });
+    expect(facts.values).toEqual({ species: 'German' });
+    expect(facts.unclearFields).toEqual(['activity_locations']);
+  });
+
+  test('the present values keep only the form\'s own fields, as text', () => {
+    expect(currentValuesFor('cockroach', {
+      species: 'German', made_up: 'x', activity_level: 3, evidence_observed: ['Live roaches'], customer_prep: '   ',
+    })).toEqual({ species: 'German', activity_level: '3' });
+    expect(currentValuesFor('cockroach', 'German')).toEqual({});
+    expect(currentValuesFor('cockroach', null)).toEqual({});
+    expect(currentValuesFor('cockroach', { species: 'x'.repeat(4001) })).toEqual({});
+  });
+});
+
 describe('readTypedFacts', () => {
   test('reads the note through the fast structured lane with the form\'s own schema', async () => {
     dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', { species: { value: 'German', quote: 'German roaches' } })));
@@ -230,6 +292,19 @@ describe('readTypedFacts', () => {
     expect(await readTypedFacts({ note: 'Saw roaches. '.repeat(Math.ceil(MAX_NOTE_CHARS / 13) + 1), findingsType: 'cockroach' }))
       .toMatchObject({ status: 'too_long' });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a form that already holds every field the note could fill never calls the model (Codex P2 on #5632)', async () => {
+    const current = Object.fromEntries(voiceFieldsFor('cockroach').map((field) => [field.key, field.options[0]]));
+    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach', current }))
+      .toMatchObject({ status: 'nothing_to_fill', type: 'cockroach', values: {}, unclearFields: [] });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    // One field still open is read for.
+    dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', {})));
+    const { species, ...open } = current;
+    expect(species).toBeTruthy();
+    expect((await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach', current: open })).status).toBe('read');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
   test('access codes never reach the provider', async () => {
@@ -322,6 +397,20 @@ describe('POST /:serviceId/typed-facts', () => {
     mockProfile = { serviceKey: 'termite_active_bait_quarterly', findingsType: 'termite_bait_station' };
     expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('the form\'s present values judge the fill and are never answered back', async () => {
+    process.env.GATE_TYPED_VOICE_FILL = 'true';
+    mockProfile = { serviceKey: 'cockroach_control', findingsType: 'cockroach' };
+    mockDbCurrent = serviceDb(SERVICE, []);
+    dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', {
+      species: { value: 'German', quote: 'German roaches' },
+      activity_level: { value: 'Heavy', quote: 'heavy' },
+    })));
+    const res = await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE, current: { species: 'American' } });
+    expect(res.body).toMatchObject({ available: true, status: 'read', values: { activity_level: 'Heavy' } });
+    expect(res.body.values).not.toHaveProperty('species');
+    expect(JSON.stringify(res.body)).not.toContain('American');
   });
 
   test('the assigned technician gets the visit\'s own form read, whatever form the client names', async () => {
