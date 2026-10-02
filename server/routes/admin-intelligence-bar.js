@@ -2733,8 +2733,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
-    // Last, so every shared prefix above stays cacheable across logins.
-    if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    // Last, so every shared prefix above stays cacheable across logins. With
+    // the platform off nothing commits directly, so the owner block must
+    // stay card-aware (Codex r2 P1 on #5563).
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
@@ -2973,30 +2976,22 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
-              let committed = null;
-              try {
-                committed = await commitPendingAction(req, { id: proposed.clientPayload.id, contractHash: proposed.clientPayload.contract_hash });
-                if (committed.claimed) directActionIds.push(proposed.clientPayload.id);
-              } finally {
-                // An approval that was never consumed must not linger as a
-                // pending row with no card to confirm or cancel it.
-                if (!committed?.claimed) await PendingActions.cancelPendingAction(proposed.clientPayload.id, getAdminActorId(req)).catch(() => {});
-              }
-              result = OwnerDirect.directModelResult(committed);
-              // An unknown outcome or an unsaved receipt closes the write
-              // frontier for the rest of this response, exactly as a card
-              // does: later writes in the same model turn would otherwise
-              // run before the model has seen the uncertainty (pre-push
-              // P1). Reads stay open so the model can re-check the record.
-              if (result.executed === null || result.receiptPersisted === false) {
-                writeFrontierBlocked = true;
-                directOutcomeUncertain = true;
-              }
-              if (!result.executed) {
+              // An uncertain outcome closes the write frontier for the rest
+              // of this response (later writes in the same model turn must
+              // not run before the model has seen it) and keeps the task
+              // open as outcome_unknown; reads stay open for a re-check.
+              const direct = await OwnerDirect.runDirectCommit(proposed.clientPayload, {
+                commit: (id, contractHash) => commitPendingAction(req, { id, contractHash }),
+                cancel: id => PendingActions.cancelPendingAction(id, getAdminActorId(req)),
+              });
+              result = direct.result;
+              if (direct.actionId) directActionIds.push(direct.actionId);
+              if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
+              if (direct.failed) {
                 failed = true;
                 errorMessage = result.error;
               }

@@ -215,8 +215,11 @@ describe('owner-direct in /query (legacy path: GATE_IB_PLATFORM off)', () => {
     await withServer(async (baseUrl) => {
       scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' }, 'owner');
+      // Platform off: the owner block is the card-aware one — it never says
+      // a write executes without a card.
       expect(systemText()).toContain('OWNER MODE');
-      expect(systemText()).toContain('update_lead_contact');
+      expect(systemText()).toContain('Every write shows a one-tap confirmation card');
+      expect(systemText()).not.toContain('no confirmation card');
 
       scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' }, 'admin');

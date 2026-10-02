@@ -83,11 +83,57 @@ describe('which writes skip the card', () => {
     }
   });
 
-  test('assign_technician is direct for one stop and carded for several', () => {
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A], technician_name: 'Synthetic Tech' })).toBe(true);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A, B], technician_name: 'Synthetic Tech' })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [], technician_name: 'Synthetic Tech' })).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' })).toBe(false);
+  test('assign_technician is direct for one ungrouped stop; several stops, a grouped stop, or no preview keep the card', () => {
+    const one = { service_ids: [A], technician_name: 'Synthetic Tech' };
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A }] })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A, grouped_visit_id: 'visit-1' }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [{ id: A }, { id: B }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, { stops: [] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one, {})).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', one)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [A, B], technician_name: 'Synthetic Tech' }, { stops: [{ id: A }] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { service_ids: [], technician_name: 'Synthetic Tech' }, { stops: [] })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' }, { stops: [{ id: A }] })).toBe(false);
+  });
+
+  test('runDirectCommit: claims through the given commit path, cancels only an unconsumed approval, and reports uncertainty', async () => {
+    const payload = { id: 'pa-1', contract_hash: 'abc' };
+    const calls = [];
+    const commit = result => async (id, hash) => { calls.push(['commit', id, hash]); return result; };
+    const cancel = async id => { calls.push(['cancel', id]); };
+
+    const ok = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'completed', result: { success: true } } }), cancel });
+    expect(ok).toMatchObject({ actionId: 'pa-1', uncertain: false, failed: false, result: { executed: true } });
+    expect(calls).toEqual([['commit', 'pa-1', 'abc']]);
+
+    calls.length = 0;
+    const unclaimable = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 409, claimed: false, body: { error: 'Pending action expired' } }), cancel });
+    expect(unclaimable).toMatchObject({ actionId: null, uncertain: false, failed: true, result: { executed: false, error: 'Pending action expired' } });
+    expect(calls).toEqual([['commit', 'pa-1', 'abc'], ['cancel', 'pa-1']]);
+
+    calls.length = 0;
+    const unknown = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: false, outcome: 'outcome_unknown', result: { outcome_unknown: true } } }), cancel });
+    expect(unknown).toMatchObject({ actionId: 'pa-1', uncertain: true, failed: true, result: { executed: null } });
+    expect(calls).toEqual([['commit', 'pa-1', 'abc']]);
+
+    calls.length = 0;
+    const unsaved = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 200, claimed: true, body: { success: true, outcome: 'completed', result: {}, receiptPersisted: false, warning: 'w' } }), cancel });
+    expect(unsaved).toMatchObject({ actionId: 'pa-1', uncertain: true, failed: false });
+
+    // A commit that throws before claiming releases the approval and rethrows.
+    calls.length = 0;
+    await expect(OwnerDirect.runDirectCommit(payload, { commit: async () => { throw new Error('db down'); }, cancel })).rejects.toThrow('db down');
+    expect(calls).toEqual([['cancel', 'pa-1']]);
+    // A failing cancel never masks the commit result.
+    const cancelFails = await OwnerDirect.runDirectCommit(payload, { commit: commit({ status: 409, claimed: false, body: { error: 'expired' } }), cancel: async () => { throw new Error('nope'); } });
+    expect(cancelFails.failed).toBe(true);
+  });
+
+  test('the card-aware owner prompt never says writes execute without a card', () => {
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).toMatch(/no confirmation card/);
+    expect(OwnerDirect.OWNER_DIRECT_CARDED_PROMPT).not.toMatch(/no confirmation card/);
+    expect(OwnerDirect.OWNER_DIRECT_CARDED_PROMPT).toMatch(/Every write shows a one-tap confirmation card/);
+    expect(OwnerDirect.OWNER_DIRECT_CARDED_PROMPT).toMatch(/Never claim a change is done/);
   });
 
   test('update_customer skips the card only for name, phone, address, source and note fields', () => {

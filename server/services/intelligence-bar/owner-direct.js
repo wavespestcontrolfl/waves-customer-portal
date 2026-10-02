@@ -87,12 +87,20 @@ function ownerDirectLive(req) {
   return gateEnvValue('GATE_IB_OWNER_DIRECT') && ibFullAccess(req);
 }
 
-function executesWithoutCard(toolName, input = {}) {
+// `preview` is the mutation-free preview the proposal just ran (two-step
+// tools); the decision reads it where the input alone cannot tell a single
+// record from a group.
+function executesWithoutCard(toolName, input = {}, preview = null) {
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
   // assign_technician takes a list of stops; one stop is an internal edit,
-  // several is a bulk change and keeps its card (pre-push P1).
+  // several is a bulk change and keeps its card (pre-push P1). A lone stop
+  // that belongs to a grouped visit is not single-record either: the
+  // assignment aligns or detaches its siblings (Codex r2), which the card
+  // discloses — so the verified preview must show exactly one ungrouped stop.
   if (toolName === 'assign_technician') {
-    return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
+    if (!Array.isArray(input?.service_ids) || input.service_ids.length !== 1) return false;
+    const stops = preview?.stops;
+    return Array.isArray(stops) && stops.length === 1 && !stops[0]?.grouped_visit_id;
   }
   if (toolName === 'update_customer') {
     const updates = input?.updates;
@@ -101,6 +109,29 @@ function executesWithoutCard(toolName, input = {}) {
     return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
   }
   return true;
+}
+
+// The proposal-to-receipt step for one direct edit, kept out of the query
+// loop (Codex r2 P2 on runQuery's size). `commit` runs the one commit path;
+// `cancel` releases an approval that was never consumed, so no pending row
+// lingers with no card to confirm or cancel it. Returns what the loop needs:
+// the model-facing result, the consumed action id (for thread attachment),
+// whether the outcome is uncertain (closes the write frontier and keeps the
+// task open), and whether the tool call failed.
+async function runDirectCommit(clientPayload, { commit, cancel }) {
+  let committed = null;
+  try {
+    committed = await commit(clientPayload.id, clientPayload.contract_hash);
+  } finally {
+    if (!committed?.claimed) await Promise.resolve().then(() => cancel(clientPayload.id)).catch(() => {});
+  }
+  const result = directModelResult(committed);
+  return {
+    result,
+    actionId: committed?.claimed ? clientPayload.id : null,
+    uncertain: result.executed === null || result.receiptPersisted === false,
+    failed: !result.executed,
+  };
 }
 
 // What the model is told after a direct commit. `committed` is the
@@ -138,4 +169,18 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, ownerDirectLive, executesWithoutCard, directModelResult, OWNER_DIRECT_PROMPT };
+// The owner login with the gate on but GATE_IB_PLATFORM off: nothing commits
+// directly (see the header), so the prompt must stay card-aware — the same
+// voice and target rules, but every write is a one-tap card (Codex r2 P1).
+const OWNER_DIRECT_CARDED_PROMPT = `
+
+OWNER MODE (overrides the sections above where they differ):
+You are talking to the owner. Do what they ask.
+- Every write shows a one-tap confirmation card. Prepare it and say "tap Confirm" — nothing more. Never claim a change is done until a confirmed result says so.
+- Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
+- A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.
+- A refused or failed lookup is not "tools erroring". Try another lookup or a different selector first. Report a failure only when nothing worked, in one sentence.
+- Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
+- Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
+
+module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, ownerDirectLive, executesWithoutCard, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
