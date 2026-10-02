@@ -15,8 +15,19 @@
 //   bestInRange — the single cheapest date+hour from `rangeFrom` through
 //                 RANGE_DAYS days out (the engine's sooner-day preference
 //                 applies). Only searched when the consumer passes rangeFrom.
+//
+// Summary mode (`summary: true`, the availability strip): ONE search over
+// the days around `date` (SUMMARY_BACK back, never before today, through
+// SUMMARY_FORWARD forward) answers `availability` — every hour that fits on
+// each of those days plus the picked hour's verdict with its reason — and
+// the three-line answers above stay empty. The server only answers it
+// behind GATE_RESCHEDULE_AVAILABILITY; a response with no `summary` (gate
+// off, or a server that predates it) falls back to the two searches above
+// and is not asked again for SUMMARY_RETRY_MS, so a dark gate costs one
+// extra request per ten minutes, not one per keystroke.
 
 import { useEffect, useState } from 'react';
+import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -30,6 +41,13 @@ function authHeaders() {
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 // The hint's third line says "next 3 days" — keep the two in step.
 const RANGE_DAYS = 3;
+// Availability strip window around the picked date (owner default 2026-10-02).
+const SUMMARY_BACK = 3;
+const SUMMARY_FORWARD = 7;
+const SUMMARY_RETRY_MS = 10 * 60 * 1000;
+let summaryUnavailableUntil = 0;
+// Test seam: forget that the server declined a summary.
+export function resetSummaryAvailability() { summaryUnavailableUntil = 0; }
 
 function addDays(ymd, days) {
   const d = new Date(`${ymd}T12:00:00Z`);
@@ -55,6 +73,36 @@ function mapSlot(s, scopedToTech) {
     // auto mode) must adopt the tech the detour was scored for.
     technicianId: s.technician?.id || null,
     technicianName: scopedToTech ? null : (s.technician?.name || null),
+  };
+}
+
+// The summary's rows, in the strip's own shape. `fits` on the verdict stays
+// three-valued here: true, false (a verified miss) or null (could not be
+// checked) — the strip must never read "unchecked" as a miss.
+export function normalizeAvailability(data, { date, scopedToTech }) {
+  const days = Array.isArray(data?.summary?.days) ? data.summary.days : null;
+  if (!days) return null;
+  const p = data.picked || null;
+  return {
+    pickedDate: date,
+    days: days.map((day) => ({
+      date: day.date,
+      status: day.status || (day.hours?.length ? 'open' : 'full'),
+      hours: (day.hours || []).map((h) => ({
+        date: day.date,
+        start: h.start_time,
+        end: h.end_time,
+        detourMinutes: h.detour_minutes ?? null,
+        technicianId: h.technician?.id || null,
+        technicianName: scopedToTech ? null : (h.technician?.name || null),
+      })),
+    })),
+    picked: p ? {
+      start: p.start,
+      fits: p.fits === true ? true : (p.fits === false ? false : null),
+      reason: p.reason || null,
+      detourMinutes: p.detour_minutes ?? null,
+    } : null,
   };
 }
 
@@ -92,11 +140,12 @@ function normalizeDay(day, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false,
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
   const [bestInRange, setBestInRange] = useState(null);
+  const [availability, setAvailability] = useState(null);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
@@ -114,6 +163,7 @@ export function useBestTimes({
     setBestTimes([]);
     setPicked(null);
     setBestInRange(null);
+    setAvailability(null);
     if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || ''))) {
       setChecking(false);
       return undefined;
@@ -163,6 +213,32 @@ export function useBestTimes({
         return data;
       };
       try {
+        const scopedToTech = !!technicianId;
+        const today = etDateString();
+        // A past date has no days around it to offer (the engine never
+        // searches before today) — the plain hint handles it as it always has.
+        if (summary && date >= today && Date.now() >= summaryUnavailableUntil) {
+          const back = addDays(date, -SUMMARY_BACK);
+          const data = await search({
+            summary: true,
+            dateFrom: back < today ? today : back,
+            dateTo: addDays(date, SUMMARY_FORWARD),
+            topN: 3,
+            pickedDate: date,
+            pickedStart: pickedKey || undefined,
+            pickedEnd: (pickedKey && pickedEndKey) || undefined,
+          });
+          if (controller.signal.aborted) return;
+          const summarized = normalizeAvailability(data, { date, scopedToTech });
+          if (summarized) {
+            setAvailability(summarized);
+            setChecking(false);
+            return;
+          }
+          // Answered, but with no summary: the gate is off. A failed
+          // request (null) says nothing about the gate — ask again next time.
+          if (data) summaryUnavailableUntil = Date.now() + SUMMARY_RETRY_MS;
+        }
         const [day, range] = await Promise.all([
           search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined }),
           rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
@@ -177,6 +253,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
-  return { bestTimes, picked, bestInRange, checking };
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary]);
+  return { bestTimes, picked, bestInRange, availability, checking };
 }

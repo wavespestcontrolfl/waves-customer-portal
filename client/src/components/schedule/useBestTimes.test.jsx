@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { useBestTimes } from './useBestTimes';
+import { useBestTimes, resetSummaryAvailability } from './useBestTimes';
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -95,4 +95,92 @@ it('durationEdit rides only when the caller saves the duration (edit form); a mo
   rerender({ durationEdit: true });
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ durationEdit: true, durationMinutes: 60 });
+});
+
+// ---- summary mode (availability strip) ----
+
+beforeEach(() => { resetSummaryAvailability(); });
+
+const summaryAnswer = {
+  slots: [daySlot],
+  picked: { start: '14:00', fits: false, reason: 'arrival_window' },
+  summary: {
+    days: [
+      { date: '2035-01-01', status: 'full', hours: [] },
+      { date: '2035-01-02', status: 'open', hours: [{ start_time: '10:00', end_time: '11:00', detour_minutes: 12, technician: { id: 'tech', name: 'A' } }] },
+    ],
+  },
+};
+
+it('summary mode: one search around the picked date answers availability and nothing else', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00', pickedEnd: '15:00', rangeFrom: '2035-01-01',
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+    hint: true, summary: true, dateFrom: '2035-01-02', dateTo: '2035-01-12', pickedDate: '2035-01-05', pickedStart: '14:00', pickedEnd: '15:00',
+  });
+  expect(result.current.availability).toEqual({
+    pickedDate: '2035-01-05',
+    days: [
+      { date: '2035-01-01', status: 'full', hours: [] },
+      { date: '2035-01-02', status: 'open', hours: [{ date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, technicianId: 'tech', technicianName: null }] },
+    ],
+    picked: { start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+  });
+  expect(result.current.bestTimes).toEqual([]);
+  expect(result.current.bestInRange).toBeNull();
+});
+
+it('summary mode keeps "could not check" apart from a miss', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, json: async () => ({ ...summaryAnswer, picked: { start: '14:00', fits: null, reason: 'route_unverified' } }),
+  }));
+  const { result } = renderHook(() => useBestTimes({ summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(result.current.availability.picked).toMatchObject({ fits: null, reason: 'route_unverified' });
+});
+
+it('gate off (no summary in the answer): falls back to the two searches and stops asking', async () => {
+  const fetch = vi.fn().mockImplementation(async (_url, init) => {
+    const body = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ slots: body.dateFrom === body.dateTo ? [daySlot] : [rangeSlot] }) };
+  });
+  vi.stubGlobal('fetch', fetch);
+  const props = { summary: true, serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00', rangeFrom: '2035-01-01' };
+  const { result, rerender } = renderHook((p) => useBestTimes(p), { initialProps: { ...props, date: '2035-01-02' } });
+  await waitFor(() => expect(result.current.bestInRange).not.toBeNull());
+  expect(result.current.availability).toBeNull();
+  expect(fetch.mock.calls.map((c) => !!JSON.parse(c[1].body).summary)).toEqual([true, false, false]);
+  expect(result.current.bestTimes[0]).toMatchObject({ date: '2035-01-02', start: '10:00' });
+  // The next pick does not ask for a summary again.
+  rerender({ ...props, date: '2035-01-03' });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(5));
+  expect(fetch.mock.calls.slice(3).some((c) => JSON.parse(c[1].body).summary)).toBe(false);
+});
+
+it('a failed summary request falls back without marking the gate off', async () => {
+  let call = 0;
+  const fetch = vi.fn().mockImplementation(async () => {
+    call += 1;
+    return call === 1 ? { ok: false, json: async () => ({ error: 'boom' }) } : { ok: true, json: async () => ({ slots: [daySlot] }) };
+  });
+  vi.stubGlobal('fetch', fetch);
+  const props = { summary: true, serviceId: 'fixture', technicianId: 'tech' };
+  const { result, rerender } = renderHook((p) => useBestTimes(p), { initialProps: { ...props, date: '2035-01-02' } });
+  await waitFor(() => expect(result.current.bestTimes).toHaveLength(1));
+  rerender({ ...props, date: '2035-01-03' });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+  expect(JSON.parse(fetch.mock.calls[2][1].body).summary).toBe(true);
+});
+
+it('a past date never asks for a summary', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ summary: true, date: '2020-01-02', serviceId: 'fixture', technicianId: 'tech' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect(JSON.parse(fetch.mock.calls[0][1].body).summary).toBeUndefined();
 });
