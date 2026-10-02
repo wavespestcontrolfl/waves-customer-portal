@@ -1220,6 +1220,31 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false));
   });
 
+  test('a reply with no photo list is no answer: the photos stay and the report holds (codex local r4 on #5624)', async () => {
+    const staged = stagedPhotos();
+    let reads = 0;
+    let readable = true;
+    const request = makeRequest({
+      // An unreadable body answers {}, as the tech app's request helper does.
+      photos: () => { reads += 1; return readable ? staged.photos() : {}; },
+      photoChange: staged.photoChange,
+    });
+    await openSheet(request, NOTE_BOX);
+    await screen.findByText('Counter edge');
+    readable = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Ants along the slider track' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
+    expect(await screen.findByText('Couldn’t read the visit’s photos. Check the connection.')).toBeTruthy();
+    expect(reads).toBe(2);
+    expect(screen.getByText('Counter edge')).toBeTruthy();
+    expect(screen.getByText('Ants along the slider track')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Read the photos again first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
+  });
+
   test('Add photo waits while a description is open: the manager never covers its mic (codex local r2 on #5624)', async () => {
     const staged = stagedPhotos();
     await openSheet(makeRequest({ photos: staged.photos, photoChange: staged.photoChange }), NOTE_BOX);

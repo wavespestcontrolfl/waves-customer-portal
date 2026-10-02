@@ -107,9 +107,14 @@ export function useVisitPhotos({ serviceId, request, version, keepOnFailure = fa
     setState((prev) => (prev.loaded ? { ...prev, loaded: false } : prev));
     request(`/tech/services/${serviceId}/photos`)
       .then((data) => {
-        if (sequence === readSequence.current) {
-          setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true, failed: false, read: true });
+        if (sequence !== readSequence.current) return;
+        // A reply with no photo list (an unreadable body answers {}) is no
+        // answer either, in the note's box (codex local r4 on #5624).
+        if (keepOnFailure && !Array.isArray(data?.photos)) {
+          setState((prev) => ({ ...prev, loaded: true, failed: true }));
+          return;
         }
+        setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true, failed: false, read: true });
       })
       // The photo manager reports its own errors.
       .catch(() => {
