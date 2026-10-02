@@ -103,6 +103,72 @@ describe('anchorSoleProperty', () => {
   });
 });
 
+describe('anchorSoleProperty — a series child follows its series (ops 2026-10-02)', () => {
+  // scheduled_services ⋈ customer_properties, as seriesAgreedPropertyId reads it.
+  function seriesConn({ visits, properties }) {
+    const conn = (table) => {
+      if (table === 'customer_properties') return fakeConn({ [properties[0]?.customer_id]: properties })(table);
+      const f = [];
+      const q = {
+        join: () => q,
+        where: (a) => { f.push(a); return q; },
+        whereNotIn: (col, vals) => { f.push({ notIn: vals }); return q; },
+        distinct: () => q,
+        limit: async (n) => {
+          const [orFn, eq, notIn] = f;
+          let root = null;
+          orFn({ where: (c, v) => { root = v; return { orWhere: () => {} }; } });
+          const rows = visits.filter((v) => (v.id === root || v.recurring_parent_id === root)
+            && v.customer_id === eq['ss.customer_id'] && !notIn.notIn.includes(v.status) && v.property_id
+            && properties.some((p) => p.id === v.property_id && p.active && p.customer_id === eq['p.customer_id']));
+          return [...new Set(rows.map((r) => r.property_id))].slice(0, n).map((property_id) => ({ property_id }));
+        },
+      };
+      return q;
+    };
+    return conn;
+  }
+  const properties = [
+    { id: 'home', customer_id: 'c', active: true },
+    { id: 'rental', customer_id: 'c', active: true },
+  ];
+
+  test('a multi-property customer\'s next visit takes the house the series is at, even when the root has none', async () => {
+    const conn = seriesConn({ properties, visits: [
+      { id: 'root', customer_id: 'c', status: 'cancelled', property_id: null },
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: 'home' },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'completed', property_id: 'home' },
+    ] });
+    const row = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(row, COLS, conn);
+    expect(row.property_id).toBe('home');
+  });
+
+  test('a series at two houses, or at none, stays for the office to place', async () => {
+    const split = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: 'home' },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: 'rental' },
+    ] });
+    const a = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(a, COLS, split);
+    expect(a.property_id).toBeNull();
+    const none = seriesConn({ properties, visits: [{ id: 'root', customer_id: 'c', status: 'pending', property_id: null }] });
+    const b = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(b, COLS, none);
+    expect(b.property_id).toBeNull();
+  });
+
+  test('a cancelled visit at another house does not count', async () => {
+    const conn = seriesConn({ properties, visits: [
+      { id: 'k1', recurring_parent_id: 'root', customer_id: 'c', status: 'cancelled', property_id: 'rental' },
+      { id: 'k2', recurring_parent_id: 'root', customer_id: 'c', status: 'pending', property_id: 'home' },
+    ] });
+    const row = { customer_id: 'c', property_id: null, recurring_parent_id: 'root' };
+    await anchorSoleProperty(row, COLS, conn);
+    expect(row.property_id).toBe('home');
+  });
+});
+
 describe('every spawned-row writer anchors the sole property', () => {
   const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 

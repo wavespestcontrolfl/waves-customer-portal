@@ -853,11 +853,43 @@ async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { loc
   };
 }
 
+/**
+ * The one active property a recurring series' own visits agree on: the root
+ * and its live (not cancelled/skipped) children, among this customer's
+ * ACTIVE properties. null when they name none or more than one. Ops
+ * 2026-10-02: a series root left without a property (its visits were linked
+ * later by the 20260829000050 backfill, which skips terminal roots) made the
+ * nightly top-up add each next visit with no property for a multi-property
+ * customer, though every other visit in the series sat at one house.
+ */
+async function seriesAgreedPropertyId(rootId, customerId, conn = db) {
+  if (!rootId || !customerId) return null;
+  const read = (c) => c('scheduled_services as ss')
+    .join('customer_properties as p', 'p.id', 'ss.property_id')
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where({ 'ss.customer_id': customerId, 'p.customer_id': customerId, 'p.active': true })
+    .whereNotIn('ss.status', ['cancelled', 'skipped'])
+    .distinct('ss.property_id')
+    .limit(2);
+  try {
+    const rows = await (conn.isTransaction ? conn.transaction((sp) => read(sp)) : read(conn));
+    return rows.length === 1 ? rows[0].property_id : null;
+  } catch {
+    return null;
+  }
+}
+
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
   if (cols.service_address_line1 && target.service_address_line1) return;
   if (cols.source_estimate_id && target.source_estimate_id) return;
+  // A series child follows the house its series is already at, before the
+  // sole-property fallback (which only resolves a one-property customer).
+  if (target.recurring_parent_id) {
+    const agreed = await seriesAgreedPropertyId(target.recurring_parent_id, target.customer_id, conn);
+    if (agreed) { target.property_id = agreed; return; }
+  }
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
