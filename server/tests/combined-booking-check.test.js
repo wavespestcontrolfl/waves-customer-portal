@@ -253,12 +253,13 @@ describe('visit prices', () => {
     const lawn = priced(lawnRows(), 175).map((row, i) => {
       if (i === 1) return { ...row, primary_line_price: 100 }; // $100 service + $75 add-on total: correct
       if (i === 2) return { ...row, has_addons: true }; // add-ons, no primary stamp: not readable, skipped
+      if (i === 5) return { ...row, has_addons: true, primary_line_price: 100 }; // add-ons + stamped primary: the primary is checked
       if (i === 3) return { ...row, estimated_price: 90, line_discount_amount: 10 }; // discounted: skipped
       if (i === 4) return { ...row, estimated_price: 90, discount_id: 'disc-1' };
       return { ...row, estimated_price: 100 };
     });
     expect(verdictFor(priced(pestRows(), 150), lawn).ok).toBe(true);
-    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90 } : row));
+    const wrongPrimary = priced(lawnRows(), 175).map((row) => (row.recurring_parent_id ? { ...row, primary_line_price: 90, has_addons: true } : row));
     expect(texts(verdictFor(priced(pestRows(), 150), wrongPrimary))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
   });
 

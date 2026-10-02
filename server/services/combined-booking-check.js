@@ -287,16 +287,19 @@ function checkPrices(dated, families, prices) {
 }
 
 // The service charge a visit bills, the way invoicing builds it
-// (invoice.js: primary_line_price when stamped, else the visit price): null
-// when that cannot be read on its own, that is, the visit carries add-ons
-// (row.has_addons, so estimated_price is the appointment total) or any
-// line / appointment discount (it cannot be apportioned to the service).
+// (invoice.js buildScheduledServiceInvoiceLines): a stamped primary_line_price
+// is its own line, add-ons or not; with no stamp the visit price is the
+// service only when the visit has no add-ons (otherwise it is the appointment
+// total). null when it cannot be read on its own: any line or appointment
+// discount (it cannot be apportioned to the service), or add-ons with no
+// primary stamp.
 function billedServicePrice(row) {
   const discounted = row.line_discount_id || Number(row.line_discount_amount) > 0 || Number(row.line_discount_dollars) > 0
     || row.discount_id || Number(row.discount_amount) > 0 || Number(row.discount_dollars) > 0;
-  if (row.has_addons || discounted) return null;
+  if (discounted) return null;
   const primary = row.primary_line_price;
-  return primary != null && primary !== '' ? Number(primary) : Number(row.estimated_price);
+  if (primary != null && primary !== '') return Number(primary);
+  return row.has_addons ? null : Number(row.estimated_price);
 }
 
 /**
@@ -658,7 +661,8 @@ function candidateQuery(conn, { now, todayET, standing, lastDay = null }) {
             // single-service population is never loaded; the urgent pass is
             // about time and technician only.
             if (!lastDay) {
-              this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id').where('s.estimated_price', '>', 0)
+              this.orWhere((priced) => priced.whereNotNull('s.recurring_parent_id')
+                .where((anyPrice) => anyPrice.where('s.estimated_price', '>', 0).orWhere('s.primary_line_price', '>', 0))
                 .whereRaw(`((SELECT COUNT(DISTINCT COALESCE(r.service_id::text, r.service_type)) FROM scheduled_services r
                   WHERE r.source_estimate_id = e.id AND r.customer_id = e.customer_id AND r.recurring_parent_id IS NULL) >= 2
                   OR EXISTS (SELECT 1 FROM scheduled_services r LEFT JOIN services cat ON cat.id = r.service_id

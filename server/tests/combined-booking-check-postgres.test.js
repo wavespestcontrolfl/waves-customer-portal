@@ -499,6 +499,25 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a visit priced only through primary_line_price is a candidate and is checked on it', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const lawnIds = (await rowsOf(trx, est.estimateId)).filter((row) => /lawn/i.test(row.service_type) && row.recurring_parent_id).map((row) => row.id);
+      await trx('scheduled_services').whereIn('id', lawnIds).update({ estimated_price: null, primary_line_price: 100 });
+      await trx('scheduled_services').where({ id: lawnIds[0] }).update({ primary_line_price: 90 });
+      await runCombinedBookingCheck({ conn: trx });
+      const [alert] = await alertsOf(trx, est.estimateId);
+      expect(alert.body).toMatch(/1 lawn visits priced \$90\.00, accepted \$100\.00/);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('a name-only combined-route series (no catalog row) is a price candidate too', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();
