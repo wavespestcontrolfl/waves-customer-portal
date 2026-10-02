@@ -75,12 +75,91 @@ async function firstPerformedVisit(estimateId, customerId) {
     .first('s.id');
 }
 
+// Returns false on failure so the caller keeps a retryable marker.
 async function closeStaleAlert(estimateId, resolution) {
   try {
     await require('./admin-alert-episodes').closeAdminAlertKeys(db, [staleAlertKey(estimateId)], 'resolved', { resolution });
+    return true;
   } catch (err) {
     logger.warn(`[paf-prepay] stale alert close failed for estimate ${estimateId}: ${err.message}`);
+    return false;
   }
+}
+
+// Owner R2 (2026-10-01): the annual prepay charge run after the first visit
+// did not go through. The customer got the pay link (when one could be sent);
+// the plan's later visits stay held, not billed per visit
+// (annual-prepay-renewals.js pafDeferredPrepayCoversVisit), until the year is
+// paid or the office decides — so the office hears about it once. Returns
+// false on failure: the sweep then records a retryable pending_alert.
+async function raiseChargeFailedAlert({ estimateId, invoiceId, delivered }) {
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: 'Collect an annual prepay that failed after visit 1',
+      why: delivered
+        ? 'The card charge after the first visit failed; the pay link went out and later visits are held, not billed.'
+        : 'The card charge after the first visit failed and the pay link could not be sent; later visits are held.',
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: 'invoice', id: String(invoiceId) },
+      doneWhen: 'invoice_paid',
+      who: 'person',
+    }, { dedupeKey: `paf-prepay-charge-failed:${estimateId}` });
+    return true;
+  } catch (err) {
+    logger.warn(`[paf-prepay] charge-failed alert failed for estimate ${estimateId}: ${err.message}`);
+    return false;
+  }
+}
+
+// Clear a pending_alert marker only while it still names this action.
+async function clearPendingAlert(estimateId, action) {
+  await db('estimates')
+    .where({ id: estimateId })
+    .whereRaw("estimate_data -> 'prepayAutoChargeJob' ->> 'pending_alert' = ?", [action])
+    .update({
+      estimate_data: db.raw(
+        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', ((estimate_data -> 'prepayAutoChargeJob') - 'pending_alert'))",
+      ),
+    });
+}
+
+// Office-alert work a job left behind after its state moved on (a failed
+// raise or close): retried every pass until it lands, whatever the job's
+// status now is, so a transient failure never loses or strands an alert.
+async function retryPendingAlerts() {
+  let rows = [];
+  try {
+    rows = await db('estimates')
+      .whereRaw("(estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'pending_alert' IS NOT NULL")
+      .orderBy('id', 'asc')
+      .limit(500)
+      .select('id', 'estimate_data');
+  } catch (err) {
+    logger.warn(`[paf-prepay] pending-alert scan failed: ${err.message}`);
+    return 0;
+  }
+  let done = 0;
+  for (const row of rows) {
+    const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
+    const action = job?.pending_alert;
+    let ok = false;
+    if (action === 'close_stale') {
+      ok = await closeStaleAlert(row.id, 'The annual prepay no longer waits for a first visit.');
+    } else if (action === 'charge_failed') {
+      ok = await raiseChargeFailedAlert({ estimateId: row.id, invoiceId: job.invoice_id, delivered: job.delivered !== false });
+    } else {
+      ok = true; // unknown marker: nothing to retry
+    }
+    if (ok) {
+      try { await clearPendingAlert(row.id, action); done += 1; } catch (err) {
+        logger.warn(`[paf-prepay] pending-alert clear failed for estimate ${row.id}: ${err.message}`);
+      }
+    }
+  }
+  return done;
 }
 
 async function raiseStaleAlert(estimateId, invoiceId) {
@@ -107,8 +186,13 @@ async function releaseOne(row, now) {
     : null;
   if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled') {
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
-    if (await casAwaiting(row.id, { status: 'cancelled_before_visit', reason, resolved_at: now.toISOString(), resolved_by: 'paf_release' })) {
-      await closeStaleAlert(row.id, 'The plan was cancelled before the first visit; nothing was charged.');
+    if (await casAwaiting(row.id, {
+      status: 'cancelled_before_visit', reason, resolved_at: now.toISOString(), resolved_by: 'paf_release',
+      ...(job.stale_alerted_at ? { pending_alert: 'close_stale' } : {}),
+    })) {
+      if (job.stale_alerted_at && await closeStaleAlert(row.id, 'The plan was cancelled before the first visit; nothing was charged.')) {
+        await clearPendingAlert(row.id, 'close_stale');
+      }
       return 'cancelled';
     }
     return null;
@@ -122,6 +206,7 @@ async function releaseOne(row, now) {
       status: 'pending',
       released_at: now.toISOString(),
       released_for_visit_id: visit?.id || null,
+      ...(job.stale_alerted_at ? { pending_alert: 'close_stale' } : {}),
     });
     if (!released) return null;
     if (!settled) {
@@ -133,7 +218,9 @@ async function releaseOne(row, now) {
         logger.warn(`[paf-prepay] due date update failed for invoice ${invoice.id}: ${err.message}`);
       }
     }
-    await closeStaleAlert(row.id, 'The first visit was performed; the annual prepay charge ran.');
+    if (job.stale_alerted_at && await closeStaleAlert(row.id, 'The first visit was performed; the annual prepay charge ran.')) {
+      await clearPendingAlert(row.id, 'close_stale');
+    }
     return 'released';
   }
   const since = new Date(job.authorized_at || job.created_at || 0);
@@ -149,7 +236,8 @@ async function releaseOne(row, now) {
 // Every awaiting job is visited on each pass, page by page (keyset on id):
 // jobs that stay waiting (no visit yet) never crowd a newer performed one out.
 async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() } = {}) {
-  const summary = { scanned: 0, released: 0, cancelled: 0, staleAlerted: 0 };
+  const summary = { scanned: 0, released: 0, cancelled: 0, staleAlerted: 0, alertsRetried: 0 };
+  summary.alertsRetried = await retryPendingAlerts();
   let afterId = null;
   for (;;) {
     let rows = [];
@@ -183,6 +271,8 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
 
 module.exports = {
   AWAITING,
+  raiseChargeFailedAlert,
+  retryPendingAlerts,
   STALE_DAYS,
   releaseDeferredPrepayCharges,
   staleAlertKey,

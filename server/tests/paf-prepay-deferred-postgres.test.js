@@ -175,6 +175,13 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await covers(f.childId)).toBe(true);
     });
 
+    it('keeps holding while the year sits with a third-party payer, unpaid', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'skipped', reason: 'payer_billed' } });
+      expect(await covers(f.childId)).toBe(true);
+      const voided = await deferredAccept({ jobPatch: { status: 'skipped', reason: 'invoice_void' } });
+      expect(await covers(voided.childId)).toBe(false);
+    });
+
     it('keeps holding later visits after a declined charge (R2)', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback' } });
       expect(await covers(f.childId)).toBe(true);
@@ -289,6 +296,32 @@ postgres('annual prepay charged after the first visit', () => {
       const ConsentText = require('../services/payment-method-consent-text');
       expect(consent.consent_text_snapshot).toBe(ConsentText.AFTER_VISIT_PREPAY_CARD_CONSENT_TEXT);
       expect(consent.consent_text_version).toBe(ConsentText.AFTER_VISIT_CONSENT_VERSION);
+    });
+
+    it('a failed R2 alert is kept on the job and raised on the next pass', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      require('../services/stripe').chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      raiseAdminAlert.mockRejectedValueOnce(new Error('synthetic alert failure'));
+      await sweep();
+      expect(await jobOf(f)).toMatchObject({ status: 'delivered_fallback', pending_alert: 'charge_failed' });
+      await release();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+      expect(await jobOf(f)).not.toHaveProperty('pending_alert');
+    });
+
+    it('a failed close of the no-visit alert is retried after the job is released', async () => {
+      const f = await deferredAccept({ jobPatch: { stale_alerted_at: new Date().toISOString() } });
+      await perform(f.parentId, f.customerId);
+      const episodes = require('../services/admin-alert-episodes');
+      const spy = jest.spyOn(episodes, 'closeAdminAlertKeys').mockRejectedValueOnce(new Error('synthetic close failure'));
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'pending', pending_alert: 'close_stale' });
+      await release();
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(await jobOf(f)).not.toHaveProperty('pending_alert');
+      spy.mockRestore();
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {

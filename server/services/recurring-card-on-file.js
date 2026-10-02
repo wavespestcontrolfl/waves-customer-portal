@@ -1279,32 +1279,6 @@ function classifySavedMethodChargeInvoice(freshInvoice) {
 // never sit silently unpaid. Idempotent: the charge service's durable
 // claim fences a concurrent in-flow executor, and every outcome resolves
 // the stamp.
-// Owner R2 (2026-10-01): the annual prepay charge run after the first visit
-// did not go through. The customer got the pay link (when one could be sent);
-// the plan's later visits stay held, not billed per visit
-// (annual-prepay-renewals.js pafDeferredPrepayCoversVisit), until the year is
-// paid or the office decides — so the office hears about it once.
-async function alertDeferredChargeFailed({ estimateId, invoiceId, delivered, settled }) {
-  if (settled) return;
-  try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    await raiseAdminAlert('billing', {
-      area: 'Billing',
-      action: 'Collect an annual prepay that failed after visit 1',
-      why: delivered
-        ? 'The card charge after the first visit failed; the pay link went out and later visits are held, not billed.'
-        : 'The card charge after the first visit failed and the pay link could not be sent; later visits are held.',
-      severity: 'needs-you',
-      link: `/admin/invoices?invoice=${invoiceId}`,
-      subject: { type: 'invoice', id: String(invoiceId) },
-      doneWhen: 'invoice_paid',
-      who: 'person',
-    }, { dedupeKey: `paf-prepay-charge-failed:${estimateId}` });
-  } catch (err) {
-    logger.warn(`[recurring-cof] deferred prepay failure alert failed for estimate ${estimateId}: ${err.message}`);
-  }
-}
-
 async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStaleMinutes = 60, limit = 20 } = {}) {
   // The kill switch stops NEW quoting/charging, but committed jobs must
   // still drain (pre-push Codex P0 r6): with the gate off, a stranded
@@ -2012,8 +1986,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);
       }
+      // Owner R2: one Billing alert; a failed raise is kept as a retryable
+      // pending_alert on the resolved job (paf-prepay-release.js).
+      let deferredAlertRaised = true;
       if (deferredToFirstVisit) {
-        await alertDeferredChargeFailed({ estimateId: row.id, invoiceId: job.invoice_id, delivered: fallbackDelivered, settled: fallbackSettled });
+        if (!fallbackSettled) {
+          deferredAlertRaised = await require('./paf-prepay-release')
+            .raiseChargeFailedAlert({ estimateId: row.id, invoiceId: job.invoice_id, delivered: fallbackDelivered });
+        }
       } else await alertUncollected(
         'Annual prepay accepted — stranded auto-charge could not complete',
         `The accept committed but the prepay auto-charge was interrupted and the recovery charge failed (${err.message}). ${fallbackSettled
@@ -2029,7 +2009,11 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // send must leave the job retryable (the stale-claim lease
       // re-attempts) instead of retiring it with no collection path at all.
       if (fallbackDelivered || fallbackSettled) {
-        await resolve('delivered_fallback', { reason: err.message, settled: fallbackSettled });
+        await resolve('delivered_fallback', {
+          reason: err.message,
+          settled: fallbackSettled,
+          ...(deferredAlertRaised ? {} : { pending_alert: 'charge_failed', delivered: fallbackDelivered }),
+        });
       }
     }
   }

@@ -15355,6 +15355,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? prepayAutoCharge.status
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
+        // The bound tender, so the after-first-visit notice names a bank
+        // debit for a saved bank account, never a card.
+        prepayChargeMethodType: prepayChargePlan?.method?.methodType || null,
         invoiceKind,
         afterVisitBilling: recurringCardPolicy.afterVisitCard === true
           && recurringCardLaneActive
@@ -20743,6 +20746,7 @@ function buildAcceptNotificationPayload({
   // 'paid' | 'processing' | null — the prepay auto-charge outcome
   // (GATE_PREPAY_CARD_AND_CHARGE); shapes the prepay copy below.
   prepayChargeOutcome = null,
+  prepayChargeMethodType = null,
   // 'paid' via account credit fully covering the quote (no card charge,
   // no receipt job) — the copy must confirm the coverage, never promise
   // a receipt (Codex r9).
@@ -20984,11 +20988,14 @@ function buildAcceptNotificationPayload({
     if (prepayChargeOutcome === 'after_first_visit') {
       // GATE_PAF_PREPAY: nothing charged at approval by design — the saved
       // method is charged after the first visit is performed. No pay ask.
+      const bank = prepayChargeMethodType === 'us_bank_account' || prepayChargeMethodType === 'ach';
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — card on file is charged after the first visit; nothing charged today.`,
+        adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved — ${bank ? 'saved bank account is debited' : 'card on file is charged'} after the first visit; nothing charged today.`,
         customerTitle: 'Estimate accepted',
-        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your annual prepay is charged to your card on file after your first visit.`,
+        customerBody: bank
+          ? `Your ${waveguardTier} WaveGuard plan is approved. Nothing is debited today — your annual prepay is debited from your saved bank account after your first visit.`
+          : `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your annual prepay is charged to your card on file after your first visit.`,
         customerLink: '/?tab=billing',
       };
     }

@@ -4082,11 +4082,27 @@ const PAF_PREPAY_HOLD_STATUSES = new Set([
   'awaiting_first_visit', 'pending', 'claimed', 'processing', 'paid', 'delivered_fallback',
 ]);
 
+// A year handed to a third-party payer (or settled with nothing due) is still
+// the plan's bill while the term is payment_pending: keep holding the visits
+// until it settles. Other skips (invoice missing / voided / refunded) are not
+// a live year bill and bill normally.
+const PAF_PREPAY_HOLD_SKIP_REASONS = new Set(['payer_billed', 'settled_zero_due']);
+function pafPrepayJobHolds(job) {
+  const status = String(job?.status || '');
+  if (PAF_PREPAY_HOLD_STATUSES.has(status)) return true;
+  return status === 'skipped' && PAF_PREPAY_HOLD_SKIP_REASONS.has(String(job?.reason || ''));
+}
+
 async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError = false } = {}) {
   if (scheduledService.prepaid_method) return false;
   if (!scheduledService.customer_id) return false;
   try {
-    if (!(await annualPrepayTableExists())) return false;
+    // Strict callers (charging / completion guards) must see a probe failure,
+    // never a cached "no table" that reads as uncovered — same direct probe
+    // as the stamped branch below.
+    if (throwOnError) {
+      if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+    } else if (!(await annualPrepayTableExists())) return false;
     // Cheapest question first: almost every customer has no payment_pending
     // term at all, so most calls end on this one indexed read.
     const terms = await conn('annual_prepay_terms')
@@ -4113,7 +4129,7 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
     const job = data && typeof data === 'object' ? data.prepayAutoChargeJob : null;
     if (!job || job.deferred_to_first_visit !== true) return false;
     if (String(job.invoice_id || '') !== String(term.prepay_invoice_id)) return false;
-    if (!PAF_PREPAY_HOLD_STATUSES.has(String(job.status || ''))) return false;
+    if (!pafPrepayJobHolds(job)) return false;
     return !(term.coverage_service_type && scheduledService.service_type
       && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type)));
   } catch (err) {
@@ -4125,8 +4141,6 @@ async function pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnErr
 
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
-
-  if (await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   // Codex round-7 P1 (owner ruling 2026-09-26, P2-4): an UNPAID termite
   // renewal successor stays covered through its OWN GRACE_DAYS payment
@@ -4148,6 +4162,10 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // to an unstamped visit (see its own comment) — never waves through a
   // visit that already carries some other, even malformed, prepay stamp.
   if (await termiteGraceCoversVisit(scheduledService, conn, { throwOnError })) return true;
+
+  // GATE_PAF_PREPAY: an unstamped visit of a year whose charge waits for (or
+  // failed after) the first visit — see pafDeferredPrepayCoversVisit.
+  if (await pafDeferredPrepayCoversVisit(scheduledService, conn, { throwOnError })) return true;
 
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED
