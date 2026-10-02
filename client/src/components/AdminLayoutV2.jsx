@@ -135,6 +135,11 @@ export default function AdminLayoutV2() {
     return () => window.removeEventListener("keydown", swallowPaletteShortcut, true);
   }, [fieldBusy]);
   const [user, setUser] = useState(null);
+  // True while the shell stands on the offline pass alone (no server answer):
+  // that readiness is the field workspace's only. Leaving /admin/today
+  // re-runs the online check before any other admin page mounts (Codex #5573
+  // r8).
+  const [offlineReady, setOfflineReady] = useState(false);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuTriggerRef = useRef(null);
@@ -149,7 +154,8 @@ export default function AdminLayoutV2() {
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
   // destination is the inbox, never a particular customer.
-  const unreadConversations = useUnreadConversations(authStatus === "ready" && ["admin", "owner"].includes(user?.role));
+  const sessionReady = authStatus === "ready" && !(offlineReady && !isFieldPath(location.pathname));
+  const unreadConversations = useUnreadConversations(sessionReady && ["admin", "owner"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
   // is covered. The layout only owns chrome geometry.
@@ -168,11 +174,6 @@ export default function AdminLayoutV2() {
   // stored one (another tab signed in): the check reruns for the new login
   // instead of applying the old login's answer.
   const [verifyRun, setVerifyRun] = useState(0);
-  // True while the shell stands on the offline pass alone (no server answer):
-  // that readiness is the field workspace's only. Leaving /admin/today
-  // re-runs the online check before any other admin page mounts (Codex #5573
-  // r8).
-  const [offlineReady, setOfflineReady] = useState(false);
   const locationRef = useRef(location);
   locationRef.current = location;
 
@@ -339,9 +340,9 @@ export default function AdminLayoutV2() {
   // only record of which admin surfaces get used. Waits for auth so an
   // expired session can't spray 401s.
   useEffect(() => {
-    if (authStatus !== "ready") return;
+    if (!sessionReady) return;
     trackAdminPageView({ pathname: location.pathname, search: location.search });
-  }, [authStatus, location.pathname, location.search]);
+  }, [sessionReady, location.pathname, location.search]);
 
   const handleLogout = () => {
     if (fieldBusy) return;
@@ -382,12 +383,15 @@ export default function AdminLayoutV2() {
   const fieldChrome = isMobile && fieldWorkspaceFlag.enabled && isFieldPath(location.pathname);
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
-  const canRenderRoute = authStatus === "ready"
+  // An offline-pass session is ready for the field workspace only: off Today
+  // it is not ready in this very render, before the re-verify effect runs, so
+  // no other admin page mounts on it for a frame (pre-push P1).
+  const canRenderRoute = sessionReady
     && (user?.role === "admin" || !isPathAdminOnly(location.pathname));
 
   return (
     <IntelligenceBarPageDataProvider open={openPalette}>
-    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && authStatus === 'ready'} agentEstimateEnabled={agentEstimateEnabled}>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && sessionReady} agentEstimateEnabled={agentEstimateEnabled}>
     <div
       className="admin-shell-v2"
       style={{

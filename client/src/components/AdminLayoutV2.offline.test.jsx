@@ -169,7 +169,12 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     );
     await screen.findByRole("button", { name: "to schedule" });
     const before = fetchMock.mock.calls.length;
+    let scheduleEverMounted = false;
+    const observer = new MutationObserver(() => { if (document.body.textContent.includes("Schedule content")) scheduleEverMounted = true; });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     await act(async () => { screen.getByRole("button", { name: "to schedule" }).click(); });
+    observer.disconnect();
+    expect(scheduleEverMounted).toBe(false);
     await act(async () => {});
     expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
     expect(screen.queryByText("Schedule content")).not.toBeInTheDocument();
