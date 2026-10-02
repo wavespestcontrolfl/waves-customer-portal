@@ -32,6 +32,7 @@ function printReport(since, until, f) {
     `  Median minutes to that reply       ${f.person_reply_median_minutes === null ? 'n/a' : f.person_reply_median_minutes}`,
     `  Followed by a schedule change <48h ${f.followed_within_48h.any}${pct(f.followed_within_48h.any, f.scheduling_flagged)}`,
     `    moves / cancels+skips / bookings ${f.followed_within_48h.moves} / ${f.followed_within_48h.cancels_or_skips} / ${f.followed_within_48h.new_bookings}`,
+    '    (moves = logged moves only; a date changed in the admin Edit appointment form is not logged and not counted)',
     '  Per week (Monday, Eastern):',
     ...Object.keys(f.per_week).sort().map((w) => `    ${w}  ${f.per_week[w]}`),
   ];

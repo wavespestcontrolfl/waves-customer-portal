@@ -10,6 +10,12 @@
  * (a visit moved, was cancelled or skipped, or a new visit was created). That is
  * "followed by", not "caused by"; the offer ledger is what later ties a change
  * to the text that asked for it.
+ *
+ * Moves are what reschedule_log records: the rebooker, the reschedule link,
+ * the reminder reply, dispatch and the call pipeline. A date changed in the
+ * admin Edit appointment form writes no move row, so those moves are NOT
+ * counted here and the report says so. The AI moves this lane adds go through
+ * the rebooker and are logged, so the after-number is not short.
  */
 
 const { hasSchedulingIntent, hasRescheduleOrAwayIntent } = require('./sms-intent');
