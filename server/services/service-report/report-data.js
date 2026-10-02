@@ -3221,8 +3221,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
     .limit(5)
-    // read-failure-exempt: gallery photos only; no insight or memory entry reads them
-    .catch(() => []);
+    // Recorded: these photos set the progress block's confidence, which the
+    // v6 copy writer (GATE_LAWN_REPORT_COPY_V6) reads before its permanent
+    // freeze. Empty on failure, as before.
+    .catch(failSoft(readFailures, 'assessment_photos', []));
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),

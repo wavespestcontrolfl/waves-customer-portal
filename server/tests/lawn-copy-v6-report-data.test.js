@@ -286,6 +286,17 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(next.data.lawnAssessment.weekWeatherUncacheable).toBe(false);
   });
 
+  test("a failed read of this visit's photos (progress confidence) is a degraded read: no model, no freeze; recovery freezes", async () => {
+    live();
+    const recs = records();
+    const { data } = await render(recs, { lawn_assessment_photos: FAIL });
+    expect(v6Calls()).toHaveLength(0);
+    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    await render(recs);
+    expect(storedLawnCopyV6For(recs['svc-cur'].structured_notes, 'la-cur')).toBeTruthy();
+  });
+
   test('a failed next-visit read (the visit gap the writer reads) is a degraded read: no model, no freeze', async () => {
     live();
     const recs = records();
