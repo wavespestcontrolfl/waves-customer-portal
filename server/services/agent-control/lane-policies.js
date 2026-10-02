@@ -181,6 +181,8 @@ const LANE_RUNTIME = {
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
   typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
+  // The same packages on Cloudflare Clef (GATE_TYPED_DECISIONS_CLEF, dark): shadow-only, same rules as typed_decisions.
+  typed_decisions_clef: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },

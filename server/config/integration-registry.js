@@ -89,6 +89,16 @@ const ADMIN_INTEGRATIONS = [
     gates: [{ key: 'typedDecisions', label: 'Typed decisions' }],
   },
   {
+    id: 'cloudflare_workers_ai',
+    category: 'AI Providers',
+    name: 'Cloudflare Clef',
+    platform: 'Cloudflare Workers AI',
+    description: 'Typed decisions, second provider (shadow; dark behind GATE_TYPED_DECISIONS_CLEF)',
+    env: { required: ['CF_ACCOUNT_ID'], oneOfRequired: ['CF_WORKERS_AI_TOKEN', 'CF_API_TOKEN'], supporting: ['MODEL_CLOUDFLARE_CLEF'] },
+    health: { type: 'token-health', key: 'cloudflare_workers_ai', primaryEnvKey: 'CF_WORKERS_AI_TOKEN' },
+    gates: [{ key: 'typedDecisionsClef', label: 'Typed decisions (Clef)' }],
+  },
+  {
     id: 'google_apis',
     category: 'Data & Research',
     name: 'Google APIs',
