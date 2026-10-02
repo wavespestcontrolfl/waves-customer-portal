@@ -147,6 +147,9 @@ describe('rankCitedPages', () => {
       'https://localsite.example/best-pest-control-companies-parrish', // unknown site WITH best word → list
       'https://todayshomeowner.com/articles/pest-control-identification/', // identification article → not
       'https://patch.com/florida/sarasota/business/listing/123/acme-pest-control-services', // directory route on an editorial host → not
+      'https://patch.com/florida/sarasota/news/local-pest-control-company-owner-retires', // a news story → not
+      'https://floridist.com/what-are-the-best-pest-control-companies-in-sarasota', // explicit roundup despite "what" → list
+      'https://localsite.example/best-pest-control-businesses-in-sarasota', // explicit roundup despite "businesses" → list
     ];
     const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
     expect(byKey).toEqual({
@@ -156,6 +159,9 @@ describe('rankCitedPages', () => {
       'localsite.example/best-pest-control-companies-parrish': true,
       'todayshomeowner.com/articles/pest-control-identification': false,
       'patch.com/florida/sarasota/business/listing/123/acme-pest-control-services': false,
+      'patch.com/florida/sarasota/news/local-pest-control-company-owner-retires': false,
+      'floridist.com/what-are-the-best-pest-control-companies-in-sarasota': true,
+      'localsite.example/best-pest-control-businesses-in-sarasota': true,
     });
   });
 

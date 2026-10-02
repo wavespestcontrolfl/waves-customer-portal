@@ -82,26 +82,33 @@ const ARTICLE_PATH_RE = /\b(costs?|prices?|pricing|how|what|why|when|diy|signs|i
 // …and never a directory route on an editorial host (patch.com/…/business/
 // listing/…): a directory is joined by signing up, not by a pitch.
 const DIRECTORY_PATH_RE = /\b(business|businesses|listing|listings|directory|biz|profile|profiles|claim)\b/;
-function isProviderListPath(words) {
-  return PROVIDER_LIST_PATH_RE.test(words) && ![PRODUCT_PATH_RE, ARTICLE_PATH_RE, DIRECTORY_PATH_RE].some((re) => re.test(words));
-}
+
+// Sites that publish local provider roundups as their pages (not news): a
+// provider path on them is a roundup without a best/top word in the address
+// (owner 2026-10-01 "loosen the rule": smarfle.com/fl/bradenton/pest-control).
+const ROUNDUP_SITES = Object.freeze(['smarfle.com', 'floridist.com', 'todayshomeowner.com']);
+// "best"/"top" plus providers in the plural: an explicit roundup, whatever
+// other words its address carries ("what-are-the-best-pest-control-companies…").
+const PLURAL_PROVIDERS_RE = /\b(companies|businesses|exterminators|services|pros|contractors|providers)\b/;
 
 /**
- * isListPage(page, url) → whether the cited-page pitch fits this page. An
- * editorial page whose path is about service providers (not products, not a
- * cost or how-to article), read with tracking parameters stripped. A known
- * editorial site (the classifier's editorial domains: smarfle, floridist,
- * Today's Homeowner, local news) qualifies on that alone — owner 2026-10-01
- * "loosen the rule" (smarfle.com/fl/bradenton/pest-control was left out). An
- * unknown site the listicle heuristic promoted still needs a best / top /
- * rated / near-me word: a company's own service-area page
- * (greenteampest.com/service-areas/parrish) looks the same otherwise. Never a
- * directory: a /biz/ profile is one company, and a directory is joined by
- * signing up, not by a pitch.
+ * isListPage(page, url) → whether the cited-page pitch fits this page: an
+ * editorial page about service providers, read with tracking parameters
+ * stripped, never a product roundup. Then, first match wins:
+ *   1. best/top/near-me + providers in the plural → a roundup;
+ *   2. a cost / how-to / identification article or a directory route → not;
+ *   3. a best/top/near-me word, or a ROUNDUP_SITES host → a roundup.
+ * Anything else — a news story, a company's own service-area page
+ * (greenteampest.com/service-areas/parrish) — is not. A /biz/ profile is one
+ * company, and a directory is joined by signing up, not by a pitch.
  */
 function isListPage(page, url) {
-  if (page.category !== 'editorial' || !isProviderListPath(pathWords(url))) return false;
-  return page.subtype !== 'listicle_candidate' || hasBestToken(displayUrl(url));
+  const words = pathWords(url);
+  if (page.category !== 'editorial' || !PROVIDER_LIST_PATH_RE.test(words) || PRODUCT_PATH_RE.test(words)) return false;
+  const best = hasBestToken(displayUrl(url));
+  if (best && PLURAL_PROVIDERS_RE.test(words)) return true;
+  if (ARTICLE_PATH_RE.test(words) || DIRECTORY_PATH_RE.test(words)) return false;
+  return best || ROUNDUP_SITES.some((d) => page.host === d || page.host.endsWith(`.${d}`));
 }
 function pathWords(urlString) {
   try {
