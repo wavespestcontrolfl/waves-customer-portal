@@ -85,14 +85,24 @@ function executesWithoutCard(toolName, input = {}) {
 }
 
 // What the model is told after a direct commit. `committed` is the
-// { status, body } commitPendingAction returned.
+// { status, body } commitPendingAction returned. An unknown outcome (the
+// runner stopped after the approval was consumed, so the mutation may have
+// committed) is reported as exactly that — never as "did not complete",
+// which would invite a retry. A saved outcome whose recovery record could
+// not be written carries the commit path's own warning for the same reason.
 function directModelResult(committed) {
   const body = committed?.body || {};
-  if (body.success === true) {
-    return { executed: true, outcome: body.outcome, result: body.result,
-      note: 'Done — this executed directly, with no confirmation card. Tell the operator what changed in one short line.' };
+  const persistence = body.receiptPersisted === false ? { receiptPersisted: false, warning: body.warning } : {};
+  if (body.outcome === 'outcome_unknown' || body.result?.outcome_unknown === true) {
+    return { executed: null, outcome: 'outcome_unknown', result: body.result, ...persistence,
+      error: body.result?.error || 'The outcome of this change could not be established.',
+      note: 'OUTCOME UNKNOWN — the change may or may not have been applied. Do NOT call this tool again. Re-read the record to see whether it changed, and tell the operator in one short line what you found.' };
   }
-  return { executed: false, outcome: body.outcome || 'failed', result: body.result,
+  if (body.success === true) {
+    return { executed: true, outcome: body.outcome, result: body.result, ...persistence,
+      note: `Done — this executed directly, with no confirmation card. Tell the operator what changed in one short line.${persistence.warning ? ' Do not repeat the action.' : ''}` };
+  }
+  return { executed: false, outcome: body.outcome || 'failed', result: body.result, ...persistence,
     error: body.error || body.result?.error || 'The change did not complete.',
     note: 'This did NOT complete and nothing is awaiting approval. Say what happened in one short line; do not claim it is done.' };
 }

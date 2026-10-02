@@ -105,6 +105,14 @@ describe('which writes skip the card', () => {
     expect(OwnerDirect.directModelResult({ body: { success: false, outcome: 'failed', result: { error: 'Lead not found' } } }))
       .toMatchObject({ executed: false, error: 'Lead not found' });
     expect(OwnerDirect.directModelResult(null)).toMatchObject({ executed: false });
+    // Unknown is its own state: the mutation may have committed.
+    const unknown = OwnerDirect.directModelResult({ body: { success: false, outcome: 'outcome_unknown', result: { outcome_unknown: true, code: 'execution_interrupted' } } });
+    expect(unknown).toMatchObject({ executed: null, outcome: 'outcome_unknown' });
+    expect(unknown.note).toMatch(/Do NOT call this tool again/);
+    // A saved outcome with no recovery record carries the commit path's warning.
+    const unsaved = OwnerDirect.directModelResult({ body: { success: true, outcome: 'completed', result: { success: true }, receiptPersisted: false, warning: 'Do not repeat the action.' } });
+    expect(unsaved).toMatchObject({ executed: true, receiptPersisted: false, warning: 'Do not repeat the action.' });
+    expect(unsaved.note).toMatch(/Do not repeat/);
   });
 });
 

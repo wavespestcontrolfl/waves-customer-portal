@@ -15,6 +15,8 @@ const mockCreatePendingAction = jest.fn();
 const mockClaimForConfirm = jest.fn();
 const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
+const mockAttachThread = jest.fn(async () => 1);
+const mockAppendExchange = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
@@ -92,6 +94,14 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   claimForConfirm: (...args) => mockClaimForConfirm(...args),
   cancelPendingAction: (...args) => mockCancelPendingAction(...args),
   recordResult: (...args) => mockRecordResult(...args),
+  attachThread: (...args) => mockAttachThread(...args),
+  // Recovery after an interrupted commit finds no receipt here.
+  getActionReceipt: jest.fn(async () => null),
+}));
+jest.mock('../services/intelligence-bar/threads', () => ({
+  threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
+  appendExchange: (...args) => mockAppendExchange(...args),
+  latestThread: jest.fn(), getThread: jest.fn(), listThreads: jest.fn(), purgeExpiredThreads: jest.fn(),
 }));
 // create_appointment proposals project the customer's inspection credit
 // (W0B disclosure) — keep it off the db stub here.
@@ -335,6 +345,48 @@ describe('owner-direct in /query', () => {
       // Claimed and consumed: nothing left to cancel.
       expect(mockCancelPendingAction).not.toHaveBeenCalled();
       expect(writeResultSeenByModel()).toMatchObject({ executed: false, error: 'A customer with this phone already exists' });
+    });
+  });
+
+  test('owner + gate: a direct commit joins the conversation thread so its receipt is recallable', async () => {
+    process.env.GATE_IB_THREADS = 'true';
+    mockAppendExchange.mockResolvedValue({ threadId: 'thread-1', lastSeq: 4 });
+    try {
+      scriptModelTurns(CREATE_CUSTOMER);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
+        expect(body.pendingActions).toEqual([]);
+        expect(mockAttachThread).toHaveBeenCalledWith([PENDING_ID], 'thread-1', 4, 'owner-1');
+      });
+      // An approval that was never consumed is cancelled, not attached.
+      jest.clearAllMocks();
+      mockAppendExchange.mockResolvedValue({ threadId: 'thread-1', lastSeq: 5 });
+      mockClaimForConfirm.mockResolvedValue({ error: 'expired' });
+      scriptModelTurns(CREATE_CUSTOMER);
+      await withServer(async (baseUrl) => {
+        await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
+        expect(mockAttachThread).not.toHaveBeenCalled();
+      });
+    } finally {
+      delete process.env.GATE_IB_THREADS;
+    }
+  });
+
+  test('owner + gate: an unknown outcome is reported as unknown, never as not done', async () => {
+    // The runner throws after the approval was consumed: the commit path
+    // answers outcome_unknown (recovery found no receipt).
+    mockExecuteTool.mockImplementation(async (...call) => { if (confirmedCall(call)) throw new Error('socket hang up'); return { preview: true }; });
+    scriptModelTurns(CREATE_CUSTOMER);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
+      expect(body.pendingActions).toEqual([]);
+      const seen = writeResultSeenByModel();
+      expect(seen).toMatchObject({ executed: null, outcome: 'outcome_unknown' });
+      expect(seen.note).toMatch(/Do NOT call this tool again/);
+      expect(seen.note).not.toMatch(/did NOT complete/);
+      // Consumed, so never cancelled; the unknown receipt was written.
+      expect(mockCancelPendingAction).not.toHaveBeenCalled();
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ outcome_unknown: true }), { onlyIfEmpty: true });
     });
   });
 

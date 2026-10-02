@@ -2799,6 +2799,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
+    const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
@@ -2971,6 +2972,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               let committed = null;
               try {
                 committed = await commitPendingAction(req, { id: proposed.clientPayload.id, contractHash: proposed.clientPayload.contract_hash });
+                if (committed.claimed) directActionIds.push(proposed.clientPayload.id);
               } finally {
                 // An approval that was never consumed must not linger as a
                 // pending row with no card to confirm or cancel it.
@@ -3204,9 +3206,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         persistedThreadSeq = appended?.lastSeq ?? null;
         // Link this exchange's proposals to the thread so recall can join a
         // conversation to its receipts (actor-bound inside the service).
-        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && pendingProposals.length) {
+        // Direct (owner-mode) commits join too: they had no card, but their
+        // execution receipt must be recallable from the conversation.
+        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && (pendingProposals.length || directActionIds.length)) {
           await PendingActions.attachThread(
-            pendingProposals.map(p => p.id), persistedThreadId, persistedThreadSeq, getAdminActorId(req),
+            [...pendingProposals.map(p => p.id), ...directActionIds], persistedThreadId, persistedThreadSeq, getAdminActorId(req),
           );
         }
       } catch (err) {
