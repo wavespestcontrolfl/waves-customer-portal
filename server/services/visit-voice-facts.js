@@ -33,7 +33,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v3';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v4';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -83,7 +83,7 @@ const VOICE_FACTS_SCHEMA = {
     spray: {
       type: 'object',
       properties: {
-        method: { type: 'string', enum: ['perimeter', 'spot', 'none'] },
+        method: { type: 'string', enum: ['perimeter', 'spot', 'none', 'not_said'] },
         quote: { type: 'string' },
       },
       required: ['method', 'quote'],
@@ -168,7 +168,7 @@ List an area only when the note says product went down there. A place the techni
 
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
 
-spray: how the technician sprayed, as the note says it. "perimeter" when they sprayed around the outside of the home (around the house, the perimeter, the foundation, all the way around); "spot" when they sprayed only particular spots; "none" when the note does not say how they sprayed, or they did not spray. Give the quote: the exact words from the note that say it, copied character for character ("" for none).
+spray: how the technician sprayed, as the note says it. "perimeter" when they sprayed around the outside of the home (around the house, the perimeter, the foundation, all the way around); "spot" when they sprayed only particular spots; "none" when the note says they did not spray ("didn't spray today"); "not_said" when the note does not say whether or how they sprayed. Give the quote: the exact words from the note that say it, copied character for character ("" for not_said).
 
 Return empty lists when the note does not say. Never guess.
 
@@ -248,13 +248,20 @@ function validateVoiceFacts(json, note) {
 
 // How the sprays went down: only a grounded quote the note does not deny. A
 // perimeter spray decides the trace and the sprays' method, so one the note
-// does not hold up is unclear, never silently a spot treatment.
+// does not hold up is unclear, never silently a spot treatment; so is a spot
+// spray whose own words deny it. "Didn't spray" said in so many words is
+// noSpray (its quote is the denial, so only its grounding is checked): the
+// sheet then holds while a spray product is still on the visit.
 function readSpray(spray, grounding) {
+  if (spray.method === 'none') {
+    return { spray: null, unclearSpray: false, noSpray: !!groundedQuote(spray.quote, grounding) };
+  }
   const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
   const holds = !!read && !read.denied;
   return {
     spray: holds ? { method: spray.method, quote: read.quote } : null,
-    unclearSpray: spray.method === 'perimeter' && !holds,
+    unclearSpray: (spray.method === 'perimeter' && !holds) || (spray.method === 'spot' && !!read?.denied),
+    noSpray: false,
   };
 }
 
@@ -268,7 +275,8 @@ function readSpray(spray, grounding) {
  */
 async function readVoiceFacts(note) {
   const empty = (status) => ({
-    status, areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, heard: { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false }, version: VOICE_FACTS_VERSION,
+    status, areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false,
+    heard: { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false }, version: VOICE_FACTS_VERSION,
   });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
@@ -299,9 +307,11 @@ async function readVoiceFacts(note) {
     pests: heard.pests.map((entry) => entry.name),
     // 'perimeter' | 'spot' | null (not said)
     spray: heard.spray?.method || null,
-    // A perimeter heard that the note does not hold up: the sheet asks for it
+    // A spray heard that the note does not hold up: the sheet asks for it
     // plainly rather than record a spot treatment with no trace.
     unclearSpray: heard.unclearSpray,
+    // "Didn't spray", in the note's own words.
+    noSpray: heard.noSpray,
     heard,
     version: VOICE_FACTS_VERSION,
   };

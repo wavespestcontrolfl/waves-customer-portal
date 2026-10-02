@@ -300,7 +300,16 @@ describe('generate and read', () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [], spray: null, unclearSpray: true } }));
     await generate();
     expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: how you sprayed');
-    expect(screen.getByText('It isn’t clear whether you sprayed all the way around the house. Say plainly how you sprayed, then write it again.')).toBeTruthy();
+    expect(screen.getByText('It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+
+  test('a note that says no spraying holds the send while a spray is still on the visit (GitHub Codex P1)', async () => {
+    const request = makeRequest({ facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: [], spray: null, noSpray: true } });
+    await openSheet(request);
+    await generate({ note: "Didn't spray today; placed bait inside along the counter." });
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside · no spraying');
+    expect(screen.getByText('Your note says you didn’t spray, but Taurus SC is a spray. Remove it or change how it went down, then write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
@@ -639,6 +648,29 @@ describe('complete and send', () => {
     failing = false;
     fireEvent.click(screen.getByRole('button', { name: 'Check the trace again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+  });
+
+  test('a way picked by hand for an added product stays when the note is read (codex r8)', async () => {
+    const products = [...CATALOG, { id: 'gentrol', name: 'Gentrol IGR', category: 'Insecticide' }];
+    const request = makeRequest({
+      products,
+      facts: { ...FACTS, spray: 'perimeter' },
+      trace: { enabled: true, treatmentZone: { linear_ft: 150, capture_mode: 'perimeter' } },
+    });
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /^Gentrol IGR\b/ }));
+    const editor = screen.getByRole('group', { name: 'Gentrol IGR' });
+    fireEvent.click(within(within(editor).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }));
+    fireEvent.change(within(editor).getByLabelText('How much?'), { target: { value: '1' } });
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const body = request.bodies('/complete')[0];
+    expect(body.products.find((product) => product.productId === 'gentrol')).toMatchObject({ applicationMethod: 'spot_treatment' });
+    expect(body.products.find((product) => product.productId === 'gentrol')).not.toHaveProperty('areaValue');
+    expect(body.products.find((product) => product.productId === 'taurus')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150 });
   });
 
   test('a spot visit with no trace saved completes with spot treatments and no trace step', async () => {

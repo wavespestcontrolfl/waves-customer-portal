@@ -88,7 +88,7 @@ describe('validateVoiceFacts', () => {
     }, NOTE);
     // A place heard on a quote the note does not hold is unresolved (the
     // sheet holds), never recorded and never silently dropped.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null, unclearSpray: false });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Garage'], pests: [], spray: null, unclearSpray: false, noSpray: false });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -168,7 +168,7 @@ describe('validateVoiceFacts', () => {
     // A denied area is never recorded and never silently dropped: the sheet
     // asks for it plainly.
     // The perimeter heard on a denied quote is unclear too: never a spot treatment.
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null, unclearSpray: true });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside'], pests: [], spray: null, unclearSpray: true, noSpray: false });
   });
 
   test('an inexact quote for a place never drops it silently', () => {
@@ -251,7 +251,7 @@ describe('validateVoiceFacts', () => {
       pests: [{ name: 'spiders', quote: 'Checked for spiders' }],
       spray: { method: 'none', quote: '' },
     }, note);
-    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null, unclearSpray: false });
+    expect(facts).toEqual({ areas: [], unclearAreas: ['Inside', 'Outside', 'Garage'], pests: [], spray: null, unclearSpray: false, noSpray: false });
   });
 
   test('a negative earlier in the sentence is about something else (codex r5 on #5538)', () => {
@@ -276,10 +276,20 @@ describe('validateVoiceFacts', () => {
   test('a perimeter spray the note does not hold up is unclear, never a spot treatment (GitHub Codex P1 on #5538)', () => {
     const note = 'Sprayed all the way around the house. Spot sprayed the garage door frames.';
     const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
-    expect(read({ method: 'perimeter', quote: 'sprayed around the house' })).toMatchObject({ spray: null, unclearSpray: true });
+    expect(read({ method: 'perimeter', quote: 'sprayed around the house' })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
     expect(read({ method: 'perimeter', quote: 'Sprayed all the way around the house' })).toMatchObject({ spray: { method: 'perimeter' }, unclearSpray: false });
     // A spot quote that does not hold reads as no method, which is spot anyway.
-    expect(read({ method: 'spot', quote: 'spot sprayed the frames' })).toMatchObject({ spray: null, unclearSpray: false });
+    expect(read({ method: 'spot', quote: 'spot sprayed the frames' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: false });
+  });
+
+  test('"didn\'t spray" in the note\'s own words is no spraying, and a spot spray its own words deny is unclear (GitHub Codex P1 on #5538)', () => {
+    const note = "Didn't spray today; placed bait inside along the counter.";
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note);
+    expect(read({ method: 'none', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: false, noSpray: true });
+    // Never on words the note does not hold, and "not said" is no claim at all.
+    expect(read({ method: 'none', quote: 'did not spray anything' })).toMatchObject({ noSpray: false });
+    expect(read({ method: 'not_said', quote: '' })).toMatchObject({ spray: null, unclearSpray: false, noSpray: false });
+    expect(read({ method: 'spot', quote: "Didn't spray today" })).toMatchObject({ spray: null, unclearSpray: true, noSpray: false });
   });
 
   test('how the sprays went down stands only on a grounded quote that says it happened', () => {
@@ -294,7 +304,7 @@ describe('validateVoiceFacts', () => {
   });
 
   test('a malformed answer is no facts', () => {
-    const none = { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false };
+    const none = { areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false };
     expect(validateVoiceFacts(null, NOTE)).toEqual(none);
     expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual(none);
   });

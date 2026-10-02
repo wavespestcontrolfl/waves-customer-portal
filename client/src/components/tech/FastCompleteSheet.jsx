@@ -833,6 +833,10 @@ function perimeterSprayRow(active, draft) {
 function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead }) {
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
+  // The note says no spraying, so a product still going down as a spray (the
+  // house mix starts on) would be recorded as applied when it wasn't.
+  const sprayedAnyway = draft?.facts?.noSpray
+    && active.find((row) => ['spot_treatment', 'perimeter_spray'].includes(rowMethod(row, reportSprayMethod(draft.facts))));
   // A trace saved while the note now records no spray around the house would
   // show on the customer's report as a sprayed perimeter.
   const unusedTrace = draft && perimeterFeet && !perimeterRow;
@@ -841,6 +845,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
     [!draft, 'Generate the report first.'],
     [draft && !draft.text.trim(), 'The report is empty. Write it again.'],
     [draft && factsHold(draft.facts), draft && factsHold(draft.facts)],
+    [sprayedAnyway, sprayedAnyway && `Your note says you didn’t spray, but ${sprayedAnyway.name} is a spray. Remove it or change how it went down, then write it again.`],
     // Whether a trace is saved decides both holds below.
     [!traceRead.loaded, 'Checking for a saved trace…'],
     [traceRead.failed, 'Couldn’t check for a saved trace. Check the trace again.'],
@@ -909,8 +914,9 @@ function useReportDraft({ request, base }) {
         pests: listOf(heard.pests),
         spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
         unclearSpray: heard.unclearSpray === true,
+        noSpray: heard.noSpray === true,
       }
-      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false };
+      : { status: 'failed', areas: [], unclearAreas: [], pests: [], spray: null, unclearSpray: false, noSpray: false };
     if (sequence !== sequenceRef.current) return;
     const payload = buildPayload(facts);
     let written = null;
@@ -1195,6 +1201,7 @@ function VisitStep({
             <ProductsSection
               products={products}
               method={sprayMethod}
+              stickyPicks
               editAmounts={editAmounts}
               locked={locked}
               onToggleEdit={() => setEditAmounts((on) => !on)}
@@ -1277,7 +1284,10 @@ function CustomerTextResult({ outcome }) {
 
 // Every product on the sheet. A house-mix tile taps off and on (struck
 // through, never removed); an added product's tile opens its editor.
-function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse }) {
+// stickyPicks (the report flow): a way the tech picks for a product stays that
+// way. The visit's way there is the note's read, which can change when the
+// report is written, so a pick never quietly follows it.
+function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -1334,6 +1344,7 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
           id={editorId}
           row={editing}
           method={method}
+          stickyPicks={stickyPicks}
           locked={locked}
           onChange={(patch) => updateRow(editing.productId, patch)}
           onRemove={removeEditing}
@@ -1394,7 +1405,7 @@ function ProductTile({ tileRef, row, editorId, locked, onClick }) {
 
 // An added product: how much, in the units its measure allows, and how it
 // went down. Fresh from the picker, the amount is the next thing to enter.
-function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDone }) {
+function AddedProductEditor({ id, row, method, stickyPicks, locked, onChange, onRemove, onDone }) {
   const nameId = useId();
   const amountId = useId();
   const amountRef = useRef(null);
@@ -1409,7 +1420,7 @@ function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDon
         <span className="tech-visit-muted">{[categoryLabel(row.product), 'added by you'].filter(Boolean).join(' · ')}</span>
       </div>
       <AmountEntry id={amountId} inputRef={amountRef} row={row} locked={locked} onChange={onChange} />
-      <RowMethodPicker row={row} method={method} locked={locked} onChange={onChange} />
+      <RowMethodPicker row={row} method={method} sticky={stickyPicks} locked={locked} onChange={onChange} />
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-primary" disabled={locked} onClick={onDone}>Done</Button>
@@ -1426,14 +1437,14 @@ const methodLabel = (value) => {
 // How an added product went down. A spray follows the visit's How until the
 // tech picks another way; a product with its own catalog method (a bait, a
 // granule) starts there. Picking the row's standard way puts it back on it.
-function RowMethodPicker({ row, method, locked, onChange }) {
+function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
   const labelId = useId();
   const current = rowMethod(row, method);
   const standard = SPRAY_METHODS.has(row.catalogMethod) ? method : row.catalogMethod;
   const ownMethod = row.catalogMethod && !ROW_METHOD_CHOICES.some((choice) => choice.value === row.catalogMethod);
   const choices = ownMethod ? [...ROW_METHOD_CHOICES, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ROW_METHOD_CHOICES;
   const pick = (value) => onChange({
-    methodInput: value === standard ? null : value,
+    methodInput: !sticky && value === standard ? null : value,
     // A rate typed for one method doesn't carry to another.
     ...(value !== current ? { rateInput: null } : {}),
   });
@@ -1445,7 +1456,7 @@ function RowMethodPicker({ row, method, locked, onChange }) {
           <Chip disabled={locked} key={choice.value} label={choice.label} pressed={current === choice.value} onClick={() => pick(choice.value)} />
         ))}
       </div>
-      {followsVisitMethod(row) && <p className="tech-visit-muted">Same as the visit&apos;s How</p>}
+      {followsVisitMethod(row) && <p className="tech-visit-muted">{sticky ? 'Goes the way your note says until you pick one' : 'Same as the visit\'s How'}</p>}
     </div>
   );
 }
