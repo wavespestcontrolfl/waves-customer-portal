@@ -902,7 +902,8 @@ async function completeProjectBackedService({
       const lockedVisit = await trx('scheduled_services')
         .where({ id: scheduledService.id })
         .forUpdate()
-        .first('id', 'service_id', 'service_type')
+        .first('id', 'service_id', 'service_type', 'is_callback',
+          'customer_request', 'customer_request_source', 'customer_request_pests')
         .catch(() => null);
       const freshRecord = await trx('service_records')
         .where({ id: serviceRecord.id })
@@ -919,6 +920,19 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      // The customer's booking words freeze with the completion
+      // (reservice-report-card.js): only when THIS update performs it (the
+      // record is not already completed), fill-if-absent, from the LOCKED row.
+      if (serviceRecordCols.service_data && lockedVisit
+        && String(serviceRecord.status || '') !== 'completed') {
+        const currentData = update.service_data !== undefined
+          ? parseJsonObject(update.service_data)
+          : parseJsonObject(serviceRecord.service_data);
+        const frozenRequest = Object.prototype.hasOwnProperty.call(currentData, 'reserviceRequest')
+          ? null
+          : require('./service-report/reservice-report-card').freezeReserviceRequest(lockedVisit);
+        if (frozenRequest) update.service_data = serializeJsonb({ ...currentData, reserviceRequest: frozenRequest });
+      }
       let closeoutSnap = null;
       if (serviceRecordCols.structured_notes
         && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {

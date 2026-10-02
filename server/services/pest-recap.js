@@ -1002,8 +1002,11 @@ async function submitRecap({
           reportIdentitySnapshot,
           // The customer's booking words, frozen with the completion like
           // the /complete path (reservice-report-card.js).
+          // Only when this recap performs the completion: recreating a record
+          // for a visit already completed never freezes today's words.
           ...(() => {
-            const frozenRequest = require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
+            const frozenRequest = recapPriorCompleted ? null
+              : require('./service-report/reservice-report-card').freezeReserviceRequest(locked);
             return frozenRequest ? { reserviceRequest: frozenRequest } : {};
           })(),
         }),

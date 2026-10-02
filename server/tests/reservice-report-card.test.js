@@ -455,6 +455,7 @@ describe('independent review fixes (#5542)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
     expect(src).toMatch(/'customer_request', 'customer_request_source', 'customer_request_pests'\);/);
     expect((src.match(/freezeReserviceRequest\(locked\)/g) || []).length).toBe(2);
+    expect((src.match(/recapPriorCompleted \? null\s*: require\('\.\/service-report\/reservice-report-card'\)\.freezeReserviceRequest\(locked\)/g) || []).length).toBe(2);
     expect(src).toContain('missing.reserviceRequest = frozenRequest;');
     expect(src).toContain('return frozenRequest ? { reserviceRequest: frozenRequest } : {};');
   });
@@ -495,5 +496,14 @@ describe('Codex r2 (#5542)', () => {
     expect(project).toContain("'customer_request', 'customer_request_source', 'customer_request_pests')");
     expect(project).toContain("freezeReserviceRequest(lockedVisit)");
     expect(project.indexOf('freezeReserviceRequest(lockedVisit)')).toBeLessThan(project.indexOf("[serviceRecord] = await trx('service_records').insert(insert)"));
+  });
+});
+
+describe('Codex r3 (#5542)', () => {
+  test('project completion freezes on the existing-record branch too, only when it performs the completion', () => {
+    const project = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'project-completion.js'), 'utf8');
+    expect((project.match(/'customer_request', 'customer_request_source', 'customer_request_pests'\)/g) || []).length).toBe(2);
+    expect(project).toMatch(/String\(serviceRecord\.status \|\| ''\) !== 'completed'\) \{\s*const currentData/);
+    expect(project).toContain("if (frozenRequest) update.service_data = serializeJsonb({ ...currentData, reserviceRequest: frozenRequest });");
   });
 });
