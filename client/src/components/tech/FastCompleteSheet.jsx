@@ -654,11 +654,29 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
 
 // ── Report flow (GATE_FAST_COMPLETE_REPORT) ─────────────────────────────────
 
-// How a spray went down when the tech picked no other way for it: a saved
-// perimeter trace makes it a perimeter spray at the trace's length;
-// otherwise a spot treatment. The server would otherwise read a spray with
-// no method as a perimeter spray and refuse it without linear feet.
-const reportSprayMethod = (perimeterFeet) => (perimeterFeet ? 'perimeter_spray' : 'spot_treatment');
+// How a spray went down when the tech picked no other way for it, as the
+// note says it (owner ruling 2026-09-30: How is voice only): around the
+// outside of the home is a perimeter spray, anything else a spot treatment.
+// It is read before the report is written, so the report and the record
+// agree; the trace only gives a perimeter spray its length. (The server
+// reads a spray sent with no method as a perimeter spray and refuses it
+// without linear feet.)
+const reportSprayMethod = (facts) => (facts?.spray === 'perimeter' ? 'perimeter_spray' : 'spot_treatment');
+
+// What the record says about one product, heard from the note: how it went
+// down, the pests it was for and where. The report is written from exactly
+// this, and the completion records exactly this.
+function recordedApplication(row, facts) {
+  const sprayMethod = reportSprayMethod(facts);
+  const { rate, rateUnit } = rowRate(row, sprayMethod);
+  const applicationArea = (facts?.areas || []).join(', ');
+  return {
+    applicationMethod: rowMethod(row, sprayMethod),
+    targets: facts?.pests || [],
+    ...(applicationArea ? { applicationArea } : {}),
+    ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
+  };
+}
 
 // "October 1, 2026" from the visit's ET calendar day, as the full form
 // sends it; never browser-local date math.
@@ -670,12 +688,12 @@ function reportServiceDate(day) {
 }
 
 // What the report is written from. A change after it was written marks it
-// stale, including a way or rate the tech picked for a product. The tip
-// prints as its own card on the report (the writer never repeats it) and
-// photos only add, so neither is part of it. Nor is the trace: it comes after
-// the report, and turning the sprays that follow it into perimeter sprays is
-// that step's own record (the note already says where the tech sprayed).
-function writerSignature(form, rows, promiseMarks) {
+// stale: the note (and so what is heard from it), a product or a way or rate
+// the tech picked for one, the customer choice, the rating, the promise
+// marks and the photos the writer reads. The tip prints as its own card on
+// the report (the writer never repeats it), so it is not part of it. Nor is
+// the trace: it only gives a perimeter spray its length.
+function writerSignature(form, rows, promiseMarks, photos) {
   return JSON.stringify({
     note: form.note.trim(),
     products: rows.filter((row) => row.active)
@@ -684,14 +702,15 @@ function writerSignature(form, rows, promiseMarks) {
     customerHome: form.customerHome,
     rating: form.rating,
     promiseMarks,
+    photos: [photos.length, photoCaptionsOf(photos)],
   });
 }
 
 // The report request: the same POST /admin/schedule/generate-report the
-// full form's "Generate AI report" sends. The visit id grounds it (the route
-// re-reads the visit, the customer's texts and calls, past visits and the
-// weather).
-function writerPayload({ service, visit, form, rows, sprayMethod, ratingAllowed, photos, promiseMarks }) {
+// full form's "Generate AI report" sends, with each product as the record
+// will hold it. The visit id grounds it (the route re-reads the visit, the
+// customer's texts and calls, past visits and the weather).
+function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photos, promiseMarks }) {
   const active = rows.filter((row) => row.active);
   const captions = photoCaptionsOf(photos);
   return {
@@ -702,23 +721,11 @@ function writerPayload({ service, visit, form, rows, sprayMethod, ratingAllowed,
     serviceDate: reportServiceDate(visit?.scheduledDate),
     serviceNotes: form.note.trim(),
     productsApplied: active.map((row) => row.name).join(', '),
-    products: active.map((row) => {
-      const applicationMethod = rowMethod(row, sprayMethod);
-      const { rate, rateUnit } = rowRate(row, sprayMethod);
-      const hasRate = Number(rate) > 0 && !!rateUnit;
-      return {
-        productId: row.productId || null,
-        name: row.name,
-        rate: hasRate ? Number(rate) : null,
-        rateUnit: hasRate ? rateUnit : null,
-        applicationMethod,
-        targets: [],
-      };
-    }),
-    areasServiced: [],
+    products: active.map((row) => ({ productId: row.productId || null, name: row.name, ...recordedApplication(row, facts) })),
+    areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
     pestActivityRating: ratingAllowed && Number.isInteger(form.rating) ? form.rating : null,
-    photoCount: Array.isArray(photos) ? photos.length : 0,
+    photoCount: photos.length,
     ...(captions.length ? { photoCaptions: captions } : {}),
     // The full form's default: the customer's texts and calls ground the report.
     includeCustomerComms: true,
@@ -726,39 +733,31 @@ function writerPayload({ service, visit, form, rows, sprayMethod, ratingAllowed,
   };
 }
 
-// The completion: the full /complete body for the report the tech read.
-// Where product went down and the pests named are what was heard from the
-// note; the report is the notes, and reportDraftBase tells the server what
-// was written so an edit gets its heads-up. A regular visit gets the full
-// form's customer text, pay link and review ask; a re-service never gets a
-// pay link or a review ask.
+// The completion: the full /complete body for the report the tech read,
+// each product as the report was written from it (a perimeter spray with the
+// trace's length). The report is the notes, and reportDraftBase tells the
+// server what was written so an edit gets its heads-up. A regular visit gets
+// the full form's customer text, pay link and review ask; a re-service never
+// gets a pay link or a review ask.
 function reportCompletionBody({
   form, rows, draft, perimeterFeet, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
 }) {
-  const sprayMethod = reportSprayMethod(perimeterFeet);
-  const areas = draft.facts?.areas || [];
-  const pests = draft.facts?.pests || [];
-  const applicationArea = areas.join(', ');
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
   return {
     visitOutcome: 'completed',
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
     products: rows.filter((row) => row.active).map((row) => {
-      const applicationMethod = rowMethod(row, sprayMethod);
-      const { rate, rateUnit } = rowRate(row, sprayMethod);
+      const application = recordedApplication(row, draft.facts);
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
       return {
         productId: row.productId,
-        applicationMethod,
-        targets: pests,
+        ...application,
         totalAmount,
         amountUnit,
-        ...(applicationArea ? { applicationArea } : {}),
-        ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
-        ...(applicationMethod === 'perimeter_spray' ? { areaValue: perimeterFeet, areaUnit: 'linear_ft' } : {}),
+        ...(application.applicationMethod === 'perimeter_spray' ? { areaValue: perimeterFeet, areaUnit: 'linear_ft' } : {}),
       };
     }),
-    areasServiced: areas,
+    areasServiced: draft.facts?.areas || [],
     customerInteraction: form.customerHome,
     ...(ratingSent ? { clientPestRating: form.rating } : {}),
     // The untouched first-visit 5: the server re-checks it is still the
@@ -780,25 +779,32 @@ function reportCompletionBody({
 // decides the customer's re-entry wait (an indoor treatment keeps its indoor
 // wait). A failed read is written again; the Full form stays open for an
 // outage.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, perimeterFeet, stage, draft = null, writing = false }) {
+function reportFlowMissing({
+  form, active, ratingAllowed, dictationPending, perimeterFeet, stage, draft = null, writing = false, photosLoaded = true, traceAvailable = false,
+}) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
   const complete = stage === 'complete';
-  // Only an added product the tech set to a perimeter spray can be one with
-  // no trace; the trace comes after the report.
+  // A perimeter spray (heard from the note, or the way the tech picked for
+  // an added product) takes its length from the trace, which comes after
+  // the report.
   const untraced = complete && !perimeterFeet
-    && active.find((row) => rowMethod(row, reportSprayMethod(perimeterFeet)) === 'perimeter_spray');
+    && active.find((row) => rowMethod(row, reportSprayMethod(draft?.facts)) === 'perimeter_spray');
+  const untracedReason = untraced && (traceAvailable
+    ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
+    : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`);
   const [, reason = '', stockRow = null] = [
     [dictationPending, 'Finish dictating first.'],
+    [!photosLoaded, 'Loading photos…'],
     [!active.length, 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
-    [untraced, untraced && `${untraced.name} is set to perimeter spray: trace where you sprayed, or pick another way.`],
     [complete && writing, 'Writing the report…'],
     [complete && !draft, 'Generate the report first.'],
     [complete && draft && !draft.text.trim(), 'The report is empty. Write it again.'],
     [complete && draft && factsHold(draft.facts), draft && factsHold(draft.facts)],
+    [untraced, untracedReason],
   ].find(([missing]) => missing) || [];
   return { reason, stockRow };
 }
@@ -839,35 +845,40 @@ function ProductsLine({ active, locked, onOpen }) {
   );
 }
 
-// Writes the report and reads where product went down and the pests named
-// from the note, side by side. Only the latest request may land.
+// Reads the note (where product went down, the pests named, how the sprays
+// went down), then writes the report from exactly those facts, so the report
+// and the record agree. Only the latest request may land.
 function useReportDraft({ request, base }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ payload, note, signature, fresh }) => {
+  const write = useCallback(async ({ buildPayload, note, signature, fresh }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
-    const [written, heard] = await Promise.allSettled([
-      request('/admin/schedule/generate-report', { method: 'POST', body: JSON.stringify(fresh ? { ...payload, fresh: true } : payload) }),
-      request(`${base}/voice-facts`, { method: 'POST', body: JSON.stringify({ note }) }),
-    ]);
+    const heard = await request(`${base}/voice-facts`, { method: 'POST', body: JSON.stringify({ note }) }).catch(() => null);
+    const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
+    const facts = heard?.available === true
+      ? { status: heard.status, areas: listOf(heard.areas), pests: listOf(heard.pests), spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null }
+      : { status: 'failed', areas: [], pests: [], spray: null };
+    if (sequence !== sequenceRef.current) return;
+    const payload = buildPayload(facts);
+    let written = null;
+    let failure = null;
+    try {
+      written = await request('/admin/schedule/generate-report', { method: 'POST', body: JSON.stringify(fresh ? { ...payload, fresh: true } : payload) });
+    } catch (err) {
+      failure = err;
+    }
     if (sequence !== sequenceRef.current) return;
     setWriting(false);
-    const text = written.status === 'fulfilled' && typeof written.value?.report === 'string' ? written.value.report.trim() : '';
+    const text = typeof written?.report === 'string' ? written.report.trim() : '';
     if (!text) {
-      setWriteError(written.status === 'rejected'
-        ? `${written.reason?.message || 'The report could not be written.'} Try again.`
-        : 'The writer sent back no report. Try again.');
+      setWriteError(failure ? `${failure.message || 'The report could not be written.'} Try again.` : 'The writer sent back no report. Try again.');
       return;
     }
-    const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
-    const facts = heard.status === 'fulfilled' && heard.value?.available === true
-      ? { status: heard.value.status, areas: listOf(heard.value.areas), pests: listOf(heard.value.pests) }
-      : { status: 'failed', areas: [], pests: [] };
-    setDraft({ text, base: text, signature, deterministic: written.value?.deterministic === true, facts });
+    setDraft({ text, base: text, signature, deterministic: written.deterministic === true, facts });
   }, [request, base]);
   const editText = useCallback((text) => setDraft((prev) => ({ ...prev, text })), []);
   return { draft, writing, writeError, write, editText };
@@ -901,16 +912,17 @@ function ReportFlowForm({
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
   const visitPhotos = useVisitPhotos({ serviceId: service?.id, request, version: photos.version });
-  const photoCount = Array.isArray(visitPhotos) ? visitPhotos.length : 0;
+  const photoList = visitPhotos.photos;
+  const photoCount = photoList.length;
   const report = useReportDraft({ request, base });
   const { draft, writing, writeError } = report;
   const [step, setStep] = useState('visit');
   const [editing, setEditing] = useState(false);
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
-  const sprayMethod = reportSprayMethod(perimeterFeet);
+  const traceAvailable = trace.enabled && service?.traceEligible !== false;
   const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
-  const signature = writerSignature(form, rows, promiseMarks);
+  const signature = writerSignature(form, rows, promiseMarks, photoList);
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, writeError);
@@ -927,10 +939,10 @@ function ReportFlowForm({
     locked: locked || dictationPending,
     isMobile,
     onFullForm,
-    onPick: (product) => addProduct(product, sprayMethod),
+    onPick: (product) => addProduct(product, reportSprayMethod(draft?.facts)),
   });
 
-  const holdInputs = { form, active, ratingAllowed, dictationPending, perimeterFeet };
+  const holdInputs = { form, active, ratingAllowed, dictationPending, perimeterFeet, photosLoaded: visitPhotos.loaded, traceAvailable };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
   const completeMissing = reportFlowMissing({ ...holdInputs, stage: 'complete', draft, writing });
 
@@ -955,7 +967,7 @@ function ReportFlowForm({
     setStep('report');
     setEditing(false);
     report.write({
-      payload: writerPayload({ service, visit: ctx.visit, form, rows, sprayMethod, ratingAllowed, photos: visitPhotos, promiseMarks }),
+      buildPayload: (facts) => writerPayload({ service, visit: ctx.visit, form, rows, facts, ratingAllowed, photos: photoList, promiseMarks }),
       note: form.note,
       signature,
       fresh,
@@ -1037,7 +1049,7 @@ function ReportFlowForm({
               onWriteAgain={() => write(true)}
             />
           )}
-          {draft && !writing && trace.enabled && service?.traceEligible !== false && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+          {draft && !writing && traceAvailable && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
           {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
         </div>
         {footer}
@@ -1053,7 +1065,7 @@ function ReportFlowForm({
           {productsOpen ? (
             <ProductsSection
               products={products}
-              method={sprayMethod}
+              method={reportSprayMethod(draft?.facts)}
               editAmounts={editAmounts}
               locked={locked}
               onToggleEdit={() => setEditAmounts((on) => !on)}
@@ -1066,7 +1078,7 @@ function ReportFlowForm({
           )}
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
-          <PhotoStripSection photos={visitPhotos} locked={locked || dictationPending} onOpen={photos.open} />
+          <PhotoStripSection photos={photoList} locked={locked || dictationPending} onOpen={photos.open} />
           <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {ratingAllowed && (
             <ActivitySection

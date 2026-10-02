@@ -82,9 +82,11 @@ export function ActivitySection({ value, scaleLabels, locked, onChange }) {
 }
 
 // The visit's photos (staged against the visit by the photo manager), read
-// again each time the manager closes. Their captions go to the report writer.
+// again each time the manager closes. Their captions go to the report
+// writer, so the report waits for the first read (`loaded`); a failed read
+// counts as no photos, never a hold.
 export function useVisitPhotos({ serviceId, request, version }) {
-  const [photos, setPhotos] = useState(null);
+  const [state, setState] = useState({ photos: [], loaded: false });
   // Only the latest read may land: a read still in flight when the manager
   // closes must not overwrite the refreshed one.
   const readSequence = useRef(0);
@@ -92,13 +94,13 @@ export function useVisitPhotos({ serviceId, request, version }) {
     const sequence = ++readSequence.current;
     request(`/tech/services/${serviceId}/photos`)
       .then((data) => {
-        if (sequence === readSequence.current) setPhotos(Array.isArray(data?.photos) ? data.photos : null);
+        if (sequence === readSequence.current) setState({ photos: Array.isArray(data?.photos) ? data.photos : [], loaded: true });
       })
-      // A convenience: the photo manager reports its own errors.
-      .catch(() => { if (sequence === readSequence.current) setPhotos(null); });
+      // The photo manager reports its own errors.
+      .catch(() => { if (sequence === readSequence.current) setState({ photos: [], loaded: true }); });
     return () => { readSequence.current += 1; };
   }, [request, serviceId, version]);
-  return photos;
+  return state;
 }
 
 // What the writer is told about the photos, as the full form sends it: the
@@ -114,7 +116,7 @@ export function photoCaptionsOf(photos) {
 const PHOTO_STRIP_COUNT = 4;
 
 export function PhotoStripSection({ photos, locked, onOpen }) {
-  const count = Array.isArray(photos) ? photos.length : 0;
+  const count = photos.length;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -319,14 +321,18 @@ export function factsHold(facts) {
   return facts.areas.length ? '' : 'Say where you treated (inside, outside or garage) in your note, then write it again.';
 }
 
+const SPRAY_HEARD = { perimeter: 'perimeter spray', spot: 'spot spraying' };
+
 function HeardLine({ facts }) {
   if (!FACTS_READ.has(facts?.status)) return null;
-  const where = facts.areas.length
-    ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}`
-    : 'where you treated: not heard';
+  const heard = [
+    facts.areas.length ? `treated ${joinAnd(facts.areas.map((area) => area.toLowerCase()))}` : 'where you treated: not heard',
+    SPRAY_HEARD[facts.spray],
+    facts.pests.length ? `for ${facts.pests.join(', ')}` : '',
+  ].filter(Boolean);
   return (
     <p className="tech-visit-muted" data-testid="fast-complete-heard">
-      Heard from you: {where}{facts.pests.length ? ` · for ${facts.pests.join(', ')}` : ''}
+      Heard from you: {heard.join(' · ')}
     </p>
   );
 }

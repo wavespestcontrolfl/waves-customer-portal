@@ -12,9 +12,16 @@
  *     indoor treatment keeps the indoor wait on the customer's report.
  *   - the PESTS the treatment was for, in the technician's own words. A
  *     spoken "roaches" stays "roaches": never a species they did not say.
+ *   - HOW the sprays went down: around the outside of the home (a perimeter
+ *     spray) or on particular spots (owner ruling 2026-09-30: How is voice
+ *     only). The sheet reads this before the report is written, so the
+ *     report and the record agree on it; the trace only gives a perimeter
+ *     spray its length.
  *
- * Every fact must quote the note word for word, or it is dropped, and a
- * pest's words must sit inside its own quote. Any failure returns no facts;
+ * Every fact must quote the note word for word, or it is dropped; a pest's
+ * words must sit inside its own quote, and a pest or a way of spraying
+ * whose quote says it did not happen ("no roaches", "didn't spray the
+ * perimeter") is dropped in code, whatever the model said. Any failure returns no facts;
  * the sheet then records none, as the quick recap screen always has.
  * Nothing here writes: the sheet shows the technician what was heard and
  * sends it with the completion.
@@ -25,7 +32,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { redactAccessCodes } = require('./context-aggregator');
 
 // Bump on any prompt or schema change.
-const VOICE_FACTS_VERSION = 'visit-voice-facts-v1';
+const VOICE_FACTS_VERSION = 'visit-voice-facts-v2';
 // A dictated visit note runs a few hundred characters. A longer one is never
 // cut short (a fact said past the cut would go unread while the report
 // writer read the note whole): it is refused as too long, and the sheet asks
@@ -70,13 +77,26 @@ const VOICE_FACTS_SCHEMA = {
         additionalProperties: false,
       },
     },
+    spray: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['perimeter', 'spot', 'none'] },
+        quote: { type: 'string' },
+      },
+      required: ['method', 'quote'],
+      additionalProperties: false,
+    },
   },
-  required: ['areas', 'pests'],
+  required: ['areas', 'pests', 'spray'],
   additionalProperties: false,
 };
 
+// A quote that says the thing did not happen ("no roaches", "didn't spray",
+// "none found"). Checked in code: the prompt asks for it, the code makes sure.
+const NEGATION_RE = /\b(no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t)\b/;
+
 // Rules only; the note rides the user channel as labeled data.
-const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out two facts, using ONLY the note.
+const VOICE_FACTS_SYSTEM_PROMPT = `You read a Waves Pest Control technician's own note about the visit they just finished and pick out three facts, using ONLY the note.
 
 areas: where the technician put product down (sprayed, baited, dusted, spread granules, placed bait stations or glue boards).
 - "inside": anywhere inside the home (kitchen, bathrooms, baseboards, cabinets, under sinks, inside door tracks, attic, any room).
@@ -85,6 +105,8 @@ areas: where the technician put product down (sprayed, baited, dusted, spread gr
 List an area only when the note says product went down there. A place the technician only looked at or inspected, or where pests were seen but nothing was applied, is NOT an area. For each area give a quote: the exact words from the note that say product went down there, copied character for character.
 
 pests: the pests the treatment was for, in the technician's OWN words (for example "ghost ants", "roaches", "palmetto bugs"). Keep the technician's word exactly: never change it to another name or to a species they did not say ("roaches" stays "roaches", never "German roaches"). A pest the note says was not found ("no roaches") is not listed. For each pest give name (the technician's own words, at most ${MAX_PEST_WORDS} words) and a quote: the exact words from the note that contain that name.
+
+spray: how the technician sprayed, as the note says it. "perimeter" when they sprayed around the outside of the home (around the house, the perimeter, the foundation, all the way around); "spot" when they sprayed only particular spots; "none" when the note does not say how they sprayed, or they did not spray. Give the quote: the exact words from the note that say it, copied character for character ("" for none).
 
 Return empty lists when the note does not say. Never guess.
 
@@ -137,22 +159,28 @@ function validateVoiceFacts(json, note) {
   const pests = [];
   for (const entry of Array.isArray(json?.pests) ? json.pests : []) {
     const quote = groundedQuote(entry?.quote, grounding);
-    const name = quote ? pestName(entry?.name, quote) : null;
+    const name = quote && !NEGATION_RE.test(quote) ? pestName(entry?.name, quote) : null;
     if (name && !pests.some((pest) => pest.name === name)) pests.push({ name, quote });
     if (pests.length >= MAX_PESTS) break;
   }
-  return { areas, pests };
+  // How the sprays went down: only a grounded, unnegated quote says it.
+  const sprayQuote = ['perimeter', 'spot'].includes(json?.spray?.method) ? groundedQuote(json.spray.quote, grounding) : null;
+  const spray = sprayQuote && !NEGATION_RE.test(sprayQuote) ? { method: json.spray.method, quote: sprayQuote } : null;
+  return { areas, pests, spray };
 }
 
 /**
- * Reads where product went down and the pests named from the technician's
- * note. Returns { status, areas, pests, heard } where status is 'read',
+ * Reads where product went down, the pests named and how the sprays went
+ * down from the technician's note. Returns { status, areas, pests, spray,
+ * heard } where status is 'read',
  * 'empty_note', 'too_long' or 'failed'; areas and pests are what the sheet records
  * (labels and the technician's words), heard carries each fact's quote.
  * Never throws.
  */
 async function readVoiceFacts(note) {
-  const empty = (status) => ({ status, areas: [], pests: [], heard: { areas: [], pests: [] }, version: VOICE_FACTS_VERSION });
+  const empty = (status) => ({
+    status, areas: [], pests: [], spray: null, heard: { areas: [], pests: [], spray: null }, version: VOICE_FACTS_VERSION,
+  });
   // Access codes never reach a provider; quotes are checked against what
   // the model was shown.
   const text = redactAccessCodes(String(note || '').trim());
@@ -165,7 +193,7 @@ async function readVoiceFacts(note) {
       system: VOICE_FACTS_SYSTEM_PROMPT,
       text: `TECHNICIAN NOTE:\n${text}`,
       jsonSchema: VOICE_FACTS_SCHEMA,
-      maxTokens: 600,
+      maxTokens: 700,
       timeoutMs: VOICE_FACTS_TIMEOUT_MS,
       promptVersion: VOICE_FACTS_VERSION,
     }, { reserveFallbackBudget: true });
@@ -178,6 +206,8 @@ async function readVoiceFacts(note) {
     status: 'read',
     areas: heard.areas.map((entry) => entry.area),
     pests: heard.pests.map((entry) => entry.name),
+    // 'perimeter' | 'spot' | null (not said)
+    spray: heard.spray?.method || null,
     heard,
     version: VOICE_FACTS_VERSION,
   };

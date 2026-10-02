@@ -86,7 +86,7 @@ describe('validateVoiceFacts', () => {
       areas: [{ area: 'garage', quote: 'treated the garage' }],
       pests: [{ name: 'spiders', quote: 'spiders in the eaves' }],
     }, NOTE);
-    expect(facts).toEqual({ areas: [], pests: [] });
+    expect(facts).toEqual({ areas: [], pests: [], spray: null });
   });
 
   test('a species the technician did not say never stands', () => {
@@ -128,9 +128,34 @@ describe('validateVoiceFacts', () => {
     expect(facts.areas).toEqual([{ area: 'Garage', quote: "sprayed the customer's garage" }]);
   });
 
+  test('a pest whose own quote says it was not there is dropped in code', () => {
+    const note = 'No roaches were found under the sink. Treated for ants along the patio. Checked for spiders, none found.';
+    const facts = validateVoiceFacts({
+      areas: [],
+      pests: [
+        { name: 'roaches', quote: 'No roaches were found' },
+        { name: 'ants', quote: 'Treated for ants along the patio' },
+        { name: 'spiders', quote: 'Checked for spiders, none found' },
+      ],
+      spray: { method: 'none', quote: '' },
+    }, note);
+    expect(facts.pests.map((pest) => pest.name)).toEqual(['ants']);
+  });
+
+  test('how the sprays went down stands only on a grounded quote that says it happened', () => {
+    const note = 'Sprayed around the outside of the house. Didn\'t spray the garage door frames.';
+    const read = (spray) => validateVoiceFacts({ areas: [], pests: [], spray }, note).spray;
+    expect(read({ method: 'perimeter', quote: 'Sprayed around the outside of the house' }))
+      .toEqual({ method: 'perimeter', quote: 'sprayed around the outside of the house' });
+    expect(read({ method: 'spot', quote: "Didn't spray the garage door frames" })).toBeNull();
+    expect(read({ method: 'perimeter', quote: 'sprayed the whole perimeter' })).toBeNull();
+    expect(read({ method: 'none', quote: '' })).toBeNull();
+    expect(read(undefined)).toBeNull();
+  });
+
   test('a malformed answer is no facts', () => {
-    expect(validateVoiceFacts(null, NOTE)).toEqual({ areas: [], pests: [] });
-    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual({ areas: [], pests: [] });
+    expect(validateVoiceFacts(null, NOTE)).toEqual({ areas: [], pests: [], spray: null });
+    expect(validateVoiceFacts({ areas: 'inside', pests: {} }, NOTE)).toEqual({ areas: [], pests: [], spray: null });
   });
 });
 
@@ -139,9 +164,10 @@ describe('readVoiceFacts', () => {
     dispatchWithFallback.mockResolvedValue(answer({
       areas: [{ area: 'inside', quote: 'Baited the counter edge' }, { area: 'outside', quote: 'sprayed around the outside of the house' }],
       pests: [{ name: 'ghost ants', quote: 'Ghost ants on the kitchen counter' }],
+      spray: { method: 'perimeter', quote: 'sprayed around the outside of the house' },
     }));
     const facts = await readVoiceFacts(NOTE);
-    expect(facts).toMatchObject({ status: 'read', areas: ['Inside', 'Outside'], pests: ['ghost ants'] });
+    expect(facts).toMatchObject({ status: 'read', areas: ['Inside', 'Outside'], pests: ['ghost ants'], spray: 'perimeter' });
     expect(facts.heard.areas).toHaveLength(2);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy.name).toBe('fastStructured');
