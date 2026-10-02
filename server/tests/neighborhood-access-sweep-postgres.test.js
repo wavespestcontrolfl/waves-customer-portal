@@ -146,7 +146,7 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(category).toBe('customer');
     expect(headline).toBe('Customers — confirm a neighborhood gate code');
     expect(why).toBe("Willow Grande now has 2 different gate codes on file after Sample's update.");
-    expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers?customerId=${customerId}` });
+    expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
     // Top-level customerId: the internal-test-customer bell suppression reads it.
     expect(opts.metadata).toMatchObject({ customerId: String(customerId), neighborhoodId: n });
     expect(why).not.toMatch(/3333|4444/);
@@ -360,7 +360,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ tally: { duplicate: 1 }, conflicts: 1 });
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${customerId}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
   });
 
   test('the conflict bell opens the customer whose code was filed last; an unrelated preference edit never steers it', async () => {
@@ -378,7 +379,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     mockRaise.mockClear();
     await sweepSavedGateCodes();
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${first}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(first) });
   });
 
   test('an internal test account is never the customer the conflict bell opens', async () => {
@@ -395,7 +397,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     mockRaise.mockClear();
     await sweepSavedGateCodes();
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${real}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(real) });
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
@@ -424,7 +427,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     await trx('neighborhood_access_filings').insert({ customer_id: customerId, value_hash: require('node:crypto').createHash('sha256').update('7777').digest('hex'), neighborhood_id: n, outcome: 'filed_conflict' });
     await sweepSavedGateCodes(); // the code is already filed; only the bell is missing
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers?customerId=${customerId}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
     // An open (or person-dismissed) bell for it is left alone.
     mockRaise.mockClear();
     mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);

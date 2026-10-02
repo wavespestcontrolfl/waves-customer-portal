@@ -446,7 +446,7 @@ async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
 
 // ONE Customers bell per neighborhood with conflicting live codes (rings
 // again only after a fix and a comeback); the name is the community's, never
-// a code. Opens the customer whose update made the conflict.
+// a code. Opens that neighborhood in the directory, where the conflict is resolved.
 async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   const n = await db('neighborhoods').where({ id: neighborhoodId }).first('name');
   const live = await db('neighborhood_access').where({ neighborhood_id: neighborhoodId })
@@ -472,7 +472,7 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
         action: 'confirm a neighborhood gate code',
         why,
         severity: 'needs-you',
-        link: `/admin/customers?customerId=${customerId}`,
+        link: `/admin/customers/gate-codes?neighborhood=${neighborhoodId}`,
         subject: { type: 'customer', id: String(customerId) },
         doneWhen: 'gate_code_confirmed',
         who: 'person',

@@ -33,8 +33,8 @@ const ALL = {
 };
 const NEEDS = { total: 1, neighborhoods: [ALL.neighborhoods[1]] };
 
-function renderPage() {
-  return render(<MemoryRouter><NeighborhoodGateCodesPage /></MemoryRouter>);
+function renderPage(url = "/") {
+  return render(<MemoryRouter initialEntries={[url]}><NeighborhoodGateCodesPage /></MemoryRouter>);
 }
 
 beforeEach(() => {
@@ -118,4 +118,28 @@ it("shows the not-turned-on state when the API answers 404 enabled:false", async
   renderPage();
   expect(await screen.findByText("Gate codes are not turned on yet.")).toBeInTheDocument();
   expect(screen.queryByLabelText("Search neighborhoods")).not.toBeInTheDocument();
+});
+
+const ONE_ID = "5d1e0b64-8f4f-4c61-9f0e-2f6a7d1c3b11";
+
+it("?neighborhood= asks for just that neighborhood and Show all clears it", async () => {
+  rawAdminFetch.mockImplementation((path) => response(path.includes("neighborhood=") ? { total: 1, neighborhoods: [ALL.neighborhoods[0]] } : ALL));
+  renderPage(`/?neighborhood=${ONE_ID}`);
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  expect(rawAdminFetch.mock.calls[0][0]).toContain(`neighborhood=${ONE_ID}`);
+  expect(screen.getByText("Showing one neighborhood")).toBeInTheDocument();
+  expect(screen.queryByText("Sample Pines")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  expect(await screen.findByText("Sample Pines")).toBeInTheDocument();
+  expect(screen.queryByText("Showing one neighborhood")).toBeNull();
+  expect(rawAdminFetch.mock.calls.at(-1)[0]).not.toContain("neighborhood=");
+});
+
+it("a malformed ?neighborhood= is ignored: everything lists, no control", async () => {
+  rawAdminFetch.mockImplementation(() => response(ALL));
+  renderPage("/?neighborhood=not-an-id");
+  expect(await screen.findByText("Sample Pines")).toBeInTheDocument();
+  expect(rawAdminFetch.mock.calls[0][0]).not.toContain("neighborhood=");
+  expect(screen.queryByText("Showing one neighborhood")).toBeNull();
 });

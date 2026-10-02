@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
@@ -157,7 +158,13 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
   );
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default function NeighborhoodGateCodesPage() {
+  // A link (a conflict bell, a customer's neighborhood) can open one neighborhood.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawOnly = searchParams.get("neighborhood") || "";
+  const onlyNeighborhood = UUID_RE.test(rawOnly) ? rawOnly : "";
   const [neighborhoods, setNeighborhoods] = useState([]);
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState("all");
@@ -187,6 +194,7 @@ export default function NeighborhoodGateCodesPage() {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
       if (query) params.set("q", query);
       if (filter === "needs_confirm") params.set("filter", "needs_confirm");
+      if (onlyNeighborhood) params.set("neighborhood", onlyNeighborhood);
       const data = await api(`/admin/neighborhood-access?${params.toString()}`);
       if (seq !== readSeq.current) return;
       setDisabled(false);
@@ -199,7 +207,7 @@ export default function NeighborhoodGateCodesPage() {
     } finally {
       if (seq === readSeq.current) setLoading(false);
     }
-  }, [query, filter]);
+  }, [query, filter, onlyNeighborhood]);
 
   useEffect(() => { load(); }, [load]);
   // A save that finishes after the search or filter changed reloads the
@@ -300,6 +308,20 @@ export default function NeighborhoodGateCodesPage() {
               </Button>
             </div>
           </div>
+
+          {onlyNeighborhood && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-ui-body text-ink-secondary">
+              <span>Showing one neighborhood</span>
+              <span aria-hidden="true">·</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("neighborhood"); return next; })}
+              >
+                Show all
+              </Button>
+            </div>
+          )}
 
           {readError && <ActionFeedback error onRetry={() => load()} className="mb-3">{readError}</ActionFeedback>}
           {actionError && <ActionFeedback error className="mb-3">{actionError}</ActionFeedback>}
