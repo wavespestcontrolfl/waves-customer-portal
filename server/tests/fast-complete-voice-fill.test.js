@@ -1577,3 +1577,13 @@ describe('Codex #5580 round 16', () => {
     expect(out.unclear.map((u) => u.reason)).toContain('note_over_cap');
   });
 });
+
+test('a visit heard quoted as several whole sentences (live Sonnet 5 shape) is grounded piece by piece', () => {
+  const t = 'Ants coming in by the kitchen window, customer said. Sprayed the perimeter outside with Taurus, four ounces. Light activity.';
+  const heard = 'Ants coming in by the kitchen window, customer said. Sprayed the perimeter outside with Taurus. Light activity.';
+  const out = validateFill(answer({ visit: visit({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light', heard }) }), ctx, t);
+  expect(out.visit).toMatchObject({ pests: ['Ants'], areas: ['Outside'], method: 'perimeter_spray', activity: 'light' });
+  // a stitched sentence that was never said is still refused
+  const made = validateFill(answer({ visit: visit({ pests: ['Ants'], heard: 'Ants everywhere. Sprayed the perimeter outside with Taurus.' }) }), ctx, t);
+  expect(made.visit.pests).toEqual([]);
+});

@@ -374,9 +374,10 @@ const cleanNote = (value, max) => String(value ?? '').replace(/[ \t]+/g, ' ').re
 const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 // A heard snippet is real when each of its pieces (the model may join separate
-// quotes with an ellipsis or a bar) occurs in the transcript.
+// quotes with an ellipsis, a bar, or as whole sentences — seen live on Sonnet 5)
+// occurs in the transcript.
 function heardInTranscript(heard, normTranscript) {
-  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s/).map(norm).filter(Boolean);
+  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;])\s+/).map(norm).filter(Boolean);
   return pieces.length > 0 && pieces.every((piece) => ` ${normTranscript} `.includes(` ${piece} `));
 }
 
