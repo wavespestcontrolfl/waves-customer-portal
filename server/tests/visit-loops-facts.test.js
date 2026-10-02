@@ -334,6 +334,22 @@ describe('pastWindow', () => {
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn({ status: 'confirmed', technician_id: null }, [{ technician_id: null, scheduled_date: '2026-10-01', window_start: '09:00:00' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
   });
 
+  test('unassigned members of one visit share a stop (null-safe tech match): a finished sibling settles it', async () => {
+    const conn = (started) => fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops)
+      ? [todayRow({ status: 'confirmed', visit_id: 'g1', technician_id: null })] : started) });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ visit_id: 'g1', technician_id: null, scheduled_date: '2026-10-01', status: 'completed' }]) })).pastWindow).toBeNull();
+    // an assigned member of the same visit is another stop
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: conn([{ visit_id: 'g1', technician_id: 'tech-1', scheduled_date: '2026-10-01', status: 'completed' }]) })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+  });
+
+  test('passed visits with the same promised start sort by id (a stable signature)', async () => {
+    const rows = [todayRow({ id: 'v-b', status: 'confirmed' }), todayRow({ id: 'v-a', status: 'confirmed' })];
+    for (const order of [rows, [...rows].reverse()]) {
+      const conn = fakeConn({ scheduled_services: (ops) => (isCandidateQuery(ops) ? order : []) });
+      expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).pastWindow.passedKeys).toEqual(['v-a@2026-10-01T09:00:00', 'v-b@2026-10-01T09:00:00']);
+    }
+  });
+
   test('an uncleared street-level address hold is never "passed" (never dispatched)', async () => {
     const conn = (held) => fakeConn({ scheduled_services: (ops) => {
       if (isCandidateQuery(ops)) return [todayRow({ status: 'confirmed' })];

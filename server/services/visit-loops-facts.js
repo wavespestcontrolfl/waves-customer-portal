@@ -213,14 +213,14 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
 // (unassigned, windowless) never collapses into another (null = no sibling).
 // The visit group scoped by tech and day (a frozen member keeps its visit_id after a
 // same-day reassignment, so visit_id alone would join two physical stops — the
-// admin-schedule membership rule); otherwise the (tech, day, window) tuple. Either
-// needs a known tech and day; a row that can't be shown to share a stop never
-// collapses into another (null = no sibling).
+// admin-schedule membership rule, null-safe: two unassigned members of one visit
+// share it); otherwise the (tech, day, window) tuple, which needs a known tech. A
+// row that can't be shown to share a stop never collapses into another (null).
 const stopKey = (r) => {
   const day = calendarDay(r.scheduled_date);
-  if (!r.technician_id || !day) return null;
-  if (r.visit_id) return `v:${r.visit_id}|${r.technician_id}|${day}`;
-  return r.window_start ? `t:${r.technician_id}|${day}|${r.window_start}` : null;
+  if (!day) return null;
+  if (r.visit_id) return `v:${r.visit_id}|${r.technician_id || 'unassigned'}|${day}`;
+  return r.technician_id && r.window_start ? `t:${r.technician_id}|${day}|${r.window_start}` : null;
 };
 // The stops (stopKey) on these days where some row is underway or done, by status
 // or tracker — used by the passed-window read.
@@ -355,7 +355,9 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
     passed.push({ row, occ, minutesPast: nowOnDay - endMin });
   }
   if (!passed.length) return null;
-  passed.sort((x, y) => `${x.occ.date}T${x.occ.startHms}`.localeCompare(`${y.occ.date}T${y.occ.startHms}`));
+  // a visit-id tie-break: the same state must sign the same at draft and at send
+  passed.sort((x, y) => `${x.occ.date}T${x.occ.startHms}`.localeCompare(`${y.occ.date}T${y.occ.startHms}`)
+    || String(x.row.id).localeCompare(String(y.row.id)));
   const { row, occ, minutesPast } = passed[0];
   return {
     visitId: String(row.id),
