@@ -33,6 +33,12 @@ jest.mock('../middleware/admin-auth', () => ({
       : next()
   ),
 }));
+// Ownership is covered in technician-scope-r3.test.js; this suite is about
+// the route's copy, so the technician services the record's customer.
+jest.mock('../services/technician-visit-scope', () => ({
+  ...jest.requireActual('../services/technician-visit-scope'),
+  technicianServicesCustomer: jest.fn(async () => true),
+}));
 jest.mock('../services/review-request', () => ({
   create: jest.fn(),
   unshortenedReviewUrl: jest.fn((token) => `https://portal.test/rate/${token}`),

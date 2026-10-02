@@ -304,7 +304,12 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
       // technicianId is the tech who actually started the job (the logged-in
       // tech, or the IMEI tech in the geofence-auto path) — pass it so the
       // arrival SMS names the acting tech, not the job's stale assignment.
-      const result = await trackTransitions.markOnProperty(jobId, { actingTechId: technicianId });
+      const result = await trackTransitions.markOnProperty(jobId, {
+        actingTechId: technicianId,
+        // A technician's own start stays bound to their assignment through
+        // the arrival transition (codex #5568 r9); the geofence path is not.
+        ...(scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq) ? { expectTechnicianId: technicianId } : {}),
+      });
       // A grouped stop that did not fully sync is NOT success (codex #3603
       // r6): the durable office surface is the transition-failure alert.
       await require('./track-transition-alerts').recordTrackTransitionResultFailure({

@@ -1005,6 +1005,14 @@ async function markOnProperty(serviceId, opts = {}) {
   }
 
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  // A technician's own start passes expectTechnicianId: a reassignment that
+  // committed after their timer insert must not let the former technician
+  // advance the visit or text the customer an arrival naming them (codex
+  // #5568 r9 P1). The flip below carries the same predicate, so a
+  // reassignment landing after this read misses the CAS instead.
+  if (opts.expectTechnicianId && String(svc.technician_id || '') !== String(opts.expectTechnicianId)) {
+    return { ok: false, reason: 'technician_changed' };
+  }
   // Terminal operational status rejects on EVERY load (same guard as
   // markEnRoute): the stale-attempt repair below reloads and re-enters,
   // and a completion can commit its status between the heal and that
@@ -1140,17 +1148,17 @@ async function markOnProperty(serviceId, opts = {}) {
     // the re-read below distinguishes a genuine arrival race from a
     // conflicting rewrite.
     const { applyTrackLifecycleCas } = require('./rebooker');
-    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => applyTrackLifecycleCas(
-      trx('scheduled_services')
-        .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null })
-        .whereIn('track_state', ['scheduled', 'en_route']),
-      svc,
-    )
-      .update({
-        track_state: 'on_property',
-        ...onSiteUpdates,
-        updated_at: now,
-      }));
+    const updated = await flipUnlessStreetLevelHeld(serviceId, (trx) => {
+      const flip = trx('scheduled_services')
+        .where({ id: serviceId, status: svc.status, scheduled_date: svc.scheduled_date ?? null });
+      if (opts.expectTechnicianId) flip.where('technician_id', opts.expectTechnicianId);
+      return applyTrackLifecycleCas(flip.whereIn('track_state', ['scheduled', 'en_route']), svc)
+        .update({
+          track_state: 'on_property',
+          ...onSiteUpdates,
+          updated_at: now,
+        });
+    });
     if (updated === null) {
       logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
       return { ok: false, reason: 'street_level_hold' };

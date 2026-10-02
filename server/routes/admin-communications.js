@@ -2469,8 +2469,16 @@ router.post('/ai-draft', async (req, res, next) => {
 
     // Look up customer context
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
-    if (isTechnicianRequest(req) && !(customer && await technicianServicesCustomer(req, customer.id))) {
-      return res.status(404).json({ error: 'Customer not found' });
+    if (isTechnicianRequest(req)) {
+      // The history below is keyed by phone, not by customer: when records
+      // share the number, a technician drafts only if EVERY one is on their
+      // route — otherwise another customer's texts would reach the prompt
+      // (codex #5568 r9 P1). They can still type the reply themselves.
+      const sharing = await db('customers').where('phone', 'like', `%${cleanPhone}`).select('id');
+      if (!sharing.length) return res.status(404).json({ error: 'Customer not found' });
+      for (const row of sharing) {
+        if (!(await technicianServicesCustomer(req, row.id))) return res.status(404).json({ error: 'Customer not found' });
+      }
     }
 
     // Get recent SMS history for context. Recruiting rows (job_*) are
