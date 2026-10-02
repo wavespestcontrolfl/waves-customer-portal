@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let C; let D; let E; let F; let G; let P; let P2; let W; let K;
+  let A; let B; let H; let C; let D; let E; let F; let G; let P; let P2; let W; let K; let R;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -233,6 +233,16 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('k_sibling', K, { total: 50, stripe_payment_intent_id: comboPi });
     await invoice('k_other', K, { total: 25 });
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: comboPi, customer_id: K, invoice_id: inv.k_anchor.id, amount: 150, source: 'invoice_payment_webhook', original_db_error: 'synthetic combined quarantine' });
+    // A combined payment settled two invoices; a partial refund on its charge could not be attributed and is parked with invoice_id NULL.
+    R = await customer(`Refunded${run}`, `Combined${run}`);
+    const refundPi = `pi_rf_${run}`;
+    for (const [key, amount] of [['r_a', 80], ['r_b', 40]]) {
+      await invoice(key, R, { total: amount, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: refundPi });
+      await db('payments').insert({ customer_id: R, payment_date: day(-2), amount, status: 'paid', processor: 'stripe', stripe_payment_intent_id: refundPi,
+        description: `Invoice ${inv[key].invoice_number} (combined balance payment)`, metadata: json({ invoice_id: inv[key].id, combined_payment: true }) });
+    }
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `${refundPi}:partial-refund:re_${run}`, customer_id: R, invoice_id: null, amount: 12, source: 'combined_pay_webhook',
+      original_db_error: 'Partial refund on a combined balance charge — attribute and reconcile manually' });
     // A packet invoice whose Bill-To moved AFTER it was sent: both payer columns stay null, only the withdrawal stamp records it.
     W = await customer(`Withdrawn${run}`, `Packet${run}`);
     await invoice('w_self', W, { total: 100 });
@@ -648,6 +658,22 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.unknowns.join(' ')).toMatch(/Do not collect or retry/);
     const clean = await read('get_invoice_detail', { invoice_id: inv.k_other.id });
     expect(clean.invoice.balance_due).toBe(25);
+  });
+
+  test('review: an unallocated partial refund on a combined payment makes every covered invoice\'s net unknown, and is refund evidence not a charge', async () => {
+    for (const key of ['r_a', 'r_b']) {
+      const detail = await read('get_invoice_detail', { invoice_id: inv[key].id });
+      const entry = detail.payments_timeline.find((e) => e.type === 'payment_refund_reconciliation');
+      expect(entry).toMatchObject({ received: false, reconciliation_required: true, refund_amount: 12 });
+      expect(detail.payments_timeline.some((e) => e.type === 'stripe_unreconciled_charge')).toBe(false);
+      expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: null, refund_reconciliation_required: 1, unreconciled_stripe_charges: 0 });
+      expect(detail.payment_summary.statement).toMatch(/^Payment was received/);
+      expect(detail.payment_summary.statement).toMatch(/net amount UNKNOWN/);
+    }
+    const list = await read('get_customer_invoices', { customer_id: R, limit: 50 });
+    for (const key of ['r_a', 'r_b']) {
+      expect(list.invoices.find((i) => i.id === inv[key].id)).toMatchObject({ amount_paid: null, payment_recorded: true, refund_reconciliation_required: 1, unreconciled_stripe_charges: 0, balance_due: 0 });
+    }
   });
 
   test('review: a statement-level orphan (partial refund before settlement) is reconciliation-required on the statement\'s invoices', async () => {
