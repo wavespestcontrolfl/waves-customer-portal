@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2;
   const inv = {};
   const tokens = [];
 
@@ -117,6 +117,20 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       await db('payments').insert({ customer_id: X, payment_date: day(0), amount: 60, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_ach_${key}_${run}`,
         description: 'ACH in flight', metadata: json({ invoice_id: row.id }) });
     }
+    // ACH evidence accounts for the attempt only: an unresolved orphan charge, or a failed row flagged ambiguous, still holds.
+    W2 = await customer(`Mixed${run}`, `Holds${run}`);
+    for (const key of ['w2_orphan', 'w2_failamb', 'w2_dbfail']) {
+      const row = await invoice(key, W2, { total: 40, stripe_payment_intent_id: `pi_${key}_${run}` });
+      await db('payments').insert({ customer_id: W2, payment_date: day(0), amount: 40, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_${key}_${run}`, description: 'ACH in flight', metadata: json({ invoice_id: row.id }) });
+      if (key !== 'w2_dbfail') {
+        await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 40, stripe_payment_intent_id: `pi_${key}_${run}`, submitted_at: new Date() });
+      }
+    }
+    await db('stripe_orphan_charges').insert([
+      { stripe_payment_intent_id: `pi_other_orphan_${run}`, customer_id: W2, invoice_id: inv.w2_orphan.id, amount: 40, source: 'invoice_payment_webhook', original_db_error: 'synthetic' },
+      { stripe_payment_intent_id: `pi_w2_dbfail_${run}`, customer_id: W2, invoice_id: inv.w2_dbfail.id, amount: 40, source: 'invoice_payment_webhook', original_db_error: 'synthetic' },
+    ]);
+    await db('payments').insert({ customer_id: W2, payment_date: day(0), amount: 40, status: 'failed', processor: 'stripe', description: 'Connection failure', metadata: json({ invoice_id: inv.w2_failamb.id, ambiguous_outcome: true }) });
     D2 = await customer(`Deposit${run}`, `Pending${run}`);
     const [estimate] = await db('estimates').insert({ customer_id: D2 }).returning('id');
     const estimateId = estimate.id || estimate;
@@ -405,6 +419,32 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
     expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
     expect(json(detail)).not.toContain(`pi_attached_${run}`);
+  });
+
+  test('ACH evidence never clears an unrelated hold: an orphan charge, an ambiguous failed row or a charged-but-unrecorded intent stays needs_reconciliation', async () => {
+    const list = await read('get_customer_invoices', { customer_id: W2, limit: 50 });
+    for (const key of ['w2_orphan', 'w2_failamb', 'w2_dbfail']) {
+      expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, bank_payment_processing: false });
+    }
+    expect(list.account_summary).toMatchObject({ needs_reconciliation_count: 3, total_due: 0 });
+    expect(list.account_summary.processing.bank_payment_in_flight).toBe(0);
+  });
+
+  test('the amount and the attached-intent hold come from the row the collection fence re-read, not the older listed row', async () => {
+    const payCombined = require('../services/pay-combined');
+    const base = await db('invoices').where({ id: inv.credited.id }).first();
+    const original = payCombined.memberCollectionPending;
+    let freshRow = { ...base, credit_applied: 0 };
+    const spy = jest.spyOn(payCombined, 'memberCollectionPending').mockImplementation(async (invoice, options) => (
+      String(invoice.id) === String(base.id) ? { row: freshRow } : original(invoice, options)));
+    try {
+      expect(by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'credited')).toMatchObject({ collectible: true, balance_due: 150, amount_due_after_credit: 150 });
+      freshRow = { ...base, stripe_payment_intent_id: `pi_late_${run}` };
+      const held = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+      expect(held.invoice).toMatchObject({ collectible: false, balance_due: null, amount_due_after_credit: null, needs_reconciliation: true });
+      const summary = (await read('get_customer_invoices', { customer_id: A, limit: 1 })).account_summary;
+      expect(summary.total_due).toBe(152);
+    } finally { spy.mockRestore(); }
   });
 
   test('a failed credit read keeps its own reason: the invoice warnings are appended, never overwrite it', async () => {

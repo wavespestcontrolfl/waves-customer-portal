@@ -234,12 +234,22 @@ async function bankPaymentProcessing(invoice, database) {
   if (!intents.size) return false;
   const rows = await database('payments').where({ customer_id: invoice.customer_id, status: 'processing' }).whereIn('stripe_payment_intent_id', [...intents]).select('stripe_payment_intent_id');
   const covered = new Set(rows.map((row) => String(row.stripe_payment_intent_id)));
-  return [...intents].every((intent) => covered.has(intent));
+  if (![...intents].every((intent) => covered.has(intent))) return false;
+  // The evidence accounts only for the attempt: the charge fence stops at the first hold it finds, so the two
+  // holds behind it (an unresolved orphan charge, a failed row flagged ambiguous: the fence's own later queries)
+  // must be absent too before the invoice reads as an ordinary bank payment.
+  if (await database('stripe_orphan_charges').where({ invoice_id: invoice.id, resolved: false }).first('id')) return false;
+  const ambiguousFailed = await database('payments').where({ status: 'failed' }).whereNull('stripe_payment_intent_id')
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
+    .whereRaw("COALESCE((metadata->>'ambiguous_outcome')::boolean, false) = true")
+    .where(function unresolvedAmbiguousAttempt() { this.whereNull('superseded_by_payment_id').orWhereColumn('superseded_by_payment_id', 'payments.id'); })
+    .first('id');
+  return !ambiguousFailed;
 }
 
 // The bank-processing explanation for a held attempt or attached intent, or the reconciliation hold.
-async function heldAttemptOutcome(invoice, database, reason, { complete = false } = {}) {
-  if (await bankPaymentProcessing(invoice, database)) return held('bank_payment_processing', 'a bank payment is processing on this invoice (an ACH debit in flight), not collectible until it settles');
+async function heldAttemptOutcome(invoice, database, reason, { complete = false, allowBank = true } = {}) {
+  if (allowBank && await bankPaymentProcessing(invoice, database)) return held('bank_payment_processing', 'a bank payment is processing on this invoice (an ACH debit in flight), not collectible until it settles');
   return complete ? held('needs_reconciliation', reason) : needsReconciliation(reason);
 }
 
@@ -249,7 +259,7 @@ async function processingStatusOutcome(invoice, database, terminalError) {
     await require('../stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
   } catch (fenceErr) {
     if (!CHARGE_FENCE_REASONS[fenceErr.code]) throw fenceErr;
-    return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[fenceErr.code]);
+    return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[fenceErr.code], { allowBank: fenceErr.code !== 'STRIPE_CHARGED_DB_FAILED' });
   }
   return held('bank_payment_processing', fenceReason(terminalError.message));
 }
@@ -292,10 +302,13 @@ async function invoiceCollectibility(invoice, database = db) {
     }
     const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: invoice.customer_id });
     if (member.reason === 'deposit_settlement') return needsReconciliation('an estimate deposit has been received and is not yet applied to this invoice');
-    if (member.reason === 'charge_reconciliation') return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS);
+    if (member.reason === 'charge_reconciliation') return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS, { allowBank: member.code !== 'STRIPE_CHARGED_DB_FAILED' });
     if (member.reason) return held('not_collectible', MEMBER_REASONS[member.reason] || MEMBER_REASONS.not_collectible);
-    if (invoice.stripe_payment_intent_id) return await heldAttemptOutcome(invoice, database, ATTACHED_INTENT_REASON, { complete: true });
-    return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(invoice) };
+    // The collection fence re-read the invoice: the attached-intent hold and the amount use THAT row, never the
+    // older one the caller passed (an intent attached or credit applied between the two reads).
+    const fresh = member.row;
+    if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
+    return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
   } catch (err) {
     logger.warn(`[intelligence-bar:billing-reader] collectibility check could not run (${err.code || err.name || 'error'})`);
     return needsReconciliation('the payment-state check could not be completed');
@@ -315,7 +328,8 @@ async function fenceAll(invoices) {
 // THE one place a due-style amount leaves the reader. Whatever reads as "owed" (the balance, the amount due after
 // credit, a payment plan's installment and remaining balance) is stated only for a collectible invoice and is
 // null otherwise; total and credit applied are document facts and stay.
-function projectDue(row, fence, today) {
+function projectDue(listedRow, fence, today) {
+  const row = fence.row || listedRow;
   return {
     amount_due_after_credit: fence.collectible ? invoiceAmountDue(row) : null,
     collectible: fence.collectible,
@@ -429,7 +443,8 @@ async function accountSummary(InvoiceService, customer, today) {
   const reconcileCount = countState('needs_reconciliation');
   const bankInFlight = countState('bank_payment_processing');
   const otherNotCollectible = fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).state === 'not_collectible').length : null;
-  const rowsWhere = (test) => (fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).collectible && test(invoice)) : null);
+  const fresh = (invoice) => fenced.get(String(invoice.id)).row || invoice;
+  const rowsWhere = (test) => (fenced ? unpaid.rows.filter((invoice) => fenced.get(String(invoice.id)).collectible && test(fresh(invoice))).map(fresh) : null);
   const sum = (rows) => (rows ? fromCents(rows.reduce((total, invoice) => total + cents(invoiceAmountDue(invoice)), 0)) : null);
   if (reconcileCount > 0) unknowns.push(`${reconcileCount} invoice(s) (unpaid or processing) need reconciliation and are NOT in total_due: check them on the Invoices page; do not collect or retry.`);
   if (otherNotCollectible > 0) unknowns.push(`${otherNotCollectible} unpaid invoice(s) are not collectible from this customer (for example billed to a third party, or nothing due after credit) and are not in total_due.`);
