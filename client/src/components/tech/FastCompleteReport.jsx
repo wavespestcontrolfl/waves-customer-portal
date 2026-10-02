@@ -218,19 +218,25 @@ export function PromisesSection({ promises, total, marks, locked, onChange }) {
 // The visit's saved spray trace (GET /tech/services/:id/treatment-zone),
 // read once and replaced by what the tracer saves. `enabled` is false while
 // the treatment-zone map is off, and the trace step is then left out.
+// The visit's saved trace. A read that failed is not "no trace": failed holds
+// the send (a saved perimeter would still show on the customer's report)
+// until reload reads it again.
 export function useVisitTrace({ serviceId, request }) {
-  const [state, setState] = useState({ loaded: false, enabled: false, zone: null });
+  const [state, setState] = useState({ loaded: false, failed: false, enabled: false, zone: null });
+  const [reads, setReads] = useState(0);
   useEffect(() => {
     let cancelled = false;
+    setState((prev) => ({ ...prev, loaded: false, failed: false }));
     request(`/tech/services/${serviceId}/treatment-zone`)
       .then((data) => {
-        if (!cancelled) setState({ loaded: true, enabled: data?.enabled === true, zone: data?.treatmentZone || null });
+        if (!cancelled) setState({ loaded: true, failed: false, enabled: data?.enabled === true, zone: data?.treatmentZone || null });
       })
-      .catch(() => { if (!cancelled) setState({ loaded: true, enabled: false, zone: null }); });
+      .catch(() => { if (!cancelled) setState({ loaded: true, failed: true, enabled: false, zone: null }); });
     return () => { cancelled = true; };
-  }, [request, serviceId]);
+  }, [request, serviceId, reads]);
   const saved = useCallback((zone) => setState((prev) => ({ ...prev, zone: zone || prev.zone })), []);
-  return { ...state, saved };
+  const reload = useCallback(() => setReads((n) => n + 1), []);
+  return { ...state, saved, reload };
 }
 
 // The traced perimeter's length, when the saved trace is a perimeter (with

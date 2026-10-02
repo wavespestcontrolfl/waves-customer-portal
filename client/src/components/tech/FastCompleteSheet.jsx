@@ -816,8 +816,14 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
 // indoor treatment keeps its indoor wait; a failed read is written again,
 // and the Full form stays open for an outage); and, for a perimeter spray,
 // the trace that gives it its length.
-function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable }) {
-  const perimeterRow = draft && active.find((row) => rowMethod(row, reportSprayMethod(draft.facts)) === 'perimeter_spray');
+// The first active product the record sprays around the house: the note's
+// perimeter, or a product the tech set to Perimeter spray by hand.
+function perimeterSprayRow(active, draft) {
+  return draft ? active.find((row) => rowMethod(row, reportSprayMethod(draft.facts)) === 'perimeter_spray') || null : null;
+}
+
+function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead }) {
+  const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
   // A trace saved while the note now records no spray around the house would
   // show on the customer's report as a sprayed perimeter.
@@ -827,6 +833,9 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable }) {
     [!draft, 'Generate the report first.'],
     [draft && !draft.text.trim(), 'The report is empty. Write it again.'],
     [draft && factsHold(draft.facts), draft && factsHold(draft.facts)],
+    // Whether a trace is saved decides both holds below.
+    [!traceRead.loaded, 'Checking for a saved trace…'],
+    [traceRead.failed, 'Couldn’t check for a saved trace. Check the trace again.'],
     [untraced, untraced && (traceAvailable
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
@@ -952,7 +961,9 @@ function ReportFlowForm({
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = { form, active, ratingAllowed, dictationPending, photosLoaded: visitPhotos.loaded };
   const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
-  const completeMissing = reportFlowMissing({ ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable });
+  const completeMissing = reportFlowMissing({
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace,
+  });
 
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
@@ -1030,7 +1041,8 @@ function ReportFlowForm({
         completeMissing={completeMissing}
         stockButton={stockButton}
         // Only a perimeter spray is traced: a spot visit has no trace step.
-        trace={traceAvailable && draft?.facts?.spray === 'perimeter' ? trace : null}
+        trace={traceAvailable && perimeterSprayRow(active, draft) ? trace : null}
+        onRetryTrace={trace.failed ? trace.reload : null}
         sources={writerSources({
           productCount: active.length,
           photoCount: visitPhotos.photos.length,
@@ -1086,7 +1098,7 @@ function ReportFlowForm({
 // prompt, write the report, or complete & send.
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, sources, photoCount,
-  onWrite, onSubmit, onTrace, onBack, onConfirm, onBackFromPrompt,
+  onWrite, onSubmit, onTrace, onRetryTrace, onBack, onConfirm, onBackFromPrompt,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -1094,6 +1106,9 @@ function ReportStep({
   let footer = (
     <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
       {stockButton}
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
     </CompleteFooter>
   );
   if (submission.prompt) {

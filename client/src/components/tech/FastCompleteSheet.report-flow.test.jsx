@@ -72,7 +72,7 @@ function makeRequest({
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
     if (path.endsWith('/photos')) return typeof photos === 'function' ? photos() : { photos };
-    if (path.endsWith('/treatment-zone')) return trace;
+    if (path.endsWith('/treatment-zone')) return typeof trace === 'function' ? trace() : trace;
     if (path === '/admin/schedule/generate-report') {
       if (report instanceof Error) throw report;
       return { report };
@@ -584,6 +584,36 @@ describe('complete and send', () => {
     expect(screen.getByText('Your saved trace shows a spray around the house, but your note says spots only. Say plainly how you sprayed, then write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     expect(request.bodies('/complete')).toEqual([]);
+  });
+
+  test('a product set to Perimeter spray by hand gets the trace step even when the note says spots', async () => {
+    const products = [...CATALOG, { id: 'gentrol', name: 'Gentrol IGR', category: 'Insecticide' }];
+    await openSheet(makeRequest({ products }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    const picker = screen.getByRole('dialog', { name: 'Add a product' });
+    fireEvent.click(within(picker).getByRole('button', { name: /^Gentrol IGR\b/ }));
+    const editor = screen.getByRole('group', { name: 'Gentrol IGR' });
+    fireEvent.click(within(within(editor).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Perimeter spray' }));
+    fireEvent.change(within(editor).getByLabelText('How much?'), { target: { value: '1' } });
+    await generate();
+    expect(screen.getByRole('button', { name: 'Trace where we sprayed' })).toBeTruthy();
+    expect(screen.getByText('Trace where you sprayed: Gentrol IGR is a perimeter spray.')).toBeTruthy();
+  });
+
+  test('a trace read that failed holds the send until it reads (a saved perimeter would still show)', async () => {
+    let failing = true;
+    const request = makeRequest({ trace: () => {
+      if (failing) throw new Error('offline');
+      return { enabled: true, treatmentZone: null };
+    } });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByText('Couldn’t check for a saved trace. Check the trace again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Check the trace again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
   });
 
   test('a spot visit with no trace saved completes with spot treatments and no trace step', async () => {
