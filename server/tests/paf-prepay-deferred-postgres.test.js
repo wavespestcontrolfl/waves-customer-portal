@@ -717,6 +717,13 @@ postgres('annual prepay charged after the first visit', () => {
       expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
+    it('a year settled before any visit whose payment came back is never charged before a visit (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'pending', released_for_visit_id: null } });
+      await sweep();
+      expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', charge_returned: true });
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -778,6 +785,11 @@ postgres('annual prepay charged after the first visit', () => {
 
     it('a returned bank debit goes to the pay link and the office alert, never a re-debit', async () => {
       const f = await deferredAccept({ jobPatch: { status: 'processing' } });
+      // Released by the performed first visit, then charged by bank debit.
+      await perform(f.parentId, f.customerId);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
       // The payment-failed webhook reopened the invoice.
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
       await sweep();
