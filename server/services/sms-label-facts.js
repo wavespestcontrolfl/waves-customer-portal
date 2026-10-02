@@ -1073,11 +1073,10 @@ function languageTokens(text, { keepNames = false } = {}) {
         for (let k = i + 1; k <= j; k++) skip.add(k);
         // a street word that ends a sentence ("St." then "Kiedy psy?") ends the address: what follows is read as words (#5537 r1)
         if (/[.!?]["\u201d\u2019')]*$/.test(raws[j])) break;
-        // the address tail: a unit ("apt 102"), then up to three capitalized city / state words or a zip ("Oak Bluff FL 34000")
+        // the address tail: a unit ("apt 102"), then a state code and zip directly after the street ("Dr FL 34000")
         let k = j + 1;
         if (k < raws.length && /^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[k])) { skip.add(k); k += 1; if (k < raws.length && /^#?\d+\w?[,.]?$/.test(raws[k])) { skip.add(k); k += 1; } }
-        // (a city of at most two capitalized words, then only a state code and a zip: a longer capitalized run is read as words)
-        for (let n = 0; n < 2 && k < raws.length && /^[A-Z][a-z]*,?$/.test(raws[k]); n += 1, k += 1) skip.add(k);
+        // (no city skip: capitalized words after a street can be a sentence, "1200 Main St Kiedy Psy", #5537 r1; only a state code + zip)
         if (k < raws.length && /^[A-Z]{2},?$/.test(raws[k])) { skip.add(k); k += 1; }
         if (k < raws.length && /^\d{5}(?:-\d{4})?[,.]?$/.test(raws[k])) skip.add(k);
         break;
@@ -1111,7 +1110,8 @@ function isUnverifiedLanguageInbound(inbound) {
   // Names leave the count only when the rest is plainly English: one unknown lowercase word beside a name puts every word back
   // ("Hi Fido kimehet most kerlek please?" is judged on all six words, #5520 r4; "Hi this is Marisol Quintanilla" stays English).
   const withoutNames = languageTokens(original);
-  const tokens = withoutNames.every(englishKnown) ? withoutNames : languageTokens(original, { keepNames: true });
+  // (and when leaving names out leaves nothing, the capitalized words are all there is to judge: "1200 Main St Pot Iesi")
+  const tokens = withoutNames.length && withoutNames.every(englishKnown) ? withoutNames : languageTokens(original, { keepNames: true });
   if (!tokens.length) return false;
   const foreign = foreignWordSet();
   // (also held: a short text with no known English word at all, "Pot iesi?" - a language on no list, which the reply guards cannot read)
@@ -1596,7 +1596,7 @@ const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upc
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|(?<!\b(?:asked|texted|called|tried|told|messaged|emailed|said|mentioned|reached\s+out|written|wrote)\s+(?:\w+\s+){0,2}\S+\s+)times?)\s+(?:ago|back|before|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|prior)|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?|several|some|many|a\s+number\s+of)\s+(?:visits?|services?|treatments?|applications?|sprays?|sprayings?|rounds?|appointments?|times?)\s+(?:ago|back|before|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|prior)|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
