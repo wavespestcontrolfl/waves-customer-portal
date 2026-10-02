@@ -44,6 +44,14 @@ async function technicianServicesCustomer(req, customerId) {
   return !!assigned;
 }
 
+// The set of customers a technician currently services, as a subquery over
+// scheduled_services (same current/recent predicate as above). For readers
+// that list across customers — the SMS inbox — a technician's query adds
+// whereIn(<customer column>, technicianCustomerIdsSubquery(req, db)).
+function technicianCustomerIdsSubquery(req, db) {
+  return technicianCurrentVisitFilter(req, db('scheduled_services')).select('scheduled_services.customer_id');
+}
+
 // MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
 // completed one is settled; corrections on it are office work.
 function technicianLiveVisitFilter(req, q) {
@@ -118,4 +126,4 @@ function technicianVisitRowInScope(actor, row) {
     && dateOnly(row.scheduled_date) >= techAccessCutoff();
 }
 
-module.exports = { isTechnicianRequest, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit };
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit };

@@ -40,7 +40,9 @@ const TECHNICIAN_ALLOW_LIST = [
   // Own schedule and visits (the routers scope to the assigned technician).
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/schedule(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/dispatch(\/.*)?$/ },
-  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/dispatch\/(jobs|routes|insights|csr\/slots)$/ },
+  // The dispatch facade's job list only (the route pins a technician to their
+  // own visits); the route board and insights are admin-only.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/dispatch\/jobs$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/visit-closeouts(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/services(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/line(\/.*)?$/ },
@@ -82,12 +84,13 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/admin\/timetracking(\/.*)?$/ },
   { bucket: 'own-time', methods: ['POST'], pattern: /^\/api\/admin\/timesheets\/dispute$/ },
 
-  // Texts with customers on their own visits. (Per-customer scoping inside
-  // admin-communications is the follow-up PR; this list only closes the
-  // routes a technician has no business calling at all: the compliance
-  // export, outbound calls from the business line, auto-reply and link
-  // library configuration.)
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|stats|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
+  // Texts with customers on their own visits: admin-communications scopes a
+  // technician's inbox, sends, drafts and read-marks to customers on their
+  // route (technicianCustomerGuard / technicianCustomerIdsSubquery). This
+  // list closes the routes a technician has no business calling at all:
+  // stats, the compliance export, outbound calls from the business line,
+  // auto-reply and link library configuration.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|schedule-sms|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts(\/.*)?$/ },

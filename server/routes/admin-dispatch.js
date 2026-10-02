@@ -207,6 +207,23 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// Every /:serviceId route is pinned to the technician's own current/recent
+// visit here, once, before the handler (codex #5568 r2 P1: a few per-visit
+// reads — card-hold, recap context — had no check of their own). The canonical
+// predicate (technicianCurrentVisitFilter: dead statuses excluded, 7-day
+// window) answers 404 so an id seen elsewhere confirms nothing. Admins pass.
+// Handlers that lock the row (lockOwnedLiveVisit) still do so for writes.
+router.param('serviceId', async (req, res, next, serviceId) => {
+  try {
+    if (!isTechnicianRequest(req)) return next();
+    const owned = await technicianCurrentVisitFilter(
+      req,
+      db('scheduled_services').where('scheduled_services.id', serviceId),
+    ).first('scheduled_services.id');
+    if (!owned) return res.status(404).json({ error: 'Service not found' });
+    return next();
+  } catch (err) { return next(err); }
+});
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
 // Tech-readable boolean reflecting whether the rating picker should be
@@ -1020,7 +1037,7 @@ router.post('/recap-preview', async (req, res, next) => {
     try {
       let customerId = null;
       if (body.serviceId) {
-        const svcRow = await db('scheduled_services').where({ id: body.serviceId }).first('customer_id');
+        const svcRow = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('customer_id');
         customerId = svcRow?.customer_id || null;
       }
       visitContext = await buildRecapVisitContext({ serviceType: body.serviceType, customerId });
@@ -5491,7 +5508,7 @@ router.get('/weather/tomorrow', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/reschedules/log
-router.get('/reschedules/log', async (req, res, next) => {
+router.get('/reschedules/log', requireAdmin, async (req, res, next) => {
   try {
     const logs = await db('reschedule_log')
       .leftJoin('customers', 'reschedule_log.customer_id', 'customers.id')

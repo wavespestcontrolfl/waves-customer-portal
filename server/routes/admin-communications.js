@@ -7,6 +7,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianServicesCustomer, technicianCustomerIdsSubquery } = require('../services/technician-visit-scope');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
@@ -54,6 +55,23 @@ const {
   releaseById: releaseReservationById,
   reserveForRequest,
 } = require('../services/messaging/review-ask-reservation');
+
+// Technician texting scope (owner 2026-10-02, codex #5568 r2 P1): a technician
+// reads and sends texts only with customers on their own current/recent
+// route. 404 (not 403) when a named customer is out of scope — existence must
+// not leak. Admins are unscoped.
+async function technicianCustomerGuard(req, res, customerId) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!customerId) {
+    res.status(403).json({ error: 'Pick the customer first — technicians text customers on their own route', code: 'TECHNICIAN_SCOPE' });
+    return false;
+  }
+  if (!(await technicianServicesCustomer(req, customerId))) {
+    res.status(404).json({ error: 'Customer not found' });
+    return false;
+  }
+  return true;
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -519,6 +537,7 @@ router.post('/sms', async (req, res, next) => {
       }
       trustedCustomerId = customer.id;
     }
+    if (!(await technicianCustomerGuard(req, res, trustedCustomerId))) return undefined;
     // Texting an applicant from the composer stays on the recruiting rail
     // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
     // the application — never a 'manual' customer text that would hand the
@@ -1750,6 +1769,7 @@ router.post('/send-prep', async (req, res, next) => {
   try {
     const { customerId, pestType = 'flea', channel = 'both' } = req.body || {};
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
     if (!isSupportedPestType(pestType)) {
       return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
     }
@@ -1958,6 +1978,9 @@ router.post('/call', async (req, res, next) => {
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search, needsResponse } = req.query;
+    if (customerId && isTechnicianRequest(req) && !(await technicianServicesCustomer(req, customerId))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     if (![undefined, 'true', 'false'].includes(needsResponse)) {
       return res.status(400).json({ error: 'Invalid needs-response filter' });
     }
@@ -2021,6 +2044,9 @@ router.get('/log', async (req, res, next) => {
     // Recruiting threads (applicant texts carry a bearer interview link) are
     // owner-only — see utils/recruiting-thread-scope.js.
     query = hideRecruitingThreadsFromNonAdmin(query, req);
+    // A technician's inbox is their own customers' threads only; unknown-sender
+    // threads (no customer behind them) are office work.
+    if (isTechnicianRequest(req)) query = query.whereIn('conversations.customer_id', technicianCustomerIdsSubquery(req, db));
 
     // Exclude internal admin phone messages from either side of the conversation.
     for (const phone of ADMIN_PHONES) {
@@ -2201,6 +2227,7 @@ router.get('/agent-draft', async (req, res, next) => {
     if (!customerId && !phoneLast10) {
       return res.status(400).json({ error: 'customerId or phone required' });
     }
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
 
     let q = db('agent_decisions as ad')
       .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
@@ -2287,6 +2314,21 @@ router.post('/messages/read', async (req, res, next) => {
       return res.status(400).json({ error: 'readBefore required when marking a conversation read' });
     }
 
+    if (isTechnicianRequest(req)) {
+      // Every named message and conversation must belong to one of the
+      // technician's own customers; a thread with no customer is office work.
+      const scoped = technicianCustomerIdsSubquery(req, db);
+      const foreignMessage = ids.length ? await db('messages')
+        .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+        .whereIn('messages.id', ids)
+        .where((b) => b.whereNull('conversations.customer_id').orWhereNotIn('conversations.customer_id', scoped))
+        .first('messages.id') : null;
+      const foreignConversation = conversationIds.length ? await db('conversations')
+        .whereIn('conversations.id', conversationIds)
+        .where((b) => b.whereNull('conversations.customer_id').orWhereNotIn('conversations.customer_id', scoped))
+        .first('conversations.id') : null;
+      if (foreignMessage || foreignConversation) return res.status(404).json({ error: 'Message not found' });
+    }
     const { markInboundSmsRead } = require('../services/inbound-sms-read');
     const { updated, notificationsCleared } = await markInboundSmsRead({
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
@@ -2310,7 +2352,7 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/communications/stats — channel analytics
-router.get('/stats', async (req, res, next) => {
+router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
@@ -2424,6 +2466,9 @@ router.post('/ai-draft', async (req, res, next) => {
 
     // Look up customer context
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
+    if (isTechnicianRequest(req) && !(customer && await technicianServicesCustomer(req, customer.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
 
     // Get recent SMS history for context. Recruiting rows (job_*) are
     // excluded for EVERY caller, admin included: this is a customer-copy
@@ -3658,6 +3703,7 @@ router.post('/rewrite-sms', async (req, res) => {
           return null;
         });
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      if (!(await technicianCustomerGuard(req, res, customer.id))) return undefined;
       const customerPhoneLast10 = fullPhoneLast10(customer.phone);
       if (!customerPhoneLast10 || customerPhoneLast10 !== requestedPhoneLast10) {
         return res.status(400).json({ error: 'customerPhone must match the selected customer phone' });
@@ -3815,6 +3861,7 @@ router.post('/schedule-sms', async (req, res, next) => {
     const trusted = await trustedCustomerForScheduledSms(customerId, to);
     if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
     const trustedCustomerId = trusted.customerId;
+    if (!(await technicianCustomerGuard(req, res, customerId ? trustedCustomerId : null))) return undefined;
     // A draft whose reschedule / appointment link points at a street-level address hold is not queued:
     // nothing about a held visit reaches the customer before the office confirms the address.
     const scheduledLinkedVisitIds = linkedVisitIdsFrom(req.body?.linkedVisitIds);
@@ -4513,3 +4560,5 @@ router._internals = {
 };
 
 module.exports = router;
+// Test seam for the technician texting scope.
+router._technicianCustomerGuard = technicianCustomerGuard;

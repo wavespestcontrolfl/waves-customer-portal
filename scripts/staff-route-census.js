@@ -65,7 +65,11 @@ function parseRouter(fileSpec) {
   let adminWide = false;
   let exemptionGate = false;
   const adminPrefixes = [];
-  for (const m of src.matchAll(/\brouter\.use\(([^]*?)\);/g)) {
+  // Guards hang off the exported router variable (router, or serviceRouter /
+  // propertyRouter for a file exporting several).
+  const guardVar = exportName || 'router';
+  const useRe = new RegExp(`\\b${guardVar}\\.use\\(([^]*?)\\);`, 'g');
+  for (const m of src.matchAll(useRe)) {
     const args = m[1];
     if (!/\brequireAdmin\b/.test(args)) continue;
     const trimmed = args.trim();
@@ -78,7 +82,7 @@ function parseRouter(fileSpec) {
       adminWide = true;
     }
   }
-  const routerStaffAuth = /\brouter\.use\([^)]*\badminAuthenticate\b[^)]*\)/.test(src);
+  const routerStaffAuth = new RegExp(`\\b${guardVar}\\.use\\([^)]*\\badminAuthenticate\\b[^)]*\\)`).test(src);
   const routes = [];
   // First argument: one quoted path or an array of quoted paths.
   const re = /\b(router|serviceRouter|propertyRouter)\.(get|post|put|patch|delete|all)\(\s*(\[[^\]]*\]|(['"`])[^'"`]+\4)\s*,([^]*?)(?=\n(?:[a-zA-Z/]|\s*\}\);|\s*$))/g;
@@ -114,8 +118,25 @@ function samplePath(p) {
     .replace(/\*/g, 'x').replace(/\([^)]*\)\??/g, '');
 }
 
+// Staff routes declared straight on the app (app.get('/api/...', adminAuthenticate, ...)).
+function readDirectAppRoutes() {
+  const src = fs.readFileSync(INDEX, 'utf8');
+  const rows = [];
+  const re = /\bapp\.(get|post|put|patch|delete)\(\s*'([^']+)'\s*,([^]*?)(?=\n(?:app\.|\s*\}\);|\s*$))/g;
+  for (const m of src.matchAll(re)) {
+    const head = m[3].split('\n').slice(0, 4).join('\n');
+    if (!/\badminAuthenticate\b/.test(head)) continue;
+    rows.push({ method: m[1].toUpperCase(), path: m[2], file: 'index.js', perRouteAdmin: /\brequireAdmin\b/.test(head.split('async')[0]) });
+  }
+  return rows;
+}
+
 function census() {
   const rows = [];
+  for (const r of readDirectAppRoutes()) {
+    const today = !r.perRouteAdmin;
+    rows.push({ method: r.method, path: r.path, file: r.file, today, after: today && technicianMayReach(r.method, samplePath(r.path)), exemptionGate: false });
+  }
   for (const { mount, file } of readIndexMounts()) {
     const r = parseRouter(file);
     if (r.missing) continue;

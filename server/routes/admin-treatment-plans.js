@@ -42,9 +42,11 @@ function projectPlanResponse(plan) {
   return { ...plan, propertyGate };
 }
 
+// Every technician request is pinned to a current/recent assigned visit —
+// not only completion-default requests (codex #5568 r2 P1: the plan carries
+// the customer's name, locality, lawn area and cost details). Admins pass.
 async function completionScopeAllowed(req) {
-  const requested = req.query.completionDefaults === '1' || req.body?.completionDefaults === true;
-  if (!requested || !isTechnicianRequest(req)) return true;
+  if (!isTechnicianRequest(req)) return true;
   const visit = await db('scheduled_services').where({ id: req.params.serviceId })
     .modify(query => technicianCurrentVisitFilter(req, query)).first('id');
   return !!visit;
