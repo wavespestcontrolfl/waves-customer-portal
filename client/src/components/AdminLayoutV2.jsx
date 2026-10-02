@@ -276,6 +276,16 @@ export default function AdminLayoutV2() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  // Entering Today after a failed check elsewhere (no signal on another
+  // page) re-runs it, so the field workspace can still open from its pass
+  // (Codex #5573 r9).
+  const onFieldNow = isFieldPath(location.pathname);
+  useEffect(() => {
+    if (!onFieldNow || authStatus !== "error") return;
+    setAuthStatus("checking");
+    setVerifyRun((n) => n + 1);
+  }, [onFieldNow]);
+
   useEffect(() => {
     if (!offlineReady || isFieldPath(location.pathname)) return;
     setOfflineReady(false);

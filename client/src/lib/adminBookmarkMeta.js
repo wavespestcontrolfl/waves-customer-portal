@@ -53,7 +53,8 @@ export function isFieldPath(pathname) {
 }
 
 export function isAdminPath(pathname) {
-  return pathname === "/admin" || pathname.startsWith("/admin/");
+  const path = String(pathname || "").toLowerCase();
+  return path === "/admin" || path.startsWith("/admin/");
 }
 
 function getMeta(name) {
