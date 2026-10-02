@@ -23,14 +23,14 @@ const start = [
   { name: 'c.jpg', data: 'data:c', caption: 'Third photo' },
 ];
 
-function Harness() {
+function Harness({ disabled = false }) {
   const [photos, setPhotos] = useState(start);
   return (
     <>
       <NoteBoxPhotos
         photos={photos}
         max={5}
-        disabled={false}
+        disabled={disabled}
         palette={palette}
         dictationServiceId="svc-1"
         onAdd={() => {}}
@@ -80,5 +80,17 @@ describe('NoteBoxPhotos', () => {
     expect(screen.getByLabelText('Description for photo 2').value).toBe('gap under the garage door');
     fireEvent.click(screen.getByRole('button', { name: 'Save description' }));
     expect(screen.getByTestId('captions').textContent).toBe('a.jpg:First photo|b.jpg:gap under the garage door|c.jpg:Third photo');
+  });
+
+  it('while the form is busy writing a report, an open description is locked (pre-push P1)', () => {
+    const view = render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Describe photo 2' }));
+    fireEvent.change(screen.getByLabelText('Description for photo 2'), { target: { value: 'Gap under the garage door' } });
+    view.rerender(<Harness disabled />);
+    expect(screen.getByLabelText('Description for photo 2').disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Save description' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Describe by voice' }).disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Description for photo 2'), { key: 'Enter' });
+    expect(screen.getByTestId('captions').textContent).toBe('a.jpg:First photo|b.jpg:|c.jpg:Third photo');
   });
 });

@@ -81,6 +81,7 @@ export default function NoteBoxPhotos({
           key={session}
           index={editing}
           initial={editingPhoto.caption || ''}
+          disabled={disabled}
           palette={palette}
           button={button}
           dictationServiceId={dictationServiceId}
@@ -125,13 +126,17 @@ export default function NoteBoxPhotos({
 // dictation hook's own unmount ends the session. A recording stops without
 // uploading, a microphone still asking for permission is released, and a
 // transcript in flight never reaches another photo.
-function CaptionEditor({ index, initial, palette, button, dictationServiceId, onSave, onCancel }) {
+// While the form is busy (a report being written from these captions) the
+// editor locks: nothing changes a caption the report request already read.
+function CaptionEditor({ index, initial, disabled, palette, button, dictationServiceId, onSave, onCancel }) {
   const [draft, setDraft] = useState(initial);
   const dictation = useSpeechDictation(
     (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
     { uploadServiceId: dictationServiceId },
   );
-  const save = () => onSave(draft.trim());
+  const save = () => {
+    if (!disabled) onSave(draft.trim());
+  };
   return (
     <div style={{ display: 'grid', gap: 8 }}>
       <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
@@ -139,6 +144,7 @@ function CaptionEditor({ index, initial, palette, button, dictationServiceId, on
         <span style={{ position: 'relative', display: 'block' }}>
           <input
             value={draft}
+            disabled={disabled}
             maxLength={PHOTO_CAPTION_MAX_CHARS}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -163,7 +169,7 @@ function CaptionEditor({ index, initial, palette, button, dictationServiceId, on
             <button
               type="button"
               onClick={dictation.toggle}
-              disabled={dictation.uploading}
+              disabled={disabled || dictation.uploading}
               aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
               style={{
                 position: 'absolute',
@@ -188,7 +194,7 @@ function CaptionEditor({ index, initial, palette, button, dictationServiceId, on
         </span>
       </label>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button type="button" onClick={save} style={{ ...button, cursor: 'pointer', opacity: 1, background: palette.text, color: palette.card, borderColor: palette.text }}>
+        <button type="button" onClick={save} disabled={disabled} style={{ ...button, background: palette.text, color: palette.card, borderColor: palette.text }}>
           Save description
         </button>
         <button type="button" onClick={onCancel} style={{ ...button, cursor: 'pointer', opacity: 1 }}>

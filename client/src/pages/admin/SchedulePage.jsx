@@ -13791,9 +13791,14 @@ export function CompletionPanel({
   // shrub & palm: another lane owns those completions and their photo steps.
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
     && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
-  const setPhotoCaption = (index, caption) => setServicePhotos((prev) => prev.map((photo, i) => (i === index
-    ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
-    : photo)));
+  // Locked while a report is being written, like removePhoto: the request
+  // already read these captions.
+  const setPhotoCaption = (index, caption) => {
+    if (generating) return;
+    setServicePhotos((prev) => prev.map((photo, i) => (i === index
+      ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+      : photo)));
+  };
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
