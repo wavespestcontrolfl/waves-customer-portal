@@ -233,7 +233,8 @@ function jsonLdNodes(html) {
     // value of a property stands), so no block's stated field is dropped.
     if (typeof node['@id'] === 'string' && !isLdRef(node)) {
       const prev = byId.get(node['@id']);
-      byId.set(node['@id'], prev ? { ...node, ...prev } : node);
+      if (!prev) byId.set(node['@id'], node);
+      else for (const k of Object.keys(node)) if (!(k in prev)) prev[k] = node[k]; // in place: each property copied once
     }
       if (node.name || node.telephone || node.address) out.push(node);
       if (node.mainEntity) stack.push(node.mainEntity);

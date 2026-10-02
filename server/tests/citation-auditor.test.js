@@ -96,6 +96,14 @@ describe('classifyListing', () => {
     expect(Date.now() - started).toBeLessThan(500);
   });
 
+  test('many blocks repeating one @id merge in linear time', () => {
+    const blocks = [];
+    for (let i = 0; i < 3000; i += 1) blocks.push({ '@id': '_:a', [`p${i}`]: 'x' });
+    const started = Date.now();
+    classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(blocks)}`), expected);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');
