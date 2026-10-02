@@ -64,6 +64,16 @@ test('a scheduled Auto Pay row is labeled Scheduled and never hides the card', a
   expect(cards[0].rows.map((r) => r.statusLabel)).toEqual(['Scheduled', 'Paid']);
 });
 
+test('a past-dated upcoming row shows as Processing, as on the Billing tab, and a repeated call replaces the card', async () => {
+  listPortalPayments.mockResolvedValue({ payments: [{ id: 'up', date: '2026-01-05', amount: 129, status: 'upcoming', description: 'Monthly', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
+  const cards = [];
+  await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  expect(cards).toHaveLength(1);
+  expect(cards[0].rows[0].statusLabel).toBe('Processing');
+  expect(result.statuses).toEqual(['Processing']);
+});
+
 test('any payment the card cannot label means no card: a disputed newest payment never lets an older paid one read as the latest', async () => {
   listPortalPayments.mockResolvedValue({ payments: [{ ...PAYMENTS[0], status: 'disputed' }, PAYMENTS[2]] });
   const actions = []; const cards = [];

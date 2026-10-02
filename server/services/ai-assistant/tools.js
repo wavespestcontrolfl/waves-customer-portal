@@ -120,7 +120,11 @@ const PAYMENT_STATUS_LABELS = { paid: 'Paid', processing: 'Processing', failed: 
 // label, so the card is withheld.
 const SETTLED_REFUND_STATUSES = new Set(['full', 'partial', 'succeeded']);
 function paymentStatusLabel(p) {
-  const base = PAYMENT_STATUS_LABELS[String(p.status || '').toLowerCase()];
+  let status = String(p.status || '').toLowerCase();
+  // The Billing tab's own rule: an 'upcoming' row whose date has passed has
+  // not resolved yet and shows as processing, never as a future charge.
+  if (status === 'upcoming' && dateKeyOf(p.date) < etDateString()) status = 'processing';
+  const base = PAYMENT_STATUS_LABELS[status];
   if (!base) return null;
   if (!(p.refundAmount > 0)) return base;
   if (!SETTLED_REFUND_STATUSES.has(String(p.refundStatus || '').toLowerCase())) return null;
@@ -347,7 +351,10 @@ async function showRecentPayments(customerId, actions, cards) {
         : 'No payments are on record for this customer. Say so plainly and show the Billing page.',
     };
   }
-  cards.push({ type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows });
+  // One payments card per reply: a repeated call replaces, never duplicates.
+  const card = { type: 'payments', title: rows.length === 1 ? 'Your most recent payment' : `Your last ${rows.length} payments`, rows };
+  const at = cards.findIndex((c) => c.type === 'payments');
+  if (at === -1) cards.push(card); else cards[at] = card;
   return {
     shown: true,
     count: rows.length,
