@@ -92,6 +92,9 @@ const LANE_RUNTIME = {
   sms_translation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   // Its verdict authorizes an automatic customer send (tech-voice review asks).
   review_ask_fact_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
+  // Its verdict holds or stops a customer send (tech-voice review asks).
+  review_ask_repeat_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
+  review_ask_reviewed_claim: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
   sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.

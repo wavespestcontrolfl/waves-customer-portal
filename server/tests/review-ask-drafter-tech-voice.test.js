@@ -5,6 +5,7 @@
 // redraft-then-fallback contract.
 const mockDispatch = jest.fn();
 const mockFactCheck = jest.fn();
+const mockRepeatCheck = jest.fn();
 const mockGates = { reviewAskTechVoice: true, reviewAskPersonalized: false };
 const mockGetRecentCalls = jest.fn(async () => []);
 const mockTables = {};
@@ -25,7 +26,8 @@ const mockWithValidate = async (fn, args) => {
   return res;
 };
 jest.mock('../services/llm/call', () => ({
-  dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a) : mockWithValidate(mockDispatch, a)),
+  dispatchWithFallback: (...a) => (a[1]?.laneId === 'review_ask_fact_check' ? mockFactCheck(...a)
+    : a[1]?.laneId === 'review_ask_repeat_check' ? mockRepeatCheck(...a) : mockWithValidate(mockDispatch, a)),
   rejectCall: (...a) => mockRejectCall(...a),
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
@@ -73,6 +75,7 @@ beforeEach(() => {
   mockDispatch.mockReset();
   mockRejectCall.mockReset();
   mockFactCheck.mockReset().mockImplementation(async (_p, req) => approveAll(req));
+  mockRepeatCheck.mockReset().mockResolvedValue({ ok: true, json: { repeats: false, sentence: '', earlier_quote: '' } });
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
   Object.keys(mockTables).forEach((k) => delete mockTables[k]);
@@ -135,6 +138,38 @@ describe('draftTechVoice', () => {
     // Rules ride the system channel, never the data.
     expect(call.system).toContain('Google review');
     expect(call.text).not.toContain('RULES');
+  });
+
+  test('a later touch that repeats an earlier one is HELD (never redrafted); the model\'s quotes are confirmed by code', async () => {
+    mockTables.review_requests = [{ sequence_step: 0, channel: 'sms', custom_body: 'Hi Marta, I flagged moisture under the kitchen sink. A Google review helps: {review_url}', template_key: 'day0_ask_tech_voice' }];
+    const sinkSentence = 'I flagged moisture under the kitchen sink for your property group.';
+    mockRepeatCheck.mockResolvedValueOnce({ ok: true, json: { repeats: true, sentence: sinkSentence, earlier_quote: 'I flagged moisture under the kitchen sink' } });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toEqual({
+      held: 'repeat', body: GOOD.body, sentence: sinkSentence, earlierQuote: 'I flagged moisture under the kitchen sink', earlierStep: 0,
+    });
+    // one draft only: a repeat is held, not reworded
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const data = mockRepeatCheck.mock.calls[0][1];
+    expect(data.text).toContain('I flagged moisture under the kitchen sink');
+    expect(data.text).not.toContain('{review_url}');
+    expect(data.system).toContain('same subject');
+  });
+
+  test('a repeat verdict whose quotes are not in the draft and the earlier touch, or an unavailable check, sends nothing drafted', async () => {
+    mockTables.review_requests = [{ sequence_step: 0, channel: 'sms', custom_body: 'Earlier touch about the sink', template_key: 'day0_ask_tech_voice' }];
+    mockRepeatCheck.mockResolvedValueOnce({ ok: true, json: { repeats: true, sentence: 'A sentence that is not in the draft.', earlier_quote: 'about the sink' } });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
+    mockRepeatCheck.mockResolvedValueOnce({ ok: false });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
+  });
+
+  test('the first touch has nothing to repeat: no repeat check is asked', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
+    expect(mockRepeatCheck).not.toHaveBeenCalled();
   });
 
   test('a rejected draft gets ONE redraft with the reason; a second rejection falls back to the template', async () => {
