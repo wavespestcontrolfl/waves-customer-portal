@@ -263,6 +263,11 @@ describe('visit prices', () => {
     expect(texts(verdictFor(priced(pestRows(), 150), wrongPrimary))).toEqual(['5 lawn visits priced $90.00, accepted $100.00']);
   });
 
+  test('a primary stamped $0 beside a positive visit price is a mismatch (the service line would bill nothing)', () => {
+    const lawn = priced(lawnRows(), 100).map((row, i) => (i === 1 ? { ...row, primary_line_price: 0 } : row));
+    expect(texts(verdictFor(priced(pestRows(), 150), lawn))).toEqual(['1 lawn visits priced $0.00, accepted $100.00']);
+  });
+
   test('a name-only combined route (no catalog row) is read as both of its services', () => {
     const tree = { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 360, mo: 30 };
     const combo = lawnRows().map((row) => ({ ...row, catalog_service_key: null, service_type: 'Lawn + Tree & Shrub Service',
@@ -302,10 +307,12 @@ describe('markPrepayCovered', () => {
       // An unstamped termite renewal visit in its payment-pending grace window: the authority covers it.
       { id: 'live', catalog_service_key: 'termite_bait', estimated_price: 120 },
       { id: 'plainlawn', catalog_service_key: 'lawn_care_recurring', estimated_price: 120 },
+      // Priced only through primary_line_price: still asked / compared on that charge.
+      { id: 'primaryonly', prepaid_amount: 120, prepaid_method: 'cash', primary_line_price: 120 },
     ];
     await check.markPrepayCovered({}, rows);
     expect(Object.fromEntries(rows.map((row) => [row.id, row.prepay_covered]))).toEqual({
-      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false,
+      partial: false, full: true, live: true, stale: false, linkonly: false, plainlawn: false, primaryonly: true,
     });
     // Asked for the annual stamps, the term link and the unstamped termite visit; never the plain lawn visit.
     expect(validator).toHaveBeenCalledTimes(4);

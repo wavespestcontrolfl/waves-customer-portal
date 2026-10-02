@@ -258,7 +258,11 @@ function checkPrices(dated, families, prices) {
   const off = new Map();
   for (const row of dated) {
     const price = billedServicePrice(row);
-    if (!row.recurring_parent_id || row.is_recurring === false || !(price > 0)) continue;
+    // Unreadable, or no price anywhere (the unpriced-series alert's). A primary
+    // stamped $0 beside a positive visit price IS checked: invoicing bills that
+    // $0 service line, so the accepted charge would go missing.
+    if (!row.recurring_parent_id || row.is_recurring === false || price == null) continue;
+    if (!(price > 0) && !(Number(row.estimated_price) > 0)) continue;
     // Fully covered by a prepayment (markPrepayCovered): its price never bills.
     if (row.prepay_covered) continue;
     // Every service the row performs must have a known accepted price (one
@@ -420,8 +424,10 @@ async function markPrepayCovered(conn, rows) {
   for (const row of rows) {
     row.prepay_covered = false;
     const paid = Number(row.prepaid_amount);
-    if (!(Number(row.estimated_price) > 0)) continue;
-    if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= Number(row.estimated_price); continue; }
+    // The visit's charge, however it is stored (a primary-only visit included).
+    const charge = Math.max(Number(row.estimated_price) || 0, Number(row.primary_line_price) || 0);
+    if (!(charge > 0)) continue;
+    if (paid > 0 && hasOutOfBandPrepaidStamp(row)) { row.prepay_covered = paid + 0.005 >= charge; continue; }
     // The coverage authority also covers an UNSTAMPED termite renewal visit
     // during the payment-pending grace window, so a termite visit is asked
     // even with no stamp; any other unstamped visit has nothing to ask about.
