@@ -4605,7 +4605,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
+    // Ring only for a real conflict (an untimed visit, or a kept appointment
+    // that needs a cadence review). A move whose only finding is an accepted
+    // overlap rings nothing (owner 2026-10-01: six bells in 72h, every one with
+    // no conflicts and no preserved visits); the overlap still rides the move's
+    // response, and it is listed in the card below when a real conflict rings one.
+    if ((dueConflicts.length || (!cardOnly && preserved.length)) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
@@ -4629,9 +4634,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          preserved.length ? 'Recurring move needs a future visit review'
-            : dueConflicts.length ? 'Series move left visits without a time window'
-              : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
+          preserved.length ? 'Recurring move needs a future visit review' : 'Series move left visits without a time window',
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
           // A card-only pass stores only the conflicts it rings for: the
           // successor owns the preserved and overlap work (admin-alert-relevance.js
@@ -4649,6 +4652,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // The successor owns preserved commitments and accepted overlaps. With
     // no still-untimed conflict, this superseded operation owes no old card.
     if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
+    // An overlap-only move owes no card (above), but its conflict_count still
+    // counts the overlaps: stamp the card marker so the recovery sweep
+    // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
+    if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
