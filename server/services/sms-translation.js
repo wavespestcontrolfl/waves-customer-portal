@@ -29,6 +29,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const TRIAL_TABLE = 'sms_translation_trials';
 const PROMPT_VERSION = 'sms_translation_trial_v1';
 const MAX_TEXT = 1600;
+const TRANSLATED_SEGMENT_LIMIT = 4;
 
 function trialEnabled() {
   return gateEnvValue('GATE_SMS_ANY_LANGUAGE_TRIAL');
@@ -49,7 +50,19 @@ function needsTranslation(inbound) {
 function isEnglishText(text) {
   const chunks = [];
   let current = '';
-  for (const sentence of String(text || '').split(/(?<=[.!?])\s+/)) {
+  // a sentence over the chunk size is itself split at word boundaries
+  const pieces = String(text || '').split(/(?<=[.!?])\s+/).flatMap((sentence) => {
+    if (sentence.length <= 900) return [sentence];
+    const parts = [];
+    let part = '';
+    for (const word of sentence.split(/\s+/)) {
+      if (part && part.length + word.length + 1 > 900) { parts.push(part); part = ''; }
+      part = part ? `${part} ${word}` : word;
+    }
+    if (part) parts.push(part);
+    return parts;
+  });
+  for (const sentence of pieces) {
     if (current && (current.length + sentence.length + 1) > 900) { chunks.push(current); current = ''; }
     current = current ? `${current} ${sentence}` : sentence;
   }
@@ -245,6 +258,9 @@ const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b)/i;
 const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b)/i;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
 const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
+// a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
+const LOCAL_PM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:tarde|noche)|da\s+(?:tarde|noite)|de\s+l['\u2019]apr[eè]s-midi|du\s+soir|in\s+the\s+(?:afternoon|evening)|at\s+night)\b/i;
+const LOCAL_AM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:ma[nñ]ana|madrugada)|da\s+manh[aã]|du\s+matin|in\s+the\s+morning)\b/i;
 
 // strictTimes: every clock time compares as a 24-hour value ("2 PM", "14:00",
 // "14 h" are all t:14; "2 AM" is t:2), so AM/PM cannot flip or drop. Our own
@@ -308,7 +324,11 @@ function numberValues(text, { strictTimes = false } = {}) {
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
-    const flags = { pm: PM_RE.test(after), time: raw.includes(':') || HOUR_WORD_RE.test(after) };
+    const flags = {
+      pm: PM_RE.test(after),
+      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) ? 'am' : null),
+      time: raw.includes(':') || HOUR_WORD_RE.test(after),
+    };
     if (strictTimes && /^\d{1,2}(?::\d{2})?$/.test(raw) && (raw.includes(':') || CLOCK_MARK_RE.test(after) || flags.pm || AM_RE.test(after))) {
       out.push({ value: clockValue(raw, after), ...flags });
       continue;
@@ -404,6 +424,17 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
   const added = [...diffCounts(tr.links, en.links), ...diffCounts(tr.emails, en.emails), ...digits.added];
   const order = addressOrderFaults(englishReply, translated);
+  // loose mode (a customer's text): the same hour stated on both sides must keep its half of the day ("2 AM" is not "2 PM")
+  if (!strictTimes) {
+    const halves = (list) => list.filter((n) => n.half).map((n) => `${n.value.split(':')[0]}|${n.half}`);
+    const a = halves(en.numbers);
+    const b = halves(tr.numbers);
+    for (const key of a) {
+      const [hour, half] = key.split('|');
+      const flipped = `${hour}|${half === 'pm' ? 'am' : 'pm'}`;
+      if (b.includes(flipped) && !b.includes(key)) order.push(`${hour} ${half}`);
+    }
+  }
   return { ok: missing.length === 0 && added.length === 0 && order.length === 0, missing, added, ...(order.length ? { order } : {}) };
 }
 
@@ -556,8 +587,9 @@ async function translateAndCheck({ englishReply, language, languageCode, context
   const fields = { reply_translated: translated.text };
   // checked whole, never clipped: an unread tail would escape both checks (and an SMS over the cap cannot send)
   if (translated.text.length > MAX_TEXT) return { stop: 'translation_too_long', fields };
-  // the SMS length rule on the text that would actually send (Arabic or Chinese fits ~67 characters a segment)
-  if (require('./comms-lint').lintComms(translated.text, { channel: 'sms', audience: 'customer', stopExpected: false }).failures.some((f) => f.rule === 'sms-segment-limit')) return { stop: 'translation_over_segment_limit', fields };
+  // the SMS length on the text that would actually send: a translated reply may run to 4 segments (owner
+  // 2026-10-02: accented Spanish, Arabic or Chinese fit ~67 characters a segment); English keeps the 2-segment rule
+  if (require('./comms-lint').smsSegmentCount(translated.text) > TRANSLATED_SEGMENT_LIMIT) return { stop: 'translation_over_segment_limit', fields };
   // a "translation" the English checks still read as English (or the reply echoed back) is not in the customer's language
   if (translated.text === englishReply || !needsTranslation(translated.text)) return { stop: 'translation_not_in_customer_language', fields };
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(translated.text)) return { stop: 'translation_has_placeholder', fields };

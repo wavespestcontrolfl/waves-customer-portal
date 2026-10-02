@@ -1006,16 +1006,15 @@ router.post('/sms', async (req, res) => {
 
     // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its own
     // gate): registered here, right after the source row is kept and before any consuming branch
-    // (reschedule reply, lead intake) returns, so those texts are sampled too. Stored for the
-    // owner to read, never sent; nothing below waits on it.
+    // (reschedule reply, lead intake) returns, so those texts are sampled too; started on response
+    // finish (like the typed-decisions shadow) so it reads the customer's state after that branch
+    // committed. Stored for the owner to read, never sent; nothing waits on it.
     if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location') {
-      void require('../services/sms-translation').runTranslationTrial({
-        inboundMessage: Body,
-        fromPhone: From,
-        customer,
-        smsLogId: smsLogEntry?.id || null,
-        hasMedia: inboundMedia.length > 0,
-      }).catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
+      const trialInput = { inboundMessage: Body, fromPhone: From, customer, smsLogId: smsLogEntry?.id || null, hasMedia: inboundMedia.length > 0 };
+      res.once('finish', () => {
+        void require('../services/sms-translation').runTranslationTrial(trialInput)
+          .catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
+      });
     }
 
     // The same post-ack kick covers both consumed replies and the ordinary

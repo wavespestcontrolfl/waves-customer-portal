@@ -123,6 +123,12 @@ describe('tokenParity', () => {
     expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 de la tarde?', { strictTimes: false })).toMatchObject({ ok: true });
   });
 
+  test('in a customer\'s text the same hour keeps its half of the day', () => {
+    expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 de la mañana?', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Can you come at 2 AM?', '¿Pueden venir a las 2 de la mañana?', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Can you come at 2 PM?', '¿Pueden venir a las 2 a. m.?', { strictTimes: false })).toMatchObject({ ok: false });
+  });
+
   test('one-word foreign replies are asked about; English ones are not', () => {
     expect(needsTranslation('Ndiyo')).toBe(true);
     expect(needsTranslation('Yes')).toBe(false);
@@ -288,7 +294,9 @@ describe('runTranslationTrial', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('a translation over the SMS segment limit is held (UCS-2 languages fit fewer characters)', async () => {
+  test('a translated reply may run to 4 segments (owner 10-02); over that is held', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, translated: `${REPLY_ES} ${'Gracias por su paciencia. '.repeat(4)}` });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's0' })).toMatchObject({ verdict: 'ready' });
     scriptModels({ inbound: SPANISH_INBOUND, translated: `${REPLY_ES} ${'Gracias por su paciencia, ¡nos vemos pronto! '.repeat(8)}` });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'translation_over_segment_limit' });
   });
