@@ -746,6 +746,8 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
 }
 
 module.exports = {
+  sentenceFamily,
+  familyCounts,
   copiesOffTarget,
   remainderHasMoney,
   zelleSentences,

@@ -875,3 +875,20 @@ describe('the read-free pre-screens select any Zelle word and price grammar (and
     expect(bodyNeedsBillingBoundaryCheck("You're paid up.", { promptVersion: V12 })).toBe(true);
   });
 });
+
+// Codex round-70 P2 (hold when ambiguous): the AUTO-send recheck recounts each copied line's family from the live render
+describe('auto-send recheck: a second receipt that arrived after drafting makes the copy ambiguous', () => {
+  const R1 = 'We received your $100.00 card payment on Sep 12, 2026.';
+  const row = (over) => ({ id: 'p1', amount: 100, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+  const ctx = (payments) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: payments, invoiceStatuses: [] }, customer: { id: 'c1' } });
+  const snapshot = { customer_id: 'c1', sentences: [R1], family_counts: { payment: 1 } };
+  const dbh = dbWithTables({ customers: { id: 'c1' } });
+  const run = (payments, autoSend) => paymentStatusVerdict({ customerId: 'c1', body: R1, snapshot, dbh, inboundMessage: 'Did my payment go through?', ctx: ctx(payments), autoSend });
+  test('one live receipt => auto-send; two => payment_status_ambiguous (auto-send only; review still sends it)', async () => {
+    await expect(run([row()], true)).resolves.toEqual({ reason: null, zelle: null });
+    const two = [row(), row({ id: 'p2', amount: 50, payment_date: '2026-09-20' })];
+    await expect(run(two, true)).resolves.toEqual({ reason: 'payment_status_ambiguous', zelle: null });
+    await expect(run(two, false)).resolves.toEqual({ reason: null, zelle: null });
+  });
+});
+

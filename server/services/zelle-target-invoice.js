@@ -35,6 +35,20 @@ function invoiceNumbersNamed(text) {
 }
 const stripZeros = (s) => String(s).replace(/^0+/, '') || '0';
 
+// Codex round-70 P2: an amount the customer ties to the ZELLE TRANSFER itself ("Can I Zelle $200?", "send 200 dollars by Zelle") names
+// the obligation as firmly as one tied to an invoice; an unrelated amount elsewhere ("I paid $50 last time - can I Zelle?") does not.
+function zelleAmountsNamed(text) {
+  const t = String(text || '');
+  const out = [];
+  for (const m of t.matchAll(AMOUNT_RE)) {
+    const before = t.slice(Math.max(0, m.index - 20), m.index);
+    const after = t.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    if (/\bzelle\s+(?:(?:you|u|over|the|it|in)\s+)?$/i.test(before)
+      || /^(?:\s*(?:dollars?|bucks|usd))?\s+(?:by|via|through|over|with|on|using)\s+zelle\b/i.test(after)) out.push(centsOf(m[0]));
+  }
+  return out;
+}
+
 // Dollar amounts the customer ties to an INVOICE/BILL ("the $95 invoice", "invoice for $210") — the only
 // amounts strong enough to contradict the sole open invoice (a bare "$50" may be anything).
 function invoiceAmountsNamed(text) {
@@ -102,8 +116,10 @@ function resolveByNumber(open, billing, named, namedAmounts) {
 }
 
 // PHASE 2 - the lone open invoice (only when no partially paid invoice could be the one the customer means).
-function resolveLoneOpen(inv, namedAmounts, bareAmounts) {
+function resolveLoneOpen(inv, namedAmounts, bareAmounts, zelleAmounts = []) {
   if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, inv)) return { invoiceId: null, reason: 'named_amount_differs' };
+  // Codex round-70 P2: an amount tied to the Zelle transfer must be this invoice's too (a filter only - it never selects a target)
+  if (zelleAmounts.length && !namedAmountsAllMatch(zelleAmounts, inv)) return { invoiceId: null, reason: 'named_amount_differs' };
   // SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are explicit alternatives: every one must be this invoice's
   // amount (Codex round-44 P2).
   if (!namedAmounts.length && bareAmounts.length > 1 && bareAmounts.some((a) => a !== dueCentsOf(inv))) return { invoiceId: null, reason: 'ambiguous_amount' };
@@ -148,12 +164,13 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     return { invoiceId: null, reason: billing?.hasUnmodeledInvoice === true ? 'unmodeled_invoice' : 'no_open_invoice' };
   }
   const namedAmounts = invoiceAmountsNamed(inboundMessage);
+  const zelleAmounts = zelleAmountsNamed(inboundMessage);
   const bareAmounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
-  return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), namedAmounts)
+  return resolveByNumber(open, billing, invoiceNumbersNamed(inboundMessage), [...new Set([...namedAmounts, ...zelleAmounts])])
     // Codex round-64 P2: an unmodeled own invoice may be payable too - the lone MODELED row is not "the" open invoice, and only an
     // explicit identification (a number above, or an amount tied to an invoice) selects a modeled row; anything else is unresolved
     || (billing?.hasUnmodeledInvoice === true && !namedAmounts.length ? { invoiceId: null, reason: 'unmodeled_invoice' } : null)
-    || (open.length === 1 && !partialDue ? resolveLoneOpen(open[0], namedAmounts, bareAmounts) : null)
+    || (open.length === 1 && !partialDue ? resolveLoneOpen(open[0], namedAmounts, bareAmounts, zelleAmounts) : null)
     || resolveByAmount(open, billing, namedAmounts, bareAmounts);
 }
 

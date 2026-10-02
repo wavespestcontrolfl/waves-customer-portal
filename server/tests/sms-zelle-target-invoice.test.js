@@ -530,3 +530,11 @@ test('"100 dollars" for an invoice contradicts the lone $120 open invoice; a mat
   expect(resolveZelleTargetInvoice(only, 'Can I Zelle 120 dollars for my invoice?').invoiceId).toBe('inv-2');
 });
 
+// Codex round-70 P2: an amount tied to the Zelle transfer itself must match the lone open invoice; an unrelated one need not
+test.each([
+  ['Can I Zelle $200?', null], ['Can I Zelle 200 dollars?', null], ['Can I send $200 by Zelle?', null],
+  ['Can I Zelle $120?', 'inv-2'], ['I paid $50 last time — can I Zelle this time?', 'inv-2'],
+])('lone $120 invoice: %s => %s', (inbound, id) => {
+  expect(resolveZelleTargetInvoice(billing([MIDDLE]), inbound).invoiceId).toBe(id);
+});
+

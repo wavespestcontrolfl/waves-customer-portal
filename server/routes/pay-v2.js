@@ -398,9 +398,20 @@ async function zellePayerOwnership(inv, dbh) {
   return require('../services/invoice-payer-ownership').invoicePayerOwnership(inv, dbh);
 }
 
+// A received estimate deposit still awaiting invoice reconciliation (the GET's own opening fence, repeated without a lock): 'deposit_pending'.
+async function zelleDeniedByDepositSettlement(invoice, dbh) {
+  try {
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(dbh, invoice, { lock: false });
+    return null;
+  } catch (err) {
+    if (err?.code === 'DEPOSIT_RECONCILIATION_REQUIRED') return 'deposit_pending';
+    throw err;
+  }
+}
+
 // { reason } when Zelle must be withheld; else { reason: null, invoice: <the fresh row>, projectedCredit }. Order: the fresh row, its DB-side
-// predicate (no caller overrides), the live payer, the projected (partial) credit, and LAST the active-collection guards (Codex round-69
-// P0: no read follows them).
+// predicate (no caller overrides), the live payer, the projected (partial) credit, the PaymentIntent, and LAST the DB fences (deposit
+// settlement, saved-card claim - Codex rounds 69/70 P0: no read follows them).
 async function zelleFinalPass(inv, { dbh, readOnly }) {
   let fresh;
   try { fresh = await dbh('invoices').where({ id: inv.id }).first(); } catch { return { reason: 'eligibility_unverifiable' }; }
@@ -417,10 +428,13 @@ async function zelleFinalPass(inv, { dbh, readOnly }) {
   if (owned) return { reason: owned };
   let projectedCredit;
   try { projectedCredit = await invoiceProjectedCreditApplied(fresh, { database: dbh }); } catch { return { reason: 'credit_unverifiable' }; }
-  // a saved-card charge claim (read-only: this pass never releases or promotes anything) and the attached PaymentIntent's live state
+  // The attached PaymentIntent's live Stripe state (the one slow await), THEN the DB fences as the last reads (Codex round-70 P0s): a
+  // received estimate deposit awaiting reconciliation, and a saved-card charge claim (read-only: never releases or promotes anything)
   try {
-    if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };
     if (await withTimeout(zelleDeniedByPaymentIntent(fresh), ZELLE_ELIGIBILITY_TIMEOUT_MS)) return { reason: 'invoice_changed' };
+    const deposit = await zelleDeniedByDepositSettlement(fresh, dbh);
+    if (deposit) return { reason: deposit };
+    if (await zelleDeniedByChargeReconciliation(fresh, true, dbh)) return { reason: 'invoice_changed' };
   } catch { return { reason: 'eligibility_unverifiable' }; }
   return { reason: null, invoice: fresh, projectedCredit };
 }

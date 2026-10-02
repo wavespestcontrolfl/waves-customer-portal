@@ -217,14 +217,14 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
     const scopeBlock = paymentStatus.autoSendScopeBlock({ reply: text, inboundText, snapshot });
     if (scopeBlock) return { reason: scopeBlock, zelle: null };
   }
-  return copied.length ? copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh }) : { reason: null, zelle: null };
+  return copied.length ? copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend }) : { reason: null, zelle: null };
 }
 async function paymentStatusSendBlockReason(args = {}) {
   return (await paymentStatusVerdict(args)).reason;
 }
 // Every copied sentence must still be one the records render right now (a fresh read; unreadable => fail closed). A copied Zelle
 // sentence is re-rendered from the LIVE Zelle facts of the invoice it named (snapshot.zelle.invoice_id).
-async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh }) {
+async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend = false }) {
   if (!customerId) return { reason: 'payment_status_recheck_no_customer', zelle: null };
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return { reason: 'payment_status_changed', zelle: null };
   try {
@@ -234,7 +234,14 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
     const zelle = copiesZelle ? await liveZelleFacts({ customerId, invoiceId: snapshot?.zelle?.invoice_id || null, dbh }) : null;
     const live = paymentStatus.renderPaymentStatusSentences(zelle ? { ...context, billing: { ...(context.billing || {}), zelleFacts: zelle } } : context)
       .map((s) => s.text);
-    return copied.every((t) => live.includes(t)) ? { reason: null, zelle } : { reason: 'payment_status_changed', zelle: null };
+    if (!copied.every((t) => live.includes(t))) return { reason: 'payment_status_changed', zelle: null };
+    // Codex round-70 P2 (hold when ambiguous, owner 2026-10-02): the AUTO-send recheck recounts each copied line's family from the LIVE
+    // render - a second receipt that arrived after drafting makes the copy a guess again
+    if (autoSend) {
+      const counts = paymentStatus.familyCounts(live);
+      if (copied.some((t) => { const f = paymentStatus.sentenceFamily(t); return f != null && counts[f] !== 1; })) return { reason: 'payment_status_ambiguous', zelle: null };
+    }
+    return { reason: null, zelle };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] payment-status recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { reason: 'payment_status_recheck_failed', zelle: null };

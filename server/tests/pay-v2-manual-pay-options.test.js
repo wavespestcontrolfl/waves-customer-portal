@@ -832,3 +832,35 @@ describe('the final pass: active collection and full coverage', () => {
   });
 });
 
+// Codex round-70 P0s: the PaymentIntent read comes first; the deposit-settlement and charge-claim fences are the LAST reads
+describe('the final pass ends with the DB fences', () => {
+  beforeEach(() => { process.env.ZELLE_RECIPIENT = 'pay@example.com'; require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null }); });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; });
+  const inv = () => invoiceData({ status: 'overdue' });
+  const rows = (i) => setDbImpl((table) => (table === 'invoices' ? chain({ first: i }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+  test('a deposit received during the probes => deposit_pending', async () => {
+    const deposits = require('../services/estimate-deposits');
+    const i = inv(); rows(i);
+    deposits.assertInvoiceDepositSettlementReady.mockRejectedValueOnce(Object.assign(new Error('awaiting'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'deposit_pending' });
+    expect(deposits.assertInvoiceDepositSettlementReady).toHaveBeenLastCalledWith(expect.anything(), i, { lock: false });
+  });
+  test('an unexpected deposit-fence error fails closed', async () => {
+    const deposits = require('../services/estimate-deposits');
+    const i = inv(); rows(i);
+    deposits.assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
+    await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+  });
+  test('order: PaymentIntent read, then deposit fence, then charge claim (last)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
+    const body = src.slice(src.indexOf('async function zelleFinalPass'), src.indexOf('const ZELLE_ELIGIBILITY_TIMEOUT_MS'));
+    const pi = body.indexOf('zelleDeniedByPaymentIntent(fresh)');
+    const dep = body.indexOf('zelleDeniedByDepositSettlement(fresh, dbh)');
+    const claim = body.indexOf('zelleDeniedByChargeReconciliation(fresh, true, dbh)');
+    expect(pi).toBeGreaterThan(-1);
+    expect(dep).toBeGreaterThan(pi);
+    expect(claim).toBeGreaterThan(dep);
+    expect(body.slice(claim)).not.toMatch(/await (?!zelleDeniedByChargeReconciliation)/);
+  });
+});
+
