@@ -11,6 +11,7 @@ let mockGateOn = true;
 const mockPrior = jest.fn(async () => []);
 const mockTrigger = jest.fn(async () => ({ created_at: new Date('2026-10-02T12:00:00Z') }));
 const mockLoopsOpen = jest.fn(() => false);
+const mockEtaExpired = jest.fn(() => false);
 jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
@@ -34,6 +35,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   SMS_COMPLIANCE_CLAIM_RE: jest.requireActual('../services/sms-shadow-drafter').SMS_COMPLIANCE_CLAIM_RE,
   normalizeNumberWords: jest.requireActual('../services/sms-shadow-drafter').normalizeNumberWords,
   visitLoopsNeedAnswer: (...a) => mockLoopsOpen(...a),
+  liveEtaExpiredByPublication: (...a) => mockEtaExpired(...a),
 }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -69,6 +71,8 @@ beforeEach(() => {
   mockUngrounded.mockReturnValue(false);
   mockLoopsOpen.mockReset();
   mockLoopsOpen.mockReturnValue(false);
+  mockEtaExpired.mockReset();
+  mockEtaExpired.mockReturnValue(false);
   mockDraft.mockResolvedValue({ parsed: { reply: REPLY, intended_actions: [] }, converged: true, passes: 1, model: 'm', factsBlock: 'FACTS', promptVersion: 'house_voice_v12' });
 });
 
@@ -199,6 +203,27 @@ describe('tokenParity', () => {
     expect(tokenParity('Your visit is on 05.10.2026.', 'Ihr Termin ist am 5.10.2026.')).toMatchObject({ ok: true });
     expect(tokenParity('Your visit is on 2026.10.05.', '您的预约在2026.05.10。')).toMatchObject({ ok: false });
     expect(tokenParity('It costs $5.10.', 'Cuesta $5,10.')).toMatchObject({ ok: true });
+  });
+
+  test('a CJK month number is not a stray figure: 10月14日 matches "Oct 14"', () => {
+    expect(tokenParity('Next visit: Tuesday, Oct 14 at 2 PM.', '下次：10月14日星期二14:00。')).toMatchObject({ ok: true });
+    expect(tokenParity('Next visit: Tuesday, Oct 14 at 2 PM.', '下次：10月15日星期二14:00。')).toMatchObject({ ok: false });
+  });
+
+  test('a duration is never a clock time: "14 horas" does not stand in for "2 PM"', () => {
+    expect(tokenParity('Come at 2 PM.', 'Venga en 14 horas.', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Come at 2 PM.', 'Venga a las 14 h.', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('midnight: "12 AM" and "0:00" are the same time in a customer text', () => {
+    expect(tokenParity('Can you call at 12 AM?', '¿Pueden llamar a las 0:00?', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Can you call at 12:30 AM?', '¿Pueden llamar a las 00:30?', { strictTimes: false })).toMatchObject({ ok: true });
+    expect(tokenParity('Can you call at 12 PM?', '¿Pueden llamar a las 0:00?', { strictTimes: false })).toMatchObject({ ok: false });
+  });
+
+  test('any scheme-free link is protected: maps.app.goo.gl/abc is not maps.app.goo.gl/abd', () => {
+    expect(tokenParity('Here is the gate: maps.app.goo.gl/abc', 'Aquí está la puerta: maps.app.goo.gl/abd', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Here is the gate: maps.app.goo.gl/abc', 'Aquí está la puerta: maps.app.goo.gl/abc', { strictTimes: false })).toMatchObject({ ok: true });
   });
 
   test('a signed rate keeps its sign: -10% is not 10%', () => {
@@ -465,6 +490,21 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su próxima visita es el martes 14 de octubre a las 14:00. Puede ver algunas hormigas.', back: 'Thanks! Your next visit is Tuesday, October 14 at 2 PM. You may see some ants.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+  });
+
+  test('a translation that changes a figure is held before any read-back is paid for', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND, translated: '¡Gracias! Su técnico le escribirá unos 30 minutos antes de llegar. Próxima visita: martes 15 de octubre, 14:00.' });
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'figures_changed_in_translation' });
+    expect(mockDispatch.mock.calls.some(([, p]) => p.system.startsWith('Say what language this text message'))).toBe(false);
+  });
+
+  test('a live ETA that went stale during the translation calls holds the trial', async () => {
+    scriptModels({ inbound: SPANISH_INBOUND });
+    mockEtaExpired.mockReturnValue(true);
+    const row = await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'live_eta_expired' });
+    expect(mockEtaExpired.mock.calls[0][0]).toMatchObject({ reply: REPLY, factsAt: expect.any(Date) });
   });
 
   test('trial drafting is metered on the translation lane', async () => {

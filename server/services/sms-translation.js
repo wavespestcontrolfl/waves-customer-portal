@@ -284,9 +284,12 @@ async function inboundMeaningCheck({ original, english, language }) {
 // Every figure a customer could act on, compared between two versions of one
 // message: links and emails exactly, phone numbers and other numbers whole
 // (see numberValues).
-// our own bare domain counts too: the drafter writes the portal without a scheme (portal.wavespestcontrol.com)
+// A scheme-free link counts too: the drafter writes the portal as portal.wavespestcontrol.com, and a customer
+// pastes maps.app.goo.gl/abc. A bare host is a dotted name ending in a common top-level domain.
 // (a link also ends at CJK sentence punctuation, which has no space after it: "…/pay。付款")
-const LINK_RE = /https?:\/\/[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]+|www\.[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]+|(?<![@\w.-])(?:[a-z0-9-]+\.)*wavespestcontrol\.com(?:\/[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]*)?/gi;
+const LINK_END = '[^\\s<>"\')\\u3001\\u3002\\uFF01\\uFF0C\\uFF1A\\uFF1B\\uFF1F\\u300D\\u300F\\uFF09]';
+const BARE_TLDS = 'com|net|org|gov|edu|mil|info|biz|io|co|us|ly|gl|me|app|dev|link|page|site|online|tv|ai|mx|es|ca|uk|de|fr|br|pt|it|cn|jp|kr|ru|in|ph|vn';
+const LINK_RE = new RegExp(`https?:\\/\\/${LINK_END}+|www\\.${LINK_END}+|(?<![@\\w.-])(?:[a-z0-9-]+\\.)+(?:${BARE_TLDS})\\b(?!\\.\\w)(?:\\/${LINK_END}*)?`, 'gi');
 const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
 // "$50.45" cannot stand in for "$45.50"). Spelling is normalised so a faithful
@@ -376,11 +379,16 @@ function numberValues(text, { strictTimes = false } = {}) {
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
+    // a month written as a number (Chinese / Japanese / Korean "10月", "10월") is the month the English names
+    // ("Oct"): it is compared as a month name through the English read-back (calendarTokens), not as a figure
+    if (/^\s*[月월]/u.test(after)) continue;
     const before = str.slice(0, m.index);
     const flags = {
       pm: PM_RE.test(after),
       half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : null),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
+      // a clock time only ("14:00", "14 h", "14時"); "14 horas" is a duration and never stands in for "2 PM"
+      clock: raw.includes(':') || CLOCK_MARK_RE.test(after),
     };
     // "2 PM", "2 a. m.", "2 in the afternoon", "2 de la tarde" all carry their half of the day
     if (strictTimes && /^\d{1,2}(?::\d{2})?$/.test(raw) && (raw.includes(':') || CLOCK_MARK_RE.test(after) || flags.half)) {
@@ -458,12 +466,22 @@ function diffCounts(from, to) {
 // translation writes a time. Any other number must match exactly.
 function pairTwentyFourHour(missing, added, en, tr) {
   const pmTimes = en.numbers.filter((n) => n.pm).map((n) => n.value);
-  const trTimes = tr.numbers.filter((n) => n.time).map((n) => n.value);
+  const trTimes = tr.numbers.filter((n) => n.clock).map((n) => n.value);
+  const amTimes = en.numbers.filter((n) => n.half === 'am').map((n) => n.value);
   const m = [...missing];
   const a = [...added];
   for (let i = m.length - 1; i >= 0; i -= 1) {
     const [hour, minutes] = m[i].split(':');
     const n = Number(hour);
+    // midnight: "12 AM" / "12:30 AM" written as "0:00" / "0:30"
+    if (n === 12 && /^\d+$/.test(hour)) {
+      const h0 = minutes ? `0:${minutes}` : '0';
+      const p = amTimes.indexOf(m[i]);
+      const t = trTimes.indexOf(h0);
+      const j = a.indexOf(h0);
+      if (p !== -1 && t !== -1 && j !== -1) { amTimes.splice(p, 1); trTimes.splice(t, 1); m.splice(i, 1); a.splice(j, 1); }
+      continue;
+    }
     if (!/^\d+$/.test(hour) || n < 1 || n > 11) continue;
     const h24 = minutes ? `${n + 12}:${minutes}` : String(n + 12);
     const p = pmTimes.indexOf(m[i]);
@@ -510,7 +528,7 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
       const hour = Number(h);
       const pmHour = hour >= 1 && hour <= 11 ? hour + 12 : hour;
       const as24 = `${n.half === 'pm' ? pmHour : (hour === 12 ? 0 : hour)}${mm ? `:${mm}` : ''}`;
-      return other.some((o) => (o.value === n.value && o.half === n.half) || (o.time && !o.half && o.value === as24));
+      return other.some((o) => (o.value === n.value && o.half === n.half) || (o.clock && !o.half && o.value === as24));
     };
     for (const n of en.numbers) if (n.half && !keepsHalf(n, tr.numbers)) order.push(`${n.value} ${n.half}`);
     for (const n of tr.numbers) if (n.half && !keepsHalf(n, en.numbers)) order.push(`${n.value} ${n.half}`);
@@ -766,7 +784,7 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   if (englishReply.length > MAX_TEXT) return { stop: 'reply_too_long', fields, checks };
   const fault = postDraftFault(englishReply, liveContext, draft?.factsBlock);
   if (fault) return { stop: fault, fields, checks };
-  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks, toPerson: openLoopThanks };
+  return { englishReply, language: inbound.language, languageCode: inbound.languageCode, context: liveContext, fields, checks, toPerson: openLoopThanks, etaAsOf: liveEtaFetchedAt };
 }
 
 // Steps 3-4: translate, then check the exact stored text.
@@ -783,6 +801,8 @@ async function translateAndCheck({ englishReply, language, languageCode, context
   if (translated.text === englishReply || !needsTranslation(translated.text)) return { stop: 'translation_not_in_customer_language', fields };
   if (require('./sms-suggest-mode').hasRedactionPlaceholder(translated.text)) return { stop: 'translation_has_placeholder', fields };
   const parity = tokenParity(englishReply, translated.text);
+  // a changed figure, link or email already holds it: no read-back or meaning check is paid for
+  if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks: { token_parity: parity } };
   const back = await backTranslate({ translated: translated.text });
   fields.back_translation = back.ok ? back.text : null;
   if (!back.ok) return { stop: `back_translation_failed:${back.reason}`, fields, checks: { token_parity: parity } };
@@ -800,7 +820,6 @@ async function translateAndCheck({ englishReply, language, languageCode, context
   if (calendar.missing.length || calendar.added.length) return { stop: 'date_name_changed_in_translation', fields, checks: { token_parity: parity, calendar } };
   const meaning = await meaningCheck({ englishReply, backTranslation: back.text });
   const checks = { token_parity: parity, meaning: meaning.ok ? { same: meaning.same, differences: meaning.differences } : { error: meaning.reason } };
-  if (!parity.ok) return { stop: 'figures_changed_in_translation', fields, checks };
   if (!meaning.ok) return { stop: `meaning_check_failed:${meaning.reason}`, fields, checks };
   if (!meaning.same) return { stop: 'meaning_changed_in_translation', fields, checks };
   return { fields, checks };
@@ -833,6 +852,9 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     const fields = { ...en.fields, ...tr.fields };
     const checks = { ...en.checks, ...tr.checks };
     if (tr.stop) return await save('held', tr.stop, fields, checks);
+    // the translation calls take time: a live ETA the reply quotes must still be fresh at this point, as the
+    // live drafter's publication check requires (15-minute facts window, GPS fix expiry)
+    if (require('./sms-shadow-drafter').liveEtaExpiredByPublication({ reply: en.englishReply, context: en.context, factsAt: en.etaAsOf })) return await save('held', 'live_eta_expired', fields, checks);
     // drafted, translated and checked, but the live drafter would put it in front of a person, never send it
     if (en.toPerson) return await save('held', 'open_loop_thanks_to_person', fields, checks);
     return await save('ready', null, fields, checks);
