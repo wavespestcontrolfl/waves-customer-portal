@@ -136,6 +136,18 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
     expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Apt 3', 'Apt 4'), v2('100 Example Loop', 'Apt 4'))).toBe(false);
   });
 
+  test('a building on line 1 and an apartment on line 2 read as one unit', () => {
+    const v2 = (line1, line2 = null) => ({ street_line_1: line1, street_line_2: line2 });
+    const at = (line1, line2 = null) => ({ ...stored, address_line1: line1, address_line2: line2 });
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop Bldg 9 Apt 204'))).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop', 'Bldg 9 Apt 204'))).toBe(true);
+    expect(firstNameAdvisoryAddressOk(AV, at('100 Example Loop Bldg 9', 'Apt 204'), v2('100 Example Loop Bldg 10 Apt 204'))).toBe(false);
+  });
+
+  test('wiring: the booking path marks the call for review while the first-name card is open', () => {
+    expect(source).toContain("if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)");
+  });
+
   test('the unit must agree with the address the verdict was computed on (none = none)', () => {
     const v2 = (unit) => ({ street_line_1: '100 Example Loop', street_line_2: unit });
     expect(firstNameAdvisoryAddressOk(AV, { ...stored, address_line2: 'Apt 3' }, v2('Unit 3'))).toBe(true);

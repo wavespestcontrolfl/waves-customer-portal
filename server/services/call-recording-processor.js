@@ -3729,23 +3729,16 @@ async function avAddressUniqueOwner(matches, opts) {
 const addressZip5 = (value) => require('./customer-properties').normalizeZip(value);
 
 // The unit a street line / line-2 pair carries, in any supported position.
-// The FULL unit of an address, keyed by the canonical address normalizer:
-// structural and dwelling parts both count ("Bldg 9 Apt 204" never equals
-// "Bldg 10 Apt 204"), and Lot / Space values are kept. A unit on line 1 that
-// conflicts with line 2 returns null, which never equals anything, so the
-// caller refuses.
+// The FULL unit of an address, keyed by the canonical address normalizer: the
+// unit text on line 1 and line 2 is read as ONE unit line, so a building on
+// line 1 and an apartment on line 2 ("Bldg 9" + "Apt 204") key the same as
+// "Bldg 9 Apt 204" on one line. Structural and dwelling parts both count, and
+// Lot / Space values are kept. Contradictory parts ("Apt 3" + "Apt 4") never
+// equal a real unit, so the comparison refuses them without a special case.
 function addressLineUnit(line, line2) {
   const { normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine } = require('../utils/address-normalizer');
-  const key = (unit) => (unit ? unitLineValueKey(normalizeUnitLine(unit)) : '');
-  const fromLine2 = key(String(line2 || '').trim());
-  const fromLine1 = key(unitAnywhereOnLine(String(line || '')));
-  if (fromLine1 && fromLine2 && fromLine1 !== fromLine2) return null;
-  return fromLine2 || fromLine1;
-}
-
-// Both sides parsed (null = a conflicting line 1 / line 2) and equal; none = none.
-function unitsAgree(a, b) {
-  return a !== null && b !== null && a === b;
+  const unit = [unitAnywhereOnLine(String(line || '')), String(line2 || '').trim()].filter(Boolean).join(' ');
+  return unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
 }
 
 // Do two renderings of ONE address agree? A missing street or ZIP on either side
@@ -3782,8 +3775,8 @@ function storedAddressMatchesVerdict(stored = {}, normalized = {}, verdictAddres
     { address_line1: stored.address_line1, zip: stored.zip },
     { address_line1: normalized?.street_line_1, zip: normalized?.postal_code },
     { strict: true },
-  ) && unitsAgree(addressLineUnit(stored.address_line1, stored.address_line2),
-    addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2));
+  ) && addressLineUnit(stored.address_line1, stored.address_line2)
+    === addressLineUnit(verdictAddress?.street_line_1, verdictAddress?.street_line_2);
 }
 
 // GATE_CALL_FIRST_NAME_ADVISORY: the address the new customer row will STORE must be
@@ -16816,6 +16809,11 @@ const CallRecordingProcessor = {
           if (customerValidation.advisory?.includes('first_name')) {
             await fileFirstNameAdvisoryCard(db)
               .catch((err) => logger.warn(`[call-proc] first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            // The call is under review while that card is open (filed now or by the
+            // create branch); the finalizer's lock-time recheck drops the reason if
+            // the card is closed meanwhile.
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
