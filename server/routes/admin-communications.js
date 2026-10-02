@@ -2474,7 +2474,11 @@ router.post('/ai-draft', async (req, res, next) => {
       // share the number, a technician drafts only if EVERY one is on their
       // route — otherwise another customer's texts would reach the prompt
       // (codex #5568 r9 P1). They can still type the reply themselves.
-      const sharing = await db('customers').where('phone', 'like', `%${cleanPhone}`).select('id');
+      // Stored phones carry punctuation: compare the last 10 digits, the
+      // file's own rule elsewhere (pre-push P1).
+      const sharing = await db('customers')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [cleanPhone])
+        .select('id');
       if (!sharing.length) return res.status(404).json({ error: 'Customer not found' });
       for (const row of sharing) {
         if (!(await technicianServicesCustomer(req, row.id))) return res.status(404).json({ error: 'Customer not found' });

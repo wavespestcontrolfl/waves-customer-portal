@@ -52,7 +52,7 @@ describe('AI draft', () => {
     const src = read('routes/admin-communications.js');
     const handler = src.slice(src.indexOf("router.post('/ai-draft'"));
     const guard = handler.slice(0, handler.indexOf("db('sms_log')"));
-    expect(guard).toMatch(/const sharing = await db\('customers'\)\.where\('phone', 'like', `%\$\{cleanPhone\}`\)\.select\('id'\);/);
+    expect(guard).toMatch(/const sharing = await db\('customers'\)\s*\.whereRaw\("right\(regexp_replace\(COALESCE\(phone, ''\), '\[\^0-9\]', '', 'g'\), 10\) = \?", \[cleanPhone\]\)\s*\.select\('id'\);/);
     expect(guard).toMatch(/for \(const row of sharing\) \{\s*if \(!\(await technicianServicesCustomer\(req, row\.id\)\)\) return res\.status\(404\)/);
   });
 });
