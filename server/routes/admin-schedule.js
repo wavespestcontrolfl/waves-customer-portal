@@ -23460,7 +23460,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         if (require('../config/feature-gates').rateReviewLive()) {
           const RateReviewApply = require('../services/rate-review-apply');
           const noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, {
-            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, today: etDateString(), lock: true,
+            customerId: liveVisit.customer_id, amount: switchTermAmount, coverageServiceType: mintPayload.serviceType || null, termStart: mintPayload.termStart || null, visitCount: mintPayload.visitCount ?? null, today: etDateString(), lock: true,
           });
           if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
           if (noticed) {

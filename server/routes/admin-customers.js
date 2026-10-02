@@ -1558,9 +1558,9 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
 // included, minus the setup share) — the noticed amount is that figure.
 // The candidate term rows are locked too, so the nightly apply's write of
 // next_term_prepay_amount serializes against it.
-async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, trx }) {
+async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, visitCount = null, trx }) {
   if (!require('../config/feature-gates').rateReviewLive()) return null;
-  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: true });
+  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx, { customerId, amount, coverageServiceType, termStart, visitCount, today: etDateString(), lock: true });
 }
 
 // The 409 the in-transaction check throws (the handlers' catch returns
@@ -5674,7 +5674,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // amount is the charged amount") unless the operator confirms a
       // different one (acknowledgeNoticedAmount). Compared with what this
       // term records — after tax, minus the setup — never the request.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, visitCount, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       if (noticedInTrx) {
         await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay_invoice', invoiceId: invoice.id });
@@ -6040,7 +6040,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // amount is the charged amount") unless the operator confirms a
       // different one (acknowledgeNoticedAmount). Compared with what this
       // term records — after tax, minus the setup — never the request.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, visitCount, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       if (noticedInTrx) {
         await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay', invoiceId: updatedInvoice.id });

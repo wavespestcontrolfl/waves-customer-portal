@@ -1354,6 +1354,46 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
   });
 }
 
+// The customer's prepaid-lane notices indexed by the term they name (see
+// noticedRenewalAmountConflict).
+async function prepayNoticesByTerm(dbh, customerId) {
+  // Family attribution through the notice the apply wrote for the term —
+  // and, before the nightly tick froze its amount, the DELIVERED notice
+  // that names the term: the customer was already told that amount, so it
+  // guards the renewal from delivery, not from the next 03:10 apply.
+  const prepayNotices = await dbh('price_change_notices')
+    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
+    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
+  // Per term: the noticed family, the renewal day its APPLIED notice named,
+  // and the amount a delivered-but-unapplied notice told the customer.
+  const familyByTerm = new Map();
+  const appliedDay = new Map();
+  const deliveredCents = new Map();
+  // The visit count behind the per-application rate the letter quoted: the
+  // same total over more visits is a lower rate than the customer was told.
+  const noticedVisits = new Map();
+  for (const n of prepayNotices) {
+    const meta = parseMetadata(n.metadata);
+    const key = String(meta.term_id || '');
+    const day = ymd(n.effective_date);
+    if (n.applied_at) {
+      familyByTerm.set(key, n.family_key);
+      appliedDay.set(key, day);
+      if (Number(meta.coverage_visits) > 0) noticedVisits.set(key, Number(meta.coverage_visits));
+      continue;
+    }
+    // Delivered with the 30-day lead the apply requires (applyNotice's
+    // notice_too_recent rule): a notice the apply refuses guards nothing.
+    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
+    if (told > 0) {
+      familyByTerm.set(key, n.family_key);
+      deliveredCents.set(key, { cents: told, day });
+      if (!noticedVisits.has(key) && Number(meta.coverage_visits) > 0) noticedVisits.set(key, Number(meta.coverage_visits));
+    }
+  }
+  return { familyByTerm, appliedDay, deliveredCents, noticedVisits };
+}
+
 // The non-termite renewal consumer of next_term_prepay_amount: an admin
 // recording a renewal (routes/admin-customers.js, the collected-prepay and
 // draft-invoice routes) must charge the amount the customer was noticed for
@@ -1372,7 +1412,7 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // `lock` (inside the caller's write transaction): the candidate rows are
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
-async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType, termStart, today, lock, editingTermId }) {
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType, termStart, today, lock, editingTermId, visitCount = null }) {
   // $0 is a price (a different amount than the one noticed), never an
   // absent one: only a missing or invalid amount skips the check.
   const chargedCents = cents(amount);
@@ -1390,34 +1430,7 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'switch_plan']);
   if (lock) query.forUpdate();
   const terms = await query.select('id', 'customer_id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
-  // Family attribution through the notice the apply wrote for the term —
-  // and, before the nightly tick froze its amount, the DELIVERED notice
-  // that names the term: the customer was already told that amount, so it
-  // guards the renewal from delivery, not from the next 03:10 apply.
-  const prepayNotices = await dbh('price_change_notices')
-    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
-    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
-  // Per term: the noticed family, the renewal day its APPLIED notice named,
-  // and the amount a delivered-but-unapplied notice told the customer.
-  const familyByTerm = new Map();
-  const appliedDay = new Map();
-  const deliveredCents = new Map();
-  for (const n of prepayNotices) {
-    const key = String(parseMetadata(n.metadata).term_id || '');
-    const day = ymd(n.effective_date);
-    if (n.applied_at) {
-      familyByTerm.set(key, n.family_key);
-      appliedDay.set(key, day);
-      continue;
-    }
-    // Delivered with the 30-day lead the apply requires (applyNotice's
-    // notice_too_recent rule): a notice the apply refuses guards nothing.
-    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
-    if (told > 0) {
-      familyByTerm.set(key, n.family_key);
-      deliveredCents.set(key, { cents: told, day });
-    }
-  }
+  const { familyByTerm, appliedDay, deliveredCents, noticedVisits } = await prepayNoticesByTerm(dbh, customerId);
   // Either amount guards only the renewal window its notice named
   // (effective_date = term_end + 1, applyPrepay's renewal_window_changed
   // rule): a term whose dates were edited since is a different renewal —
@@ -1451,8 +1464,14 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   // judged like the renewal itself.
   if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family, editingTermId)) return null;
   const noticedCents = noticedCentsOf(term);
-  if (noticedCents === chargedCents) return null;
-  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(chargedCents) };
+  const told = noticedVisits.get(String(term.id)) || null;
+  const charged = Number(visitCount) > 0 ? Number(visitCount) : null;
+  const visitsDiffer = told != null && charged != null && told !== charged;
+  if (noticedCents === chargedCents && !visitsDiffer) return null;
+  return {
+    termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(chargedCents),
+    ...(told != null ? { noticedVisits: told, chargedVisits: charged } : {}),
+  };
 }
 
 // The 409 every renewal writer returns when noticedRenewalAmountConflict
@@ -1462,10 +1481,12 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
 function noticedRenewalAmountError(conflict) {
   return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
     noticedRenewalAmount: {
-      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)}${conflict.noticedVisits ? ` for ${conflict.noticedVisits} applications` : ''} for this plan by the annual rate review. Charge that amount${conflict.noticedVisits ? ' for that many applications' : ''}, or confirm the difference deliberately.`,
       code: 'RENEWAL_AMOUNT_NOTICED',
       noticedAmount: conflict.noticedAmount,
       chargedAmount: conflict.chargedAmount,
+      noticedVisits: conflict.noticedVisits || null,
+      chargedVisits: conflict.chargedVisits || null,
       termId: conflict.termId,
     },
   });
@@ -1484,6 +1505,8 @@ async function recordNoticedAmountOverride(trx, { customerId, conflict, adminUse
     metadata: JSON.stringify({
       noticed_amount: conflict.noticedAmount,
       charged_amount: conflict.chargedAmount,
+      noticed_visits: conflict.noticedVisits || null,
+      charged_visits: conflict.chargedVisits || null,
       predecessor_term_id: conflict.termId,
       predecessor_term_end: conflict.termEnd || null,
       invoice_id: invoiceId,

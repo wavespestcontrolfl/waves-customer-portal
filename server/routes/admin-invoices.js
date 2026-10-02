@@ -2218,7 +2218,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           const linkedTermForNotice = await trx('annual_prepay_terms')
             .where({ prepay_invoice_id: invoice.id })
             .first('id', 'term_start', 'coverage_service_type');
-          const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };
+          const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null, visitCount: resolvedVisitCount ?? null };
           // Both amounts must match the notice: what the customer actually
           // pays for the coverage — the locked invoice's total GROSS of any
           // deposit credit (a paid deposit is prior payment riding as a

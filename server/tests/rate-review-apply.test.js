@@ -1361,6 +1361,17 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(484)).toBeNull();
   });
+  test('the visit count behind the noticed per-application rate is enforced too: the same total over more visits is a conflict', async () => {
+    const notice = { id: 'n-visits', customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-02-01T08:00:00Z'), effective_date: '2027-05-15', metadata: JSON.stringify({ term_id: TERM(1), coverage_visits: 4 }) };
+    mockDb.reset({ annual_prepay_terms: [term()], price_change_notices: [notice] });
+    expect(await renew(484, { visitCount: 6 })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 484, noticedVisits: 4, chargedVisits: 6 });
+    expect(await renew(484, { visitCount: 4 })).toBeNull();
+    // a caller that does not know the count is judged on the amount alone
+    expect(await renew(484)).toBeNull();
+    const err = apply.noticedRenewalAmountError({ termId: TERM(1), noticedAmount: 484, chargedAmount: 484, noticedVisits: 4, chargedVisits: 6 });
+    expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedVisits: 4, chargedVisits: 6 });
+    expect(err.noticedRenewalAmount.error).toContain('for 4 applications');
+  });
   test('the predecessor is matched by coverage family and the new term\'s start — a pest notice never blocks a lawn prepay, nor a renewal a year away', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull();
@@ -1449,7 +1460,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const collectedAmount = /const termPrepayAmount = Math\.round\(\(Number\(updatedInvoice\.total\) - collectedSetupShare\) \* 100\) \/ 100;/;
     for (const [route, amountRe] of [[draftRoute, draftAmount], [collectedRoute, collectedAmount]]) {
       expect(route).toMatch(amountRe);
-      const calls = [...route.matchAll(/const noticedInTrx = await noticedRenewalAmountConflictFor\(customer\.id, termPrepayAmount, \{ coverageServiceType, termStart, trx \}\);\s*if \(noticedInTrx && req\.body\?\.acknowledgeNoticedAmount !== true\) throw noticedRenewalAmountError\(noticedInTrx\);/g)];
+      const calls = [...route.matchAll(/const noticedInTrx = await noticedRenewalAmountConflictFor\(customer\.id, termPrepayAmount, \{ coverageServiceType, termStart, visitCount, trx \}\);\s*if \(noticedInTrx && req\.body\?\.acknowledgeNoticedAmount !== true\) throw noticedRenewalAmountError\(noticedInTrx\);/g)];
       expect(calls).toHaveLength(1);
       const at = calls[0].index;
       expect(route.slice(at).search(amountRe)).toBe(-1); // the amount is computed before the check
@@ -1459,7 +1470,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
       expect(route.slice(0, at)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
     }
     expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
-    expect(src).toMatch(/noticedRenewalAmountConflict\(trx, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: true \}\)/);
+    expect(src).toMatch(/noticedRenewalAmountConflict\(trx, \{ customerId, amount, coverageServiceType, termStart, visitCount, today: etDateString\(\), lock: true \}\)/);
     expect(src.match(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/g)).toHaveLength(2);
   });
   test('the invoice route that marks an invoice as annual prepay (POST /api/admin/invoices/:id/annual-prepay) is a renewal writer too: it consults the guard inside its transaction, under the annual-prepay lock, with the term amount, coverage and start, and 409s without the acknowledgement', () => {
@@ -1468,7 +1479,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
     // an amount-only edit of its own term (coverage omitted) is judged on the coverage that term keeps, never as unlabeled
-    expect(route).toContain('const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };');
+    expect(route).toContain('const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null, visitCount: resolvedVisitCount ?? null };');
     const call = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount })');
     expect(call).toBeGreaterThan(0);
     // what the customer actually pays is judged too, FIRST (so the prompt and the override log name the real charge):
