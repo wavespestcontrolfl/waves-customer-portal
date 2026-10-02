@@ -257,6 +257,21 @@ describe('runTranslationTrial', () => {
     expect(mockDraft).not.toHaveBeenCalled();
   });
 
+  test('a thread row whose translation changes the meaning holds the trial', async () => {
+    const ctx = require('../services/context-aggregator');
+    const OLDER = 'No vengan el jueves, por favor.';
+    ctx.getContextForCustomer.mockResolvedValueOnce({ customer: { id: 'c1' }, smsHistory: [{ direction: 'inbound', body: OLDER, fromPhone: '+19415550100' }] });
+    scriptModels({ inbound: SPANISH_INBOUND });
+    const base = mockDispatch.getMockImplementation();
+    mockDispatch.mockImplementation(async (policy, payload) => {
+      if (payload.system.startsWith('You read') && payload.text.includes(OLDER)) return { ok: true, json: { is_english: false, language: 'Spanish', language_code: 'es', english: 'Please come Thursday.' } };
+      if (payload.system.startsWith('ORIGINAL is a customer') && payload.text.includes(OLDER)) return { ok: true, json: { same_meaning: false, differences: ['drops "no"'] } };
+      return base(policy, payload);
+    });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'thread_translation_failed:meaning_changed' });
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
   test('a draft that did not pass the English checks is held before any translation', async () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     mockDraft.mockResolvedValue({ parsed: { reply: REPLY }, converged: false, passes: 3 });

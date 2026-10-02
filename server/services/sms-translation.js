@@ -294,6 +294,11 @@ async function translateThread(context, inboundMessage, inboundEnglish) {
       if (!t.ok) return { ok: false, reason: t.reason };
       // same figure check as the current text: a row the draft reads must keep the customer's numbers
       if (!t.isEnglish && !tokenParity(t.english, m.body).ok) return { ok: false, reason: 'figures_changed' };
+      if (!t.isEnglish) {
+        const meaning = await inboundMeaningCheck({ original: m.body, english: t.english, language: t.language });
+        if (!meaning.ok) return { ok: false, reason: meaning.reason };
+        if (!meaning.same) return { ok: false, reason: 'meaning_changed' };
+      }
       cache.set(key, t.isEnglish ? null : t.english);
     }
     const english = cache.get(key);
