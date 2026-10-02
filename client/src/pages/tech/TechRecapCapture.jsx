@@ -171,8 +171,9 @@ function showFinishedUpload(mounted, recoveryStore, serviceId, targetServiceId, 
   }
 }
 
-export default function TechRecapCapture({ service, request, staffId = null, recoveryStore: ownedRecoveryStore = null, recoveryRevision = 0, onRecoveryChange = () => {} }) {
-  const deviceScope = staffId ? String(staffId) : '';
+export default function TechRecapCapture({ service, request, staffId, recoveryStore: ownedRecoveryStore = null, recoveryRevision = 0, onRecoveryChange = () => {} }) {
+  // The page passes the verified id as a string ('' / absent = none).
+  const deviceScope = staffId;
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
   const [pendingFile, setPendingFile] = useState(null);
@@ -377,7 +378,7 @@ export default function TechRecapCapture({ service, request, staffId = null, rec
   const tag = (role) => {
     const file = pendingFile?.file;
     const targetServiceId = pendingFile?.serviceId;
-    if (!file || !targetServiceId || targetServiceId !== serviceId || restoringFor === serviceId) return;
+    if (!file || !targetServiceId || targetServiceId !== serviceId) return;
     const mediaType = file.type.startsWith('image/') ? 'image' : 'video';
     const contentType = file.type || (mediaType === 'image' ? 'image/jpeg' : 'video/mp4');
     upload({ file, role, serviceId: targetServiceId, mediaType, contentType, durationMs: undefined, mediaId: null, uploadUrl: null, uploaded: false, needsReconcile: false, retryable: true, cleanupBeforeRetry: false, presignAttempted: false });

@@ -385,6 +385,7 @@ export default function TechHomePage({ section = 'today' }) {
   // Identity comes from the profile the shell verified; the stored copy is
   // only a fallback (a failed cache write can leave it missing or stale).
   const staff = staffProfile?.id ? staffProfile : getAdminUser();
+  const staffIdForDevice = staff?.id ? String(staff.id) : '';
   const staffRef = useRef(staff);
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -975,7 +976,7 @@ export default function TechHomePage({ section = 'today' }) {
               {selectedVisit?.primary.status === 'on_site' && <>
                 {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
                 {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture
-                  service={selectedVisit.primary} request={techRequest} staffId={staff?.id || null}
+                  service={selectedVisit.primary} request={techRequest} staffId={staffIdForDevice}
                   recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
                   onRecoveryChange={notifyRecapRecoveryChange}
                 />}
@@ -1220,7 +1221,7 @@ export default function TechHomePage({ section = 'today' }) {
         {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
         {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
           <TechRecapCapture
-            service={nextStop} request={techRequest} staffId={staff?.id || null}
+            service={nextStop} request={techRequest} staffId={staffIdForDevice}
             recoveryStore={recapRecoveryStore} recoveryRevision={recapRecoveryRevision}
             onRecoveryChange={notifyRecapRecoveryChange}
           />

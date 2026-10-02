@@ -67,3 +67,24 @@ it('retries a failed flag read when the browser comes back online and updates mo
 
   expect(await screen.findByText('Recap capture')).toBeInTheDocument();
 });
+
+it('turns a mounted gate off when a later flag read fails closed', async () => {
+  let online = true;
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    if (!online) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({ flags: { 'pest-recap-v1': true } }) };
+  }));
+  localStorage.setItem('waves_admin_token', 'login-a');
+  const { useFeatureFlag, refetchFlags } = await import('./useFeatureFlag');
+  function Gate() {
+    return useFeatureFlag('pest-recap-v1', false) ? <p>Recap capture</p> : <p>Recap hidden</p>;
+  }
+
+  render(<Gate />);
+  expect(await screen.findByText('Recap capture')).toBeInTheDocument();
+
+  online = false;
+  await act(async () => { await refetchFlags(); });
+
+  expect(await screen.findByText('Recap hidden')).toBeInTheDocument();
+});

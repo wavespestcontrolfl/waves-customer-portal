@@ -50,6 +50,7 @@ async function loadFlags() {
       const token = localStorage.getItem('waves_admin_token');
       if (!token) {
         cache = {};
+        publish(cache);
         return cache;
       }
       const res = await fetch(`${API_BASE}/admin/feature-flags`, {
@@ -68,6 +69,8 @@ async function loadFlags() {
       console.warn('[useFeatureFlag] load failed — failing closed', err);
       cache = {}; // fail closed — everyone gets stable UI
       lastLoadFailed = true;
+      // Screens already showing a flag fail closed too, not only new ones.
+      publish(cache);
       return cache;
     } finally {
       if (timer) clearTimeout(timer);
