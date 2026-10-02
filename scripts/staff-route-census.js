@@ -87,7 +87,17 @@ function parseRouter(fileSpec) {
       adminWideFrom = Math.min(adminWideFrom, m.index);
     }
   }
-  const routerStaffAuth = new RegExp(`\\b${guardVar}\\.use\\([^)]*\\badminAuthenticate\\b[^)]*\\)`).test(src);
+  // Where router-wide staff auth starts: a route declared BEFORE the
+  // router.use(adminAuthenticate …) line is not behind it (codex #5568 r17).
+  // adminAuthenticate itself or a router's own wrapper of it
+  // (adminAuthenticateExceptOauthCallback in admin-email).
+  const routerAuthMatch = src.match(new RegExp(`\\b${guardVar}\\.use\\([^)]*\\badminAuthenticate\\w*\\b[^)]*\\)`));
+  const routerStaffAuth = !!routerAuthMatch;
+  const routerAuthFrom = routerAuthMatch ? routerAuthMatch.index : Infinity;
+  // Any staff-auth signal at all (router-wide or on some route): then a route
+  // counts only when that auth actually covers it. A router with no visible
+  // signal keeps the old count-everything rule (unknown, not dropped).
+  const anyStaffAuthSignal = routerStaffAuth || /\b(adminAuthenticate|authStack)\b/.test(src.replace(/require\([^)]*\)/g, ''));
   const routes = [];
   // First argument: one quoted path or an array of quoted paths.
   const re = /\b(router|serviceRouter|propertyRouter)\.(get|post|put|patch|delete|all)\(\s*(\[[^\]]*\]|(['"`])[^'"`]+\4)\s*,([^]*?)(?=\n(?:[a-zA-Z/]|\s*\}\);|\s*$))/g;
@@ -102,11 +112,12 @@ function parseRouter(fileSpec) {
     const head = m[5].split('\n').slice(0, 6).join('\n');
     const guards = head.split('async')[0];
     const perRouteAdmin = /\brequireAdmin\b/.test(guards);
-    const staffAuth = routerStaffAuth || /\b(adminAuthenticate|authStack)\b/.test(guards);
+    const staffAuth = (routerStaffAuth && m.index > routerAuthFrom) || /\b(adminAuthenticate|authStack)\b/.test(guards);
+    const authUnknown = !anyStaffAuthSignal;
     for (const routePath of routePaths) {
       const prefixAdmin = adminPrefixes.some((pre) => routePath === pre || routePath.startsWith(`${pre}/`));
       const guardedByOrder = m.index > adminWideFrom;
-      routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin: perRouteAdmin || prefixAdmin || guardedByOrder, staffAuth });
+      routes.push({ method: method === 'ALL' ? 'GET' : method, routePath, perRouteAdmin: perRouteAdmin || prefixAdmin || guardedByOrder, staffAuth, authUnknown });
     }
   }
   return { routes, adminWide: false, exemptionGate, missing: false };
@@ -148,6 +159,10 @@ function census() {
     if (r.missing) continue;
     for (const route of r.routes) {
       if (MIXED_MOUNTS.has(mount) && !route.staffAuth) continue;
+      // Core mounts too: a route no staff auth covers (declared before the
+      // router-wide adminAuthenticate, or a login/reset route beside per-route
+      // staff routes) is not one the gate can affect.
+      if (!route.staffAuth && !route.authUnknown) continue;
       const full = joinPath(mount, route.routePath);
       const today = !(r.adminWide || route.perRouteAdmin);
       const after = today && technicianMayReach(route.method, samplePath(full));

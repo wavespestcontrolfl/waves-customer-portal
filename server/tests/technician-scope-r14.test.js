@@ -405,3 +405,29 @@ describe('mint transaction lock order (pre-push P1)', () => {
     expect(visit).toBeGreaterThan(cust);
   });
 });
+
+describe('codex #5568 r17', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('a field lead is scoped to a customer on the technician\'s route before any copy', () => {
+    const s = src('routes/tech-field-lead.js');
+    const guard = s.indexOf('if (!(await technicianServicesCustomer(req, customerId))) return res.status(404)');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(s.indexOf("customer = await db('customers').where({ id: customerId }).first();"));
+  });
+
+  test('a visual note refused after the upload deletes its stored media', () => {
+    const s = src('routes/visual-service-moments.js');
+    expect(s).toMatch(/if \(refusal\) \{[\s\S]{0,200}await deleteVisualMomentMedia\(media\?\.mediaStorageKey\);\s*return res\.status\(refusal\.status\)/);
+  });
+
+  test('the census leaves out routes no staff auth covers', () => {
+    const doc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'technician-reachable-routes.md'), 'utf8');
+    for (const p of ['/api/admin/auth/login', '/api/admin/auth/forgot-password', '/api/admin/auth/reset-password', '/api/admin/push/vapid-key']) {
+      expect(doc).not.toContain(`\`${p}\``);
+    }
+    expect(doc).toContain('`/api/admin/email/inbox`');
+  });
+});

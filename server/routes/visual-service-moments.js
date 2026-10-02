@@ -12,6 +12,7 @@ const {
   canCreateVisualServiceMoment,
   normalizeMomentInsert,
   uploadVisualMomentMedia,
+  deleteVisualMomentMedia,
   signedVisualMomentMediaUrl,
   formatVisualMoment,
   tagForCode,
@@ -197,7 +198,12 @@ router.post('/jobs/:jobId/visual-moments', authStack, upload.single('media'), as
       }
       [row] = await trx('visual_service_moments').insert(insert).returning('*');
     });
-    if (refusal) return res.status(refusal.status).json({ error: refusal.error });
+    if (refusal) {
+      // The media was uploaded before the locked recheck: drop it, no row will
+      // ever reference it (codex #5568 r17 P2).
+      await deleteVisualMomentMedia(media?.mediaStorageKey);
+      return res.status(refusal.status).json({ error: refusal.error });
+    }
     const [moment] = await formatRows([row], true);
     logger.info(`[visual-service-notes] saved moment=${row.id} job=${job.id} tech=${req.technicianId} tag=${row.tag_code}`);
     return res.status(201).json({
