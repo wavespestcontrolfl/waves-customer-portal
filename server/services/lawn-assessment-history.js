@@ -56,7 +56,7 @@ async function visitEligibility({ customerId, propertyId, allowPrimary = true },
     : sole || (allowPrimary ? active.find((property) => property.is_primary) : null);
   const prefs = await knex('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at');
   const movedAt = prefs?.irrigation_home_changed_at || null;
-  const { addressKey } = require('./customer-properties');
+  const { addressKey } = require('./customer-property-address-keys');
   return {
     customerId, propertyId: selected?.id || null, solePropertyId: sole?.id || null,
     includeUnlinked: !!(selected && sole?.id === selected.id && !movedAt),
@@ -71,7 +71,7 @@ function hasConflictingEvidence(row, scope) {
   const propertyId = row.property_id || row.history_visit_property_id;
   if (propertyId && propertyId !== scope.propertyId) return true;
   if (!scope.propertyId || row.history_visit_property_id || !row.history_address_line1) return false;
-  const { addressKey } = require('./customer-properties');
+  const { addressKey } = require('./customer-property-address-keys');
   return addressKey({
     address_line1: row.history_address_line1, address_line2: row.history_address_line2,
     city: row.history_city, zip: row.history_zip,

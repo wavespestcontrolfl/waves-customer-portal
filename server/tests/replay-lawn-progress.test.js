@@ -328,6 +328,22 @@ describe('loadReplayRows', () => {
   });
 });
 
+describe('the real history resolver never loads the ambient database (codex r5 on #5566)', () => {
+  it('requiring it and keying an address never loads models/db.js, knexfile or customer-properties', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => { throw new Error('models/db.js must not be loaded'); });
+      jest.doMock('../knexfile', () => { throw new Error('knexfile.js must not be loaded'); });
+      jest.doMock('../services/customer-properties', () => { throw new Error('customer-properties.js loads models/db'); });
+      const history = jest.requireActual('../services/lawn-assessment-history');
+      const row = {
+        id: 'a1', customer_id: 'c1', confirmed_by_tech: true, history_address_line1: '100 Example St', history_city: 'Testville', history_zip: '34000',
+      };
+      const scope = { customerId: 'c1', propertyId: 'p1', propertyAddressKey: 'nomatch', includeUnlinked: true };
+      expect(history.isEligible(row, scope)).toBe(false); // address key compared, no database touched
+    });
+  });
+});
+
 describe('connection handling', () => {
   it('requiring the engine and the replay script never loads models/db.js or knexfile.js', () => {
     jest.isolateModules(() => {
