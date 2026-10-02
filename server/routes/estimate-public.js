@@ -10955,6 +10955,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (!paymentConsentVersionIsCurrent(req.body?.consentTextVersion)) {
           return res.status(409).json(paymentConsentVersionStaleResponse());
         }
+        // The after-visit authorization carries its OWN version label
+        // (consentVersionForVariant), which the bundle version above does not
+        // prove (GitHub Codex #5567 r11): a tab rendering older after-visit
+        // copy must reload, never be recorded under text it never showed.
+        if (prepayChargeAfterFirstVisit) {
+          const { consentVersionForVariant } = require('../services/payment-method-consent-text');
+          const attestedVariantVersion = typeof req.body?.prepayChargeConsentVersion === 'string'
+            ? req.body.prepayChargeConsentVersion.trim() : '';
+          if (attestedVariantVersion !== consentVersionForVariant('after_visit_prepay', prepayChargeMethod.methodType || 'card')) {
+            return res.status(409).json(paymentConsentVersionStaleResponse());
+          }
+        }
         prepayChargePlan = {
           method: prepayChargeMethod,
           quote: chargeInfo,

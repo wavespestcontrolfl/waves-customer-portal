@@ -4013,6 +4013,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
       prepayChargeAcknowledgedMethodKey: quote.methodKey,
       prepayChargeConsentAccepted: true,
       prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
     });
     expect(res.status).toBe(200);
     expect(res.data.prepayChargeStatus).toBe('after_first_visit');
@@ -4027,6 +4028,23 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
       .toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_prepay', paymentMethodId: 'pm-row-1' }));
   });
 
+  test('a tab attesting older after-visit copy reloads (409 CONSENT_VERSION_STALE), nothing committed (GitHub Codex #5567 r11)', async () => {
+    const quote = await quoteOf();
+    for (const version of [undefined, 'v12_2026-09-30']) {
+      const res = await accept({
+        prepayChargeAcknowledgedTotalCents: quote.totalCents,
+        prepayChargeAcknowledgedMethodKey: quote.methodKey,
+        prepayChargeConsentAccepted: true,
+        prepayChargeConsentVariant: 'after_visit_prepay',
+        ...(version ? { prepayChargeConsentVersion: version } : {}),
+      });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VERSION_STALE');
+    }
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
   test('a year minted to a third-party payer never waits for a first visit: the normal job routes it to the payer', async () => {
     EstimateConverter.convertEstimate.mockImplementation(async () => {
       const total = db.__state.quotedBase;
@@ -4039,6 +4057,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
       prepayChargeAcknowledgedMethodKey: quote.methodKey,
       prepayChargeConsentAccepted: true,
       prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
     });
     expect(res.status).toBe(200);
     expect(res.data.prepayChargeStatus).not.toBe('after_first_visit');
@@ -4072,6 +4091,7 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
       prepayChargeAcknowledgedMethodKey: quote.methodKey,
       prepayChargeConsentAccepted: true,
       prepayChargeConsentVariant: 'after_visit_prepay',
+      prepayChargeConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
     });
     expect(res.status).toBe(402);
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
