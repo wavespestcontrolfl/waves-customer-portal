@@ -767,6 +767,49 @@ describe('an estimate sent to the customer keeps a callback or quote promise', (
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   });
 
+  test('an estimate sent while UNOWNED (its estimate_sent text has no customer_id) keeps a LINKED customer\'s promise through the promise\'s phone', async () => {
+    mockDb();
+    const base = db.getMockImplementation();
+    let smsQuery;
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') {
+        smsQuery = q;
+        const baseSelect = q.select;
+        q.select = async (...cols) => {
+          await baseSelect(...cols);
+          // Only the unowned row exists, as admin-estimates logs it.
+          return [{ id: 'sms-x', customer_id: null, to_phone: '+19415550123', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+            message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+        };
+      }
+      return q;
+    });
+    listOpenCommitments.mockResolvedValue([row('a', { from_phone: '+19415550123', to_phone: '+19415550100' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+    expect(smsQuery).toBeDefined();
+    // The unowned arm rides the same query, scoped to estimate_sent rows with no customer.
+    const calls = queriesOn('sms_log')[0].calls.map(([m, ...a]) => [m, ...a.filter((v) => typeof v !== 'function')]);
+    expect(calls).toContainEqual(['whereNull', 'customer_id']);
+    expect(calls).toContainEqual(['where', 'message_type', 'estimate_sent']);
+    // Another number's unowned estimate text never clears it, and only for these kinds.
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') q.select = async () => [{ id: 'sms-y', customer_id: null, to_phone: '+19415550999', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+        message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+      return q;
+    });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'schedule_visit', from_phone: '+19415550123', to_phone: '+19415550100' })]);
+    db.mockImplementation((t) => {
+      const q = base(t);
+      if (t === 'sms_log') q.select = async () => [{ id: 'sms-x', customer_id: null, to_phone: '+19415550123', created_at: '2100-01-01T00:00:00Z', status: 'delivered',
+        message_type: 'estimate_sent', from_phone: '+19415550100', operator_sent: false, provider_accepted: false, push_channel: false }];
+      return q;
+    });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
   test('the evidence boundary is the call end: a handoff before the promise does not keep it', async () => {
     mockDb({ activity: { estimates: { handed_off_at: et('13:00').toISOString() } } });
     listOpenCommitments.mockResolvedValue([row('a', { call_started_at: et('14:00').toISOString() })]);

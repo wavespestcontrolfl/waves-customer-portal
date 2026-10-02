@@ -262,7 +262,10 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
     // itself never returns non-null without a valid promisedAt, so
     // `slot` implies `promised` is set whenever this value is read.
     const slotFloor = floor && promised && floor.getTime() > promised.getTime() ? floor : promised;
-    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
+    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)),
+      // The number the promise was made on, for a LINKED caller too: only the
+      // estimate_sent witness may match an unowned (customer_id NULL) text by it.
+      callerPhone: phoneKey(contactPhone(r)) };
   }).filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
@@ -324,7 +327,22 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   // the sending admin or a staff-approved draft, and a delivered text). A
   // bare 'manual' type is reused by automated senders, and a queued text
   // reached no one yet.
-  const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
+  // An estimate sent while unowned (parked on a lead) logs its estimate_sent
+  // text with no customer_id (admin-estimates), so a linked promise would
+  // never select it by customer. Its delivery text alone also matches an
+  // UNOWNED row by the number the promise was made on, in this same query.
+  const linkedQuotePhones = [...new Set(scoped.filter((x) => x.r.customer_id && ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && x.callerPhone).map((x) => x.callerPhone))];
+  const smsContact = (qb) => qb.where(function smsContactClause() {
+    if (customerIds.length) this.whereIn('customer_id', customerIds);
+    if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
+    if (linkedQuotePhones.length) {
+      this.orWhere(function unownedEstimateText() {
+        this.whereNull('customer_id').where('message_type', ESTIMATE_SENT_SMS_TYPE);
+        commitments.phoneWhereAny(this, 'to_phone', linkedQuotePhones);
+      });
+    }
+  });
+  const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(smsContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
     .where(function personSent() {
       // The estimate's own delivery text rides the same read (see the
@@ -420,7 +438,7 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || personTexts.some((t) => mine(t, x) && after(t, x.since))
       || estimateDone.has(x.r.id)
-      || (ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && estimateTexts.some((t) => mine(t, x) && after(t, x.since)))) done.add(x.r.id);
+      || (ESTIMATE_FOLLOWUP_KINDS.includes(x.r.kind) && estimateTexts.some((t) => (mine(t, x) || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && after(t, x.since)))) done.add(x.r.id);
   }
   return done;
 }
