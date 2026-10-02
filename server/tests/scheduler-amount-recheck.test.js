@@ -50,12 +50,12 @@ describe('recheckScheduledSmsAmounts', () => {
   // whose body carries status vocabulary reads the decision (one indexed read), whatever the live gate says.
   test('ROLLBACK: gate off, v12 decision, status-only body => the decision is read and the strict recheck runs', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
-    const q = dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cfl_p', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: { customer_id: 'c1', sentences: ['Your account has no balance due.'] } }) });
+    const q = dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cflvp', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: { customer_id: 'c1', sentences: ['Your account has no balance due.'] } }) });
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'payment_status_changed' });
     const out = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your account has no balance due.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
     expect(out).toEqual({ stale: true, reason: 'payment_status_changed' });
     expect(q.first).toHaveBeenCalledTimes(1); // ONE read, reused by the recheck
-    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ promptVersion: 'house_voice_v12_real_answers5_cfl_p', inboundMessage: 'Do I owe anything?' }));
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ promptVersion: 'house_voice_v12_real_answers5_cflvp', inboundMessage: 'Do I owe anything?' }));
   });
   test('gate off, v11 (or version-less) decision, status-only body => one decision read, then no recheck (main\'s verdict)', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
@@ -86,7 +86,7 @@ describe('recheckScheduledSmsAmounts', () => {
   // Owner ruling 2026-10-01: staff edits. human_authored AND different from the decision's stored AI draft => the contract does not judge it.
   describe('staff edits (owner ruling 2026-10-01)', () => {
     const AI = 'Your account has no balance due.';
-    const decisionRow = (over = {}) => ({ prompt_version: 'house_voice_v12_real_answers5_cfl_p', suggested_message: AI, input_snapshot: JSON.stringify({ sms: { body: 'Did I pay?' }, payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
+    const decisionRow = (over = {}) => ({ prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: AI, input_snapshot: JSON.stringify({ sms: { body: 'Did I pay?' }, payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
     const fire = (body, meta) => recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta: { agent_decision_id: 'd1', ...meta } });
     test('an edited body with free-text status is never blocked by the contract, gate on or off (the recheck is told it is a staff edit)', async () => {
       for (const gate of ['true', undefined]) {
@@ -145,11 +145,11 @@ describe('recheckScheduledSmsAmounts', () => {
   // inbound, and the payment-status sentences the draft copied; there is no separate "strict for every version" switch.
   test('the scheduler passes the decision\'s prompt version, inbound and payment_status_snapshot to the recheck', async () => {
     const snap = { customer_id: 'c1', sentences: ['Your account has no balance due.'] };
-    dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cfl_p', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: snap }) });
+    dbReturning({ prompt_version: 'house_voice_v12_real_answers5_cflvp', input_snapshot: JSON.stringify({ sms: { body: 'Do I owe anything?' }, payment_status_snapshot: snap }) });
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
     await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your account has no balance due.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({
-      promptVersion: 'house_voice_v12_real_answers5_cfl_p', trustOwedAmounts: false, inboundMessage: 'Do I owe anything?', paymentStatusSnapshot: snap,
+      promptVersion: 'house_voice_v12_real_answers5_cflvp', trustOwedAmounts: false, inboundMessage: 'Do I owe anything?', paymentStatusSnapshot: snap,
     }));
     expect(recheck.outgoingAmountsStale.mock.calls[0][0]).not.toHaveProperty('strictStatusClaims');
     recheck.outgoingAmountsStale.mockClear();
@@ -243,7 +243,7 @@ describe('scheduled replies: billing fingerprint before the recheck, checked aga
 
 // Local Codex review pass 2: a customerless staff edit with only exempt status wording takes no billing boundary (it could only refuse)
 test('a staff-edited status body with no customer: clean, and no boundary', async () => {
-  const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ prompt_version: 'house_voice_v12_real_answers5_cfl_p', input_snapshot: null, customer_id: null, suggested_message: 'Thanks for reaching out!' })) };
+  const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ prompt_version: 'house_voice_v12_real_answers5_cflvp', input_snapshot: null, customer_id: null, suggested_message: 'Thanks for reaching out!' })) };
   db.mockReset().mockImplementation(() => q);
   recheck.outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
   const prev = process.env.GATE_SMS_REAL_ANSWERS;

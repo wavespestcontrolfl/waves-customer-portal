@@ -42,6 +42,9 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
   const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
   const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
   const isPayerLinked = (p) => {
+    // A row the ledger stamps as the payer's directly (payments.payer_id, or metadata.payer_id on statement refunds and
+    // disputes) is the payer's whatever it links to.
+    if (p.payer_id != null || metadataOf(p)?.payer_id != null) return true;
     const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
     if (invId && payerInvoiceIds.has(invId)) return true;
     if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;

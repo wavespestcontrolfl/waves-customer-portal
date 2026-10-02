@@ -336,6 +336,39 @@ describe('auto-send: a retryable ETA refusal at the provider boundary releases t
     expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
   });
 
+  // PR #5499: the open-loop recheck reports an unreadable read with its own retryable code.
+  test('an unreadable open-loop recheck at the boundary is released the same way', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
+  });
+
+  test('the released claim names the open-loop recheck, not the live ETA, in the log and the reopened card', async () => {
+    const logger = require('../services/logger');
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true }));
+    await attempt({ reply: 'Sounds good, thanks!' });
+    const lines = logger.warn.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /open-loop recheck unreadable at the provider boundary/.test(l))).toBe(true);
+    expect(lines.some((l) => /live ETA recheck unreadable at the provider boundary/.test(l))).toBe(false);
+  });
+
+  test('a closed commitment at the boundary is terminal: the claim fails', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)', retryable: false }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'OPEN_LOOPS_STALE_AT_BOUNDARY' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+
+  test('the claim carries the commitment ids into the boundary predicate', async () => {
+    sendCustomerMessage.mockImplementationOnce(async (input) => refusalFrom(await input.providerPreSendCheck({ channel: 'sms', dbi: () => { throw new Error('db down'); } })));
+    const r = await attempt({ reply: 'Sounds good, thanks!', visitLoopCommitmentIds: ['cc-1'], factsGeneratedAt: new Date() });
+    expect(r).toMatchObject({ sent: false, reason: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+  });
+
   test('a refusal that may have reached the provider is never released', async () => {
     sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, deliveryOutcome: 'uncertain', code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true }));
     const r = await attempt({ reply: 'Sounds good, thanks!' });

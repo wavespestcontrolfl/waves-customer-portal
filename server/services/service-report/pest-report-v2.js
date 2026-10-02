@@ -169,13 +169,10 @@ function buildAiSummary(personality) {
 
 // Shape the raw pest-forecast payload (pest-forecast/forecast.js) into a compact
 // "what to expect this season" card: the lead summary, this month's weather line,
-// and the 2–3 pests most worth watching (rising first, then highest level).
+// and the 2–3 highest modeled levels. Baseline deltas are not time trends.
 function buildForecast(forecast) {
   if (!forecast || !Array.isArray(forecast.pests) || !forecast.pests.length) return null;
   const ranked = [...forecast.pests].sort((a, b) => {
-    const aUp = a.trend === 'up' ? 1 : 0;
-    const bUp = b.trend === 'up' ? 1 : 0;
-    if (aUp !== bUp) return bUp - aUp;
     const aRank = LEVEL_RANK[a.level] ?? 0;
     const bRank = LEVEL_RANK[b.level] ?? 0;
     if (aRank !== bRank) return bRank - aRank;
@@ -187,6 +184,8 @@ function buildForecast(forecast) {
     emoji: p.emoji || null,
     level: p.level || null,
     trend: p.trend || null,
+    baselineComparison: p.baseline_comparison || null,
+    weekOverWeek: p.week_over_week || null,
     note: p.note || null,
   }));
   return {
@@ -388,11 +387,13 @@ function pestReportV2PdfSignature(service = {}) {
   // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
   // applies to every pest PDF, V2 dashboard or not.
   const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
-  // '-pex1' rides every pest-line key while the expectations gate is on —
+  // '-pex2' rides every pest-line key while the expectations gate is on —
   // same append-not-switch pattern as '-ton1' above, and independent of
   // PEST_REPORT_V2 for the same reason: computed before the V2 early-return
   // so a flip re-renders cached documents once regardless of dashboard state.
-  const pexSuffix = pestReportExpectationsGateOn() ? '-pex1' : '';
+  // Bumped from '-pex1' when the expectation wording changed (owner
+  // 2026-10-01), so PDFs cached under the old wording re-render once.
+  const pexSuffix = pestReportExpectationsGateOn() ? '-pex2' : '';
   if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a

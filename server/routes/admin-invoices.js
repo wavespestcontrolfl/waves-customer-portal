@@ -2151,7 +2151,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         // the undo's reverse repoint — whichever commits second sees the
         // other (the undo's new prepay-term child probe refuses on ours).
         const lockedInvoiceRow = await trx('invoices')
-          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
+          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id', 'total', 'line_items');
         if (!lockedInvoiceRow) {
           const notFound = new Error('Invoice not found');
           notFound.statusCode = 404;
@@ -2204,6 +2204,42 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           }
         }
 
+        // Annual rate review (GATE_RATE_REVIEW): this route can write a
+        // same-family successor term too, so it honours the noticed renewal
+        // amount like the Customer 360 renewal routes — checked under the
+        // customer's annual-prepay lock (taken above), with the candidate
+        // term rows locked against the nightly apply; a different amount
+        // needs acknowledgeNoticedAmount. Gate off = no read.
+        if (require('../config/feature-gates').rateReviewLive()) {
+          const RateReviewApply = require('../services/rate-review-apply');
+          // An edit of this invoice's own term with no start sent keeps that
+          // term's dates (createTermForAnnualPrepay preserves them) — judge
+          // the preserved start, never today.
+          const linkedTermForNotice = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('id', 'term_start', 'coverage_service_type');
+          const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null };
+          // Both amounts must match the notice: what the customer actually
+          // pays for the coverage — the locked invoice's total GROSS of any
+          // deposit credit (a paid deposit is prior payment riding as a
+          // negative deposit_credit line, the same gross basis the Customer
+          // 360 renewal records), judged FIRST so the prompt and the override
+          // log name the real charge — AND the term's prepay amount (an
+          // editable field). A $468 invoice marked with prepayAmount 484
+          // still charges $468, so it needs the same acknowledgement.
+          const depositCredit = InvoiceService._parseInvoiceLineItems(lockedInvoiceRow.line_items)
+            .filter((li) => li && li.category === 'deposit_credit')
+            .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
+          const chargedTotal = Math.round((Number(lockedInvoiceRow.total) + depositCredit) * 100) / 100;
+          const totalDiffers = Number.isFinite(chargedTotal) && Math.round(chargedTotal * 100) !== Math.round(resolvedAmount * 100);
+          let noticed = totalDiffers ? await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal }) : null;
+          if (!noticed) noticed = await RateReviewApply.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount });
+          if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);
+          if (noticed) {
+            await RateReviewApply.recordNoticedAmountOverride(trx, { customerId: termCustomerId, conflict: noticed, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'invoice_annual_prepay', invoiceId: invoice.id });
+          }
+        }
+
         return AnnualPrepayRenewals.createTermForAnnualPrepay({
           customerId: termCustomerId,
           prepayInvoiceId: invoice.id,
@@ -2220,6 +2256,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
       throw err;
     }
     if (!term) {
@@ -3642,9 +3679,12 @@ router.get('/:id/followup', async (req, res, next) => {
     const seq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first();
     // A customer on combined reminders (customer-dunning/wiring.js): the panel shows the combined step
     // and invoice count, and send-now must confirm that step (Codex #5503 r2 P1). null otherwise.
+    // An invoice with no reminder row of its own can still be on the combined balance: the summary is
+    // then answered only when the combined reminder really names this invoice.
+    const Wiring = require('../services/customer-dunning/wiring');
     const customerSchedule = seq
-      ? await require('../services/customer-dunning/wiring').customerScheduleSummary(seq.customer_id)
-      : null;
+      ? await Wiring.customerScheduleSummary(seq.customer_id)
+      : await Wiring.customerScheduleSummaryForInvoice(req.params.id);
     res.json({
       sequence: seq || null,
       customerSchedule,
@@ -3724,8 +3764,21 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     // A customer on a customer-level reminder schedule: the click sent (or
     // refused to send) the schedule's current step (dunning consolidation §8).
     if (routed?.routedTo === 'customer_schedule') {
-      const { status, body } = require('../services/customer-dunning/wiring').httpResult(routed);
-      return res.status(status).json(body);
+      const Wiring = require('../services/customer-dunning/wiring');
+      const result = Wiring.httpResult(routed);
+      // On the customer's activity log like the customer page's send-now (who, when, what happened).
+      // Best effort: a failed lookup never turns the press's answer into a 500.
+      try {
+        const invoice = await db('invoices').where({ id: req.params.id }).first('customer_id');
+        if (invoice?.customer_id) {
+          await Wiring.recordStaffControl({
+            customerId: invoice.customer_id, control: 'send-now', adminId: req.technicianId || null, result, via: 'invoice',
+          });
+        }
+      } catch (err) {
+        logger.warn(`[admin-invoices] combined send-now activity record failed for invoice ${req.params.id}: ${err.message}`);
+      }
+      return res.status(result.status).json(result.body);
     }
     res.json({ ok: true });
   } catch (err) { next(err); }

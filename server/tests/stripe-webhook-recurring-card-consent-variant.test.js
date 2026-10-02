@@ -46,6 +46,8 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
   notifyCustomer: jest.fn(async () => ({})),
 }));
+const mockRaiseAdminAlert = jest.fn(async () => ({}));
+jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: (...a) => mockRaiseAdminAlert(...a) }));
 const mockCompleteEnrollment = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/recurring-card-on-file', () => ({
   isRecurringCardOnFileEnabled: jest.fn(() => true),
@@ -69,11 +71,19 @@ function estimateRow(estimateData) {
   };
 }
 
-function wireDb(estimate) {
+// The customer's own authorization row for this method, as the accept
+// records it. An accept that persisted no consent snapshot and no current
+// version stamp (every legacy accept here) enrolls only on such a row
+// (#5434: recovery never records current-version consent the customer
+// never read); `consentRows: []` is the ledger with nothing on it.
+const LEGACY_ACCEPT_CONSENT_ROWS = [{ consent_text_version: 'v11_2026-08-25', source: 'estimate_accept' }];
+
+function wireDb(estimate, { consentRows = LEGACY_ACCEPT_CONSENT_ROWS } = {}) {
   db.schema = { hasTable: jest.fn(async () => false) };
   db.mockImplementation((table) => {
     const q = {};
     for (const m of ['where', 'whereNotNull', 'whereNull', 'orderBy']) q[m] = jest.fn(() => q);
+    q.select = jest.fn(async () => (table === 'payment_method_consents' ? consentRows : []));
     q.first = jest.fn(async () => {
       if (table === 'estimates') return estimate;
       if (table === 'customers') return { billing_mode: 'per_application' };
@@ -140,6 +150,20 @@ describe('estimate_recurring_card recovery records the accepted consent variant'
     await handleSetupIntentSucceeded(SETUP_INTENT);
     expect(mockCompleteEnrollment).toHaveBeenCalledTimes(1);
     expect(mockCompleteEnrollment.mock.calls[0][0]).not.toHaveProperty('consentVariant');
+  });
+
+  test('no stamp and NO authorization row on the ledger: recovery refuses (one Billing bell), never enrolls (#5434 backstop)', async () => {
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }), { consentRows: [] });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockRaiseAdminAlert.mock.calls[0][0]).toBe('billing');
+    // A card-hold consent is not an enrollment authorization either.
+    mockRaiseAdminAlert.mockClear();
+    wireDb(estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1' }), { consentRows: [{ consent_text_version: 'hold_v1_2026-10-01', source: 'estimate_card_hold' }] });
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
   test('only the accepted intent carries the variant, and only a known variant is honored', async () => {

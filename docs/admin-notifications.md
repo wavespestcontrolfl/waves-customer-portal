@@ -45,6 +45,17 @@ Examples:
 | Comms — call Mona Refay back | Promised on a 3:22 PM call; an hour has passed with no contact. |
 | System — Venice review sync silent 3 days | No new reviews fetched since Sat; Google shows 2. |
 
+**Say who and what** (owner audit 2026-10-01). A bell is read before anything is opened, so
+the customer's name (or the sender's) belongs in the headline and the words behind the alert
+belong in the why: a text, an email, a promise we made, the failed amount, the visit date.
+"Comms — send Albert Clark the estimate" with "“Swarming termites mobile home tenting free
+estimate” (Sep 29) — no estimate sent yet." works; "An SMS request needs follow-up" does not.
+Quote the customer, redacted the way every bell body is (`redactSensitiveText`, so a phone
+number or street address is masked), cut to the 110 characters at a word, and keep the whole
+quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
+alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
@@ -66,11 +77,23 @@ customer's message by this rule.
 1. **Ring once per episode.** A refresh of the same subject and class updates the row in
    place and keeps its read state (`refreshOnDedupe` with `ringOnRefresh`). A comeback
    after the row was cleared rings again.
+   A customer who keeps texting is one subject: a known sender's texts share ONE bell row
+   (`dedupeKey` `sms-thread:<customerId>`, `refreshOnDedupe` + `bumpOnRefresh`). Each new
+   text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
+   moved to the top) and still pushes; the count restarts once the row was read or done.
+   The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A standing backlog (overdue promises past five) is a count on its page, never a bell:
+   its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
+   Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
+   as an `ops_digest` row, not the bell.
 2. **Clear yourself.** An emitter that re-raises a stable key closes it when its
    done-when holds (`server/services/admin-alert-episodes.js`). The relevance sweep
    (`server/services/admin-alert-relevance.js`) is the backstop for one-shot classes only.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
    day in total. A class that would push past that becomes a standing count.
+   Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
+   tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
+   rings; tomorrow it may be too late to act.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,

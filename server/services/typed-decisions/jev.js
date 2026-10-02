@@ -1,18 +1,21 @@
 /**
  * Typed decisions caller (dark behind GATE_TYPED_DECISIONS).
  *
- * askPackage(packageId, state) asks TypeSafe Jev the registered questions of a
- * decision package (./packages.js) about one `state` and returns normalised,
- * threshold-aware answers. It is the ONLY way a caller reaches the typed-
- * decision route: ROUTES.typedDecision is single-leg (nothing else answers
- * typed questions), so on `ok:false` the caller keeps its existing path.
+ * askPackage(packageId, state) asks a decision model the registered questions
+ * of a decision package (./packages.js) about one `state` and returns
+ * normalised, threshold-aware answers. TypeSafe Jev is the default provider;
+ * `{ provider: 'cloudflare' }` puts the same package to Cloudflare Clef
+ * (ROUTES.typedDecisionClef, behind GATE_TYPED_DECISIONS_CLEF as well), whose
+ * answers share Jev's shape. It is the ONLY way a caller reaches either
+ * route: each is single-leg (nothing else answers typed questions), so on
+ * `ok:false` the caller keeps its existing path.
  * Shadow/evidence use only: the answers propose, they never send or write on
  * their own, and this module never throws.
  */
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatch, rejectCall } = require('../llm/call');
-const { typedDecisionsLive } = require('../../config/feature-gates');
+const { typedDecisionsLive, typedDecisionsClefLive } = require('../../config/feature-gates');
 const { packageFor, packageHash } = require('./packages');
 
 function stateProblem(state, pkg) {
@@ -55,21 +58,33 @@ function normaliseAnswer(question, answer, thresholds) {
   return null;
 }
 
-async function askPackage(packageId, state, { laneId } = {}) {
+// The providers that answer decision packages. typesafe (Jev) is the default;
+// cloudflare (Clef on Workers AI) answers the SAME packages as a second
+// opinion and needs its own gate on top of GATE_TYPED_DECISIONS. The route
+// and lane ids are written out literally in askPackage (not looked up from a
+// table) so the switchboard's call-site guard and the ledger coverage test
+// can read them in this file.
+const KNOWN_PROVIDERS = Object.freeze([MODELS.PROVIDER.TYPESAFE, MODELS.PROVIDER.CLOUDFLARE]);
+
+async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER.TYPESAFE } = {}) {
   if (!typedDecisionsLive()) return { ok: false, reason: 'gate_off' };
+  if (!KNOWN_PROVIDERS.includes(provider)) return { ok: false, reason: 'unknown_provider', provider };
+  const clef = provider === MODELS.PROVIDER.CLOUDFLARE;
+  if (clef && !typedDecisionsClefLive()) return { ok: false, reason: 'gate_off' };
   const pkg = packageFor(packageId);
   if (!pkg) return { ok: false, reason: 'unknown_package', packageId };
-  const base = { packageId: pkg.id, packageHash: packageHash(pkg) };
+  const base = { packageId: pkg.id, packageHash: packageHash(pkg), provider };
   const problem = stateProblem(state, pkg);
   if (problem) {
     logger.warn(`[typed-decisions] bad_state for ${pkg.id}: ${problem}`);
     return { ok: false, reason: 'bad_state', ...base };
   }
   try {
-    const result = await dispatch(MODELS.ROUTES.typedDecision, {
+    const route = clef ? MODELS.ROUTES.typedDecisionClef : MODELS.ROUTES.typedDecision;
+    const result = await dispatch(route, {
       state,
       questions: pkg.questions,
-      laneId: laneId || 'typed_decisions',
+      laneId: laneId || (clef ? 'typed_decisions_clef' : 'typed_decisions'),
       promptVersion: pkg.id,
     });
     if (!result || !result.ok) {

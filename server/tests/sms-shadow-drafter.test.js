@@ -1129,10 +1129,10 @@ describe('auto-send fallback publication', () => {
       // Codex round-16 P2: the opt-in also requires the release gate — gate-off
       // is byte-identical (no live-row query).
       const off = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
-      expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false });
+      expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true });
       process.env.GATE_SMS_REAL_ANSWERS = 'true';
       const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
-      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true });
+      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true });
     } finally {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
@@ -1155,7 +1155,7 @@ describe('auto-send fallback publication', () => {
         { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
       );
       expect(getContextForCustomer).toHaveBeenCalledTimes(1);
-      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false });
+      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false, includeVisitLoops: true });
     } finally {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;

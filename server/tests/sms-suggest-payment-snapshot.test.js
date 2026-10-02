@@ -29,7 +29,7 @@ const { publishSuggestion } = require('../services/sms-suggest-mode');
 
 const base = {
   draftId: 'draft-1', customerId: 'cust-1', smsLogId: 'sms-1', inboundMessage: 'Did you get my payment?', reply: 'Your account has no balance due.',
-  intent: 'general_customer_sms_needs_review', confidence: 0.9, model: 'm', promptVersion: 'house_voice_v12_real_answers5_cfl_p', lintFailures: [],
+  intent: 'general_customer_sms_needs_review', confidence: 0.9, model: 'm', promptVersion: 'house_voice_v12_real_answers5_cflvp', lintFailures: [],
 };
 const lastSnapshot = () => JSON.parse(db.__inserts.filter((i) => i.table === 'agent_decisions').pop().row.input_snapshot);
 

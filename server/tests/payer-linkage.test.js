@@ -68,11 +68,19 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
     expect(out.failed).toBe(true);
     expect(out.payerInvRows).toEqual([]);
   });
-  test('billing-v2 uses the shared service (no second copy of the predicate)', () => {
-    const src = require('fs').readFileSync(require.resolve('../routes/billing-v2'), 'utf8');
-    expect(src).toMatch(/require\('\.\.\/services\/payer-linkage'\)/);
-    expect(src).toMatch(/await loadPayerLinkage\(req\.customerId\)/);
+  test('the portal payment history (GET /api/billing) uses the shared service (no second copy of the predicate)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/portal-payment-history'), 'utf8');
+    expect(src).toMatch(/require\('\.\/payer-linkage'\)/);
+    expect(src).toMatch(/await loadPayerLinkage\(customerId\)/);
     expect(src).not.toMatch(/const isPayerLinked = /);
+    expect(require('fs').readFileSync(require.resolve('../routes/billing-v2'), 'utf8')).not.toMatch(/const isPayerLinked = /);
+  });
+  test('a row the ledger stamps as the payer\'s directly (payments.payer_id / metadata.payer_id) is payer-linked', () => {
+    const { buildPayerLinkage } = require('../services/payer-linkage');
+    const { isPayerLinked } = buildPayerLinkage([]);
+    expect(isPayerLinked({ payer_id: 'p1' })).toBe(true);
+    expect(isPayerLinked({ metadata: JSON.stringify({ payer_id: 'p1' }) })).toBe(true);
+    expect(isPayerLinked({ payer_id: null, metadata: {} })).toBe(false);
   });
 });
 

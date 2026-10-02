@@ -43,6 +43,7 @@ import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../.
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -77,6 +78,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
+import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -144,6 +146,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -1060,6 +1063,9 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
 export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// An open photo description (GATE_NOTE_BOX_PHOTOS) may hold typed or
+// dictated words not yet on the photo: Generate and Complete wait for it.
+export const PHOTO_DESCRIPTION_OPEN_ALERT = "Save or cancel the photo description first.";
 // The promise list is an optional read: a stalled one gives up rather than
 // hold the form (Codex #5516).
 const PROMISE_CHECK_TIMEOUT_MS = 15000;
@@ -1334,6 +1340,8 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "annual_prepay_addons_lookup_failed",  // annual-prepay add-ons unreadable against the visit's invoice
   "first_application_coverage_changed",  // trip's combined invoice now covers the visit; the resume reuses it
   "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
+  "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
+  "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -10611,24 +10619,7 @@ export function defaultApplicationMethod(product = {}, serviceType = "", { inter
 // products DO (owner request 2026-07-23): their targets are the nutrition
 // goals of the application (green-up, iron chlorosis, potassium deficiency),
 // prefilled from the catalog like pest targets. Unknown catalog rows keep it.
-export function productControlsTargets(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  if (!category) return true;
-  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
-    category,
-  );
-}
-
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition, productControlsTargets };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -10801,7 +10792,16 @@ function treeShrubText(...values) {
   return values.filter(Boolean).join(" ").toLowerCase();
 }
 
-function treeShrubProductFlagsClient(selectedProducts = []) {
+// A catalog row labelled as a trunk injection, whatever its name says:
+// application method trunk_injection, or a rate per inch of trunk or per
+// palm. Mirrors isInjectionProduct in server/services/tree-shrub-closeout.js.
+function isInjectionCatalogRow(row) {
+  if (!row) return false;
+  if ((row.application_method ?? row.applicationMethod) === "trunk_injection") return true;
+  return /^\s*(ml|g)\s*\/\s*(inch|in\b|palm)/i.test(String(row.default_unit ?? row.defaultUnit ?? ""));
+}
+
+function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
   const productsText = (product) =>
     treeShrubText(
       product.name,
@@ -10835,9 +10835,12 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     if (/\b0\s*-\s*0\s*-\s*\d+/.test(textValue)) return false;
     return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
   });
-  const hasInjectionProduct = selectedProducts.some((product) =>
-    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
+  const injectionRows = selectedProducts.filter((product) =>
+    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)) ||
+    isInjectionCatalogRow(product) ||
+    isInjectionCatalogRow((catalog || []).find((row) => String(row.id) === String(product.productId))),
   );
+  const hasInjectionProduct = injectionRows.length > 0;
   const missingActuals = selectedProducts.filter((product) => {
     const amount = treeShrubNumber(product.totalAmount);
     return !amount || amount <= 0 || !product.amountUnit;
@@ -10850,6 +10853,7 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
+    injectionRows,
     missingActuals,
   };
 }
@@ -10874,6 +10878,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  injectionProducts = [],
   servicePhotos,
   service,
   customerRecap,
@@ -10935,12 +10940,25 @@ export function treeShrubCloseoutBlocksClient({
   if (closeout.injectionPerformed || productFlags.hasInjectionProduct) {
     const injection = closeout.injectionRecord || {};
     if (!String(injection.plantSpecies || "").trim()) push("Injection record requires plant species.", "injectionRecord.plantSpecies");
+    // The record's product, when it is one of this visit's injection products,
+    // brings its label: a per-inch label needs the trunk in inches (unless a
+    // palm is picked), and a label split by the tech's pick needs that band
+    // (the server checks the same).
+    const { rate: labelRate, pickKey, trunkNeeded } = injectionRecordView(injection, injectionProducts);
+    const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
+    else if (trunkNeeded && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
+    if (labelRate?.pick && !pickedBand(labelRate, pickKey)) {
+      push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
+    }
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
     // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
     // refuses the same dose (tree-shrub-closeout.js).
     else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
+    // A dose saved before the dose became a number of tsp or fl oz, and not
+    // readable as one, is entered again rather than sent unseen.
+    else if (!(Number(parseDose(injection.dose).amount) > 0)) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -10949,11 +10967,317 @@ export function treeShrubCloseoutBlocksClient({
   return blocks;
 }
 
-function TreeShrubCloseoutBlock({
+// The injection product's label in tsp or fl oz: the band that applies (or
+// the whole label until one does), the label's own rule for choosing, and the
+// pick the label leaves to the tech.
+function InjectionLabelFields({ rate, band, pickKey, onPick, select, colors }) {
+  const hint = { fontSize: 14, color: colors.muted };
+  // A palm is dosed from the label's canopy-spread table, never the tree
+  // rate per inch of trunk.
+  const palm = Boolean(pickedBand(rate, pickKey)?.palm);
+  return (
+    <>
+      {palm ? (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>palms are dosed per palm from the label's canopy-spread table</strong>
+        </div>
+      ) : (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate, band)}</strong>
+          {band && rate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
+        </div>
+      )}
+      {!rate.bands && (
+        <div style={hint}>No dose is worked out for this product until its label is checked. Dose from the label.</div>
+      )}
+      {rate.pick && (
+        <label style={{ display: "grid", gap: 4, fontSize: 14, color: colors.muted }}>
+          {rate.pick}
+          <select aria-label={rate.pick} value={pickKey} onChange={(e) => onPick(e.target.value)} style={select}>
+            <option value="" disabled>{`Pick the ${rate.pick.toLowerCase()}`}</option>
+            {rate.bands.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.palm ? option.label : `${option.label}: ${injectionLabelText(rate, option)}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </>
+  );
+}
+
+// The dose: what the label works out for this tree (or palm), and the dose
+// the tech put in as a number of tsp or fl oz, noted when it is over the label.
+function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
+  const { trunkInches, doseRange, dose, unreadableDose } = view;
+  // The unit a dose is entered in: the saved dose's own, so clearing its
+  // amount never switches tsp to fl oz under the tech.
+  const [doseUnitPick, setDoseUnitPick] = useState(() => dose.unit || "fl_oz");
+  // What the tech is typing: the record keeps only a number it can read
+  // ("1 1/2" reads 1.5), never digits run together.
+  const [doseTyped, setDoseTyped] = useState(null);
+  const doseDraft = typedDraft(doseTyped, record.dose);
+  const doseUnit = dose.unit || doseUnitPick;
+  const overLabel = view.overLabel(doseUnit);
+  const underLabel = view.underLabel(doseUnit);
+  const forWhat = view.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`;
+  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const hint = { fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  // Per palm: a per-palm label, or a palm picked on a per-inch one.
+  const perPalm = view.basis === "palm" || Boolean(view.basis && !view.trunkNeeded);
+  return (
+    <>
+      {doseRange && (
+        <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
+          <div style={hint}>{perPalm ? "Dose per palm" : "Dose for this tree"}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
+          <div style={hint}>
+            {perPalm ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
+          </div>
+        </div>
+      )}
+      <div style={caption}>
+        <span>{perPalm ? "Dose you put in, per palm" : "Dose you put in"}</span>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
+          <input
+            inputMode="decimal"
+            aria-label="Dose amount"
+            value={doseDraft ?? dose.amount}
+            onChange={(e) => {
+              const typed = e.target.value;
+              const stored = doseText(quantityOf(typed), doseUnit);
+              setDoseUnitPick(doseUnit);
+              setDoseTyped({ typed, stored });
+              onDose(stored);
+            }}
+            placeholder="Dose"
+            style={input}
+          />
+          <select
+            aria-label="Dose unit"
+            value={doseUnit}
+            onChange={(e) => {
+              setDoseUnitPick(e.target.value);
+              if (dose.amount) onDose(doseText(dose.amount, e.target.value));
+            }}
+            style={select}
+          >
+            {DOSE_UNITS.map((unit) => (
+              <option key={unit.value} value={unit.value}>{unit.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
+      {unreadableDose && !doseDraft && (
+        <div style={problem}>
+          {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
+        </div>
+      )}
+      {overLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is more than the label allows ${forWhat}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
+        </div>
+      )}
+      {underLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is less than the label's dose ${forWhat} (${doseRange}). Check the label before you inject.`}
+        </div>
+      )}
+    </>
+  );
+}
+
+// The tree's trunk in inches for a per-inch label (a saved size in another
+// unit is shown, to enter again); otherwise the size as typed. A banded palm
+// label's pick is the palm's size, so it has no field here.
+function InjectionSizeFields({ record, view, onSize, input, colors }) {
+  const { trunkNeeded, trunkInches, unreadableTrunk } = view;
+  const [trunkTyped, setTrunkTyped] = useState(null);
+  const trunkDraft = typedDraft(trunkTyped, record.sizeClassOrDbh);
+  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  return (
+    <>
+      {trunkNeeded ? (
+        <label style={caption}>
+          Trunk (inches across, chest high)
+          <input
+            inputMode="decimal"
+            value={trunkDraft ?? trunkInches}
+            onChange={(e) => {
+              const typed = e.target.value;
+              // Only a trunk above zero is stored; "." or "0" stays a draft.
+              const inches = quantityOf(typed);
+              const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
+              setTrunkTyped({ typed, stored });
+              onSize(stored);
+            }}
+            placeholder="Inches"
+            style={input}
+          />
+        </label>
+      ) : (
+        <input
+          value={record.sizeClassOrDbh || ""}
+          onChange={(e) => onSize(e.target.value)}
+          placeholder="DBH / palm size"
+          style={input}
+        />
+      )}
+      {trunkNeeded && trunkTypingUnreadable && (
+        <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
+      )}
+      {unreadableTrunk && !trunkDraft && (
+        <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
+      )}
+    </>
+  );
+}
+
+// The injection record (owner rulings 2026-09-29, 2026-10-01): the product,
+// its label in tsp or fl oz, the band and trunk that settle the dose, and the
+// dose itself as a number of tsp or fl oz.
+function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, select, colors }) {
+  const setInjectionField = (field, nextValue) =>
+    onChange({ ...value, injectionRecord: { ...(value.injectionRecord || {}), [field]: nextValue } });
+  // The injection dose in the truck's measures (lib/injection-dose.js): the
+  // record's product, if it is one of this visit's injection products, brings
+  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz
+  // with the dose for the tree measured. The dose is a number of tsp or fl oz.
+  const record = value.injectionRecord || {};
+  const [otherProduct, setOtherProduct] = useState(false);
+  const view = injectionRecordView(record, injectionProducts);
+  const { chosen: chosenInjection, rate: labelRate, pickKey, band } = view;
+  // The record keeps the catalog id of one of this visit's products, so the
+  // server matches its label by id even if the product is renamed.
+  const setProduct = (product, productAuto) => {
+    const next = injectionProducts.find((option) => option.name === product) || null;
+    // A label measured another way (per palm vs per inch) starts without the
+    // old size.
+    const clearSize = Boolean(next?.basis) && next.basis !== view.basis;
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId: next?.productId ?? null, clearSize }) });
+  };
+  // One injection product on this visit: the record names it, until the tech
+  // chooses or types a product of their own (then it is never put back). A
+  // product the form named itself follows the visit: when that product leaves
+  // the visit, the record names the new only one, or none.
+  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  // The record marks a product the form named (productAuto), so a restored
+  // draft still knows it may follow the visit.
+  const productTouched = useRef(false);
+  useEffect(() => {
+    if (productTouched.current) return;
+    const stale = Boolean(record.product) && record.productAuto === true &&
+      !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product && onlyInjection) || stale) {
+      setProduct(onlyInjection, Boolean(onlyInjection));
+    }
+  }, [onlyInjection, record.product, injectionProducts]);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {injectionProducts.length > 0 && (
+        <select
+          aria-label="Injection product"
+          value={otherProduct ? "__other__" : chosenInjection?.name || ""}
+          onChange={(e) => {
+            const picked = e.target.value;
+            productTouched.current = true;
+            setOtherProduct(picked === "__other__");
+            setProduct(picked === "__other__" ? "" : picked, false);
+          }}
+          style={select}
+        >
+          <option value="" disabled>Injection product</option>
+          {injectionProducts.map((product) => (
+            <option key={product.name} value={product.name}>{product.name}</option>
+          ))}
+          <option value="__other__">Other product…</option>
+        </select>
+      )}
+      {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
+        <input
+          value={record.product || ""}
+          onChange={(e) => {
+            productTouched.current = true;
+            setProduct(e.target.value, false);
+          }}
+          placeholder="Injection product"
+          style={input}
+        />
+      )}
+      {labelRate && (
+        <InjectionLabelFields
+          rate={labelRate}
+          band={band}
+          pickKey={pickKey}
+          onPick={(key) => {
+            // Tree to palm (or back) measures the size another way: it starts over.
+            const clearSize = Boolean(pickedBand(labelRate, key)?.palm) !== Boolean(pickedBand(labelRate, view.pickKey)?.palm);
+            onChange({ ...value, injectionRecord: recordWithBand(record, key, { clearSize }) });
+          }}
+          select={select}
+          colors={colors}
+        />
+      )}
+      <InjectionSizeFields
+        record={record}
+        view={view}
+        onSize={(size) => setInjectionField("sizeClassOrDbh", size)}
+        input={input}
+        colors={colors}
+      />
+      <InjectionDoseFields
+        record={record}
+        view={view}
+        onDose={(dose) => setInjectionField("dose", dose)}
+        input={input}
+        select={select}
+        colors={colors}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={record.numberOfPorts ?? ""}
+          onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
+          placeholder="Ports"
+          style={input}
+        />
+        <input
+          type="date"
+          value={record.followUpDate || ""}
+          onChange={(e) => setInjectionField("followUpDate", e.target.value)}
+          style={input}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          value={record.plantSpecies || ""}
+          onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+          placeholder="Plant species"
+          style={input}
+        />
+        <input
+          value={record.targetIssue || ""}
+          onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+          placeholder="Injection target issue"
+          style={input}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function TreeShrubCloseoutBlock({
   value,
   onChange,
   blocks,
   productFlags,
+  injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
   textareaStyle,
@@ -10963,14 +11287,6 @@ function TreeShrubCloseoutBlock({
   const select = { ...(selectStyle || baseInputStyle), marginBottom: 8 };
   const textarea = { ...(textareaStyle || baseInputStyle), marginBottom: 8, minHeight: 82 };
   const setField = (field, nextValue) => onChange({ ...value, [field]: nextValue });
-  const setInjectionField = (field, nextValue) =>
-    onChange({
-      ...value,
-      injectionRecord: {
-        ...(value.injectionRecord || {}),
-        [field]: nextValue,
-      },
-    });
   const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -11114,57 +11430,14 @@ function TreeShrubCloseoutBlock({
         Injection add-on performed
       </label>
       {injectionVisible && (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.plantSpecies || ""}
-              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
-              placeholder="Plant species"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.sizeClassOrDbh || ""}
-              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
-              placeholder="DBH / palm size"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.product || ""}
-              onChange={(e) => setInjectionField("product", e.target.value)}
-              placeholder="Injection product"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.dose || ""}
-              onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose (tsp or fl oz)"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              type="number"
-              value={value.injectionRecord?.numberOfPorts ?? ""}
-              onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
-              placeholder="Ports"
-              style={input}
-            />
-            <input
-              type="date"
-              value={value.injectionRecord?.followUpDate || ""}
-              onChange={(e) => setInjectionField("followUpDate", e.target.value)}
-              style={input}
-            />
-          </div>
-          <input
-            value={value.injectionRecord?.targetIssue || ""}
-            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-            placeholder="Injection target issue"
-            style={input}
-          />
-        </div>
+        <TreeShrubInjectionRecord
+          value={value}
+          onChange={onChange}
+          injectionProducts={injectionProducts}
+          input={input}
+          select={select}
+          colors={colors}
+        />
       )}
     </div>
   );
@@ -12551,6 +12824,7 @@ export function CompletionPanel({
   // Completion photos are intentionally kept out of localStorage (a handful
   // of base64 images can exceed its quota).
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [photoDescriptionOpen, setPhotoDescriptionOpen] = useState(false);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -13515,6 +13789,20 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
+  // flag): the visit's photos and their descriptions sit inside the notes
+  // box and the separate photo section goes away. Never on lawn or tree,
+  // shrub & palm: another lane owns those completions and their photo steps.
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
+    && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
+  // Locked while a report is being written, like removePhoto: the request
+  // already read these captions.
+  const setPhotoCaption = (index, caption) => {
+    if (generating) return;
+    setServicePhotos((prev) => prev.map((photo, i) => (i === index
+      ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+      : photo)));
+  };
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
@@ -14341,6 +14629,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14373,7 +14662,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
@@ -14537,11 +14826,24 @@ export function CompletionPanel({
     (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
-  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts, products);
+  // The injection record's product list: this visit's rows the closeout flags
+  // as injections (by name or by the catalog's injection label), each with its
+  // label rate in mL per inch of trunk or per palm for the dose helper.
+  const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
+    return {
+      name: row.name,
+      productId: row.productId ?? null,
+      basis: injectionBasis(catalogRow || {}),
+      rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
+    };
+  });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
         closeout: treeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        injectionProducts,
         servicePhotos,
         service,
         customerRecap,
@@ -17384,6 +17686,10 @@ export function CompletionPanel({
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
     // Marks restored with a draft are checked against the promise list once
     // it loads; completing before then would drop them (Codex #5516).
     if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
@@ -19565,6 +19871,7 @@ export function CompletionPanel({
                   }
                   blocks={treeShrubCloseoutBlocks}
                   productFlags={treeShrubProductFlags}
+                  injectionProducts={injectionProducts}
                   inputStyle={mInput}
                   selectStyle={mSelect}
                   textareaStyle={mTextarea}
@@ -19574,6 +19881,7 @@ export function CompletionPanel({
                     text: M.ink,
                     muted: M.ink3,
                     error: M.err,
+                    warn: M.warn,
                   }}
                 />
               </Field>
@@ -19643,8 +19951,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label={noteBoxPhotos ? "Notes and photos" : "Technician notes"}>
               {" "}
+              <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
@@ -19668,13 +19977,16 @@ export function CompletionPanel({
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
                     opacity: generating ? 0.6 : 1,
+                    ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
                   }}
                 />{" "}
                 {dictation.supported && (
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating || dictation.uploading}
+                    // One microphone at a time: an open photo description holds the notes
+                    // mic (it can still stop a recording already going).
+                    disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                     aria-busy={dictation.uploading || undefined}
                     aria-label={
                       dictation.uploading
@@ -19709,6 +20021,35 @@ export function CompletionPanel({
                     {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
+              </div>
+              {noteBoxPhotos && (
+                <>
+                  <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+                  <NoteBoxPhotos
+                    photos={servicePhotos}
+                    max={5}
+                    disabled={generating}
+                    palette={{ text: M.ink, muted: M.ink3, border: M.hairline, card: M.card, danger: M.err, onDanger: M.actionFg }}
+                    dictationServiceId={service.id}
+                    onAdd={() => photoInputRef.current?.click()}
+                    onRemove={removePhoto}
+                    onCaption={setPhotoCaption}
+                    onEditingChange={setPhotoDescriptionOpen}
+                    micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                    onDescribeWithAi={handlePhotoAnalyze}
+                    describing={photoAnalyzing}
+                    describeError={photoAiError}
+                    summary={typedPhotoSummary}
+                    summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                    onSummary={setTypedPhotoSummary}
+                    onAddSummaryToNotes={isTypedFindings ? null : () => {
+                      const summary = typedPhotoSummary.trim();
+                      if (!summary) return;
+                      setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                    }}
+                  />
+                </>
+              )}
               </div>
             </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
@@ -19970,6 +20311,10 @@ export function CompletionPanel({
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
                     return;
                   }
+                  if (photoDescriptionOpen) {
+                    alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+                    return;
+                  }
                   if (promiseMarksPending) {
                     alert(PROMISE_MARKS_LOADING_ALERT);
                     return;
@@ -20101,7 +20446,7 @@ export function CompletionPanel({
                 </span>
               </Field>
             )}
-            {!quickComplete && !hideServicePhotos && (
+            {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -20354,6 +20699,7 @@ export function CompletionPanel({
             })}
             {/* Products applied */}
             <Field label="Products applied">
+              {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -21911,6 +22257,7 @@ export function CompletionPanel({
                 }
                 blocks={treeShrubCloseoutBlocks}
                 productFlags={treeShrubProductFlags}
+                injectionProducts={injectionProducts}
                 inputStyle={inputStyle}
                 selectStyle={inputStyle}
                 textareaStyle={{ ...inputStyle, minHeight: 82, resize: "vertical" }}
@@ -21920,6 +22267,7 @@ export function CompletionPanel({
                   text: D.text,
                   muted: D.muted,
                   error: D.red,
+                  warn: D.amber,
                 }}
               />
             </div>
@@ -22088,7 +22436,8 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
-          <label style={labelStyle}>Technician Notes</label>{" "}
+          <label style={labelStyle}>{noteBoxPhotos ? "Notes and photos" : "Technician Notes"}</label>{" "}
+          <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
@@ -22112,6 +22461,7 @@ export function CompletionPanel({
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
                 opacity: generating ? 0.6 : 1,
+                ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
               }}
               placeholder={
                 dictation.listening
@@ -22125,7 +22475,9 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating || dictation.uploading}
+                // One microphone at a time: an open photo description holds the notes
+                // mic (it can still stop a recording already going).
+                disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                 aria-busy={dictation.uploading || undefined}
                 aria-label={
                   dictation.uploading
@@ -22159,6 +22511,35 @@ export function CompletionPanel({
                 {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
+          </div>
+          {noteBoxPhotos && (
+            <>
+              <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+              <NoteBoxPhotos
+                photos={servicePhotos}
+                max={5}
+                disabled={generating}
+                palette={{ text: D.text, muted: D.muted, border: D.border, card: D.input, danger: D.red, onDanger: D.white }}
+                dictationServiceId={service.id}
+                onAdd={() => photoInputRef.current?.click()}
+                onRemove={removePhoto}
+                onCaption={setPhotoCaption}
+                onEditingChange={setPhotoDescriptionOpen}
+                micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                onDescribeWithAi={handlePhotoAnalyze}
+                describing={photoAnalyzing}
+                describeError={photoAiError}
+                summary={typedPhotoSummary}
+                summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                onSummary={setTypedPhotoSummary}
+                onAddSummaryToNotes={isTypedFindings ? null : () => {
+                  const summary = typedPhotoSummary.trim();
+                  if (!summary) return;
+                  setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                }}
+              />
+            </>
+          )}
           </div>
           </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
@@ -22421,6 +22802,10 @@ export function CompletionPanel({
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
                   return;
                 }
+                if (photoDescriptionOpen) {
+                  alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+                  return;
+                }
                 if (promiseMarksPending) {
                   alert(PROMISE_MARKS_LOADING_ALERT);
                   return;
@@ -22505,7 +22890,7 @@ export function CompletionPanel({
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
               Combined visits keep it (companions have their own photo gates). */}
-          {!quickComplete && !hideServicePhotos && (
+          {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
@@ -22774,6 +23159,7 @@ export function CompletionPanel({
           })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
+          {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {quickComplete ? (
             <div
               style={{
@@ -24020,36 +24406,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
-];
-
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
 // treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
 const ORNAMENTAL_TARGET_SUGGESTIONS = [
@@ -24067,24 +24423,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:
@@ -24747,6 +25085,8 @@ const PRODUCT_DESCRIPTIONS = {
   "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
   snapshot: "granular bed pre-emergent for long residual weed prevention",
   "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "8-0-12": "LESCO palm fertilizer #511542; dose in pounds from the canopy chart",
+  "0-0-16": "LESCO palm fertilizer #510513; potassium and magnesium without N or P",
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",

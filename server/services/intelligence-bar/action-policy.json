@@ -1847,6 +1847,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "update_lead_contact": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "update_lead_status": {
     "module": "leads-tools.js",
     "domain": "leads",

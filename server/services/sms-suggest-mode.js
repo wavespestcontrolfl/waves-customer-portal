@@ -286,8 +286,12 @@ async function getIntentMode(intent) {
  * The executor independently re-verifies all of this before sending; this is
  * the drafter-side resolution, not the security boundary.
  */
-async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
+// requireReview (PR #5499): a draft that must reach a person whatever its intent's
+// rung — a "thanks" that arrived while something is still owed. Suggest when the
+// suggestion surface is on, never auto-send.
+async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent, requireReview = false }) {
   if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
+  if (requireReview) return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
   // Gratitude is always inert shadow storage for the drafter, whatever its
   // rung or gate: never an immediate send (the quiet window forbids it) and
@@ -317,21 +321,50 @@ async function listIntentModes() {
   return db('sms_intent_modes').orderBy('intent', 'asc');
 }
 
-async function setIntentMode({ intent, mode, actor, reason }) {
+/**
+ * The ladder is climbed one rung at a time: auto_send is written only over a
+ * stored 'suggest' mode (Codex r2 on #5531). Judge-graded readiness evidence
+ * accrues while an intent is still in shadow, and evaluateAutoSendEligibility
+ * deliberately evaluates the suggest → auto_send rung without reading the
+ * stored mode, so without this check a direct API caller could promote a
+ * well-judged shadow intent straight to autonomous sending. The fixed-copy
+ * gratitude lane is the one documented exception: it never suggests and
+ * qualifies from shadow through its own non-delivery exam.
+ */
+function autoSendRequiresSuggest(intent) {
+  return intent !== require('./sms-gratitude').GRATITUDE_INTENT;
+}
+
+async function setIntentMode({ intent, mode, actor, reason, dbi = db }) {
   const check = validateModeChange(intent, mode);
   if (!check.ok) {
     const err = new Error(check.error);
     err.statusCode = 400;
     throw err;
   }
-  const [row] = await db('sms_intent_modes')
-    .insert({
-      intent: check.intent,
-      mode,
-      updated_by: actor || 'admin',
-      reason: reason || null,
-      updated_at: new Date(),
-    })
+  const patch = {
+    mode,
+    updated_by: actor || 'admin',
+    reason: reason || null,
+    updated_at: new Date(),
+  };
+  if (mode === AUTO_SEND_MODE && autoSendRequiresSuggest(check.intent)) {
+    // Conditional update: the row must exist AND sit at 'suggest'. An intent
+    // with no row is shadow by definition, so there is no insert path here —
+    // the update either lands on the suggest row or touches nothing.
+    const [row] = await dbi('sms_intent_modes')
+      .where({ intent: check.intent, mode: 'suggest' })
+      .update(patch)
+      .returning('*');
+    if (!row) {
+      const err = new Error('auto_send is earned from suggest — promote this intent to suggest first');
+      err.statusCode = 409;
+      throw err;
+    }
+    return row;
+  }
+  const [row] = await dbi('sms_intent_modes')
+    .insert({ intent: check.intent, ...patch })
     .onConflict('intent')
     .merge(['mode', 'updated_by', 'reason', 'updated_at'])
     .returning('*');
@@ -548,7 +581,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, zelleInvoiceId = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -698,6 +731,12 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // Technician first name(s), independent of live entries (round-42 P2): read back at
             // send time so name-subjected status wording is recognized with no live snapshot.
             ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+            // PR #5499 r1: the open call_commitments ids this draft's VISIT STATUS & OPEN
+            // LOOPS lines named — agentDecisionSendBlockReason / the scheduler recheck
+            // they are still open before the reviewed reply goes out.
+            ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+            // ...and the stop count its Tech position line showed (recounted when the reply mentions stops).
+            ...(visitLoopStatus ? { visit_loop_status: visitLoopStatus } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',
@@ -1284,6 +1323,7 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
 module.exports = {
   VALID_MODES,
   AUTO_SEND_MODE,
+  autoSendRequiresSuggest,
   ESCALATION_INTENTS,
   SUGGESTED_STATUS,
   SUGGEST_WORKFLOW,

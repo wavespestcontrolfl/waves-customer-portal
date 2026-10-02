@@ -132,6 +132,50 @@ describe('LawnLeadCard layout', () => {
     expect(words(screen.getByTestId('lawn-lead-region')) + bannerWords).toBeLessThanOrEqual(250);
   });
 
+  describe('Since your last visit (lead.sinceLast)', () => {
+    const SINCE = { priorDate: '2026-08-01', lines: ['Last visit we applied weed control.', 'Weed control is on track.'] };
+
+    it('renders nothing when the lead has no block, or an empty one', () => {
+      renderLead();
+      expect(screen.queryByTestId('lawn-since-last')).toBeNull();
+      cleanup();
+      renderLead({ lead: { ...LEAD, sinceLast: { priorDate: '2026-08-01', lines: [] } } });
+      expect(screen.queryByTestId('lawn-since-last')).toBeNull();
+    });
+
+    it('prints the server lines as given, labelled with the prior visit day, above "What we applied today"', () => {
+      renderLead({ lead: { ...LEAD, sinceLast: SINCE } });
+      const block = screen.getByTestId('lawn-since-last');
+      expect(block).toHaveTextContent('Since your last visit, Aug 1');
+      for (const line of SINCE.lines) expect(within(block).getByText(line)).toBeInTheDocument();
+      const region = screen.getByTestId('lawn-lead-region');
+      const text = region.textContent;
+      expect(text.indexOf('Since your last visit')).toBeLessThan(text.indexOf('What we applied today'));
+    });
+
+    it('the day is the calendar day the server sent, whatever the viewer time zone, and a bad date drops only the date', () => {
+      renderLead({ lead: { ...LEAD, sinceLast: { ...SINCE, priorDate: '2026-12-31' } } });
+      expect(screen.getByTestId('lawn-since-last')).toHaveTextContent('Since your last visit, Dec 31');
+      cleanup();
+      renderLead({ lead: { ...LEAD, sinceLast: { ...SINCE, priorDate: 'nope' } } });
+      const block = screen.getByTestId('lawn-since-last');
+      expect(block).toHaveTextContent('Since your last visit');
+      expect(block).not.toHaveTextContent(/Invalid|nope|,/);
+    });
+
+    it('still fits the 250 visible-word budget with a full block and banner lines', () => {
+      const full = { priorDate: '2026-08-01', lines: [
+        'Last visit we applied weed control, fungus protection and fertilizer.',
+        'Your overall lawn score is down since then.',
+        'Weed control is behind where we expected.',
+        'Still on our watch list: weeds and mowing height.',
+      ] };
+      const banner = ['Water in today’s treatment by Thu 2 PM.', 'Run spray heads about 15 minutes a zone and rotors about 40 minutes.', 'Run it even if it is not your usual day.'];
+      renderLead({ lead: { ...LEAD, sinceLast: full } });
+      expect(words(screen.getByTestId('lawn-lead-region')) + banner.join(' ').split(/\s+/).length).toBeLessThanOrEqual(250);
+    });
+  });
+
   it('merges a style override (the page mounts it with a top margin)', () => {
     render(<LawnLeadCard lead={LEAD} snapshot={SNAPSHOT} style={{ marginTop: 16 }} />);
     expect(screen.getByTestId('lawn-lead-region').firstElementChild.style.marginTop).toBe('16px');
@@ -250,6 +294,35 @@ describe('LawnReportV2Section lead mode', () => {
     const text = container.textContent;
     expect(text.indexOf('Water This Week')).toBeGreaterThan(text.indexOf('Priority findings'));
     expect(text.indexOf('Turf Density')).toBeGreaterThan(text.indexOf('Water This Week'));
+  });
+});
+
+describe('program line (GATE_LAWN_EXPECTATIONS)', () => {
+  const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
+  const programSnapshot = { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' };
+
+  it('lead mode renders the program line exactly once, beside the trends', () => {
+    const { container } = render(<LawnReportV2Section data={payload({ snapshot: programSnapshot, trends: { overall: [{ date: '2026-04-15', value: 60 }, { date: '2026-10-14', value: 68 }] } })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+    expect(container.textContent.match(new RegExp(PROGRAM.slice(0, 30), 'g'))).toHaveLength(1);
+    expect(screen.getByText('This time of year')).toBeInTheDocument();
+  });
+
+  it('lead mode renders it with no trends payload too (a first visit)', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: programSnapshot })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+  });
+
+  it('lead mode never renders an unmarked season note (gate off, or a null program line)', () => {
+    render(<LawnReportV2Section data={payload()} />);
+    expect(screen.queryByText('This time of year')).toBeNull();
+    expect(screen.queryByText(SNAPSHOT.seasonalNote)).toBeNull();
+  });
+
+  it('legacy layout renders the line once, in the hero, without the lead block', () => {
+    render(<LawnReportV2Section data={payload({ lead: undefined, snapshot: programSnapshot })} />);
+    expect(screen.getAllByText(PROGRAM)).toHaveLength(1);
+    expect(screen.queryByText('This time of year')).toBeNull();
   });
 });
 

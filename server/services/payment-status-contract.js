@@ -478,11 +478,15 @@ const RECEIPT_SCOPE_RE = /\b(?:(?:went|go|goes|gone|going|came|come|comes|coming
 // (sms-label-facts.looksNonEnglish, the shared detector) - is held: it may confirm a payment in words no list knows.
 const FOREIGN_MONEY_RE = /(?<![\p{L}])(?:pag(?:o|os|ar|ue|u[eé]|ó|amos|aron|ado|ada|amento|amentos|ou|uei)|paiements?|pay[ée]e?s?|factura|facturas|fatura|faturas|facture|factures|saldo|saldos|solde|dinero|dinheiro|argent|cobr(?:o|os|ar|amos|aron|ado|ada|anza|é|ó)|recib\p{L}*|receb\p{L}*|reçu|transferencia|transfer[eê]ncia|virement|tarjeta|cart[aã]o|carte|cuenta|conta|compte|deuda|d[ií]vida|dette|reembols\p{L}*|rembours\p{L}*)(?![\p{L}])/iu;
 const notReadableEnglish = (text) => { try { return !!require('./sms-label-facts').looksNonEnglish(text); } catch { return true; } };
+// "We still owe you a callback" (the VISIT STATUS & OPEN LOOPS facts, PR #5499) is a promise, not money. An ALLOW-list of non-money
+// things owed is masked before the payment vocabulary is read; "we owe you a refund / credit / $20" stays payment status.
+const NON_MONEY_OWE_RE = /\b(?:we|you|they)(?:'re|\s+are)?\s+(?:still\s+|also\s+|really\s+)?ow(?:e|ing)\s+(?:you|me|us)\s+(?:a|an|the|that|this|one|your|my|our)\s+(?:quick\s+|proper\s+|real\s+)?(?:call[\s-]?backs?|calls?|phone\s+calls?|answers?|repl(?:y|ies)|responses?|updates?|visits?|follow[\s-]?ups?|texts?|emails?|apolog(?:y|ies)|explanations?|quotes?|estimates?|confirmations?|check[\s-]?ins?)\b/gi;
+const maskNonMoneyOwe = (text) => String(text ?? '').replace(NON_MONEY_OWE_RE, ' we will follow up ');
 function isPaymentScopedText(text) {
   const t = String(text ?? '').replace(/[’‘]/g, "'");
   if (t.length > MAX_INBOUND_CHARS) return true;
   if (FOREIGN_MONEY_RE.test(t)) return true;
-  const body = t.replace(GREETING_RE, ''); // "Hi Bill," is a name, not a bill
+  const body = maskNonMoneyOwe(t.replace(GREETING_RE, '')); // "Hi Bill," is a name, not a bill
   return TOPIC_RE.test(body) || RECEIPT_SCOPE_RE.test(body);
 }
 const asTexts = (list) => (Array.isArray(list) ? list : []).filter((t) => t != null).map(String);
@@ -502,8 +506,9 @@ function isPaymentScoped({ reply = '', inboundText = null, scopeTexts = [], scop
  * ("Would you like a receipt for the payment we received Tuesday?").
  */
 function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scoped = false } = {}) {
-  const body = String(text ?? '').replace(/[’‘]/g, "'");
-  if (body.length > MAX_REPLY_CHARS) return true; // never truncated and passed
+  const raw = String(text ?? '').replace(/[’‘]/g, "'");
+  if (raw.length > MAX_REPLY_CHARS) return true; // never truncated and passed
+  const body = maskNonMoneyOwe(raw);
   const inbound = inboundText == null ? null : String(inboundText);
   if (!isPaymentScoped({ reply: body, inboundText: inbound, scopeTexts, scoped })) return false;
   if (body.trim() && (FOREIGN_MONEY_RE.test(body) || notReadableEnglish(body))) return true;

@@ -706,7 +706,8 @@ describe('send-now and staff controls', () => {
     openFor.mockResolvedValueOnce({ ...openRow, step_index: 4, next_touch_at: next });
     resolve.mockResolvedValueOnce(setOf(['active', 'active', 'active']));
     expect(await Wiring.customerScheduleSummary(CUST)).toEqual({
-      id: 'sched-1', status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
+      id: 'sched-1', customerId: CUST, status: 'active', stepIndex: 4, stepLabel: Schedule.STEPS[4].label, invoiceCount: 3, nextTouchAt: next,
+      controllable: false, pausedBy: null, pausedReason: null,
     });
     expect(Schedule.STEPS[4].label).toBe('60-day reminder');
     expect(resolve).toHaveBeenCalledWith(CUST, { now: expect.any(Date) });
@@ -756,6 +757,7 @@ describe('send-now and staff controls', () => {
 
   test('IN_FLIGHT end to end: the exact office copy comes from admin.js through the 409 body (pause, release, send-now)', async () => {
     jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    mockGates.live = true;
     const fresh = new Date(NOW.getTime() - 60 * 1000);
     // pause: the guarded UPDATE matched nothing, the row carries a fresh claim
     mockDb.results.customer_dunning_schedules = 0;
@@ -783,8 +785,125 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
   });
 
+  test('every press that reaches a schedule is on the customer\'s activity log: who, which button, what happened (owner 10-01)', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    const ADMIN = '7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f';
+    const logRows = () => writes().filter((w) => w.table === 'activity_log' && w.write === 'insert').map((w) => w.args[0]);
+    mockDb.results.customer_dunning_schedules = 1;
+    mockGates.live = true;
+    await Wiring.controlCustomerSchedule(CUST, 'pause', { adminId: ADMIN, reason: 'customer called', now: NOW });
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'in_flight' });
+    await Wiring.controlCustomerSchedule(CUST, 'release', { adminId: ADMIN, now: NOW });
+    mockGates.live = false;
+    await Wiring.controlCustomerSchedule(CUST, 'send-now', { adminId: 'not-a-uuid', now: NOW }); // dark: refused
+    const [pause, release, send] = logRows();
+    expect(pause).toMatchObject({ customer_id: CUST, admin_user_id: ADMIN, action: 'combined_reminders_pause' });
+    expect(pause.description).toBe('Combined overdue reminders: Pause pressed — done. Reason: customer called');
+    expect(JSON.parse(pause.metadata)).toMatchObject({ control: 'pause', via: 'customer', scheduleId: 'sched-1', httpStatus: 200 });
+    expect(release).toMatchObject({ action: 'combined_reminders_release', admin_user_id: ADMIN });
+    // a refusal is recorded too, with the office's own words (one full stop)
+    expect(release.description).toMatch(/^Combined overdue reminders: Release pressed — not done: [^.].*[^.]\.$/);
+    expect(JSON.parse(release.metadata)).toMatchObject({ control: 'release', httpStatus: 409 });
+    expect(send).toMatchObject({ action: 'combined_reminders_send_now', admin_user_id: null }); // a non-uuid staff id is never written to the FK
+    expect(JSON.parse(send.metadata)).toMatchObject({ code: 'SCHEDULE_NOT_LIVE' });
+  });
+
+  test('no record without a schedule; a failed record never fails the press', async () => {
+    const openFor = jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(undefined);
+    await Wiring.controlCustomerSchedule(CUST, 'pause', { now: NOW });
+    expect(writes().filter((w) => w.table === 'activity_log')).toHaveLength(0);
+    openFor.mockResolvedValue(openRow);
+    mockGates.live = true;
+    mockDb.results.customer_dunning_schedules = 1;
+    mockDb.throwOn.activity_log = new Error('log table down');
+    expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { now: NOW })).toMatchObject({ status: 200, body: { ok: true } });
+    delete mockDb.throwOn.activity_log;
+  });
+
+  // Codex #5593 r1 P1: a schedule stays open after the gate, a prerequisite or the allowlist turns off, until
+  // the next run releases it. A pause pressed in that window would be carried onto every per-invoice reminder.
+  test('pause and resume are refused while the schedule is dark (gate off, prerequisite off, or outside the allowlist); release is not', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    mockDb.results.customer_dunning_schedules = 1;
+    const refused = { status: 409, body: { code: 'SCHEDULE_NOT_LIVE', error: expect.stringMatching(/Combined reminders are off for this customer/), scheduleId: 'sched-1' } };
+    const darkStates = [
+      () => { mockGates.live = false; },
+      () => { mockGates.live = true; mockGates.prereqs = false; },
+      () => { mockGates.live = true; mockGates.prereqs = true; mockGates.allow = new Set([CUST2]); },
+    ];
+    for (const makeDark of darkStates) {
+      makeDark();
+      expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { reason: 'customer called', now: NOW })).toEqual(refused);
+      expect(await Wiring.controlCustomerSchedule(CUST, 'resume', { now: NOW })).toEqual(refused);
+    }
+    // nothing was written to the schedule; each refusal is on the activity log
+    expect(writes().filter((w) => w.table === 'customer_dunning_schedules')).toEqual([]);
+    expect(writes().filter((w) => w.table === 'activity_log')).toHaveLength(6);
+    // release still works while dark: it is how a dark schedule is cleared by hand
+    mockGates.live = false;
+    mockDb.firsts.customer_dunning_schedules = openRow;
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: true, landed: [{}] });
+    expect(await Wiring.controlCustomerSchedule(CUST, 'release', { now: NOW })).toMatchObject({ status: 200, body: { ok: true, released: 1 } });
+    // allowlisted and live: pause goes through
+    Object.assign(mockGates, { live: true, prereqs: true, allow: new Set([CUST]) });
+    expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { now: NOW })).toMatchObject({ status: 200, body: { ok: true } });
+  });
+
+  test('customerScheduleSummary: controllable only while the live gate covers the customer; a paused schedule says why', async () => {
+    const openFor = jest.spyOn(Schedule, 'openScheduleFor');
+    jest.spyOn(BalanceSet, 'resolveDunnableSet').mockResolvedValue(setOf(['active', 'active']));
+    openFor.mockResolvedValue(openRow);
+    expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ controllable: false, pausedBy: null, pausedReason: null });
+    mockGates.live = true;
+    expect((await Wiring.customerScheduleSummary(CUST)).controllable).toBe(true);
+    mockGates.allow = new Set([CUST2]);
+    expect((await Wiring.customerScheduleSummary(CUST)).controllable).toBe(false);
+    mockGates.allow = null;
+    // what the office typed
+    openFor.mockResolvedValue({ ...openRow, status: 'paused', paused_reason: 'customer will pay Friday', paused_by_admin_id: 'admin-7' });
+    expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ status: 'paused', pausedBy: 'staff', pausedReason: 'customer will pay Friday' });
+    // a staff pause with no typed reason: no made-up words
+    openFor.mockResolvedValue({ ...openRow, status: 'paused', paused_reason: 'admin_paused', paused_by_admin_id: null });
+    expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ pausedBy: 'staff', pausedReason: null });
+    // the engine's own pause, in plain English (never the code)
+    openFor.mockResolvedValue({ ...openRow, status: 'paused', paused_reason: 'no_reachable_channel', paused_by_admin_id: null });
+    expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ pausedBy: 'system', pausedReason: 'there is no way to reach them' });
+    // a stale reason on a schedule that is not paused is not reported
+    openFor.mockResolvedValue({ ...openRow, status: 'active', paused_reason: 'old words' });
+    expect(await Wiring.customerScheduleSummary(CUST)).toMatchObject({ pausedBy: null, pausedReason: null });
+  });
+
+  // Codex #5593 r1 P2: an invoice with no reminder row of its own can still be on the combined balance.
+  test('customerScheduleSummaryForInvoice: answered only when the combined balance names that invoice', async () => {
+    const INV = '5a6b7c8d-1e2f-4a3b-8c4d-5e6f7a8b9c01';
+    const OTHER = '5a6b7c8d-1e2f-4a3b-8c4d-5e6f7a8b9c02';
+    const openFor = jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue({ ...openRow, step_index: 4 });
+    const resolve = jest.spyOn(BalanceSet, 'resolveDunnableSet');
+    const covering = (ids) => ({ kind: 'multi', reason: null, members: ids.map((invoice_id) => ({ invoice_id, cents: 1000, seqStatus: 'none', quiet: true })) });
+    expect(await Wiring.customerScheduleSummaryForInvoice('not-a-uuid')).toBeNull();
+    // no such invoice
+    mockDb.firsts.invoices = undefined;
+    expect(await Wiring.customerScheduleSummaryForInvoice(INV)).toBeNull();
+    expect(openFor).not.toHaveBeenCalled();
+    mockDb.firsts.invoices = { customer_id: CUST };
+    // covered: the same summary the sequenced invoices get
+    resolve.mockResolvedValueOnce(covering([OTHER, INV, 'inv-x']));
+    expect(await Wiring.customerScheduleSummaryForInvoice(INV)).toMatchObject({ id: 'sched-1', customerId: CUST, stepIndex: 4, invoiceCount: 3 });
+    // the balance does not name it (paid, excluded): nothing
+    resolve.mockResolvedValueOnce(covering([OTHER, 'inv-x']));
+    expect(await Wiring.customerScheduleSummaryForInvoice(INV)).toBeNull();
+    // the balance cannot be read: nothing (never a guess)
+    resolve.mockRejectedValueOnce(new Error('stripe down'));
+    expect(await Wiring.customerScheduleSummaryForInvoice(INV)).toBeNull();
+    // the customer has no open schedule
+    openFor.mockResolvedValueOnce(undefined);
+    expect(await Wiring.customerScheduleSummaryForInvoice(INV)).toBeNull();
+    expect(writes()).toEqual([]);
+  });
+
   test('200 with what happened: pause / resume / release / a send that went out', async () => {
     jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    mockGates.live = true;
     mockDb.results.customer_dunning_schedules = 1;
     expect(await Wiring.controlCustomerSchedule(CUST, 'pause', { adminId: 'admin-7', reason: 'customer called', now: NOW }))
       .toEqual({ status: 200, body: { scheduleId: 'sched-1', ok: true } });

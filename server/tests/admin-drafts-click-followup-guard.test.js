@@ -428,7 +428,7 @@ describe('reject — releases the linked click action', () => {
     // the stale sweep: both writes commit or roll back together.
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(updates).toEqual([
-      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected', flags: expect.stringMatching(/^CASE jsonb_typeof\(flags\) WHEN 'array' THEN flags \|\| \?::jsonb WHEN 'object' THEN flags \|\| \?::jsonb ELSE \?::jsonb END$/) }) },
       // 'dismissed' sits OUTSIDE hasOpenAction's pending|drafted set and the
       // partial unique indexes — a fresh re-click re-qualifies immediately
       // instead of waiting out the 14-day sweep.
@@ -534,7 +534,7 @@ describe('reject — pending-only claim (concurrent owner sessions)', () => {
       expect((await rejectReq(base)).status).toBe(200);
     });
     expect(updates).toEqual(expect.arrayContaining([
-      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected', flags: expect.stringMatching(/^CASE jsonb_typeof\(flags\) WHEN 'array' THEN flags \|\| \?::jsonb WHEN 'object' THEN flags \|\| \?::jsonb ELSE \?::jsonb END$/) }) },
       { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'dismissed' }) },
     ]));
   });

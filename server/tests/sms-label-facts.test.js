@@ -2684,7 +2684,7 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     const { system } = buildSystemPromptWithProfile();
     expect(system).toContain('LABEL FACTS (product timing from the label):');
-    expect(system).toContain('COMPANY FACTS, LABEL FACTS, the thread');
+    expect(system).toContain('COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
     expect(system).toContain('Never name a product or brand');
     expect(system).toContain('COPY the sentence word for word');
     expect(system).toContain('including its visit date');
@@ -2726,15 +2726,15 @@ describe('prompt rules and hand-off narrowing', () => {
     expect(system).not.toContain('is NOT a chemical/medical concern');
   });
 
-  test('prompt version: _cfl + _p, prefix kept, fits the column with all four tags', () => {
+  test('prompt version: cumulative cflvp (LABEL + VISIT STATUS & OPEN LOOPS + PAYMENT FACTS), prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    // PR #5331 (payment facts, '_p') merged on top of #5416's '3_cfl': the combined identity is 5_cfl_p (cumulative '_cfl' + '_p')
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cfl_p');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cfl_p');
+    // PR #5331 (payment facts) merged on top of #5499's '3_cflv': the combined identity is 5_cflvp (cumulative 'cflv' + 'p', one glued token)
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers5_cfl_p+bclm');
+    expect(all).toBe('house_voice_v12_real_answers5_cflvp+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2766,7 +2766,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers5_cfl_p');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers5_cflvp');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2872,7 +2872,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cfl_p');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }
@@ -3324,4 +3324,50 @@ test('#5520 r4: names count again when an unknown lowercase word remains; effect
     expect([t, labelFactsLib.askedLabelKinds(t).includes('rain')]).toEqual([t, true]);
   }
   for (const t of ['Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill if it runs all night?']) expect([t, labelFactsLib.askedLabelKinds(t)]).toEqual([t, []]);
+});
+
+describe('follow-up 2 (#5520 r5 + the 2026-10-01 prod sweep): the inbound language check', () => {
+  const english = (t) => !labelFactsLib.isUnverifiedLanguageInbound(t) && labelFactsLib.isEnglishInbound(t);
+  test('English the sweep held: contractions, ordinals, units, address tails, names-only, media reactions, everyday words', () => {
+    for (const t of [
+      'How about soap? Dish soap', '1200 maple loop apt 3', '1500 9th Ave east', "i'm impressed",
+      'Reacted \u2764\ufe0f to an image', 'Reimbursed from Sam not you lol', 'Gate code for the community is 5 digits. #0000',
+      'Please leave cert in the permit box for inspection', 'Rain or shine?', 'My address is 100 Harbor Dr FL 34000', 'Is everybody good?',
+      'Liked \u201cHello Alex! Payment received. Your report: portal.example...', 'the dogs Rex and Bo can go out now?',
+      'Reacted \u2764\ufe0f to "Hello Alex! Payment received, thank you. Invoice WPC-0000-0000...',
+    ]) expect([t, english(t)]).toEqual([t, true]);
+  });
+  // (#5520 r5 P1 "Can our Fido now mehet?" - 3 of 5 words English - still passes the 60% share: every word-list rule that held it held
+  // 48 more real English texts in the prod sweep, so it stays an accepted gap; see the PR.)
+  test('the earlier mixed-language leaks stay held', () => {
+    // #5537 r1: each was let through by a loosening and is held again (fail closed; the English ones they cost - a names-only text,
+    // "Im home", a name before an address - go to a person)
+    for (const t of ['1200 Main St. Kiedy Psy?', '1200 Main St Kiedy Psy', '1200 Main St Pot Iesi', '4821 Oak St Kiedy Psy Moga Wyjsc?', 'Liked "\u00bfYa pueden salir los perros?"', 'Liked "See https://x.y/z" kiedy psy moga wyjsc', 'Pot Iesi', 'Im Haus?', 'Can Fido mehet?', 'Kutyak mehetnek outside?', 'Hi Fido kimehet most kerlek please?', 'Pot iesi?', '2godziny wystarczy?', 'Dlaczego nie']) {
+      expect([t, english(t)]).toEqual([t, false]);
+    }
+  });
+  test('effectiveness wording beside watering asks rain across sentences, and counted "times" names another visit (both fail closed)', () => {
+    // whole-message on purpose (fail closed): a sprinkler mention beside any effectiveness question asks rain, and one pointing back
+    // across sentences is never dropped
+    expect(labelFactsLib.askedLabelKinds('My sprinkler is broken. Separately, is the ant bait less effective in winter?')).toEqual(['rain']);
+    expect(labelFactsLib.askedLabelKinds('The sprinklers ran. Will that make the ant bait less effective?')).toEqual(['rain']);
+    expect(labelFactsLib.askedLabelKinds('Will the sprinklers make it less effective?')).toEqual(['rain']);
+    // a following sentence that points back at the watering still counts, and the reply guard then holds a bare answer
+    const asked = labelFactsLib.askedLabelKinds('The sprinklers ran. Will that make it less effective?');
+    expect(asked).toEqual(['rain']);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('No, it will not.', '', asked)).toBe(true);
+    // (counted "times" always names another visit, conversational repetition included: fail closed, a person answers - #5537 r1)
+    expect(labelFactsLib.inboundRefersToOtherVisit('I asked about treatment two times ago, when can the dogs go out?', '2026-09-30', '2026-10-01')).toBe(true);
+    expect(labelFactsLib.inboundRefersToOtherVisit('two treatments back, can the kids go out?', '2026-09-30', '2026-10-01')).toBe(true);
+    for (const t of ['the treatment two times ago', 'two times ago, when can the dogs go out?']) expect([t, labelFactsLib.inboundRefersToOtherVisit(t, '2026-09-30', '2026-10-01')]).toEqual([t, true]);
+  });
+  test('"Is everybody good?" after a re-entry question inherits re-entry only (r5 P2)', () => {
+    expect(labelFactsLib.askedLabelKinds(['Is everybody good?', 'When can the dogs go out after the spray?'])).toEqual(['reentry']);
+  });
+});
+
+test('follow-up 2: a reaction with text typed after the quote is judged on that text, whatever quote marks it uses', () => {
+  for (const t of ['Liked \u201cThanks!\u201d kiedy psy moga wyjsc', "Liked 'Thanks!' kiedy psy moga wyjsc", 'Liked "Thanks!" kiedy psy moga wyjsc "ok"']) {
+    expect([t, labelFactsLib.isEnglishInbound(t)]).toEqual([t, false]);
+  }
 });

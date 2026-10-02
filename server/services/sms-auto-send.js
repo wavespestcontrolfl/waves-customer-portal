@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -271,6 +271,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // send-time snapshot publishSuggestion persists — see its comment.
           ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
           ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+          // PR #5499: the open call_commitments ids the draft's VISIT STATUS & OPEN LOOPS lines named.
+          ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
+          ...(visitLoopStatus ? { visit_loop_status: visitLoopStatus } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -327,6 +330,8 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // through the row it just inserted.
       // promptVersion: which prompt family the reply was drafted under (real-answers v12 replies run the payment-status recheck; PR #5334 ETA check reads it too)
       liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
+      visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
+      visitLoopStatus: visitLoopStatus || null,
     };
   });
 }
@@ -506,14 +511,20 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
-// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
-// Codex round-63 P2: a billing / Zelle change (or an unreadable re-read) at the boundary is retryable too - the retry reruns the full recheck.
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2),
+// and so does the open-loop recheck (PR #5499). Codex round-63 P2: a billing / Zelle change (or an unreadable re-read) at the
+// boundary is retryable too - the retry reruns the full recheck.
 const RETRYABLE_BOUNDARY_CODES = new Set([
-  'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', 'BILLING_CHANGED_AT_BOUNDARY', 'ZELLE_CHANGED_AT_BOUNDARY',
+  'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY', 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY',
+  'BILLING_CHANGED_AT_BOUNDARY', 'ZELLE_CHANGED_AT_BOUNDARY',
 ]);
-const BOUNDARY_RETRY_WHAT = {
-  LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY: 'the label timing', BILLING_CHANGED_AT_BOUNDARY: 'the billing state', ZELLE_CHANGED_AT_BOUNDARY: 'the Zelle details',
-};
+const BOUNDARY_RECHECK_SUBSYSTEMS = Object.freeze({
+  LIVE_ETA_CHECK_FAILED_AT_BOUNDARY: { what: 'the live ETA', logName: 'live ETA' },
+  LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY: { what: 'the label timing', logName: 'label facts' },
+  OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY: { what: 'the open promises and visit status', logName: 'open-loop' },
+  BILLING_CHANGED_AT_BOUNDARY: { what: 'the billing state', logName: 'billing', changeable: true },
+  ZELLE_CHANGED_AT_BOUNDARY: { what: 'the Zelle details', logName: 'Zelle', changeable: true },
+});
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
     && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
@@ -837,13 +848,20 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
     // gratitude handoff) LAST, so no other state can change after the final guard and before
     // the provider request; the repeatable parts re-run in the same order after the marker.
+    // Open-loop commitments (PR #5499) run next: a promise the reply was grounded on
+    // can be fulfilled or dismissed while the draft is verified and claimed.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
         // executor's own recheck cannot let the previous visit's timing through.
         labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // gratitude carries no draft snapshot: its fixed reply is refused when the
+        // rebuilt facts hold anything that must be answered (PR #5499)
+        gratitudeLane
+          ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
+          : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
         // Codex round-49 P1: a billing reply's rows must be exactly as they were before its recheck (one read on the handoff connection)
         billingFingerprint !== undefined
           ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ customerId, fingerprint: billingFingerprint, zelle })
@@ -1157,9 +1175,10 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    const what = BOUNDARY_RETRY_WHAT[result.code] || 'the live ETA';
-    logger.warn(`[sms-auto-send] ${result.code} at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
-    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} ${result.code in BOUNDARY_RETRY_WHAT && result.code !== 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'changed or ' : ''}could not be rechecked — suggestion reopened.` });
+    // the subsystem whose read failed (or, for billing / Zelle, changed), named in the log and the reopened card
+    const { what, logName, changeable } = BOUNDARY_RECHECK_SUBSYSTEMS[result.code] || BOUNDARY_RECHECK_SUBSYSTEMS.LIVE_ETA_CHECK_FAILED_AT_BOUNDARY;
+    logger.warn(`[sms-auto-send] ${logName} recheck ${changeable ? 'changed or unreadable' : 'unreadable'} at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} ${changeable ? 'changed or ' : ''}could not be rechecked — suggestion reopened.` });
     return { sent: false, reason: result.code, retryable: true };
   }
 

@@ -16,6 +16,7 @@ import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 import ReportText from '../ReportSections';
+import ForecastComparison from '../ForecastComparison';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -792,8 +793,8 @@ export function PestSeasonForecast({ forecast }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{p.label}</span>
-                <TrendArrow trend={p.trend} />
               </div>
+              <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}><ForecastComparison forecast={p} /></div>
               {p.note ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}>{p.note}</div> : null}
             </div>
             {p.level ? (

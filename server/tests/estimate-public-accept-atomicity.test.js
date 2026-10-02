@@ -135,18 +135,44 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
+      // Atomic JSON-path stamps (`jsonb_set(estimate_data, '{key}', value)`)
+      // reach this fake as the raw marker object; apply the keys to the
+      // stored JSON instead of replacing the column with the marker, so a
+      // later read of estimate_data (proposal, delivery marker) still parses.
+      const applyJsonbSet = (row, column, raw) => {
+        const sql = String(raw.__raw);
+        const bindings = Array.isArray(raw.bindings) ? [...raw.bindings] : [];
+        const wasString = typeof row[column] === 'string';
+        let data = row[column];
+        if (wasString) { try { data = JSON.parse(data); } catch { data = {}; } }
+        data = data && typeof data === 'object' ? data : {};
+        const re = /'\{([A-Za-z0-9_]+)\}',\s*(to_jsonb\(\?::text\)|'true'::jsonb|'false'::jsonb|\?::jsonb)/g;
+        let m;
+        while ((m = re.exec(sql))) {
+          const [, key, valueSrc] = m;
+          if (valueSrc === "'true'::jsonb") data[key] = true;
+          else if (valueSrc === "'false'::jsonb") data[key] = false;
+          else {
+            const b = bindings.shift();
+            data[key] = valueSrc === '?::jsonb' ? JSON.parse(b) : b;
+          }
+        }
+        row[column] = wasString ? JSON.stringify(data) : data;
+      };
       hits.forEach((row) => {
-        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
-        // accept writes — assigning the raw token would clobber the column.
-        const raw = obj.estimate_data && obj.estimate_data.__raw;
-        if (raw && /jsonb_set/.test(raw)) {
-          const key = /'\{(\w+)\}'/.exec(raw)[1];
-          const wasString = typeof row.estimate_data === 'string';
-          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
-          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
-          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
-        } else {
-          Object.assign(row, obj);
+        for (const [col, val] of Object.entries(obj)) {
+          if (val && typeof val === 'object' && val.__raw && String(val.__raw).includes('jsonb_set(')) applyJsonbSet(row, col, val);
+          else if (val && typeof val === 'object' && val.__raw && String(val.__raw).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'")) {
+            // The accept's wholesale estimate_data write merges the ROW's
+            // current served marker over the snapshot it was built from.
+            const wasString = typeof row[col] === 'string';
+            let existing = row[col];
+            if (wasString) { try { existing = JSON.parse(existing); } catch { existing = {}; } }
+            const next = JSON.parse(val.bindings[0]);
+            if (existing && typeof existing === 'object' && existing.rateReviewTermsServed != null) next.rateReviewTermsServed = existing.rateReviewTermsServed;
+            row[col] = wasString ? JSON.stringify(next) : next;
+          }
+          else row[col] = val;
         }
       });
       return {
@@ -176,7 +202,10 @@ jest.mock('../models/db', () => {
     return b;
   };
 
-  const dbFn = (table) => makeBuilder(table);
+  // state.onTable: a per-test hook fired on EVERY table access (root and
+  // transaction alike) so a test can interleave a concurrent write at a
+  // chosen point inside the accept transaction.
+  const dbFn = (table) => { if (typeof state.onTable === 'function') state.onTable(table); return makeBuilder(table); };
   dbFn.fn = { now: () => new Date() };
   dbFn.raw = (sql, bindings) => {
     // Advisory-lock statements (`pg_advisory_xact_lock`) flow through here —
@@ -245,6 +274,21 @@ jest.mock('../services/estimate-card-holds', () => ({
   attachCardHoldPaymentMethod: jest.fn(async () => ({})),
   cardHoldNoShowFee: jest.fn(() => 49),
   cardHoldCancelWindowHours: jest.fn(() => 24),
+}));
+// The public /pdf download, pdfkit path: the real generator streams a PDF
+// through pdfkit; here it only needs to end the response so the served
+// marker written beside it can be asserted.
+// The browser document renderer: never reachable in tests (no headless
+// browser); the mock lets the /pdf route tests pin WHEN it is attempted.
+jest.mock('../services/pdf/estimate-doc-pdf', () => {
+  const actual = jest.requireActual('../services/pdf/estimate-doc-pdf');
+  return { ...actual, renderEstimateDocumentPdf: jest.fn(async () => { throw new Error('no browser in tests'); }) };
+});
+jest.mock('../services/pdf/estimate-pdf', () => ({
+  generateEstimateProposalPDF: jest.fn((estimate, res) => {
+    res.set('Content-Type', 'application/pdf');
+    res.end('%PDF-1.4 test');
+  }),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
@@ -369,6 +413,7 @@ function resetStore(estimateRow) {
   };
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
+  db.__state.onTable = null;
 }
 
 function storedEstimate() {
@@ -386,6 +431,11 @@ async function putAccept(token, body = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks keeps queued *Once values: a test whose accept is refused
+  // before conversion would otherwise hand its queued conversion to the next
+  // test. convertEstimate has no default implementation, so a reset only
+  // drops that leftover queue.
+  EstimateConverter.convertEstimate.mockReset();
   InvoiceService.create.mockImplementation(async () => ({
     id: 'inv-1', token: 'invtok1', total: 159, applied_deposit_credit: 0,
   }));
@@ -489,7 +539,9 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(response.data.invoicePayUrl == null).toBe(true);
     const NotificationService = require('../services/notification-service');
     const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
-    expect(estimateNotice[2]).toContain('($448.00)');
+    // The full admin text (the bell's detail since the who-and-what copy, #5576)
+    // quotes the park's frozen total.
+    expect(estimateNotice[3].detail).toContain('($448.00)');
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
@@ -1505,7 +1557,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       // IP: the record takes req.ip (proxy-validated under index.js's
       // trust-proxy setting; the loopback here, where nothing is trusted).
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '198.51.100.77' },
-      body: JSON.stringify({ termsVersion: CURRENT }),
+      // A recurring pest plan: the tab rendered the 'plan' scope (the
+      // Services line with the annual rate review sentence) and attests it.
+      body: JSON.stringify({ termsVersion: CURRENT, termsScope: 'plan' }),
     });
     expect(res.status).toBe(200);
 
@@ -1520,9 +1574,10 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       customer_id: customerId,
       method: 'public_estimate',
       terms_version: CURRENT,
-      terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+      terms_text: acceptanceTerms.acceptanceTermsSnapshot('plan'),
       user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
     });
+    expect(records[0].terms_text).toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
     expect(records[0].ip).toMatch(/127\.0\.0\.1|::1/);
     expect(records[0].ip).not.toContain('198.51.100.77');
     expect(records[0].accepted_at).toBeTruthy();
@@ -1538,7 +1593,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({ id: 'est-terms-2', token: 'tok-terms-2-x0123456789' });
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
 
-    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT });
+    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(failed.status).toBeGreaterThanOrEqual(500);
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
@@ -1550,12 +1605,356 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-3', token: 'tok-terms-3-x0123456789' });
 
-    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01' });
+    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01', termsScope: 'plan' });
     expect(stale.status).toBe(409);
     expect(stale.data.code).toBe('TERMS_VERSION_STALE');
     expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // Scope attestation (codex #5434 r1 P0): the record carries the Services
+  // line the tab rendered — the server re-derives the estimate's scope and
+  // refuses the other one (or none) with the same reloadable 409.
+  test.each([
+    ['the other scope', { termsVersion: null, termsScope: 'base' }],
+    ['no scope beside a current version (a bundle that predates scopes)', { termsVersion: null }],
+    ['an unknown scope', { termsVersion: null, termsScope: 'all' }],
+  ])('a recurring plan accept attesting %s → 409 TERMS_VERSION_STALE before any mutation', async (_name, body) => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-s', token: 'tok-terms-s-x0123456789' });
+    const res = await putAccept('tok-terms-s-x0123456789', { ...body, termsVersion: CURRENT });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test("a rodent-only estimate serves and records the 'base' scope — no rate review sentence — and refuses 'plan'", async () => {
+    mockGateState.acceptanceTerms = true;
+    const rodent = {
+      id: 'est-terms-r',
+      token: 'tok-terms-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] },
+          oneTime: { items: [], membershipFee: 0 },
+        },
+      }),
+    };
+    seed(rodent);
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    expect(acceptanceTermsScopeFor(storedEstimate(), JSON.parse(rodent.estimate_data), {})).toBe('base');
+
+    const wrong = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(wrong.status).toBe(409);
+    expect(wrong.data.code).toBe('TERMS_VERSION_STALE');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    conversionOk();
+    const res = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'base' });
+    expect(res.status).toBe(200);
+    const records = db.__state.tables.estimate_acceptances;
+    expect(records).toHaveLength(1);
+    expect(records[0].terms_version).toBe(CURRENT);
+    expect(records[0].terms_text).toBe(acceptanceTerms.acceptanceTermsSnapshot('base'));
+    expect(records[0].terms_text).not.toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
+  });
+
+  test("the customer's one-time toggle on a plan estimate is a 'base' accept: 'plan' is refused", async () => {
+    mockGateState.acceptanceTerms = true;
+    // A pest plan the customer may take as a single visit (show_one_time_option + a resolvable one-time price).
+    seed({ id: 'est-terms-o', token: 'tok-terms-o-x0123456789', show_one_time_option: true, onetime_total: 150 });
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const estData = JSON.parse(storedEstimate().estimate_data);
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {}, { oneTime: true })).toBe('base');
+
+    const res = await putAccept('tok-terms-o-x0123456789', { termsVersion: CURRENT, termsScope: 'plan', serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // codex #5434 r3 P1 + the merge-head pre-push P1: the accept stamps the
+  // frozen-document fact only on persisted evidence the customer was SERVED
+  // the disclosure — the served marker (/pdf download, legacy page card) or
+  // the recorded 'plan' drawer snapshot — never on plan eligibility alone.
+  test('gate off: a plan accept stamps rateReviewDisclosedAtAccept only when the served marker is current; rodent never', async () => {
+    mockGateState.acceptanceTerms = false;
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const stampOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'));
+    const planData = (extra = {}) => JSON.stringify({
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      ...extra,
+    });
+
+    // No evidence at all (an older tab, nothing downloaded): unstamped.
+    seed({ id: 'est-stamp-0', token: 'tok-stamp-0-x0123456789' });
+    conversionOk();
+    expect((await putAccept('tok-stamp-0-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // The document or page served the current line: stamped, still no drawer row.
+    seed({ id: 'est-stamp-1', token: 'tok-stamp-1-x0123456789', estimate_data: planData({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-1-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(1);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // A marker from an older copy version is no evidence for this line.
+    seed({ id: 'est-stamp-2', token: 'tok-stamp-2-x0123456789', estimate_data: planData({ rateReviewTermsServed: 'v2025-01' }) });
+    conversionOk();
+    expect((await putAccept('tok-stamp-2-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+
+    // Rodent: no rate to review, marker or not.
+    seed({
+      id: 'est-stamp-r',
+      token: 'tok-stamp-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({
+        result: { recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] }, oneTime: { items: [], membershipFee: 0 } },
+        rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION,
+      }),
+    });
+    conversionOk();
+    expect((await putAccept('tok-stamp-r-x0123456789', {})).status).toBe(200);
+    expect(stampOps()).toHaveLength(0);
+  });
+
+  test('served evidence persisted AFTER the accept read the row is still honored: merged through the wholesale write and read under the lock', async () => {
+    // GH Codex r5 P1: a /pdf download (or legacy page view) lands between
+    // the accept's unlocked read and its guarded UPDATE. The marker write
+    // does not move updated_at, so the accept's guard does not 409 — the
+    // accept must merge the row's marker through its own estimate_data write
+    // and decide the stamp from the row under its lock, not the snapshot.
+    mockGateState.acceptanceTerms = false;
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-stamp-race', token: 'tok-stamp-race-x0123456789' });
+    conversionOk();
+    let injected = false;
+    db.__state.onTable = (table) => {
+      // First transaction touch of the customers table = matchAcceptCustomerByPhone,
+      // which runs before the guarded estimates UPDATE.
+      if (table === 'customers' && !injected) {
+        injected = true;
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await putAccept('tok-stamp-race-x0123456789', {});
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(injected).toBe(true);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.rateReviewDisclosedAtAccept).toBe(true);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
+  });
+
+  test('a whole-blob preference write preserves served evidence recorded since its read (codex local review on #5434)', async () => {
+    // PUT /preferences rewrites estimate_data from the row it read; the marker
+    // never moves updated_at, so the route's guard cannot catch a download
+    // that recorded the disclosure in between — the SQL merge must keep it.
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    seed({ id: 'est-pref-1', token: 'tok-pref-1-x0123456789' });
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      touches += 1;
+      // A download lands right after the route's read: the stored row gains
+      // the marker before the route's whole-blob UPDATE.
+      if (touches === 2) {
+        const row = storedEstimate();
+        row.estimate_data = JSON.stringify({ ...JSON.parse(row.estimate_data), rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pref-1-x0123456789/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interior_spray: false }),
+    });
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    expect(stored.preferences.interior_spray).toBe(false);
+    // The route's own snapshot (built from its pre-download read) lacked the
+    // marker; the SQL-side merge is what carried it through.
+    const mergeOps = db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).startsWith("?::jsonb || jsonb_strip_nulls(jsonb_build_object('rateReviewTermsServed'"));
+    expect(mergeOps).toHaveLength(1);
+    expect(JSON.parse(mergeOps[0].bindings[0]).rateReviewTermsServed).toBeUndefined();
+  });
+
+  test("gate on: the recorded 'plan' drawer snapshot is evidence on its own (no served marker)", async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-stamp-d', token: 'tok-stamp-d-x0123456789' });
+    conversionOk();
+    const res = await putAccept('tok-stamp-d-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(res.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(1);
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewDisclosedAtAccept'))).toHaveLength(1);
+  });
+
+  test('GET /:token/pdf marks the served disclosure for an open recurring plan (pdfkit path) and never for a frozen estimate', async () => {
+    const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    // The synthesized document prints the engine lines (estimate_data.lineItems),
+    // the same shape the /data projection tests use for an eligible plan.
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-1', token: 'tok-pdf-1-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
+    const open = await fetch(`${base}/api/estimates/tok-pdf-1-x0123456789/pdf`);
+    expect(open.status).toBe(200);
+    expect(servedOps()).toHaveLength(1);
+    // Evidence proven → the browser renderer was attempted (and fell back).
+    expect(renderDoc).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBe(RATE_REVIEW_TERMS_VERSION);
+    // Frozen: still downloadable, but the marker is never written.
+    seed({ id: 'est-pdf-2', token: 'tok-pdf-2-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', status: 'accepted', price_locked_at: '2026-09-01T00:00:00.000Z', estimate_data: documentData });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-2-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+    // A stored (disabled) proposal with operator terms: both renderers
+    // suppress the canned line beside authored terms, so no evidence either
+    // (pre-push Codex on #5434).
+    seed({
+      id: 'est-pdf-3',
+      token: 'tok-pdf-3-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(documentData),
+        proposal: {
+          enabled: false,
+          terms: 'Operator terms govern this proposal.',
+          buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 60, frequency: 'quarterly', taxable: false }] }],
+        },
+      }),
+    });
+    expect((await fetch(`${base}/api/estimates/tok-pdf-3-x0123456789/pdf`)).status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+  });
+
+  test('GET /:token/pdf: a non-customer download (bot / unfurler UA) records no served evidence (local max-effort review on #5434)', async () => {
+    const servedOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'));
+    seed({
+      id: 'est-pdf-bot',
+      token: 'tok-pdf-bot-x0123456789',
+      sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    const res = await fetch(`${base}/api/estimates/tok-pdf-bot-x0123456789/pdf`, { headers: { 'User-Agent': 'Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)' } });
+    expect(res.status).toBe(200);
+    expect(servedOps()).toHaveLength(0);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+  });
+
+  test('the legacy page records served evidence only on a counted customer view (source pattern; local max-effort review on #5434)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    expect(src).toMatch(/if \(rateReviewTermsRendered && countThisView\) \{/);
+    expect(src).toMatch(/const countThisView = shouldCountView\(req, requestIp, estimate\);/);
+  });
+
+  test('GET /:token/pdf: when the row freezes between the read and the evidence write, the document is rendered from the frozen row (no line, no marker)', async () => {
+    // GH Codex r7 P1: the marker must be durable BEFORE a document carrying
+    // the line exists. An accept that lands first turns the write into a
+    // zero-row no-op; the route must then render the CURRENT (frozen) row
+    // rather than the stale open snapshot it read.
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    const documentData = JSON.stringify({
+      lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+      result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+    });
+    seed({ id: 'est-pdf-race', token: 'tok-pdf-race-x0123456789', sent_at: '2026-09-20T12:00:00.000Z', estimate_data: documentData });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      // Second touch = the evidence UPDATE; the accept from another tab
+      // committed just before it.
+      if (estimateTouches === 2) {
+        const row = storedEstimate();
+        row.status = 'accepted';
+        row.price_locked_at = '2026-10-01T06:00:00.000Z';
+      }
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pdf-race-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(estimateTouches).toBeGreaterThanOrEqual(3);
+    // The guarded evidence UPDATE was attempted (one raw stamp issued) but
+    // matched zero rows (frozen-status guards): the stored row carries no marker.
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'))).toHaveLength(1);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // The renderer received the frozen row, not the open snapshot.
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('accepted');
+    expect(renderedEstimate.price_locked_at).toBe('2026-10-01T06:00:00.000Z');
+    expect(renderedBilling.withholdRateReviewTerms).toBeUndefined();
+  });
+
+  test('GET /:token/pdf: when the evidence write FAILS, the document is served with the line withheld (GH Codex r8 P0)', async () => {
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    seed({
+      id: 'est-pdf-fail',
+      token: 'tok-pdf-fail-x0123456789',
+sent_at: '2026-09-20T12:00:00.000Z',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      if (estimateTouches === 2) throw new Error('db down'); // the evidence UPDATE
+    };
+    const renderDoc = require('../services/pdf/estimate-doc-pdf').renderEstimateDocumentPdf;
+    renderDoc.mockClear();
+    const res = await fetch(`${base}/api/estimates/tok-pdf-fail-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    // Withholding: the browser renderer (which cannot be told) is skipped.
+    expect(renderDoc).not.toHaveBeenCalled();
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('sent');
+    expect(renderedBilling.withholdRateReviewTerms).toBe(true);
+  });
+
+  test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const est = (extra = {}) => ({ id: 'e', monthly_total: 60, annual_total: 720, onetime_total: 0, ...extra });
+    const data = (services, oneTime = []) => ({ result: { recurring: { services }, oneTime: { items: oneTime, membershipFee: 0 } } });
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    // Rodent anywhere: no estimate-wide plan terms.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    // One-time-only: no rate to review.
+    expect(acceptanceTermsScopeFor(est({ monthly_total: 0, annual_total: 0, onetime_total: 150 }), data([], [{ name: 'One-Time Pest Control', service: 'pest_one_time', price: 150 }]), {})).toBe('base');
+    // Termite / unclassifiable rows, commercial marks, malformed data: fail closed.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }], [{ name: 'WDO Inspection', service: 'wdo_inspection', price: 125 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60, isCommercial: true }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), null, {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), 'not an object', {})).toBe('base');
   });
 
   test('a termite/WDO estimate (own signed agreement) never gets a record, even when a version is sent', async () => {
@@ -1571,7 +1970,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       }),
     });
     conversionOk();
-    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT });
+    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(res.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
@@ -1667,7 +2066,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
     conversionOk();
-    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
+    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(gateOff.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
@@ -1676,6 +2075,65 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     conversionOk();
     const gateOffStale = await putAccept('tok-terms-6-x0123456789', { termsVersion: 'v2000-01' });
     expect(gateOffStale.status).toBe(200);
+  });
+});
+
+describe('Payment consent attestation on consent-bearing accepts (codex #5434 r1 P1)', () => {
+  // The inline Auto Pay capture / capture modal render the bundle's own copy
+  // of the saved-payment-method consent text; the accept that records that
+  // consent (post-commit) must attest the version the tab rendered.
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  const spies = [];
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+      recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    });
+  }
+
+  beforeEach(() => {
+    resetStore(recurringPestEstimate({ id: 'est-consent-1', token: 'tok-consent-1-x012345678' }));
+    // A recurring plan whose Auto Pay card capture is REQUIRED and verified.
+    spies.push(
+      jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ enforced: true, required: true, exemptReason: null }),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({ ok: true, setupIntentId: 'si_cof_1', paymentMethodId: 'pm_cof_1', methodType: 'card' }),
+      jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true),
+      jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true, paymentMethodRowId: 'pm-row-1' }),
+    );
+  });
+  afterEach(() => { while (spies.length) spies.pop().mockRestore(); });
+
+  test('the current version passes the attestation (the accept proceeds past the capture gate)', async () => {
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion: CONSENT_VERSION });
+    expect(res.data.code).not.toBe('CONSENT_VERSION_STALE');
+    expect(RecurringCards.verifyRecurringCardIntent).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'si_cof_1' }));
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test.each([
+    ['a stale version', 'v11_2026-08-25'],
+    ['no version (a bundle that predates the attestation)', undefined],
+  ])('a verified Auto Pay capture attesting %s → 409 CONSENT_VERSION_STALE before any mutation', async (_name, consentTextVersion) => {
+    const res = await putAccept('tok-consent-1-x012345678', { recurringCardSetupIntentId: 'si_cof_1', consentTextVersion });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VERSION_STALE');
+    expect(res.data.error).toMatch(/refresh the page/i);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('an accept that captures no consent (no card owed) ignores the attestation entirely', async () => {
+    RecurringCards.resolveRecurringCardPolicyForEstimate.mockResolvedValue({ enforced: true, required: false, exemptReason: 'not_required' });
+    conversionOk();
+    const res = await putAccept('tok-consent-1-x012345678', {});
+    expect(res.status).toBe(200);
+    expect(RecurringCards.verifyRecurringCardIntent).not.toHaveBeenCalled();
   });
 });
 
@@ -2745,6 +3203,21 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
     });
 
+    test('a lone STALE recurringCardConsentVersion (no variant, no tender) is refused — it must not bypass the bundle-version fence (pre-push Codex on the merge)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentVersion: 'v11_2026-08-25' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).not.toBe('accepted');
+    });
+
+    test('a tender attested WITHOUT a version is an incomplete attestation and is refused', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
     test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
       conversion('ss-first');
       const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
@@ -2774,5 +3247,612 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
     expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// ── Pay after the first visit — monthly-tier (setup-only) setup fee ─────────
+// GATE_PAF_SETUP_FEE (pay-after-first-visit PR-C): on the card rail, the
+// setup-only shape's WaveGuard setup fee is STAMPED on the first visit's
+// series parent (scheduled_services.pending_setup_fee) instead of minted as a
+// payable unattached invoice. The shape is forced at the route's own decision
+// point (resolveFirstApplicationAmount → 0) rather than rebuilt through the
+// tier-pricing ladder in this fake-knex harness; the tier derivation
+// (selectedServiceTierBillsMonthly → firstApplicationInvoiceAmount null) is
+// unchanged by this lane.
+describe('PAF setup fee — setup-only accept stamps the series instead of minting an invoice', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const NotificationService = require('../services/notification-service');
+  const SAVED_RAIL_POLICY = { enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1' };
+  const FRESH_CAPTURE_POLICY = { enforced: true, required: true, exemptReason: null };
+  const savedEnv = {};
+  let policySpy;
+  let retireCapture;
+  // The setup-fee promise rides only a FRESH capture (the one surface that
+  // renders the after_visit_card authorization), so the default customer here
+  // captures a card; a saved/enrolled-method customer keeps today's invoice.
+  // A capture-required policy sends the captured SetupIntent with the accept.
+  const accept = async (token, body = {}) => {
+    const policy = await policySpy.getMockImplementation()?.();
+    // A capture tab attests the consent text version it rendered (#5434's
+    // bundle-level fence); a per-capture attestation in `body` supersedes it.
+    return putAccept(token, policy?.required === true ? {
+      recurringCardSetupIntentId: 'seti_paf_default',
+      consentTextVersion: require('../services/payment-method-consent-text').CONSENT_VERSION,
+      ...body,
+    } : body);
+  };
+  // A tab showing the promise attests it, and its capture rendered the
+  // after_visit_card authorization for a card (the accept's one collection
+  // promise records exactly that, or refuses CONSENT_VARIANT_STALE).
+  const acceptShown = async (token, body = {}) => {
+    const policy = await policySpy.getMockImplementation()?.();
+    return accept(token, {
+      ...(policy?.required === true ? {
+        recurringCardConsentVariant: 'after_visit_card',
+        recurringCardConsentVersion: require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION,
+        recurringCardConsentTender: 'card',
+      } : {}),
+      ...body,
+      setupFeeAfterFirstVisitShown: true,
+    });
+  };
+
+  function setupOnlyFixture(id, { withAnchor = true, parentId = null, price = 50, billingMode = 'per_application', visitsKnown = true } = {}) {
+    resetStore(recurringPestEstimate({
+      id,
+      token: `tok-${id}-x0123456789`,
+      // A solo MOSQUITO plan: the setup fee applies to it, and the engine's
+      // mosquito ladder (monthly12 / seasonal9) is monthly-billed tier rows with
+      // known visit counts — the REAL setup-only shape, no spy needed.
+      monthly_total: 79,
+      annual_total: 948,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: {
+            discount: 0,
+            services: [{ name: 'Mosquito Control', service: 'mosquito', mo: 79, ann: 948, perTreatment: 79, ...(visitsKnown ? { visitsPerYear: 12 } : {}) }],
+          },
+          oneTime: { items: [], membershipFee: 99 },
+          results: {
+            // visitsKnown=false: a plan whose tier ladder cannot be resolved
+            // to monthly tier rows with a visit count (no frequency rows at
+            // all) — the preview keeps the BASE copy for it.
+            mq: visitsKnown ? [
+              { n: 'Monthly', key: 'monthly12', v: 12, mo: 79, ann: 948, pv: 79 },
+              { n: 'Seasonal', key: 'seasonal9', v: 9, mo: 65, ann: 780, pv: 86.67 },
+            ] : [],
+          },
+        },
+      }),
+    }));
+    db.__state.tables.scheduled_services = withAnchor ? [
+      ...(parentId ? [{ id: parentId, customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null }] : []),
+      { id: `ss-${id}`, customer_id: 'customers-1', recurring_parent_id: parentId, pending_setup_fee: null, estimated_price: price },
+    ] : [];
+    // The real converter stamps the converted customer's billing lane
+    // (per_application unless it preserves an existing membership); the fake
+    // trx's customers table is where the accept's in-trx lane read looks.
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
+      for (const row of db.__state.tables.customers) row.billing_mode = billingMode;
+      return {
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId: withAnchor ? `ss-${id}` : null,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      };
+    });
+    return `tok-${id}-x0123456789`;
+  }
+
+  beforeEach(() => {
+    for (const k of ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT', 'GATE_PAF_SETUP_FEE']) savedEnv[k] = process.env[k];
+    process.env.RECURRING_CARD_ON_FILE = 'true';
+    jest.spyOn(EstimateConverter, 'resolveFirstApplicationAmount').mockReturnValue(0);
+    policySpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_default', paymentMethodId: 'pm_paf_default', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    retireCapture = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    jest.restoreAllMocks();
+  });
+
+  function gateOn() {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    process.env.GATE_PAF_SETUP_FEE = 'true';
+  }
+
+  test('gate OFF: exactly today — the unattached payable setup invoice is minted and its pay link delivered', async () => {
+    const token = setupOnlyFixture('paf-off');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(InvoiceService.create.mock.calls[0][0].scheduledServiceId).toBeUndefined();
+    expect(response.data.invoiceMode).toBe(true);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    const stamp = db.__state.ops.find((op) => op.type === 'update' && op.table === 'scheduled_services' && op.data && 'pending_setup_fee' in op.data);
+    expect(stamp).toBeUndefined();
+  });
+
+  test('master gate on but the setup-fee sub-gate off: still today\'s payable invoice', async () => {
+    process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+    delete process.env.GATE_PAF_SETUP_FEE;
+    const token = setupOnlyFixture('paf-subgate-off');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+  });
+
+  test('gate ON: no invoice minted, nothing delivered, the fee is stamped on the series parent, the customer is told it bills with the first visit', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-on');
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(response.data.invoiceMode).toBe(false);
+    expect(response.data.invoiceId).toBeNull();
+    expect(response.data.invoicePayUrl).toBeFalsy();
+    expect(response.data.nextStep).toBe('confirmed');
+    expect(response.data.setupFeeAfterFirstVisit).toBe(true);
+    // The durable claim the first PERFORMED completion consumes.
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+    // Persisted so an already-accepted retry describes the same accept.
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.recurringCardLaneAccepted).toBe(true);
+    expect(stored.setupFeeDeferredToFirstVisit).toBe(true);
+    const customerNote = NotificationService.notifyCustomer.mock.calls.map((c) => c[3]).join(' ');
+    expect(customerNote).toMatch(/Nothing is charged today/);
+    expect(customerNote).toMatch(/setup fee is billed with your first visit/);
+    expect(customerNote).not.toMatch(/pay link/i);
+  });
+
+  test('gate ON: the stamp lands on the SERIES PARENT when the first visit is a follow-up child', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-child', { parentId: 'ss-parent-1' });
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(200);
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-parent-1').pending_setup_fee).toBe(99);
+    expect(rows.find((r) => r.id === 'ss-paf-child').pending_setup_fee).toBeNull();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: a capture-required accept records the after_visit_card consent variant', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_1', paymentMethodId: 'pm_paf_1', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent');
+    const response = await acceptShown(token, { recurringCardSetupIntentId: 'seti_paf_1' });
+
+    expect(response.status).toBe(200);
+    expect(enroll).toHaveBeenCalledTimes(1);
+    expect(enroll.mock.calls[0][0].consentVariant).toBe('after_visit_card');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Reviewer P2-A (supersedes Codex pre-push r2 P1's "record after_visit_card
+  // even on fallback"): the capture UI showed the after-first-visit promise, so
+  // when the stamp cannot land the accept is REFUSED retryably (409, the whole
+  // accept — conversion, invoice, consent — rolls back). It never falls back to
+  // a payable setup invoice with the after-visit consent on record.
+  test('gate ON, capture-required, stamp CANNOT land (no first visit / occupied claim): the accept fails 409 (refresh) — no payable invoice, no after_visit_card consent, nothing committed', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fb', paymentMethodId: 'pm_paf_fb', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+
+    const noAnchor = setupOnlyFixture('paf-consent-noanchor', { withAnchor: false });
+    const first = await acceptShown(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(first.status).toBe(409);
+    expect(first.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(first.data.error).toMatch(/reload the page/i);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(storedEstimate().status).not.toBe('accepted');
+
+    const occupied = setupOnlyFixture('paf-consent-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const second = await acceptShown(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    expect(second.status).toBe(409);
+    expect(second.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+  });
+
+  // Reviewer P3: the accept attempts the stamp only where the preview applied
+  // the same eligibility — a tier whose visit count is unknown shows the BASE
+  // text, so it keeps today's payable invoice and records the BASE consent.
+  test('gate ON, a monthly tier with an UNKNOWN visit count: never attempted — the payable invoice is minted, nothing stamped, BASE consent recorded', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_uk', paymentMethodId: 'pm_paf_uk', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-unknown-visits', { visitsKnown: false, price: null });
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_uk' });
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  // Reviewer P2-B: a monthly-membership / prepay lane covers its first visit
+  // with dues, the completion mint never runs the claim there, so the stamp
+  // would strand. The lane is read INSIDE the trx after the converter set it.
+  test.each(['monthly_membership', 'annual_prepay', null])('gate ON, converted customer billing lane %s (not per_application): never stamped — today\'s payable invoice, BASE consent', async (lane) => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_ln', paymentMethodId: 'pm_paf_ln', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture(`paf-lane-${lane}`, { billingMode: lane });
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_ln' });
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  test('gate ON but not on the setup-only shape (first-application line present): base consent, no after_visit_card', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...FRESH_CAPTURE_POLICY });
+    EstimateConverter.resolveFirstApplicationAmount.mockReturnValue(40);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+      ok: true, setupIntentId: 'seti_paf_fa', paymentMethodId: 'pm_paf_fa', methodType: 'card',
+    });
+    jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+    jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+    const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    const token = setupOnlyFixture('paf-consent-firstapp');
+    const response = await accept(token, { recurringCardSetupIntentId: 'seti_paf_fa' });
+    expect(response.status).toBe(200);
+    expect(enroll.mock.calls[0][0].consentVariant).toBeNull();
+  });
+
+  test('gate ON but no first visit exists to carry the stamp: the accept is refused retryably — a fee is never dropped and no payable invoice contradicts the page', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex pre-push r3 P1: a monthly-tier quote with an unknown visit count
+  // converts to an UNPRICED visit; the completion mint gate refuses it, so a
+  // stamp there would queue the fee indefinitely. The preview already keeps
+  // the BASE text for such a tier (monthlyTierVisitCountsResolvable), so the
+  // accept never attempts the stamp: today's payable invoice, nothing stamped.
+  test('gate ON, tier visit count unknown (the converter leaves the visit unpriced): never deferred — the payable invoice is minted and nothing is stamped', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-${price}`, { price, visitsKnown: false });
+      const response = await accept(token);
+
+      expect(response.status).toBe(200);
+      expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+      expect(response.data.nextStep).toBe('pay_invoice');
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
+  // Defense in depth: the preview said "billed with your first visit" (visit
+  // counts known) yet the converted first visit carries no billable price — a
+  // stamp there would never be consumed, a payable invoice would contradict
+  // the page: refuse retryably.
+  test('gate ON, counts known but the first visit has no billable price (unpriced / $0): the accept is refused 409, nothing stamped, nothing minted', async () => {
+    gateOn();
+    for (const price of [null, 0]) {
+      InvoiceService.create.mockClear();
+      const token = setupOnlyFixture(`paf-unpriced-known-${price}`, { price });
+      const response = await acceptShown(token);
+
+      expect(response.status).toBe(409);
+      expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    }
+  });
+
+  // The visit price on a converted tier row comes from the converter's own
+  // derivation (billing-cadence perApplicationChargeAmount, the figure it
+  // stamps as estimated_price). Feed the REAL derivation through the accept:
+  // a monthly-tier plan whose visit count is unknown resolves no price (the
+  // converter leaves the row unpriced and completion parks it) and the page
+  // shows the base text → never deferred; a known count resolves one → deferred.
+  test('real converter derivation: unknown-visit-count monthly tier resolves no price and is never deferred; a known count is deferred at that price', async () => {
+    gateOn();
+    const BillingCadence = require('../services/billing-cadence');
+    const cadence = { frequencyKey: 'monthly', amount: 96 };
+    const derive = (visitsPerYear) => BillingCadence.perApplicationChargeAmount({
+      billingCadence: cadence, annualRate: 1152, monthlyRate: 96, visitsPerYear, serviceKey: 'mosquito',
+    });
+    expect(derive(null)).toBeNull();
+    expect(derive(9)).toBe(128);
+
+    const unresolved = setupOnlyFixture('paf-real-unknown', { price: derive(null), visitsKnown: false });
+    const first = await accept(unresolved);
+    expect(first.status).toBe(200);
+    expect(first.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+
+    InvoiceService.create.mockClear();
+    const resolved = setupOnlyFixture('paf-real-known', { price: derive(9) });
+    const second = await acceptShown(resolved);
+    expect(second.status).toBe(200);
+    expect(second.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(99);
+  });
+
+  test('gate ON but the series already carries a DIFFERENT setup claim: never overwritten — the accept is refused 409 (no payable invoice contradicting the page)', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-occupied');
+    db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
+    const response = await acceptShown(token);
+
+    expect(response.status).toBe(409);
+    // The real answer rides the refusal (Codex P1): the retry keeps the payable
+    // setup invoice instead of re-attesting a promise that can never land.
+    expect(response.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex PR r(d22e49b0c3) P1: a customer satisfied by a saved / enrolled
+  // method sees no capture, so never the after-visit authorization — the fee
+  // is not deferred onto that method (today's payable invoice, base consent).
+  test.each(['saved_method_consented', 'autopay_already_active'])('gate ON, %s (no capture shown): today\'s payable setup invoice; an attested promise is refused with the real answer', async (exemptReason) => {
+    gateOn();
+    policySpy.mockResolvedValue({ ...SAVED_RAIL_POLICY, exemptReason });
+    const attested = await acceptShown(setupOnlyFixture(`paf-saved-attested-${exemptReason}`));
+    expect(attested.status).toBe(409);
+    expect(attested.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(attested.data.setupFeePromise).toBe(false);
+
+    InvoiceService.create.mockClear();
+    const response = await accept(setupOnlyFixture(`paf-saved-${exemptReason}`));
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(JSON.parse(storedEstimate().estimate_data).acceptedRecurringCardConsentVariant).not.toBe('after_visit_card');
+  });
+
+  test('gate ON but not on the card rail (exempt customer): today\'s payable invoice', async () => {
+    gateOn();
+    policySpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+    const token = setupOnlyFixture('paf-exempt');
+    const response = await accept(token);
+
+    expect(response.status).toBe(200);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    expect(response.data.nextStep).toBe('pay_invoice');
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  // Codex round 2 P0: the page promised first-visit billing to a customer the
+  // accept then converts onto a non-per_application lane (a current monthly
+  // member the preview could not see). The tab's attestation and the accept's
+  // recomputation differ, so the accept is REFUSED for a refresh — never a
+  // payable setup invoice after the promise.
+  test.each(['monthly_membership', 'annual_prepay'])('gate ON, the tab attested the first-visit promise but the converted lane is %s: the accept is refused 409 SETUP_FEE_TERMS_REFRESH, nothing committed', async (lane) => {
+    gateOn();
+    const token = setupOnlyFixture(`paf-attested-lane-${lane}`, { billingMode: lane });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    // The answer the accept would apply rides the 409 so the tab stops promising it.
+    expect(response.data.setupFeePromise).toBe(false);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('gate ON, the transaction resolves a PAYER-billed customer: the fee is never deferred onto a card (409 with the real answer, nothing stamped)', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-billed');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(false);
+    // The ONLY payer lookup is the in-transaction one (the policy saw self-pay).
+    expect(Payer.resolveForInvoice).toHaveBeenCalledTimes(1);
+    expect(Payer.resolveForInvoice.mock.calls[0][0]).toMatchObject({ throwOnError: true });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('gate ON, payer-billed: the retry WITHOUT the attestation accepts with the payable setup invoice, no stamp and base consent', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-retry');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    try {
+      const response = await accept(token);
+      expect(response.status).toBe(200);
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+      expect(InvoiceService.create).toHaveBeenCalled();
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    } finally {
+      Payer.resolveForInvoice.mockResolvedValue(null);
+    }
+  });
+
+  // Pre-push audit P1: the client drops its captured intent on every
+  // SETUP_FEE_TERMS_REFRESH, so the accept retires it after the rollback.
+  test('gate ON, a SETUP_FEE_TERMS_REFRESH refusal retires the captured SetupIntent the tab will drop', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-refresh-retire', { billingMode: 'monthly_membership' });
+    const response = await acceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(retireCapture).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-unattested');
+    const response = await accept(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  test('gate ON, an accept that records the after-visit consent persists acceptedRecurringCardConsentVariant for the setup_intent recovery', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-variant-persist');
+    const response = await acceptShown(token);
+    expect(response.status).toBe(200);
+    const stored = JSON.parse(storedEstimate().estimate_data);
+    expect(stored.acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+    // The one collection promise records the after-visit TEXT too (the
+    // setup_intent recovery records it verbatim).
+    const recorded = typeof stored.acceptedRecurringCardConsent === 'string'
+      ? JSON.parse(stored.acceptedRecurringCardConsent) : stored.acceptedRecurringCardConsent;
+    expect(recorded).toMatchObject({ variant: 'after_visit_card', tender: 'card' });
+    expect(recorded.text).toBe(require('../services/payment-method-consent-text').getConsentText('card', { variant: 'after_visit_card' }));
+  });
+
+  test('gate ON, a capture tab that showed the setup-fee promise but attests the BASE consent (older bundle): refused CONSENT_VARIANT_STALE, nothing committed', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-variant-unattested');
+    const retire = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+    const response = await accept(token, { setupFeeAfterFirstVisitShown: true });
+    expect(retire).toHaveBeenCalled();
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(response.data.collectionPromise).toMatchObject({ variant: 'after_visit_card', deferred: true });
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('retry of the deferred accept says the same thing and never produces a pay link', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-retry');
+    const first = await acceptShown(token);
+    expect(first.status).toBe(200);
+    const retry = await accept(token);
+
+    expect(retry.status).toBe(200);
+    expect(retry.data.alreadyAccepted).toBe(true);
+    expect(retry.data.setupFeeAfterFirstVisit).toBe(true);
+    expect(retry.data.invoicePayUrl).toBeFalsy();
+    expect(retry.data.nextStep).toBe('confirmed');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  // Codex P1 on #5485: a MULTI-PROGRAM accept never defers the fee — the claim
+  // would live on one program's series and could not follow whichever program
+  // is performed first. A tab that promised it is refused with the real answer
+  // (setupFeePromise: false, nothing stamped); the retry takes today's payable
+  // setup invoice (no stamp anywhere).
+  test('R9 (route): a multi-program accept never defers the setup fee — the promise is refused with the real answer, and the retry keeps the payable setup invoice', async () => {
+    gateOn();
+    const multiConverter = () => {
+      EstimateConverter.convertEstimate.mockReset();
+      EstimateConverter.convertEstimate.mockImplementation(async () => {
+        for (const row of db.__state.tables.customers) row.billing_mode = 'per_application';
+        return {
+          customerId: 'cust-1',
+          tier: 'Bronze',
+          monthlyRate: 60,
+          firstScheduledServiceId: 'ss-paf-multi',
+          combinedInvoiceMemberIds: ['ss-member-2'],
+          recurringConversionSkipped: false,
+          welcomeSms: null,
+          membershipEmail: null,
+          deferredFollowUpReminderRows: [],
+        };
+      });
+    };
+    const token = setupOnlyFixture('paf-multi');
+    db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null, estimated_price: 40 });
+    multiConverter();
+    const promised = await acceptShown(token);
+    expect(promised.status).toBe(409);
+    expect(promised.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
+    const rows = db.__state.tables.scheduled_services;
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+
+    const retried = await accept(token);
+    expect(retried.status).toBe(200);
+    expect(retried.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+  });
+
+  // R9 (plan §7): a multi-program first visit shares a combined invoice. The
+  // stamp rides the anchor's series PARENT; the combined-invoice stamper only
+  // writes first_application_invoice_id, so it never reads, clears or
+  // overwrites the claim. (The stamper itself is the real implementation here.)
+  test('R9: stampCombinedFirstApplicationInvoiceCoverage on an anchor carrying the claim leaves pending_setup_fee untouched', async () => {
+    const actual = jest.requireActual('../services/estimate-converter');
+    const rows = [
+      { id: 'anchor-1', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: 40, pending_setup_fee: 99, first_application_invoice_id: null },
+      { id: 'member-2', customer_id: 'c1', source_estimate_id: 'e1', is_recurring: true, recurring_parent_id: null, estimated_price: null, pending_setup_fee: null, first_application_invoice_id: null },
+    ];
+    const updates = [];
+    const trx = (table) => {
+      const q = { table, ids: null };
+      const chain = {
+        where: () => chain,
+        whereNull: () => chain,
+        whereIn: (col, ids) => { q.ids = ids; return chain; },
+        first: async () => (q.table === 'scheduled_services' ? { customer_id: 'c1', source_estimate_id: 'e1' } : undefined),
+        select: async () => (q.ids ? rows.filter((r) => q.ids.includes(r.id) && r.estimated_price == null).map((r) => ({ id: r.id })) : []),
+        update: async (patch) => { updates.push({ ids: q.ids, patch }); return (q.ids || []).length; },
+      };
+      return chain;
+    };
+    await actual.stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId: 'inv-9', anchorId: 'anchor-1', memberIds: ['member-2'] });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].ids).toEqual(['anchor-1', 'member-2']);
+    expect(updates[0].patch).toEqual({ first_application_invoice_id: 'inv-9' });
+    expect(rows[0].pending_setup_fee).toBe(99);
   });
 });

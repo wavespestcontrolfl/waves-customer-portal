@@ -105,7 +105,7 @@ const attempt = (overrides = {}) => autoSend.maybeAutoSend({
   ...overrides,
 });
 
-const V12 = 'house_voice_v12_real_answers5_cfl_p';
+const V12 = 'house_voice_v12_real_answers5_cflvp';
 const CUSTOMER = '00000000-0000-4000-8000-000000000002';
 const ZELLE_FACTS = { state: 'offer', invoiceId: 'inv-1', invoiceNumber: 'WPC-2026-0001', recipient: 'payments@wavespestcontrol.com' };
 
@@ -250,7 +250,7 @@ describe('the claim is released on every other pre-send error path', () => {
     suggest.settleReplyHoldingReservation
       .mockResolvedValueOnce(true) // arm
       .mockRejectedValue(new Error('settle down')); // release
-    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cfl_p' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
+    await expect(attempt({ reply: "You're paid up!", promptVersion: 'house_voice_v12_real_answers5_cflvp' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
   });

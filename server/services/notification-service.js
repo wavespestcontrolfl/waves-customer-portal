@@ -77,6 +77,26 @@ function excludeActivityOnlyFromBell(query) {
 // reader and the fence must agree on it. No `updated_at` column exists.
 // A JSON array, not a joined string: field boundaries and NULL-vs-empty stay
 // distinct, so two different contents never share a version.
+// Does this customer (bound twice: unified rows, then legacy-only rows) still
+// have an unread inbound text? Same two sources the thread read looks at:
+// unified messages on any of their conversations, and recent legacy sms_log rows
+// that never got a unified twin (older ones were initialised unread and never
+// mirrored, so they do not count).
+// Hidden recruiting replies (message_type job_*, utils/recruiting-thread-scope.js)
+// are not the customer's texts and never ring this bell, so they never hold it open.
+const { RECRUITING_MESSAGE_TYPE_PREFIX_LIKE } = require('../utils/recruiting-thread-scope');
+const NOT_RECRUITING_SQL = (col) => `(${col} IS NULL OR ${col} NOT LIKE '${RECRUITING_MESSAGE_TYPE_PREFIX_LIKE}%')`;
+const CUSTOMER_UNREAD_INBOUND_SQL = `(
+  EXISTS (SELECT 1 FROM messages um JOIN conversations uc ON uc.id = um.conversation_id
+    WHERE uc.customer_id = ? AND um.channel = 'sms' AND um.direction = 'inbound'
+      AND ${NOT_RECRUITING_SQL('um.message_type')}
+      AND (um.is_read = false OR um.is_read IS NULL))
+  OR EXISTS (SELECT 1 FROM sms_log ul WHERE ul.customer_id = ? AND ul.direction = 'inbound'
+      AND ${NOT_RECRUITING_SQL('ul.message_type')}
+      AND ul.created_at > NOW() - interval '30 days' AND (ul.is_read = false OR ul.is_read IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM messages tw WHERE tw.twilio_sid = ul.twilio_sid AND tw.channel = 'sms'))
+)`;
+
 const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
 
 // The done state (docs/admin-notifications.md section 4.3, owner ruling
@@ -555,7 +575,11 @@ const NotificationService = {
     // inside the SAME transaction as the insert (the caller's own `trx`
     // when given, else one this call opens) so the lookup a gate performs
     // and the row it gates can never observe each other's in-between state.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
+    // moves the row's created_at to now, so a standing row that keeps getting
+    // newer news (one row per customer thread: "3 texts") rises to the top of
+    // the newest-first bell instead of staying where its first text put it.
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -574,18 +598,27 @@ const NotificationService = {
         // one — never an arbitrary older row.
         const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
+          const existingMeta = typeof existing.metadata === 'string'
+            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+            : (existing.metadata || {});
+          // standingRefresh runs HERE, inside the key's lock, against the row as it
+          // stands now: a caller that must compare this emission with what the row
+          // already holds (a count, which of two concurrent messages is newer) cannot
+          // do it before the lock. Returns null (no change) or the content this
+          // refresh should write; `quiet` writes it without ringing or bumping.
+          const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
+            ? await standingRefresh(existing, existingMeta) : null;
+          const useMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
           // emoji title, an over-length body) would read as "changed" on
           // every emission and re-bell for no real reason.
-          const normalized = normalizeAdminNotificationText({ category, title, body, detail: createOpts.detail });
+          const normalized = normalizeAdminNotificationText({ category, title: adjusted?.title ?? title, body: adjusted?.body ?? body, detail: useDetail });
           const nextTitle = normalized.title;
           const nextBody = normalized.body;
           const nextDetail = normalized.detail;
-          const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
-          const existingMeta = typeof existing.metadata === 'string'
-            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
-            : (existing.metadata || {});
+          const nextLink = adjusted && 'link' in adjusted ? adjusted.link : (createOpts.link === undefined ? existing.link : createOpts.link || null);
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
@@ -598,33 +631,34 @@ const NotificationService = {
           // (full text in `detail`) and the same whole text arriving uncut.
           // Only when the caller supplied no detail of its own, so the stored
           // detail can only be the guard's copy of that body.
-          const storedCut = !createOpts.detail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
+          const storedCut = !useDetail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
           const sameText = storedUncut || storedCut;
           const detailChanged = !sameText && (existing.detail || null) !== (nextDetail || null);
           // Routing metadata is content too: a FIX -> ACT flip with identical
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
           // #5236). Only keys this emission actually carries are compared.
-          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
-            && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
+          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
+            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null));
           // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
           // follow-up): count/newCount growing, or itemKeys naming a
           // different item, must trigger the refresh (and ringOnRefresh's
           // evaluation) even when title/body/link/routing are unchanged.
           // Compared by JSON so an itemKeys array compares by value.
-          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
-            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
+          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
+            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
           if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
-            const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
-            const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
+            const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+            const shouldRing = adjusted?.quiet ? false : (enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
+            const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
-            await trx('notifications').where({ id: existing.id }).update(refreshed);
-            return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
+            await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
+            return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
           return { notification: existing, deduped: true };
         }
@@ -1019,9 +1053,26 @@ const NotificationService = {
     )
       .whereNull('read_at')
       .where('created_at', '<=', before);
+    // A shared thread row (dedupeKey sms-thread:<customerId>) stands for EVERY
+    // text from that customer, so reading one message is not reading the row.
+    // The ONE rule for it, whichever caller reaches here: a SID never clears it,
+    // and a customer-wide clear (the thread open, the webhook's post-write read
+    // check, the cross-clear) clears it only when that customer has no unread
+    // inbound text left on any business number.
+    const THREAD_ROW_SQL = "COALESCE(metadata->>'dedupeKey', '') LIKE 'sms-thread:%'";
     // The thread link, bare or with the alerted message (&message=<sid>, sms_reply).
-    if (customerId) q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`]);
-    if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
+    if (customerId) {
+      q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`])
+        .whereRaw(`(NOT (${THREAD_ROW_SQL}) OR NOT (${CUSTOMER_UNREAD_INBOUND_SQL}))`, [customerId, customerId]);
+    }
+    if (sids.length) {
+      q = q.whereRaw(
+        customerId
+          ? `(${THREAD_ROW_SQL} OR metadata->'payload'->>'twilioSid' = ANY(?))`
+          : `(NOT (${THREAD_ROW_SQL}) AND metadata->'payload'->>'twilioSid' = ANY(?))`,
+        [sids],
+      );
+    }
     return q.update({ read_at: new Date() });
   },
 

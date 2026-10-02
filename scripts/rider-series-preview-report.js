@@ -10,10 +10,11 @@
  * prints what services/rider-series-preview.js#previewRiderPair says the
  * pairing would do: whether it's eligible, why (or why not), and the plan.
  *
- * Nothing here writes. `scheduled_services.rides_parent_id` is a schema-only
- * column (migration 20260928220000_scheduled_services_rides_parent) that
- * nothing in this repository sets — every candidate pair below is found by
- * this script's OWN heuristic, never by reading that column, and
+ * Nothing here writes. `scheduled_services.rides_parent_id` (migration
+ * 20260928220000_scheduled_services_rides_parent) is written only by
+ * accept-time rider seeding (rider-accept-seeding.js, behind
+ * GATE_PEST_RIDES_LAWN_AT_ACCEPT); every candidate pair below is still found
+ * by this script's OWN heuristic, never by reading that column, and
  * `previewRiderPair` is called with an explicit hostParentId so it never
  * needs the link to already exist. The whole run is one
  * SET TRANSACTION READ ONLY snapshot.

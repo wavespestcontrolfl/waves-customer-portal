@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
-const { excludeHoldDeferralPlaceholders } = require('../services/collections/collection-hold');
+const { listPortalPayments } = require('../services/portal-payment-history');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -12,10 +12,10 @@ const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod, isPaused, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
-const {
-  loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf,
-} = require('../services/payer-linkage');
 const { isEnabled } = require('../config/feature-gates');
+const {
+  CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
+} = require('../services/payment-method-consent-text');
 
 router.use(authenticate);
 
@@ -32,228 +32,8 @@ router.get('/', async (req, res, next) => {
     if (queryError) {
       return res.status(400).json({ error: 'limit must be 1-100 and cursor must be a non-negative integer' });
     }
-    const requestedLimit = page.limit;
-    const requestedCursor = page.cursor;
-    const service = await StripeService;
-
-    // Third-party Bill-To: a payment against a payer-billed invoice belongs to
-    // the payer (AP contact), not the homeowner — drop those rows so the
-    // logged-in customer never sees the payer's card brand / last4 / Stripe
-    // PaymentIntent id in their own history. Over-fetch first so excluding those
-    // rows still returns up to `requestedLimit` customer-visible payments (the
-    // exclusion can't be a SQL filter without casting arbitrary payment metadata
-    // to jsonb table-wide). Payer payments are a small minority, so a padded
-    // buffer fills the page in realistic cases.
-    // ONE shared payer-linkage predicate (services/payer-linkage.js — extracted verbatim from this route so the SMS
-    // facts use the exact same rule). Payer ownership is recognized through EVERY linkage the receipt resolution
-    // below understands: metadata invoice_id / aliases, PaymentIntent, charge, invoice-number description, and the
-    // payer_billed: withdrawal stamp (pre-push P0).
-    const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(req.customerId);
-    let total;
-    if (payerInvoiceIds.size === 0) {
-      // Hold-deferral placeholders are never shown (getPaymentHistory drops them), so
-      // they are not counted either: `total` must match what pagination serves.
-      const countRow = await excludeHoldDeferralPlaceholders(db('payments')
-        .where({ customer_id: req.customerId }), 'payments')
-        .count('* as count')
-        .first();
-      total = Number(countRow?.count || 0);
-    } else {
-      const rows = await excludeHoldDeferralPlaceholders(db('payments')
-        .where({ customer_id: req.customerId }), 'payments')
-        // Every field isPayerLinked reads — metadata alone under-counts the
-        // exclusion for rows payer-linked only through their PaymentIntent or
-        // invoice-number description, leaving `total` above the number of
-        // rows pagination will ever serve (pre-push P1).
-        .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description');
-      total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
-    }
-
-    // `cursor` is the raw payment-history offset. Scan bounded chunks so a
-    // page still contains up to `limit` customer-visible rows when third-party
-    // payer rows are interspersed. The cursor points at (not beyond) the first
-    // visible look-ahead row, so no payment is lost between pages.
-    const visiblePayments = [];
-    const batchSize = 100;
-    let rawCursor = requestedCursor;
-    let nextCursor = null;
-    let exhausted = false;
-    for (let scan = 0; scan < 10 && !exhausted && nextCursor == null; scan += 1) {
-      const batch = await service.getPaymentHistory(req.customerId, batchSize, rawCursor);
-      if (!batch.length) {
-        exhausted = true;
-        break;
-      }
-      for (let index = 0; index < batch.length; index += 1) {
-        const payment = batch[index];
-        if (isPayerLinked(payment)) continue;
-        if (visiblePayments.length < requestedLimit) visiblePayments.push(payment);
-        else {
-          nextCursor = rawCursor + index;
-          break;
-        }
-      }
-      if (nextCursor != null) break;
-      rawCursor += batch.length;
-      if (batch.length < batchSize) exhausted = true;
-    }
-    if (nextCursor == null && !exhausted) {
-      // The bounded scan may encounter an unusually long run of payer-only
-      // rows. Continue from the raw position on the next request rather than
-      // scanning without limit or claiming the history is complete.
-      nextCursor = rawCursor;
-    }
-
-    // Recurring = the monthly WaveGuard plan obligation. Metadata-first, same
-    // rule as billing-cron's dedupe: every monthly-autopay row (chargeMonthly,
-    // retry rungs, admin charge-now) carries a metadata.billed_month stamp.
-    // The canonical "<tier> WaveGuard Monthly" description marker stays as the
-    // legacy fallback for rows written before the stamp existed. Description
-    // wording alone (e.g. a row that merely says "Monthly") is NOT a signal.
-    const isRecurringPayment = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        if (m && m.billed_month) return true;
-      } catch { /* unparseable metadata — fall through to the marker */ }
-      return (p.description || '').includes('WaveGuard Monthly');
-    };
-
-    // Receipt links per payment row. Two sources, in preference order:
-    //   1. The Waves receipt — invoice.token drives the permanent
-    //      /receipt/:token page + its PDF (receipt-v2). Only for invoices the
-    //      PDF route will actually serve (paid/refunded), so the portal never
-    //      offers a download that 409s.
-    //   2. Stripe's hosted receipt — recurring autopay rows carry no
-    //      invoice_id but do stamp metadata.stripe_receipt_url (the same link
-    //      the payment-success SMS/email uses). View-only, no PDF.
-    // Customer-scoped lookup: a token is only ever returned for an invoice
-    // belonging to the requesting customer.
-    // invoiceIdOf is already defined above (payer-link filtering) — reuse it.
-    const stripeReceiptOf = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return m?.stripe_receipt_url || p.receipt_url || null;
-      } catch { return p.receipt_url || null; }
-    };
-    // Invoice resolution mirrors the canonical webhook resolver
-    // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy
-    // aliases, then the payment's Stripe PaymentIntent matched against
-    // invoices.stripe_payment_intent_id — the last one is what rescues
-    // self-pay cash/check/Zelle rows, which admin-invoices.js writes with no
-    // metadata at all and which would otherwise show no Waves receipt.
-    const anyInvoiceIdOf = (p) => invoiceIdOf(p) || aliasInvoiceIdOf(p);
-    // Manual self-pay rows (cash/check/Zelle) are written with NEITHER
-    // metadata nor a PaymentIntent — admin-invoices.js only stamps metadata
-    // for payer-billed or credit-applied invoices. Their description is
-    // deterministic though: `Invoice <number> — <method>`, so the invoice
-    // number is the only link back and the receipt would otherwise never
-    // appear on a cash/check payment (codex r2 P1).
-    const invoiceNumberOf = descriptionInvoiceNumberOf;
-    // Same UUID shape-filter the balance path already applies below: historic
-    // rows can carry a non-UUID metadata.invoice_id, and invoices.id is a uuid
-    // column — an unfiltered whereIn makes Postgres throw on the cast, and the
-    // catch would then leave EVERY receipt link null (codex r3 P2).
-    const RECEIPT_UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))]
-      .filter((id) => RECEIPT_UUID_SHAPE.test(id));
-    const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
-    // Historical reconciled rows can be bound to their invoice ONLY through
-    // payments.stripe_charge_id ↔ invoices.stripe_charge_id — the canonical
-    // webhook resolver and receipt-v2's payment lookup both honor it, so the
-    // billing history must too or those rows show a Stripe link (or nothing)
-    // instead of the permanent Waves receipt (codex r7 P1).
-    const chargeIds = [...new Set(visiblePayments.map(p => p.stripe_charge_id).filter(Boolean))];
-    const invoiceNumbers = [...new Set(visiblePayments.map(invoiceNumberOf).filter(Boolean))];
-    const receiptTokenByInvoiceId = new Map();
-    const receiptTokenByIntentId = new Map();
-    const receiptTokenByChargeId = new Map();
-    const receiptTokenByNumber = new Map();
-    if (invoiceIds.length || intentIds.length || chargeIds.length || invoiceNumbers.length) {
-      try {
-        const invoiceRows = await db('invoices')
-          .where({ customer_id: req.customerId })
-          // A payer-billed invoice still hangs off the homeowner's customer
-          // row, and its receipt is a PERMANENT bearer token exposing the AP
-          // payer's billing identity. The payment-history payer filter above
-          // only catches rows linked by metadata.invoice_id, so the alias /
-          // PaymentIntent / invoice-number paths added here would slip past
-          // it — exclude payer-billed invoices outright (pre-push P0).
-          .whereNull('payer_id')
-          .whereIn('status', ['paid', 'refunded'])
-          .where((qb) => {
-            if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
-            if (intentIds.length) qb.orWhereIn('stripe_payment_intent_id', intentIds);
-            if (chargeIds.length) qb.orWhereIn('stripe_charge_id', chargeIds);
-            if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
-          })
-          .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id', 'stripe_charge_id');
-        invoiceRows.forEach((row) => {
-          if (!row.token) return;
-          const entry = { token: row.token, invoiceNumber: row.invoice_number };
-          receiptTokenByInvoiceId.set(row.id, entry);
-          if (row.stripe_payment_intent_id) receiptTokenByIntentId.set(row.stripe_payment_intent_id, entry);
-          if (row.stripe_charge_id) receiptTokenByChargeId.set(row.stripe_charge_id, entry);
-          if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
-        });
-      } catch (err) {
-        // Best-effort: a receipt-link lookup failure must not break the
-        // payment history itself.
-        logger.warn(`[billing] receipt token lookup failed for customer ${req.customerId}: ${err.message}`);
-      }
-    }
-
-    res.json({
-      payments: visiblePayments.map(p => ({
-        id: p.id,
-        date: p.payment_date,
-        amount: parseFloat(p.amount),
-        status: p.status,
-        description: p.description,
-        // The client's Recurring/One-Time filter and YTD split read this —
-        // it was previously never serialized (always $0.00).
-        type: isRecurringPayment(p) ? 'recurring' : 'one_time',
-        cardBrand: p.card_brand,
-        lastFour: p.last_four,
-        processor: 'stripe',
-        methodType: p.method_type || 'card',
-        bankName: p.bank_name || null,
-        stripePaymentIntentId: p.stripe_payment_intent_id || null,
-        refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
-        refundStatus: p.refund_status || null,
-        // Receipt surfaces (see the resolution block above). All three are
-        // null when this payment has no retrievable receipt — the row simply
-        // renders no receipt action.
-        ...(() => {
-          // A FAILED attempt can carry the same metadata.invoice_id as the
-          // retry that later succeeded (stripe.js persists failed saved-card
-          // attempts with it). Attaching the invoice receipt to that row would
-          // show a receipt beside a FAILED badge for money this row never
-          // took — only settled rows get one (codex r2 P1).
-          // Fail closed: if payer ownership couldn't be resolved we cannot
-          // prove this row is self-pay, so no receipt link is emitted.
-          const settled = !payerLookupFailed
-            && ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
-          const inv = !settled ? null : (
-            receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
-            || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
-            || (p.stripe_charge_id ? receiptTokenByChargeId.get(p.stripe_charge_id) : null)
-            || receiptTokenByNumber.get(invoiceNumberOf(p))
-          );
-          const stripeReceiptUrl = stripeReceiptOf(p);
-          return {
-            receiptUrl: inv ? `/receipt/${inv.token}` : null,
-            receiptPdfUrl: inv ? `/api/receipt/${inv.token}/pdf` : null,
-            receiptNumber: inv?.invoiceNumber || null,
-            stripeReceiptUrl: (inv || !settled) ? null : stripeReceiptUrl,
-          };
-        })(),
-      })),
-      total,
-      limit: requestedLimit,
-      cursor: requestedCursor,
-      hasMore: nextCursor != null,
-      nextCursor,
-    });
+    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, { limit: page.limit, cursor: page.cursor });
+    res.json(body);
   } catch (err) {
     next(err);
   }
@@ -439,9 +219,24 @@ router.post('/cards/setup-intent', async (req, res, next) => {
   try {
     const schema = Joi.object({
       paymentMethodType: Joi.string().valid('card', 'us_bank_account', 'card_or_bank').default('card'),
+      // The saved-payment-method consent version the modal renders beside
+      // its (locked) checkbox — see the stale check below.
+      consentTextVersion: Joi.string().max(40).optional(),
     });
 
-    const { paymentMethodType } = await schema.validateAsync(req.body);
+    const { paymentMethodType, consentTextVersion } = await schema.validateAsync(req.body);
+    // Rendered-version attestation (codex #5434 r1 P1): the portal bundles
+    // its own copy of the consent text, so the mint refuses a tab whose
+    // text is not this server's current version (or that attests none — a
+    // bundle from before the attestation existed, left open across a copy
+    // change) with a 409 the modal surfaces as "refresh the page". The
+    // version is stamped into the SetupIntent so POST /cards and the
+    // portal_add_method webhook record the consent only under a current
+    // stamp — never the posting bundle's constant, which a redirect return
+    // re-sends from a freshly loaded, possibly newer bundle.
+    if (!renderedConsentVersionIsCurrent(consentTextVersion)) {
+      return res.status(409).json(consentVersionStaleResponse());
+    }
     // Portal bank saves are gated (GATE_PORTAL_ACH_AUTOPAY): with the gate
     // off, a bank-inclusive request downgrades to card-only rather than
     // erroring — the Payment Element simply doesn't offer the bank tab.
@@ -459,7 +254,7 @@ router.post('/cards/setup-intent', async (req, res, next) => {
       // deferred save (see POST /cards + the stripe-webhook
       // portal_add_method branch). Card intents carry it too — the webhook
       // branch is idempotent alongside the synchronous save below.
-      metadata: { purpose: 'portal_add_method' },
+      metadata: { purpose: 'portal_add_method', [CONSENT_VERSION_METADATA_KEY]: consentTextVersion },
     });
 
     res.json({
@@ -482,6 +277,9 @@ router.post('/cards', async (req, res, next) => {
       // Stripe: paymentMethodId from confirmed SetupIntent
       paymentMethodId: Joi.string().allow(null, '').optional(),
       setupIntentId: Joi.string().required(),
+      // Accepted for symmetry with the mint; the SetupIntent's own stamp
+      // (made by the tab that rendered the text) is the version of record.
+      consentTextVersion: Joi.string().max(40).allow(null, '').optional(),
     });
 
     const { paymentMethodId, setupIntentId } = await schema.validateAsync(req.body);
@@ -507,6 +305,15 @@ router.post('/cards', async (req, res, next) => {
       return res.status(409).json({
         error: 'Bank accounts aren’t available right now. Add a card instead.',
       });
+    }
+    // The consent text the customer read is the version the tab that MINTED
+    // this SetupIntent attested (stamped by /cards/setup-intent). A stale or
+    // absent stamp is refused BEFORE any mirror/consent/enrollment — the
+    // customer refreshes and re-adds under the current text (codex #5434
+    // r1 P1). The portal_add_method webhook applies the same rule.
+    if (!renderedConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY])) {
+      logger.warn(`[billing-v2] add-method refused — SI ${setupIntentId} stamped consent text version ${setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (customer ${req.customerId})`);
+      return res.status(409).json(consentVersionStaleResponse());
     }
 
     // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent
@@ -1207,6 +1014,12 @@ router.put('/cards/:id/default', async (req, res, next) => {
             code: 'consent_required',
             method_type: card.method_type || 'card',
           });
+        }
+        // The prompt's retry attests the consent version it rendered; a
+        // stale or absent one is refused before the row is written (codex
+        // #5434 r1 P1).
+        if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+          return res.status(409).json(consentVersionStaleResponse());
         }
         await ConsentService.recordConsent({
           customerId: req.customerId,

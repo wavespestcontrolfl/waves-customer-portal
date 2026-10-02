@@ -88,7 +88,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -150,6 +150,7 @@ const WRITE_TWO_STEP = [
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -569,6 +570,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }],
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],
+    // The seeded lead's first name differs, so the preview reaches the gate
+    // with a real diff to show (an identical value is refused before it).
+    ['leads-tools', 'executeLeadsTool', 'update_lead_contact', { lead_id: 'lead-1', first_name: 'Roadie' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],

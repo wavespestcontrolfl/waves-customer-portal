@@ -91,6 +91,44 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Re-service report card (owner-approved design 2026-09-26, Fast Complete PR D;
+`GATE_RESERVICE_REPORT_CARD` — dark, off unless exactly `'true'`, read at call
+time): on the service-report payload (`/api/reports/:token/data` and the PDF,
+which share `buildReportV1Data`), when the card gate is on AND the existing
+`reserviceReport` callback block is composed (`GATE_RESERVICE_REPORT_COPY` on,
+a pest/lawn callback record), gate on adds an optional `data.reserviceReportCard`
+object `{ version: 1, youToldUs, whatWeDid, stillSeeing }`; gate off, or no
+callback block, omits the key entirely (never `null`), so the payload is
+byte-identical to before. `server/services/service-report/reservice-report-card.js`
+is the pure builder.
+- `youToldUs` (`null` or `{ source, quoted, lead, text, pests }`): the
+  customer's booking words, read ONLY from the copy frozen onto
+  `service_records.service_data.reserviceRequest` at completion (from the
+  locked `scheduled_services.customer_request` / `_source` / `_pests` row;
+  never read live, so a later booking edit cannot rewrite a permanent report;
+  records completed before the freeze carry none). `source` is
+  `picker` | `text` | `call` | `office`, or `null` when only pest chips are
+  on file (no words shown). Picker and text words are the
+  customer's verbatim words (`quoted: true`); a call paraphrase
+  (`lead: 'On your call, you mentioned'`) and office words
+  (`lead: 'As reported to our office:'`) are never quoted. `text` always passes
+  the report writer's customer-words scrub (`scrubCustomerText`: pest talk
+  only, access details such as gate codes removed) and the banned
+  customer-copy screen, and is capped at 280 characters; a scrub that is
+  unavailable or throws drops the words (never shown raw). A call / office
+  paraphrase written about the customer in the third person is dropped.
+  `pests` are display labels of the picker's chip keys. Nothing left → `null`.
+- `whatWeDid` (`null` or `{ pests, where, found, safetyLine }`): only for a
+  performed (`treated`) outcome; pests from the product rows' targets, where
+  from `areas_serviced`, `found` from the technician's own activity tap, and
+  the safety line only with a recorded wet application.
+- `stillSeeing`: the topic word for the "Still seeing …? Tell us" button. The
+  button links only the existing authenticated `/?tab=schedule` portal route,
+  rendered only when the payload's existing `reserviceEligible === true` and in
+  the live view (never the PDF); no re-service token or new route is exposed.
+The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
+when the card is present.
+
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
 call time, no redeploy to flip): on the pest-line service-report payload
@@ -304,12 +342,12 @@ equivalent fetch exactly (no deadline there either). Both PDF
 cache-decision sites (the direct `/:token` route and the queued renderer
 in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
 object `buildReportV1Data` returns and skip storing under the stable
-`-pex1` key when it is set, so a later render — once the window closes or
+`-pex2` key when it is set, so a later render — once the window closes or
 the provider recovers — is what gets cached, not a permanent "no rain
 block" copy. This flag rides the JSON payload the same way
 `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
-`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+`spiders: { headline, whatWeDid, expectation }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
 that eaves were treated — the tech may have tagged it while applying it
@@ -321,7 +359,7 @@ completedActions "serviced-eaves" choice, "Completed the recorded eave and
 soffit service." (`client/src/lib/service-completion-choices.js`), names the
 eaves/soffit and so opens the section, but records no web-removal work of
 any kind — it could just as easily be a residual application or a plain
-inspection. Every wording below opens with "We knocked down webs...", so
+inspection. Every wording below opens with "We swept webs and egg sacs...", so
 that specific claim additionally requires an action that actually says a web
 was removed: either it names web(s)/webbing/a cobweb directly (the
 completedActions "removed-webs" choice, "Removed accessible webs from the
@@ -329,14 +367,15 @@ recorded exterior areas.") or it explicitly SWEPT (the protocol library's
 "Swept eaves, window frames, door frames, and lanai" — sweeping IS the
 web-removal act). A location-only eave/soffit action with neither gets NO
 card at all, gate on or off, residual evidence or not — an unproven "we
-knocked down webs" claim is never invented just because a treatment
-happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
-ALWAYS one of two fixed combinations: (1) the action was recorded but no
+swept webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` are
+ALWAYS one of two fixed combinations (no `nextStep`: owner 2026-10-01, webs
+are not a return-visit item): (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
 tying it to the eaves — de-web-only wording, no treatment claim ("We
-knocked down webs around the eaves and entry points.") and an expectation
-that never says "the residual we applied"; (2) the action was recorded AND
+swept webs and any egg sacs from your eaves and entry points.") and an
+expectation that never credits a residual; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
 (owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
@@ -347,8 +386,8 @@ nothing else stands in for it — matched by exact key, never a substring),
 or the visit separately recorded a genuine `treatmentApplied: true` eave
 action, never just the sweep-only action that gates the section in the
 first place) → combined wording ("We
-knocked down webs and treated the eaves and entry points where spiders
-build.") with a residual-backed expectation — even here, the eaves-treated
+swept webs and any egg sacs, then applied a residual insecticide to the eaves
+and entry points where spiders build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
 alone and never on free text. Neither combination ever interpolates a raw
 completed protocol-action label. Raw protocol-action labels
@@ -375,7 +414,8 @@ Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 (owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
 cracks/voids, never a surface barrier, so it never shares the pyrethroid
 barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
-Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Bait → roach gel bait; Advion Ant Bait Gel → ant bait; Advion WDG Granular
+(a granular bait broadcast by the pound, with no approved line) → no class;
 Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
 explicitly mapped to no class. A product NOT in this map gets no line —
 fail closed, never guessed; extending the map to a new product requires an
@@ -390,9 +430,22 @@ recorded) method is treated as unknown, never assumed exterior; an
 unrecognized or free-text area string never qualifies either, fail closed;
 when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
-rather than silently asserting the claim. Never a "guarantee"
-or "eliminate" claim (screened through the existing `validateCustomerCopy`
-banned-copy guard). The what-to-expect facts (never the rain block, never
+rather than silently asserting the claim. The non-repellent "6-foot
+perimeter band" sentence needs one non-repellent application that is both
+ant-tagged and recorded as a band: an explicit `perimeter_spray` method or a
+perimeter/foundation chip (Perimeter, Exterior perimeter, Property
+perimeter, Foundation, Foundation perimeter) by exact key; any other
+exterior chip is spot work and gets the general non-repellent wording. Each line names the active ingredient from a
+closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
+lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
+pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the
+barrier sentence names only the products recorded exterior. The bait and
+dust lines make no placement claim (the builder reads no area or method),
+the AI writer's plain variant leaves out label durations ("up to 8
+months") and customer instructions, and the Tekko Pro 6-month
+cockroach-nymph sentence needs a roach target on that application. Never a
+"guaranteed" or "eliminated" claim (screened through the existing
+`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
 the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
@@ -664,7 +717,54 @@ message (no plan, parent or reason detail rides the payload), and `/finalize`
 additionally runs its charge UNDER the renewal gate with the same check
 repeated inside it, so a prior-plan change either waits for the charge or is
 seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
-payment Stripe already collected always remains available),
+payment Stripe already collected always remains available). RENDERED CONSENT
+VERSION (2026-09-30, codex #5434 r1 P1 — every surface that captures a
+saved-payment-method consent): the client bundles its own copy of the consent
+text (`client/src/lib/paymentMethodConsentText.js`), so a tab left open across
+a copy change keeps rendering the older text. (The v12 copy family — base
+card/ACH, the immediate-charge prepay variants and the after-visit variants of
+GATE_PAY_AFTER_FIRST_VISIT — all carry the rate-review sentence; the base and prepay
+variants are `v12_2026-09-30`, the revised after-visit variants
+`v13_2026-10-01` (#5481's v12 after-visit rows carry the text without it); a one-time card HOLD snapshots its own disclosure
+under `hold_v1_2026-10-01`, which never qualifies for enrollment.) Every save-the-method capture
+therefore carries `consentTextVersion`, the `CONSENT_VERSION` the tab
+rendered beside its checkbox. `/setup`, `/update-amount` and `/finalize`
+refuse a save (requested, or forced by a required-save invoice) whose
+attestation is not the server's current version — or is absent — with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` BEFORE any Stripe work (on the
+estimate accept, a tab that attests its saved-card capture per #5481 —
+`recurringCardConsentVersion` / `Variant` / `Tender` — is judged by that
+verification inside the accept transaction instead, whose stale or
+mismatched attestation answers `CONSENT_VARIANT_STALE`), and
+thread the version into the mint, which stamps it on the PaymentIntent
+(`metadata.consent_text_version`, beside `save_card_opt_in`; carried across a
+tender replacement). A `/setup` that would REUSE an open PaymentIntent — or
+an `/update-amount` on one — whose stamp differs from the one it would write
+(an older version, or none — the rollout) cancels and replaces it instead of
+updating in place (the `replaced` response re-mounts Elements): the stale tab
+that minted it can confirm straight with Stripe (Express Checkout), and an
+in-place re-stamp would let the webhook record the newer version against
+text that tab never rendered. A replacement carries a SUPERSET of the old
+intent's metadata (`waves_customer_id`, `save_card_opt_in`, the consent
+stamp, …) with the new values winning, so the webhook mirrors keyed on
+those stamps keep working across the swap, and the `replaced` response carries
+`methodCategory` (the tender the fresh intent is locked to) so the page
+re-mounts its form on that tender instead of defaulting to card. `/finalize`
+never re-stamps in
+place either: under the invoice lock it reads the PaymentIntent's live stamp
+and refuses with `409 { error, staleBalance: true }` (the page reloads and
+re-syncs through `/setup`) when it differs from the one it would write. `/capture-setup` does the same and stamps the
+SetupIntent. `/consent` and `/setup-complete` record ONLY under the intent's
+own current stamp — never the posting bundle's constant, since a redirect
+return posts from a freshly loaded, possibly newer bundle — answering the
+same 409 otherwise (the payment itself already settled; only the saved-method
+authorization is withheld), and the `payment_intent.succeeded` save mirror and
+the `covered_capture` webhook apply the identical rule: a stale or absent
+stamp keeps the method saved but unconsented and unenrolled and parks one
+Billing bell per intent for the office to re-collect the authorization. A
+plain one-off payment (no save) attests nothing and is unchanged. Existing
+rows are untouched — the enrollment floor (v8+) does not move, so no existing
+customer is re-asked),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -1537,6 +1637,66 @@ tender, text }` (the exact authorization recorded as shown) beside the existing
 recovery record that text and version verbatim (never re-derived from current copy), and the
 recovery passes the committed `accepted_at` as the authorization time so an Auto Pay opt-out made
 after accepting is honored.
+Setup fee billed with the first visit (pay-after-first-visit PR-C,
+`GATE_PAF_SETUP_FEE`, dark; needs `GATE_PAY_AFTER_FIRST_VISIT`). Three public payload
+additions, each OMITTED (never `false`) unless true, so every gate-off response is
+byte-identical to before. (1) GET `/api/estimates/:token/data`
+`recurringCardPolicy.setupFeeAfterFirstVisit: true` only when BOTH gates are exactly
+`'true'` and the policy the accept would resolve puts this customer on the card rail with a
+FRESH capture (`required: true`, not the Auto Pay paused / off cohorts: a customer satisfied by a
+saved or enrolled method sees no capture, so never the after-visit text, and keeps today's
+payable setup invoice) AND every monthly-billed
+tier row in the quoted pricing carries a positive visit count (the accept defers only
+onto a priced first visit, and a tier row's per-visit price resolves only with a known
+visit count; otherwise the field is omitted and the page keeps today's invoice wording)
+AND the resolved customer does not keep monthly membership billing (one shared server
+predicate, also used by the legacy page copy and the accept; any lookup failure omits the
+field). The React page applies
+its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
+only when this is true AND its own selection resolves to the setup-only shape (monthly
+tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean
+about the viewer's own estimate: no customer, payer or payment-method data. (2) PUT
+`/api/estimates/:token/accept` request body `setupFeeAfterFirstVisitShown: true` ATTESTS the
+tab rendered that promise (render-bound, omitted otherwise); the accept recomputes the
+promise inside its transaction from the same inputs and, on ANY difference between the
+attestation and what it would apply, refuses with `409 { code: 'SETUP_FEE_TERMS_REFRESH' }`
+(whole accept rolls back; the page refetches). The deferred fee joins the accept's ONE
+collection promise (`resolveCollectionPromise`, see PR-B above): for a card tender the promise is
+`after_visit_card`, so the tab attests it with `recurringCardConsentVariant` / `Version` /
+`Tender` like the PR-B cohort and any difference is refused `409 CONSENT_VARIANT_STALE`; the
+accept persists `estimate_data.acceptedRecurringCardConsent` (exact text) and
+`acceptedRecurringCardConsentVariant`, which the `setup_intent.succeeded` recovery records
+verbatim. A bank tender records the base ACH consent. Success payload
+`setupFeeAfterFirstVisit: true` when this
+accept actually STAMPED the setup fee on the first visit's series parent
+(`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
+the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and
+`nextStep: 'confirmed'`. An accept that is not eligible to defer (not on the card rail, a
+bait-station setup or first-application line in the quote, a monthly tier whose visit
+count is unknown, or a converted customer whose billing lane is not `per_application`)
+keeps today's payload and pay link, omits the field and records the BASE consent. An
+accept the page DID promise first-visit billing for (card rail, setup-only shape, known
+visit counts, `per_application` lane) whose stamp cannot land (no series parent, no
+billable first visit, a different claim already on the series, or a MULTI-PROGRAM accept —
+the claim lives on one program's series and could not follow whichever program is performed
+first, so a multi-program accept never defers the fee) is REFUSED with
+`409 { code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false }` and the whole accept rolls
+back, never a payable setup invoice recorded under the after-first-visit consent; the
+retry, without the attestation, takes today's payable setup invoice. (3) Durable retry: the accept
+persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
+transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
+already-accepted estimate (`alreadyAccepted: true`) rebuilds the same
+`setupFeeAfterFirstVisit: true`, never a pay link. The setup fee is billed on the first
+PERFORMED visit's own invoice and charged once to the saved method; a no-show or
+cancelled series bills nothing. A fee the first performed visit cannot bill on its own
+completion invoice (the visit billed nothing, a grouped closeout handed to the office, a
+dues-covered billing lane) is PARKED FOR THE OFFICE, never turned into a free-standing
+invoice: the stamp is cleared and one internal `setup_fee_office_billing` dispatch alert
+(amount, series, estimate, customer) is the durable owed-fee record the office bills by
+hand, once. No draft invoice is created outside the normal completion mint, and nothing is
+sent to the customer. The accept notification (customer account feed) says
+nothing is charged today and the fee bills with the first visit. No message is sent
+because of these fields.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
@@ -1893,7 +2053,8 @@ separate customer text right after the lawn completion text, rendered from the
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` to
+key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -1932,6 +2093,93 @@ headline + what we saw (+ why it matters only for needs_attention) with no
 line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
 stamp while the gate is on, so gate-off PDFs are never served after the flip
 (or the reverse on rollback).
+`GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
+for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
+(lawn only, never tree & shrub; no new route, token, privacy or rate-limit
+surface): instead of the peak / shoulder / dormant note it is one calendar-based,
+tier-neutral sentence for the visit's month and grass (St. Augustine,
+Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
+says what the program focuses on that time of year, never what the visit
+applied. It is written from `server/config/protocols.json` months, and any step
+the protocol makes conditional (skipped, soil-test or weather gated, optional,
+or on request) is only stated with a qualifier such as "where the
+lawn needs it" or "when conditions allow". It is at most about 30 words, and
+never naming a product, an ordinance, a county, a blackout, a law, a clock time,
+plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
+carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
+is null, and the old note stays, for a visit that is not a recurring lawn plan
+visit (the visit's catalog service identity must be a recurring lawn plan:
+one-time lawn jobs, callbacks and unresolved identities get no line; the
+WaveGuard tier is never the signal), for a visit with no assessment date, and
+for a June to September visit that may have applied nitrogen (the program
+applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
+with no `analysis_n`, or any applied product the catalog cannot resolve.
+The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
+lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+renders a program line once as a small "This time of year" card above the
+trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
+print `seasonalNote`, so its content and cache signature are unchanged.
+`GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key
+for key, and makes no read or write) adds an optional `reportV2.sinceLast` to the
+`/api/reports/:token/data` lawn payload (lawn only, never tree & shrub; no new
+route, token, privacy or rate-limit surface; nothing renders it yet, the web
+report and PDF are unchanged and keep their cache signature). It is DATA for the
+progress engine and the copy writer: `{ v: 1, priorAssessmentId, priorDate,
+applied: [{ name, activeIngredient, kind, tag, targets (at most 3) }], checks:
+[{ key, status }] }`, read from the PRIOR visit's frozen treatment memory: what
+that visit applied and which of water, weeds, damage, coverage and mowing it said
+it would keep watching (at most 3; the customer's own concern is not carried).
+No state words ("clear", "still watching") are decided here. The prior visit is
+the previous confirmed assessment at the SAME property with a strictly earlier
+date (needs `GATE_LAWN_PROPERTY_HISTORY`; a later-dated or same-day row is never
+the prior, and a customer who moved gets no prior). The key is absent when there
+is no prior or the prior has no frozen memory. Each visit's own entry is frozen
+into `service_records.structured_notes.lawnVisitMemory[<assessment id>]` at its
+first render (first writer wins per assessment, no migration) together with the
+`sinceLast` block it carried, and replayed byte for byte after, so a permanent
+token never changes when later visits are added. A render whose entry could not
+be frozen is marked uncacheable (`weekWeatherUncacheable`); delivery is not held.
+The same gate also builds the lawn progress engine's block
+(`server/services/service-report/lawn-progress.js`, P13: a state per prior applied
+row and prior check, and an overall direction, from `sinceLast` plus both visits'
+scores and this render's photo confidence). It adds NO public key: it rides the
+in-process report object as a non-enumerable `reportV2.progress`, so JSON, spread
+and `Object.keys` never see it and the `/api/reports/:token/data` payload is what
+it was (a test pins that). The block itself never reaches the payload; the only
+thing a customer sees of it is the sentences below. Pure, no read, no write, and
+a failure cannot break a render.
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
+`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
+`{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
+(`mode: 'live'`), and the web report prints it in the lead as "Since your last
+visit, <Mon D>" above "What we applied today". PDF and static builds mount the
+same lead card but never carry the key, so PDF content and its cache signature
+are unchanged by this gate.
+Every line is a fixed sentence selected by key in
+`server/services/service-report/lawn-since-last-copy.js`; no model writes it and
+it carries no product name, active ingredient, number, date or timing word. In
+order, at most four lines and 40 words (a second per-treatment line gives way
+to the watch list; past 40 words whole lines are dropped from the end): what the prior
+visit applied, by product kind ("Last visit we applied weed control and
+fertilizer."); the overall direction when the engine compared the two visits
+(up / down / holding steady; nothing when the photos cannot support a
+comparison); at most two per-treatment states (ahead of schedule, on track,
+holding steady, too early, behind, or seasonal for color), spoken ONLY for an
+expectation row the owner has approved (`server/config/lawn-expectations.js`
+`approved: true`) and never for an `unclear` item; and "Still on our watch
+list: …" naming the prior visit's watched topics (weeds, stressed areas, mowing
+height, watering, sprinkler coverage) that today's report still carries as a
+watch or needs-attention finding. A topic today's report no longer carries is
+not called cleared, and no better / same / worse wording exists: that verdict
+comes only from a same-spot recheck record, which nothing writes yet. Under a
+watering banner the block names neither watering nor sprinkler coverage (the
+banner owns them). The key is absent when there is nothing to say, when there
+is no prior visit, or when the prior visit froze no memory. The sentences are
+selected at render from the frozen memory and the two visits' scores, so a
+permanent token repeats them while those inputs stand; approving an expectation
+row later adds that row's line to reports already delivered.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -2642,6 +2890,18 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
+Forecast evidence: `baseline_comparison` is `above|below|near` the monthly
+seasonal model. The legacy `pests[].trend` stays `up|down|flat` with
+`trend_basis: seasonal_baseline` for existing embeds; it is not a temporal
+trend. `week_over_week` is null unless the same city's same model has a
+comparable-weather snapshot exactly seven ET calendar days earlier. When
+available it carries direction, score delta, and both dates, describing
+modeled change only. `model_version` identifies the scoring model and
+`evidence.observation_validation` remains `not_validated`. Public requests
+may READ `pest_forecast_snapshots` under `GATE_PEST_FORECAST_HISTORY`, but
+never write history or read customer observations. The gated 08:15/14:15 ET
+cron captures the first successful city forecast per day. History failure
+preserves the weather outlook with unavailable comparisons.
 Note: unlike the token-gated read routes, the forecast and `/locations`
 responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
@@ -3217,8 +3477,17 @@ data — for operator preview/share. Token in path, `noindex`).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
-per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
-legacy 5-char codes still resolve).
+per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07.
+Legacy 1-7 char codes (5-char space minted 2026-04-19 → 2026-08-07, ~26
+bits) still resolve while `GATE_SHORTLINK_LEGACY_EXPIRE` is unset; with the
+gate `=== 'true'` a legacy code whose row exists answers 410 with the same
+expired page as a past `expires_at` (no telemetry bump), and a legacy code
+with no row stays the generic 404 — so the gate never turns an unknown code
+into an existence oracle. Independently of the gate, a re-send never reuses
+a legacy code for its entity: `existingShortUrlFor` mints a fresh 10-char
+code instead; send-reconciliation readers that search historical bodies use
+`allShortUrlsFor`, which returns every code ever minted for the entity,
+legacy and replacement alike).
 `/go/:code` (outside-link click redirect for prep-guide links to third-party
 sites — 302 to the registered destination / generic 404 with no enumeration
 leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
@@ -3347,6 +3616,97 @@ their guarantee wording when it is set; per-service CTA lines follow their
 own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
 service makes no guarantee). Derived read-only; no write. The legacy
 server-rendered page applies the same rule to its plan-terms card.
+The annual rate review disclosure (owner ruling 2026-09-30; shared
+`RATE_REVIEW_TERMS_LINE`, "Rate reviewed yearly after 12 months, 30 days’
+notice") follows the plan-terms scope the same way: the proposal document's
+terms line (browser and pdfkit renderers) and the legacy plan-terms card
+("Rate reviewed once a year") print it only when every row carries the
+recurring residential plan terms ('all') and at least one line recurs —
+never on a termite-only, rodent, commercial, authored-terms, programs or
+one-time-only estimate. The document's decision is the server's alone:
+`/data` projects the explicit boolean `proposal.rateReviewTermsEligible`
+(`proposalRateReviewTermsEligible`, the pdfkit fallback's own decision)
+beside `proposal.noGuaranteeClaims`, and the browser document prints by it
+rather than re-classifying row descriptions with its own narrower service
+taxonomy (a row the server classifies as lawn or tree & shrub work may carry
+no "lawn"/"tree" word). Frozen documents keep their original terms: on an
+accepted or declined estimate (`estimateIsPriceLocked`) the disclosure prints
+only on persisted evidence that the customer saw it — the recorded
+acceptance's verbatim snapshot carried the sentence (the 'plan' drawer
+below), or the accept stamped `estimate_data.rateReviewDisclosedAtAccept` —
+written atomically with a recurring-residential-plan acceptance — the public
+accept and the admin's manual mark-accepted alike — ONLY on
+persisted evidence that the customer was served the line while the estimate
+was open: that same recorded 'plan' drawer snapshot, or
+`estimate_data.rateReviewTermsServed` at the current shared
+`RATE_REVIEW_TERMS_VERSION`, which the `/pdf` download (either renderer) and
+the legacy page's plan-terms card write when they print the disclosure to the
+CUSTOMER — only a request the view counter treats as the customer's own
+(`shouldCountView`: never a bot or link unfurler, an admin-marked or admin-IP
+request, a staff or draft preview, an internal refresh or the pinned headless
+pass) records it; any other request gets the page or document as it stands,
+unrecorded
+(idempotent; never on a frozen estimate; never fatal to the download or the
+page; made durable BEFORE either renderer runs, and before the legacy page
+is sent). The marker never moves `updated_at`, so an accept racing from
+another tab merges the row's current marker through its own `estimate_data`
+write and decides the stamp from the row under its lock, not from its
+pre-transaction snapshot — evidence persisted after that read is still
+honored. The other order — the accept lands first — turns the marker write
+into a zero-row no-op (the row is frozen): the `/pdf` download then renders
+the row as it is now (frozen, no line unless that accept stamped it) and the
+legacy page answers one `303` to its own URL (query preserved; cache headers
+set) and re-renders from the current row instead of sending HTML that shows
+a term the accept never recorded — bounded to one hop, because a frozen row
+never enters that branch: an accepted page has no plan-terms card and a
+declined page prints no rate review item at all (it keeps its cancel/refund
+card; "declined never acquires it" holds on the legacy page too). Persistence
+unproven — a write that FAILS, an eligibility check that errors, or a
+zero-row write that cannot be shown to have hit a frozen row (re-read failed,
+row missing or still open) — withholds the line rather than showing it
+without evidence: the `/pdf` download serves the pdfkit document without the
+line (the browser renderer reads the row itself and cannot be told), the
+legacy page re-renders without the item, and a `/data?mode=pdf` document pass
+(the headless capture, or a customer's bare `?mode=pdf` view) runs the same
+pre-render step and projects `rateReviewTermsEligible: false`. That pass
+records evidence only while GATE_ESTIMATE_DOC_PDF is on — the condition under
+which the document is actually rendered; with the gate off, `?mode=pdf` falls
+through to the normal page, shows no document, and records nothing. Plan eligibility alone never stamps: an accept from a tab that rendered
+no rate copy (a bundle that predates the line with the gate off, the
+terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
+document without the line rather than claiming a disclosure that was never
+shown. A document accepted before this disclosure existed, accepted under the
+'base' drawer, or declined never acquires it; an open estimate is sold under
+the current terms and prints it.
+The acceptance terms (`acceptanceTerms`, GATE_ESTIMATE_ACCEPTANCE_TERMS)
+carry the same rule as a SCOPE on one version: `scope: 'plan'` — the
+Services drawer line ends with the rate review sentence ("Rates are reviewed
+once a year after your first 12 months, with at least 30 days’ written
+notice before any change.") — is served only when the estimate is a
+recurring residential plan (every service carries the plan terms, the
+`noEstimateWideGuarantee` decision above, and the estimate is not
+one-time-only); every other cancel-anytime estimate (rodent, one-time-only)
+is served `scope: 'base'`, whose drawer is byte-identical to v2026-09. A
+'plan' payload also carries `oneTimeTerms` (the 'base' lines) for the
+customer's one-time toggle, which has no rate to review. The page attests
+the scope it rendered (`termsScope` beside `termsVersion`) and the accept
+route re-derives the scope from the estimate and the accept's own one-time
+mode, recording the verbatim snapshot for that scope or refusing a
+mismatch — or a current version with no scope — with the same reloadable
+409 `TERMS_VERSION_STALE` as a stale version, so no acceptance is ever
+recorded under a Services line the tab did not render.
+The accept's saved-payment-method consent is attested the same way
+(codex #5434 r1 P1): an accept that carries a verified Auto Pay capture
+(`recurringCardSetupIntentId` under a required recurring-card policy — the
+inline capture / capture modal rendered the card, ACH or prepay variant of
+the bundle's consent text) or acknowledges the prepay exact-total quote
+(`prepayChargeConsentAccepted`, whose checkbox rendered the prepay variant)
+sends `consentTextVersion`, the client's `CONSENT_VERSION`; the route
+refuses any other value, or none, with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mutation, so the
+post-commit consent snapshot (recorded from the server's current text) is
+never written for a tab that rendered older copy. An accept that captures no
+consent ignores the field.
 When `/data` includes a `proposal` for document rendering or an enabled
 public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
 the normalized rows that the document actually prints. React document mode
@@ -4637,7 +4997,27 @@ payer-billed, or Auto Pay is already active (the pending row is RETIRED to
 and chargeable; the POST runs the same
 live-verify (purpose `autopay_setup_link` + request id) and the same
 save → consent → enroll tail under the same claim/lease; `select-plan`
-is not applicable to these rows. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
+is not applicable to these rows. RENDERED CONSENT VERSION (2026-09-30, codex
+#5434 r1 P1, both kinds): the GET mints the SetupIntent for the page it
+serves, so the GET carries `?consentTextVersion=` — the `CONSENT_VERSION`
+the bundle renders beside the capture checkbox — and is refused with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mint when that is
+not the server's current version or is absent (an older bundle refetching
+after a copy change); the mint stamps that attested value into the intent
+(`metadata.consent_text_version`) and salts the deterministic idempotency
+key with it, so a page load after a copy change mints a fresh intent under
+the new text instead of replaying one stamped with the old, and a stored
+intent stamped with an older version is never replayed. `/replace-intent`
+("use a different payment method", a fresh mint) carries the same
+attestation in its body under the same refusal. `/complete` carries
+`consentTextVersion` too and is refused the same way before the capture
+service runs; and the shared completion tail — page POST and the
+`setup_intent.succeeded` backstop alike — re-reads the intent under its
+claim and refuses an intent whose stamp is stale or absent
+(`consent_version_stale`: nothing saved, recorded or enrolled, the claim
+reverts so the row stays pending, one Billing bell per intent for the office
+to re-collect; the route answers the same 409, the webhook acks). The page
+prompts a refresh, which re-mints under the current text. The visit lane below is unchanged — dark until `APPOINTMENT_CARD_REQUEST`
 AND the `secure_appointment_card` SMS template are both enabled, and
 unreachable until the funnel mints links. Bearer token
 (`appointment_card_requests.token` — 22-char base64url / 128-bit since

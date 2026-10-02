@@ -4,15 +4,25 @@
 // per IMG_3861: large amount header, Stripe card fields, Charge button.
 //
 // Uses the invoice token surcharge flow:
+//   GET  /api/pay/:token                             -> invoice.saveRequired
 //   POST /api/pay/:token/setup  { cardOnly: true }  -> clientSecret
 //   Stripe createPaymentMethod                       -> card funding lookup
 //   POST /api/pay/:token/quote                       -> exact surcharge disclosure
 //   POST /api/pay/:token/finalize                    -> server-side confirm
 //   POST /api/pay/:token/confirm                     -> mark paid + SMS receipt
+//
+// Required-save invoices (per-application / annual-prepay customers): the
+// server keeps the entered card on file and enrolls Auto Pay, so the sheet
+// renders the locked card authorization for the customer to read before the
+// charge and attests the consent text version it rendered on /setup and
+// /finalize (codex #5434 r1 P1) — the same contract as the customer pay
+// page. A one-off invoice saves nothing, shows nothing, attests nothing.
 
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { getStripe } from '../../lib/stripeLoader';
+import SaveCardConsent from '../billing/SaveCardConsent';
+import { consentAttestation } from '../../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -34,6 +44,10 @@ export default function MobileManualCardSheet({
   const [processing, setProcessing] = useState(false);
   const [quoteData, setQuoteData] = useState(null);
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
+  // Whether the server will keep this card on file (invoice.saveRequired):
+  // decides the rendered authorization and the attestation below.
+  const [saveRequired, setSaveRequired] = useState(false);
+  const saveRequiredRef = useRef(false);
 
   useEffect(() => {
     if (!invoiceToken) return;
@@ -41,10 +55,22 @@ export default function MobileManualCardSheet({
 
     (async () => {
       try {
+        const pageRes = await fetch(`${API_BASE}/pay/${invoiceToken}`);
+        if (!pageRes.ok) {
+          const d = await pageRes.json().catch(() => ({}));
+          throw new Error(d.error || 'Failed to load invoice');
+        }
+        const page = await pageRes.json();
+        if (cancelled) return;
+        const mustSave = page?.invoice?.saveRequired === true;
+        saveRequiredRef.current = mustSave;
+        setSaveRequired(mustSave);
         const setupRes = await fetch(`${API_BASE}/pay/${invoiceToken}/setup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cardOnly: true }),
+          // A required-save invoice attests the consent text version this
+          // sheet renders (SaveCardConsent below); a one-off attests nothing.
+          body: JSON.stringify({ cardOnly: true, ...(mustSave ? consentAttestation() : {}) }),
         });
         if (!setupRes.ok) {
           const d = await setupRes.json().catch(() => ({}));
@@ -121,7 +147,7 @@ export default function MobileManualCardSheet({
         const finalRes = await fetch(`${API_BASE}/pay/${invoiceToken}/finalize`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ quoteToken: quoteData.quoteToken }),
+          body: JSON.stringify({ quoteToken: quoteData.quoteToken, ...(saveRequiredRef.current ? consentAttestation() : {}) }),
         });
         const finalized = await finalRes.json().catch(() => ({}));
         if (!finalRes.ok) throw new Error(finalized.error || 'Payment failed');
@@ -238,6 +264,19 @@ export default function MobileManualCardSheet({
             </div>
           )}
         </div>
+
+        {/* Required-save invoices keep this card on file for Auto Pay: the
+            locked authorization the customer reads before the charge — the
+            text whose version the sheet attests. */}
+        {saveRequired && !initError && (
+          <SaveCardConsent
+            locked
+            onChange={() => {}}
+            methodType="card"
+            headline="This card will be kept on file for Auto Pay — please read before charging"
+            style={{ marginTop: 16 }}
+          />
+        )}
 
         {/* Charge */}
         <button

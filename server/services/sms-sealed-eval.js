@@ -127,7 +127,7 @@ const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
 // PR #5331: the PAYMENT OPTIONS fact is properly gated (see
 // sms-shadow-drafter.js buildFactsBlock's own comment) and renders on every
 // gate-on facts block of the payment-facts revision. It is a VERSION-SUFFIX
-// fact ('p' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
+// fact ('cflvp' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
 // every real-answers identity before that revision (bare, '_cf') never
 // carried it, so their historical sealed-eval contracts FORBID it.
 const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
@@ -169,9 +169,21 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
 // because the drafter ALWAYS renders its header gate-on ("none on file" when
 // the last visit has no verified label timing), so its absence always means
 // "frozen before the section existed".
+// '_cflv' (SMS facts-gap PR 1, #5499) adds VISIT STATUS & OPEN LOOPS, also always
+// rendered gate-on ("- none" when empty) right after UPCOMING SERVICES — never in
+// the COMPANY FACTS / LABEL FACTS / FREE RE-SERVICE tail. Position-aware: see
+// hasRenderedVisitLoops.
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
-// 'p' = PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line.
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: [COMPANY_FACTS_HEADER], cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER], p: [V12_PAYMENT_OPTIONS_MARKER] });
+const VISIT_LOOPS_MARKER = 'VISIT STATUS & OPEN LOOPS:';
+// 'cflvp' = '_cflv' + PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line. One glued token (not
+// '_cflv_p') keeps the identity at 35 chars, 40 with all four category tags = PROMPT_VERSION_COLUMN_MAX.
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
+  cf: [COMPANY_FACTS_HEADER],
+  cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER],
+  cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
+  cflvp: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER],
+  p: [V12_PAYMENT_OPTIONS_MARKER],
+});
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
   if (/^\d+$/.test(token)) return Number(token) >= 2 ? [RESERVICE_FACTS_MARKER] : [];
@@ -272,8 +284,20 @@ function hasRenderedReserviceFact(factsBlock) {
   const before = facts.slice(0, at).replace(new RegExp(exactStructureRegexSource('optional')), '');
   return RESERVICE_SECTION_RE.test(before);
 }
+// The rendered VISIT STATUS & OPEN LOOPS header (PR #5499 r1): on its own line,
+// after UPCOMING SERVICES and before the first BILLING: line. A thread or call
+// text quoting the header sits after BILLING (RECENT PHONE CALLS / RECENT SMS
+// THREAD) and never counts.
+const UPCOMING_DELIMITER = '\nUPCOMING SERVICES:\n';
+const VISIT_LOOPS_LINE = `\n${VISIT_LOOPS_MARKER}\n`;
+function hasRenderedVisitLoops(facts) {
+  const head = String(facts).split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(VISIT_LOOPS_LINE);
+}
 function factsHasMarker(factsBlock, marker) {
   const facts = String(factsBlock || '');
+  if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
   // COMPANY FACTS keeps main's exact-render trust test (a header typed into a multi-line SMS proves nothing).
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
   if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
@@ -294,7 +318,12 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
+    if (marker === VISIT_LOOPS_MARKER) {
+      // the twin of hasRenderedVisitLoops: the header line inside the text between the first
+      // UPCOMING SERVICES line and the first BILLING: line
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in split_part(split_part(${col}, ?::text, 1), ?::text, 2)) > 0)`);
+      bindings.push(VISIT_LOOPS_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
+    } else if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
       // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
       // text before the first BILLING: line matches the same regex source.
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND split_part(${col}, ?::text, 1) ~ ?::text)`);

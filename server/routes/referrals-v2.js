@@ -10,6 +10,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE } = require('../services/referral-errors');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { toE164, isLikelyE164 } = require('../utils/phone');
@@ -60,13 +61,55 @@ const inviteEmailSchema = Joi.object({
   friendName: Joi.string().trim().max(100).optional().allow(''),
 });
 
+// resolvePromoter rethrows a cross-account phone collision (23505 on
+// referral_promoters.customer_phone — see services/referral-errors.js). For
+// the customer that is "not enrolled yet", never a 500: GET / answers with
+// the unenrolled shape, the action routes answer 409. The warn carries the
+// customer id and the PG code only — the constraint message quotes the phone.
+function logPhoneCollision(req, route) {
+  logger.warn(`[referrals-v2] ${route}: promoter enroll blocked, phone already enrolled on another account (customer ${req.customerId}, 23505)`);
+}
+async function resolvePromoterOr409(req, res, route) {
+  try {
+    const { promoter } = await engine.resolvePromoter(req.customerId);
+    return promoter;
+  } catch (err) {
+    if (!isPromoterPhoneCollision(err)) throw err;
+    logPhoneCollision(req, route);
+    res.status(409).json({ error: PHONE_COLLISION_MESSAGE, code: PHONE_COLLISION_CODE });
+    return null;
+  }
+}
+
 // =========================================================================
 // GET / — full referral data (auto-enrolls if needed)
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
     // Auto-enroll as promoter if not already
-    const { promoter } = await engine.resolvePromoter(req.customerId);
+    let promoter;
+    try {
+      ({ promoter } = await engine.resolvePromoter(req.customerId));
+    } catch (err) {
+      if (!isPromoterPhoneCollision(err)) throw err;
+      logPhoneCollision(req, 'GET /');
+      const settings = await engine.getSettings();
+      return res.json({
+        enrolled: false,
+        enrollBlocked: PHONE_COLLISION_CODE,
+        referralCode: null,
+        referralLink: null,
+        milestoneLevel: 'none',
+        nextMilestone: null,
+        availableBalance: 0,
+        pendingEarnings: 0,
+        totalEarned: 0,
+        totalPaidOut: 0,
+        stats: { totalReferrals: 0, converted: 0, pending: 0, totalClicks: 0 },
+        referrals: [],
+        rewardPerReferral: settings.referrer_reward_cents / 100,
+      });
+    }
 
     // Legacy rows (promoter_id never backfilled) key on referrer_customer_id:
     // for a household sibling that is the OWNER's id as well as the acting
@@ -186,7 +229,8 @@ router.post('/', submitLimiter, async (req, res, next) => {
     const { name, phone, email, address, notes } = value;
 
     // Ensure enrolled (a household sibling shares the household promoter)
-    const { promoter } = await engine.resolvePromoter(req.customerId);
+    const promoter = await resolvePromoterOr409(req, res, 'POST /');
+    if (!promoter) return;
     // The friend hears from the person who submitted, not the household
     // promoter's owner (GH codex #3850 r3 P2).
     const self = await db('customers').where({ id: req.customerId }).first('first_name').catch(() => null);
@@ -224,7 +268,8 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { phone, friendName } = value;
 
-    const { promoter } = await engine.resolvePromoter(req.customerId);
+    const promoter = await resolvePromoterOr409(req, res, 'POST /invite');
+    if (!promoter) return;
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
     // The friend hears from the person who tapped, not the household
@@ -317,7 +362,8 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
     const { email, friendName } = value;
     const cleanEmail = email.trim().toLowerCase();
 
-    const { promoter } = await engine.resolvePromoter(req.customerId);
+    const promoter = await resolvePromoterOr409(req, res, 'POST /invite-email');
+    if (!promoter) return;
     const settings = await engine.getSettings();
     const referralLink = engine.getPromoterReferralLink(promoter, settings);
 

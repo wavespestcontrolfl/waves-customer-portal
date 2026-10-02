@@ -572,3 +572,96 @@ describe('content registry live status helpers', () => {
     expect(liveStatus.normalizeStatuses('all')).toBe(null);
   });
 });
+
+describe('soft-404 heading detector (shared with the citation auditor)', () => {
+  const { notFoundHeading, computeBodySignals } = liveStatus;
+  test('reads <title>/<h1> only, decoded, ignoring markup that never renders', () => {
+    expect(notFoundHeading('<title>Page&nbsp;Not&nbsp;Found</title>')).toBe(true);
+    expect(notFoundHeading("<h1>Sorry, we couldn't find this page</h1>")).toBe(true);
+    expect(notFoundHeading('<h1>Pest control in Bradenton</h1><p>404 reviews</p>')).toBe(false);
+    expect(notFoundHeading('<title>Why Termites Were Not Found During Inspection</title>')).toBe(false);
+    expect(notFoundHeading('<h1>Rodents not found after exclusion</h1>')).toBe(false);
+    for (const h of ['404 Not Found', 'Not Found', 'Oops! Not found', 'The page you requested was not found', 'Listing not found', 'Error 404']) {
+      expect(notFoundHeading(`<title>${h}</title>`)).toBe(true);
+    }
+    expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
+  });
+  test('stays linear on malformed or unclosed tags (600 KB fetch cap)', () => {
+    const junks = ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>', '<template></template>',
+      '<h1><template></template>', '<template><template></template>', '<div>', '<li><ul>', '<b><i>', '<table><td>',
+      '<script>', '<style>', '</template>', '<h1><!--', '<title><script></script>', '<<<<', '<!---->', '<p><h1>'];
+    for (const junk of junks) {
+      const started = Date.now();
+      notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
+      expect(Date.now() - started).toBeLessThan(1500); // ~200 ms in Jest; the quadratic scan this guards took 3.5–5 s
+    }
+    for (const html of [`<h1>${'<'.repeat(80000)}</h1>`, `<title>${'<a'.repeat(100000)}</title>`, `<svg>${'<svg/>'.repeat(60000)}`]) {
+      const t0 = Date.now();
+      notFoundHeading(html);
+      expect(Date.now() - t0).toBeLessThan(1500);
+    }
+    for (const html of [`<div a="${'>'.repeat(300000)}`, `${'<a b=">" '.repeat(60000)}`, `${'<a b=c '.repeat(80000)}`,
+      `<svg>${'<svg a=">"'.repeat(60000)}`, `<template>${'<template a=">"'.repeat(60000)}`,
+      `${'<title>'.repeat(80000)}`, `${'</x'.repeat(150000)}`, `<script>${'</scriptx'.repeat(60000)}`, `${'<svg>'.repeat(100000)}`,
+      `${'<svg>'.repeat(60000)}${'</x>'.repeat(60000)}`, `${'<template>'.repeat(60000)}${'</svg>'.repeat(60000)}`]) {
+      const t0 = Date.now();
+      notFoundHeading(html);
+      expect(Date.now() - t0).toBeLessThan(1500);
+    }
+    // deep nesting, then the matching closes (the exhausted-search case)
+    const started = Date.now();
+    notFoundHeading(`${'<template>'.repeat(30000)}${'</template>'.repeat(30000)}`);
+    expect(Date.now() - started).toBeLessThan(1500); // ~200 ms in Jest; the quadratic scan this guards took 3.5–5 s
+  });
+  test('a heading left open runs to the end of the document', () => {
+    expect(notFoundHeading('<html><body><h1>Page not found')).toBe(true);
+    expect(notFoundHeading('<h1>Page <!-- x --> not found')).toBe(true);
+    expect(notFoundHeading('<h1>Waves Pest Control')).toBe(false);
+  });
+  test('inert markup inside a heading, and nested templates, contribute no heading text', () => {
+    expect(notFoundHeading('<h1>Waves Pest Control<template>Not found</template></h1>')).toBe(false);
+    expect(notFoundHeading('<h1>Waves<!-- Not found --> Pest Control</h1>')).toBe(false);
+    expect(notFoundHeading('<template><template></template><h1>Page not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<h1>Page <script>x()</script>not found</h1>')).toBe(true);
+    expect(notFoundHeading('<template></template><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<h1><template></template>Not found</h1>')).toBe(true);
+    expect(notFoundHeading('<iframe><h1>Not found</h1></iframe><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<textarea><h1>Page not found</h1></textarea><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><textarea></template><h1>Not found</h1></textarea></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<iframe src="x"></iframe><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<title>Waves</title><svg><symbol><title>Not found</title></symbol></svg><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<svg><svg><title>x</title></svg><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<svg class="i"/><h1>Page not found</h1>')).toBe(true); // a self-closing svg is empty
+    expect(notFoundHeading('<math><title>Not found</title></math><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<button onclick="if (n > 0) show(\'<h1>Not Found</h1>\')">Go</button><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div data-template="><h1>Page not found</h1>"></div><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<h1 class="a>b">Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<h1><span title="> Page not found">Waves Pest Control</span></h1>')).toBe(false);
+    expect(notFoundHeading('<template><div data-x="</template>"></div><h1>Page not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div data-x="<template>"></div><h1>Page not found</h1>')).toBe(true); // a quoted open hides nothing
+    expect(notFoundHeading('<title>Page Not Found</title>')).toBe(true);
+    expect(notFoundHeading('<title>Waves <b>Pest</b></title><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div hidden><h1>Not found</h1></div><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div hidden><div><p>x</div><h1>Not found</h1></div><h1>Waves</h1>')).toBe(false); // nested closes pair up
+    expect(notFoundHeading('<section hidden="hidden"><br><img src=x><h1>Not found</h1></section><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<div title="not hidden"></div><h1>Page not found</h1>')).toBe(true); // "hidden" in a value is not the attribute
+    expect(notFoundHeading('<div hidden></div><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<svg data-x="/>"><title>Not found</title></svg><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<script>var s = "</scripture><h1>Page not found</h1>";</script><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><scripts></scripts><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<script>x</script\t><h1>Page not found</h1>')).toBe(true);
+    expect(notFoundHeading('<h1><template><template></template></template >Not found</h1>')).toBe(true);
+    expect(notFoundHeading('<template><!-- </template> --><h1>Not found</h1></template><h1>Waves Pest Control</h1>')).toBe(false);
+    expect(notFoundHeading('<template><script>"</template>"</script><h1>Not found</h1></template><h1>Waves</h1>')).toBe(false);
+    expect(notFoundHeading('<template><style>/* </template> */</style></template><h1>Page not found</h1>')).toBe(true);
+  });
+  test('matches tags case-insensitively and only the exact tag name', () => {
+    expect(notFoundHeading('<H1 class="t">Page Not Found</H1>')).toBe(true);
+    expect(notFoundHeading('<h1x>Page not found</h1x>')).toBe(false);
+    expect(notFoundHeading('<h1>Pest <span>control</span></h1><h1>Not found</h1>')).toBe(true); // every h1 is read
+  });
+  test('owned-page body signals flag the same headings', () => {
+    expect(computeBodySignals('<html><head><title>x</title></head><body><h1>We could not find that page</h1></body></html>', 'text/html').softNotFound).toBe(true);
+    expect(computeBodySignals('<html><head><title>Lawn care</title></head><body><h1>Lawn care</h1></body></html>', 'text/html').softNotFound).toBe(false);
+  });
+});

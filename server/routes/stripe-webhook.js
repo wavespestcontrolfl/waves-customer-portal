@@ -2542,6 +2542,16 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
         }
         const mirrorNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+        // A consent row is created here only under the opt-in's OWN stamp of
+        // the consent text version the minting tab rendered (/setup and
+        // /update-amount write it beside save_card_opt_in — codex #5434 r1
+        // P1). A stale or absent stamp means the customer read older copy:
+        // the method stays mirrored but unconsented and unenrolled, and the
+        // office is asked to re-collect the authorization.
+        if (mirrorNeedsConsentRow
+          && !(await ConsentService.deferredCaptureConsentVersionCurrent(paymentIntent, { context: 'pay-page save mirror', customerId: wavesCustomerId }))) {
+          return;
+        }
         if (mirrorNeedsConsentRow) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
@@ -5135,15 +5145,54 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     const stripePmId = typeof setupIntent.payment_method === 'string'
       ? setupIntent.payment_method
       : setupIntent.payment_method.id;
+    // The authorization the customer actually gave (codex #5434 r1 P1): the
+    // accept stamped the consent text version it attested beside the bound
+    // intent. While that is still the current text the enrollment routine
+    // may record the consent from the current copy (the accept's own
+    // idempotent path). Otherwise — a deploy landed between the accept and
+    // this recovery, or a legacy accept carries no stamp — recovery never
+    // records current-version consent the customer never read: it proceeds
+    // only on the customer's own authorization row (recorded by the accept
+    // under that version; any enrollment-scoped row for a legacy accept),
+    // and otherwise skips with one Billing bell for the office to
+    // re-collect — the plan stays accepted, Auto Pay simply is not enrolled.
+    {
+      const ConsentService = require('../services/payment-method-consents');
+      const { renderedConsentVersionIsCurrent } = require('../services/payment-method-consent-text');
+      const acceptedConsentVersion = typeof estimateData?.acceptedRecurringCardConsentVersion === 'string' && estimateData.acceptedRecurringCardConsentVersion
+        ? estimateData.acceptedRecurringCardConsentVersion : null;
+      // The accept may have persisted the EXACT authorized text + version
+      // bound to this intent (#5481 acceptedRecurringCardConsent, passed to
+      // the enrollment routine below and recorded verbatim). That snapshot
+      // is the customer's authorization itself — recovery needs neither the
+      // current copy nor a prior ledger row for it (pre-push Codex on the
+      // merge: an accept from before the version stamp, or across any later
+      // bump, must keep its enrollment backstop).
+      const persistedSnapshot = boundToAccept
+        && typeof estimateData?.acceptedRecurringCardConsent?.text === 'string' && estimateData.acceptedRecurringCardConsent.text
+        && /^v\d+(?:[_-]|$)/.test(String(estimateData.acceptedRecurringCardConsent.version || ''));
+      if (!persistedSnapshot && !renderedConsentVersionIsCurrent(acceptedConsentVersion)) {
+        const onRecord = acceptedConsentVersion
+          ? await ConsentService.hasConsentSnapshotForVariant(estimate.customer_id, stripePmId, { version: acceptedConsentVersion, source: 'estimate_accept' })
+          : await ConsentService.hasEnrollmentScopedConsent(estimate.customer_id, stripePmId);
+        if (!onRecord) {
+          await ConsentService.refuseDeferredConsentRecording({
+            intentId: setupIntent.id, stampedVersion: acceptedConsentVersion, context: 'recurring card accept backstop', customerId: estimate.customer_id,
+          });
+          return;
+        }
+      }
+    }
     const enrollment = await RecurringCards.completeRecurringCardEnrollment({
       customerId: estimate.customer_id,
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
-      // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the accept stamps the consent
-      // variant the capture UI rendered; recovery records that same text
-      // (after_visit_card, v12) rather than the base card consent. Only the
-      // accepted intent carries it, and only a known variant is honored.
+      // The consent variant the accept rendered and recorded (estimate_data
+      // acceptedRecurringCardConsentVariant: the one collection promise's
+      // after_visit_card, PR-B's cohort or PR-C's deferred setup fee):
+      // recovery records that same text rather than the base card consent.
+      // Only the accepted intent carries it, and only that variant is honored.
       ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
         ? { consentVariant: 'after_visit_card' }
         : {}),
@@ -5237,6 +5286,13 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // ran before a Stripe round-trip, and a Bill-To change during it would
       // otherwise leave consent recorded for a withdrawn invoice.
       const coveredNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+      // Same rule as /setup-complete: the stamp /capture-setup made from the
+      // rendering tab's attestation must be this server's current consent
+      // text version, or nothing is recorded or enrolled (codex #5434 r1 P1).
+      if (coveredNeedsConsentRow
+        && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'covered-capture webhook', customerId: wavesCustomerId }))) {
+        return;
+      }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: this webhook can complete DAYS after the customer
@@ -5417,6 +5473,18 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           throw saveErr;
         }
       }
+      // The consent-version rule runs BEFORE any state moves (codex #5434 r2
+      // P1): a stale or absent stamp — an intent minted under older copy,
+      // verified after a copy change — must not clear the customer-level
+      // needs_verification block below, or the next collection would retry
+      // the previously failed bank once the pointer is honored again. The
+      // pending row stays pending and unconsented; the office is asked to
+      // re-collect. Same rule as POST /cards (which refuses before any save).
+      const needsEnrollmentScopedConsent = !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
+      if (needsEnrollmentScopedConsent
+        && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
+        return;
+      }
       // Verification cleared — a pending bank row becomes chargeable.
       if (isBankMethodType(saved.method_type) && saved.ach_status !== 'verified') {
         await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
@@ -5443,7 +5511,8 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // exists (backstop re-runs stay deduped), and enrollment stays
       // consent-gated: the row below is the authority, never SI metadata
       // (Codex #2507 P1).
-      if (!(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId))) {
+      if (needsEnrollmentScopedConsent) {
+        // The stamp was judged current above, before any state moved.
         await ConsentService.recordConsent({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,

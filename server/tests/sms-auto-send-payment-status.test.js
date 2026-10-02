@@ -85,7 +85,7 @@ beforeEach(() => {
   });
 });
 
-const V12 = 'house_voice_v12_real_answers5_cfl_p';
+const V12 = 'house_voice_v12_real_answers5_cflvp';
 const COPY = 'We received your $120.00 card payment on Sep 12, 2026.';
 const SNAP = { customer_id: '00000000-0000-4000-8000-000000000002', sentences: [COPY], family_counts: { payment: 1 } };
 const live = (over = {}) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }], ...over } });

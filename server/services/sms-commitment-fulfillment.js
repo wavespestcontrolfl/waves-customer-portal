@@ -64,7 +64,7 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     means nobody from Waves responded. R3 and 17's reply_answerable stamp
 //     are gone.
 // 19: the no-model close is a customer's ask only (basis 'request'); a
-//     promise Waves made is never closed by a later reply.
+//     promise Waves made is never closed by a later reply. (Narrowed by 25.)
 // 20: a staff promise carries the day it named (sms_context.due_date), and
 //     the check is told a promise is kept only by doing it on that day.
 // 21: a general staff promise admits any delivered text written after it and
@@ -86,7 +86,12 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     evidence hash it compares against sms_context.fulfillment_check — one
 //     model call per still-open row on its next tick, expected and one-time
 //     (noted in the PR body).
-const FULFILLMENT_POLICY = 24;
+// 25: owner 2026-10-01 (false overdue bells): a delivered text a person wrote
+//     after a general staff promise closes it without the model, like a
+//     customer's ask (replyFulfillment). (An SMS cancel-ask witness was tried
+//     and dropped from #5543, owner ruling 2026-10-02; cancel asks behave as
+//     before.)
+const FULFILLMENT_POLICY = 25;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -983,17 +988,23 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
 // open window (eventOnly) a message waits for the deadline, as before. Null
 // when nobody responded; the model then judges any event evidence.
 function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
-  if (!customerAsk(commitment)) return null;
+  // A customer's ask is closed by any person reply. A promise Waves made is
+  // closed only by a TEXT a person wrote after it (owner 2026-10-01: a
+  // promise the office then resolved by text, and the customer thumbed-up,
+  // still rang the bell); calls and emails stay with the model for a promise,
+  // which judges whether they delivered it.
+  const ask = customerAsk(commitment);
+  if (!ask && !staffPromise(commitment)) return null;
   // email_reply (a person's Gmail SENT row resolved to this customer) closes
   // a general ask exactly like sms/call — NEVER email_delivery, which is an
   // automated SendGrid send (coordinator correction #1, 2026-09-29).
-  const replies = evidence.records.filter((row) => ['sms', 'call', 'email_reply'].includes(row.type)
+  const replies = evidence.records.filter((row) => (ask ? ['sms', 'call', 'email_reply'].includes(row.type) : row.type === 'sms' && operatorReply(row))
     && witnessAllowed(row, commitment, evidence.records, eventOnly));
   if (!replies.length) return null;
   const at = (row) => new Date(witnessTime(row, commitment)).getTime();
   const reply = replies.reduce((first, row) => (at(row) < at(first) ? row : first));
   return { verdict: 'fulfilled', record_type: reply.type, record_id: reply.id, matched_at: witnessTime(reply, commitment),
-    quote: null, basis: 'person_reply', extractor_version: VERSION };
+    quote: null, basis: ask ? 'person_reply' : 'person_text_after_promise', extractor_version: VERSION };
 }
 
 // The event page's scan watermark and attempt stamp are bookkeeping, not obligation content.
@@ -1098,7 +1109,7 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   const eventOnly = verdict.event_only === true;
   if (fulfillmentFingerprint(commitment, evidence, { eventOnly }).evidenceHash !== verdict.evidence_hash) return false;
-  if (verdict.basis === 'person_reply') {
+  if (['person_reply', 'person_text_after_promise'].includes(verdict.basis)) {
     const reply = replyFulfillment(evidence, commitment, { eventOnly });
     return reply?.record_type === verdict.record_type && String(reply.record_id) === String(verdict.record_id);
   }

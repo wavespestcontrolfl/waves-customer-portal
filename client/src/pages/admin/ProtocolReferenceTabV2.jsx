@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 import ProtocolTankSheet from "./ProtocolTankSheet";
+import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
 import {
   MONTH_NAMES,
@@ -947,7 +948,7 @@ export default function ProtocolReferenceTabV2() {
 
   const lawnTracks = (programs?.lawn?.tracks?.length
     ? programs.lawn.tracks
-    : FALLBACK_LAWN_TRACKS).filter((track) => track.key === "st_augustine");
+    : FALLBACK_LAWN_TRACKS).filter((track) => track.key === "st_augustine").map(track => ({ ...track, name: "Lawn" }));
   const servicePrograms = programs?.programs?.length
     ? programs.programs
     : FALLBACK_SERVICE_PROGRAMS;
@@ -1121,7 +1122,7 @@ export default function ProtocolReferenceTabV2() {
     : trackData?.safety_rules || [];
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className={cn("gap-4", trackData?.fieldGuideEnabled ? "grid md:grid-cols-[200px_minmax(0,1fr)] items-start" : "flex flex-col")}>
       {/* Protocol picker. Phones: one Select (the wrapping tile row ran to
           four ragged lines). md+: a uniform grid so every tile is the same
           width — lawn tracks first, then the service programs. */}
@@ -1147,7 +1148,7 @@ export default function ProtocolReferenceTabV2() {
             </option>
           ))}
         </Select>
-        <div className="hidden md:grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+        <div className={cn("hidden md:grid gap-2", !trackData?.fieldGuideEnabled && "md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4")}>
           {[
             ...lawnTracks.map((t) => ({ ...t, meta: `${t.visits} visits/year` })),
             ...servicePrograms.map((p) => ({ ...p, meta: `${p.visits} templates` })),
@@ -1197,7 +1198,19 @@ export default function ProtocolReferenceTabV2() {
           </div>
         )}
       </div>
-      {trackData && (
+      {trackData?.fieldGuideEnabled && <Card className="p-4 md:p-6">
+        <div className="flex flex-wrap gap-1 mb-5 border-b border-hairline border-zinc-200" role="group" aria-label="Treatment month">
+          {MONTH_NAMES.map((month, i) => <button key={month} type="button" aria-pressed={selectedMonth === i + 1}
+            onClick={() => setSelectedMonth(i + 1)}
+            className={cn('appearance-none bg-transparent min-h-11 px-3 text-14 border-0 border-b-2 border-solid u-focus-ring', selectedMonth === i + 1 ? 'border-zinc-900 text-ink-primary' : 'border-transparent text-ink-secondary')}>{month}</button>)}
+        </div>
+        {currentVisit?.fieldGuide && <TreeShrubFieldGuide key={currentVisit.month} guide={currentVisit.fieldGuide} safetyRules={safetyRules} />}
+        {trackData.notes?.length > 0 && <details className="mt-4 text-14 text-ink-secondary">
+          <summary className="min-h-11 flex items-center cursor-pointer text-ink-primary">Program notes</summary>
+          <ul className="space-y-3 list-disc pl-5">{trackData.notes.map(note => <li key={note}>{note}</li>)}</ul>
+        </details>}
+      </Card>}
+      {trackData && !trackData.fieldGuideEnabled && (
         <div className="flex flex-col gap-3">
           {/* Month / equipment / area controls — lawn tracks only; service
               programs have no mix inputs, so no (empty) card for them. */}

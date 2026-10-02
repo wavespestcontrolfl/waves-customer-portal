@@ -53,6 +53,13 @@ const FIELD_GROUPS = {
     'price_is_final',
     'staff_accepted_proposed_slot',
     'selected_day_words',
+    // On-site flags (schema 1.22.0): they decide whether a spouse/buyer/tenant/
+    // family member is sent the recipient opt-in ask, so drift must show.
+    'secondary_wants_appointment_texts',
+    'secondary_on_site',
+    // Same inputs for EVERY entry of secondary_contacts[] (order-stable signature,
+    // keyed on each contact's phone identity).
+    'secondary_contacts_consent_signature',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -453,6 +460,8 @@ const FIELD_NORMALIZERS = {
   email: (v) => normalizeString(v),
   preferred_date_time: (v) => normalizeDateTime(v),
   proposed_start_at: (v) => normalizeDateTime(v),
+  // Absent and '' both mean "no other parties" — collapse so pre-1.22 rows don't read as drift.
+  secondary_contacts_consent_signature: (v) => normalizeString(v) || '',
 };
 // Booleans compared as they are, null kept distinct from false:
 //   - price_accepted is a tri-state (true/false/null): unlike
@@ -474,7 +483,7 @@ const BOOL_FIELDS = new Set([
 // means "not committed", identical to false — collapse them so replays
 // don't report a spurious high-severity delta on every pre-1.8.0 row
 // (codex P2). A genuine true↔false disagreement still surfaces.
-const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot']);
+const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot', 'secondary_wants_appointment_texts', 'secondary_on_site']);
 
 function normalizeField(field, value) {
   if (Object.hasOwn(FIELD_NORMALIZERS, field)) return FIELD_NORMALIZERS[field](value);

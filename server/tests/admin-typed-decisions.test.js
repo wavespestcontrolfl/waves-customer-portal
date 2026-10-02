@@ -19,6 +19,8 @@ const mockAudit = jest.fn(async () => 'audit-1');
 const mockCloseIfEmpty = jest.fn(async () => 0);
 jest.mock('../services/typed-decisions/daily-review-item', () => ({ closeIfQueueEmpty: (...a) => mockCloseIfEmpty(...a) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
+const mockEvaluate = jest.fn(async ({ days } = {}) => ({ generatedAt: '2026-10-02T00:00:00.000Z', windowDays: 90, requestedDays: days ?? null, capabilities: [] }));
+jest.mock('../services/typed-decisions/eval', () => ({ evaluateCapabilities: (...a) => mockEvaluate(...a) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -28,6 +30,7 @@ const { callSubjectHash, smsSubjectHash } = require('../services/typed-decisions
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
 const baseRow = (over = {}) => ({
+  provider: 'typesafe',
   id: ID, capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', package_hash: 'h', served_model: 'jev-1.13.0',
   subject_type: 'sms_log', subject_id: 'sms-1', question_id: 'is_courtesy_only',
   jev_answer: JSON.stringify({ p: 0.9, yes: true, confident: true }), baseline_answers: JSON.stringify({ rules: false }),
@@ -75,7 +78,9 @@ describe('GATE_TYPED_DECISIONS off', () => {
     delete process.env.GATE_TYPED_DECISIONS;
     expect((await get('/reviews')).status).toBe(404);
     expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(404);
+    expect((await get('/status')).status).toBe(404);
     expect(db).not.toHaveBeenCalled();
+    expect(mockEvaluate).not.toHaveBeenCalled();
   });
 });
 
@@ -284,5 +289,25 @@ describe('POST /reviews/:id/label', () => {
     const label = JSON.parse(called(log, 'decision_reviews', 'update')[0][0].label);
     expect(label.note).toHaveLength(2000);
     expect(label.correct_value).toBeNull();
+  });
+});
+
+describe('GET /status', () => {
+  test('returns the per-capability evaluation for the requested window; the route itself reads nothing', async () => {
+    installDb({});
+    mockEvaluate.mockClear();
+    const { status, body } = await get('/status?days=30');
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ windowDays: 90, requestedDays: '30', capabilities: [] });
+    expect(mockEvaluate).toHaveBeenCalledWith({ days: '30' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an evaluation failure is a 500 through the error handler, never a partial payload', async () => {
+    installDb({});
+    mockEvaluate.mockRejectedValueOnce(new Error('relation missing'));
+    const { status, body } = await get('/status');
+    expect(status).toBe(500);
+    expect(body.error).toMatch(/relation missing/);
   });
 });

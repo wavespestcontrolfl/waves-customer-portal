@@ -1212,6 +1212,7 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   ];
   let movedContactSlot = false;
   let movedContactPhone = false;
+  const movedPhoneKeys = new Set();
   const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
   for (const slot of CONTACT_SLOTS) {
     const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
@@ -1222,7 +1223,10 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
         movedContactSlot = true;
         // slot[1] is the phone column — only a moved TEXTING target can
         // invalidate the winner's SMS-consent stamp below.
-        if (f === slot[1]) movedContactPhone = true;
+        if (f === slot[1]) {
+          movedContactPhone = true;
+          movedPhoneKeys.add(String(loser[f]).replace(/\D/g, '').slice(-10));
+        }
       }
     }
   }
@@ -1255,6 +1259,47 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
     winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
     winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+  }
+  // Per-phone consent boundary (#5467, service_preferences): a loser contact
+  // phone the call pipeline held out of texting until its own YES
+  // (unconsented_slot_phone_keys), or one the loser's cleared stamp covered
+  // (consent_covered_phone_keys), keeps that standing on the winner when the
+  // phone ends up in the winner's slots. The winner's prior blob is journaled
+  // so an undo restores it.
+  const prefsObj = (row) => {
+    const raw = row.service_preferences;
+    if (raw && typeof raw === 'object') return raw;
+    try { return JSON.parse(raw || '{}') || {}; } catch { return {}; }
+  };
+  const loserPrefs = prefsObj(loser);
+  const winnerPrefs = prefsObj(winner);
+  // Every phone in the winner's FINAL slot set (its own slots plus the ones
+  // moving in): a held loser phone the winner already carries keeps its hold
+  // too (the loser's recipient_optin row is repointed to the winner).
+  const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const finalSlotKeys = new Set([
+    ...CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean),
+    ...movedPhoneKeys,
+  ]);
+  const carried = {};
+  for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys']) {
+    const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
+    if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
+  }
+  // When this merge CLEARED the winner's own stamp (a mixed list), the
+  // winner's existing slot phones were covered by it (grandfathered, often no
+  // recipient_optin row): record them as covered, as an ordinary unconsented
+  // add does, so a later YES can restore the account stamp.
+  if (Object.prototype.hasOwnProperty.call(backfills, 'service_contacts_consent_at') && backfills.service_contacts_consent_at === null) {
+    const winnerOwn = CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean);
+    carried.consent_covered_phone_keys = [...new Set([
+      ...(carried.consent_covered_phone_keys || (Array.isArray(winnerPrefs.consent_covered_phone_keys) ? winnerPrefs.consent_covered_phone_keys : [])),
+      ...winnerOwn,
+    ])];
+  }
+  if (Object.keys(carried).length) {
+    backfills.service_preferences = { ...winnerPrefs, ...carried };
+    if (!isEmptyValue(winner.service_preferences)) winnerPriorValues.service_preferences = winner.service_preferences;
   }
   // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
   // estimate_acceptances rows repoint to the winner below, so the winner's
@@ -3508,6 +3553,16 @@ const REVERT_BACKFILL_CLEAR_EXCLUDED = new Set(['stripe_customer_id', 'is_primar
 function backfillValueUnchanged(current, recorded) {
   if (current === recorded) return true;
   if (current === null || current === undefined || recorded === null || recorded === undefined) return false;
+  // A jsonb column (service_preferences, #5467) compares by content with keys
+  // sorted — String() of two objects is always '[object Object]'.
+  const plainObject = (v) => typeof v === 'object' && !(v instanceof Date);
+  if (plainObject(current) || plainObject(recorded)) {
+    const canon = (v) => JSON.stringify(typeof v === 'string' ? JSON.parse(v) : v, (k, val) => (
+      val && typeof val === 'object' && !Array.isArray(val)
+        ? Object.fromEntries(Object.keys(val).sort().map((key) => [key, val[key]]))
+        : val));
+    try { return canon(current) === canon(recorded); } catch { return false; }
+  }
   if (String(current) === String(recorded)) return true;
   const a = Number(current);
   const b = Number(recorded);
@@ -6098,6 +6153,7 @@ module.exports = {
   UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
+    backfillValueUnchanged,
     classifyPair,
     lockedPairAutoEligibility,
     EMAIL_BOUND_SURFACES,

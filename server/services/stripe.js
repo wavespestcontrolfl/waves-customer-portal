@@ -7,6 +7,27 @@ const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlacehold
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
+const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+
+// Rendered-version stamp for a consent captured through an intent (codex
+// #5434 r1 P1): the saved-payment-method consent version the MINTING tab
+// attested rides the intent's metadata, so the deferred recorders (the
+// webhook mirrors, a redirect return from a reloaded bundle) can refuse to
+// record a consent under text that tab never rendered. Empty when nothing
+// is being saved — Stripe metadata updates merge, so the empty string also
+// CLEARS a stale stamp when the customer unticks the box.
+function consentVersionStamp(saveCard, consentTextVersion) {
+  return { [CONSENT_VERSION_METADATA_KEY]: saveCard && consentTextVersion ? String(consentTextVersion) : '' };
+}
+// The same stamp as an idempotency-key part: the stamp is a create
+// parameter, so a key that ignored it would make a retry across a copy
+// change (or across this stamp's own rollout) a changed-parameters
+// rejection — payment setup blocked until the key expired (pre-push Codex
+// on #5434). 'nocv' for a non-saving mint keeps today's keys for those.
+function consentVersionKeyPart(saveCard, consentTextVersion) {
+  const stamp = consentVersionStamp(saveCard, consentTextVersion)[CONSENT_VERSION_METADATA_KEY];
+  return stamp ? `cv-${stamp}` : 'nocv';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -1293,9 +1314,21 @@ const StripeService = {
   // `replacing`: the "use a different payment method" mint — keyed on the
   // retired intent's id (unbounded, no generation consumed) so re-requesting
   // the same replacement replays the same fresh intent.
-  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null }) {
+  // The intent is stamped with the saved-payment-method consent text version
+  // the page it is minted for renders (the GET mints it on page load, so
+  // this server's CONSENT_VERSION IS that page's), and the version salts the
+  // idempotency key: a page load after a copy change mints a fresh intent
+  // under the new text instead of replaying one stamped with the old, and
+  // the completion tail records a consent only under a current stamp
+  // (codex #5434 r1 P1).
+  // `consentTextVersion` is the version the requesting tab attested, which
+  // the public route validated equals this server's CONSENT_VERSION before
+  // any mint; the constant is only the fallback for direct callers. Stamping
+  // the attested value binds the intent to the bundle that rendered the text.
+  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null, consentTextVersion = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    const stampedVersion = String(consentTextVersion || CONSENT_VERSION);
     const salt = replacing
       ? `_after_${String(replacing)}`
       : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
@@ -1307,9 +1340,10 @@ const StripeService = {
         purpose: 'appointment_card_request',
         request_id: String(requestId),
         scheduled_service_id: String(scheduledServiceId),
+        [CONSENT_VERSION_METADATA_KEY]: stampedVersion,
         ...(replacing ? { replaces: String(replacing) } : {}),
       },
-    }, { idempotencyKey: `appointment_card_request_${requestId}${salt}` });
+    }, { idempotencyKey: `appointment_card_request_${requestId}_${stampedVersion}${salt}` });
   },
 
   /**
@@ -3188,6 +3222,10 @@ const StripeService = {
         db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
+      // payment_date is a DATE: a failed attempt and its same-day retry need
+      // a deterministic order so the newest row is the latest outcome.
+      .orderBy('payments.created_at', 'desc')
+      .orderBy('payments.id', 'desc')
       .limit(limit);
     // The collections-hold deferral placeholder (B10), armed or collected by the retry
     // sweep, is never a payment: a customer-facing history would show it as FAILED with
@@ -3734,6 +3772,15 @@ const StripeService = {
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
+        // The intent a cancel-and-replace branch below retires (codex local
+        // max-effort review on #5434): it must stay in the replacement's
+        // idempotency key. Clearing the invoice pointer alone made the key
+        // fall back to `_new_`, i.e. the ORIGINAL mint's key, and within
+        // Stripe's idempotency window the create replayed that first — now
+        // canceled — intent's original response (status included), binding
+        // the invoice to a dead client secret (save on → off → on within a
+        // day, or re-opening the original link after opting in).
+        let retiredIntentId = null;
         // Combined setups serialize per customer BEFORE any row lock (codex
         // r2 P2): two combined setups from different anchor links otherwise
         // each hold their own anchor and then want the other's inside the
@@ -3904,6 +3951,7 @@ const StripeService = {
                 // a PaymentIntent that will never collect them.
                 await require('./pay-combined').clearPaymentIntentStamps(trx, triagedPi.id);
                 lockedInvoice.stripe_payment_intent_id = null;
+                retiredIntentId = triagedPi.id;
               } catch (e) {
                 logger.warn(`[stripe] pay-page stale-PI triage could not clear dead PI for invoice ${invoiceId}: ${e.message}`);
                 const err = new Error('Could not prepare your payment — please try again in a moment');
@@ -4091,6 +4139,7 @@ const StripeService = {
             // longer charges).
             combined_allocation: combinedAllocation ? PayCombined.encodeAllocation(combinedAllocation) : '',
             save_card_opt_in: saveCard ? 'true' : 'false',
+            ...consentVersionStamp(saveCard, opts.consentTextVersion),
             selected_method_category: 'card',
             // CLEAR any surcharge-finalization metadata (Stripe metadata updates
             // MERGE) so a reused PI that was previously finalized can't carry a
@@ -4148,6 +4197,7 @@ const StripeService = {
               await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
               await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
               lockedInvoice.stripe_payment_intent_id = null;
+              retiredIntentId = activeIntent.id;
             } catch (e) {
               logger.warn(`[stripe] could not release combined PI ${activeIntent.id} for sibling invoice ${invoiceId}: ${e.message}`);
               const err = new Error('Could not prepare your payment — please try again in a moment');
@@ -4155,6 +4205,15 @@ const StripeService = {
               throw err;
             }
           } else if (activeIntent.status === 'requires_payment_method'
+            // A consent-stamp change takes the cancel-and-replace branch
+            // too (pre-push Codex on #5434): an in-place update would
+            // re-stamp a PI whose client secret a stale tab still holds —
+            // Express Checkout confirms straight with Stripe, and the
+            // webhook would record the NEWER version against text that tab
+            // never rendered. Covers the rollout (no stamp → v12) and any
+            // later copy change.
+            && String(activeIntent.metadata?.[CONSENT_VERSION_METADATA_KEY] || '')
+              === String(piParams.metadata[CONSENT_VERSION_METADATA_KEY] || '')
             && (
               // Single-invoice ↔ single-invoice reuse keeps the original
               // in-place update contract (amount refresh included) — the
@@ -4200,17 +4259,19 @@ const StripeService = {
             await stampCombinedSiblings(paymentIntent.id);
             return;
           } else if (activeIntent.status === 'requires_payment_method') {
-            // Allocation or amount CHANGED on an unconfirmed PI (codex r28
-            // P1): cancel and mint FRESH so every stale tab's client secret
-            // is invalidated — an in-place update would leave the old
-            // secret able to confirm a sibling set/total the first tab
-            // never itemized.
+            // Allocation, amount or consent stamp CHANGED on an unconfirmed
+            // PI (codex r28 P1; pre-push Codex on #5434): cancel and mint
+            // FRESH so every stale tab's client secret is invalidated — an
+            // in-place update would leave the old secret able to confirm a
+            // sibling set/total the first tab never itemized, or a saved
+            // method under a consent version it never displayed.
             try {
               await stripe.paymentIntents.cancel(activeIntent.id);
               await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
               await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
               lockedInvoice.stripe_payment_intent_id = null;
-              logger.info(`[stripe] combined allocation/amount changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
+              retiredIntentId = activeIntent.id;
+              logger.info(`[stripe] allocation/amount/consent stamp changed for invoice ${lockedInvoice.invoice_number} — replaced PI ${activeIntent.id} with a fresh mint`);
             } catch (e) {
               logger.warn(`[stripe] could not replace changed-allocation PI ${activeIntent.id} for invoice ${invoiceId}: ${e.message}`);
               const err = new Error('Could not prepare your payment — please try again in a moment');
@@ -4301,7 +4362,7 @@ const StripeService = {
 
         // Include the currently stored PI id in the key so a replacement
         // setup cannot replay an older canceled intent for this invoice.
-        const sourceIntent = lockedInvoice.stripe_payment_intent_id || 'new';
+        const sourceIntent = retiredIntentId || lockedInvoice.stripe_payment_intent_id || 'new';
         // Allocation-salted (codex r13 P2): a rolled-back stamp write can
         // leave a PI parked under this key; if the eligible sibling SET
         // changes while the total stays equal, the retry would send
@@ -4312,7 +4373,10 @@ const StripeService = {
         const allocKeyPart = combinedAllocation
           ? require('crypto').createHash('sha1').update(PayCombined.encodeAllocation(combinedAllocation)).digest('hex').slice(0, 10)
           : 'single';
-        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}_${allocKeyPart}`;
+        // Consent-version-salted too (pre-push Codex on #5434): the stamp is a
+        // create parameter, so a save-the-method mint retried after a copy
+        // change (or after this stamp's own rollout) needs a fresh key.
+        const idempotencyKey = `invoice_pi_${invoiceId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${methodMode}_${sourceIntent}_${allocKeyPart}_${consentVersionKeyPart(saveCard, opts.consentTextVersion)}`;
         paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
 
         if (paymentIntent.status === 'canceled') {
@@ -4580,6 +4644,10 @@ const StripeService = {
       payment_method_types: paymentMethodTypes,
       metadata: {
         waves_invoice_id: invoiceId,
+        // The webhook's saved-method mirror keys on waves_customer_id (GH
+        // Codex r5 P1): carried here so a consent-stamp REPLACEMENT minted
+        // from this block keeps it, exactly like the /setup mint.
+        waves_customer_id: invoice.customer_id,
         invoice_number: invoice.invoice_number,
         base_amount: String(base),
         card_surcharge: '0',
@@ -4589,6 +4657,7 @@ const StripeService = {
         pay_session_touched_at: paySessionTouchedAt(),
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        ...consentVersionStamp(saveCard, opts.consentTextVersion),
         // CLEAR any surcharge-finalization metadata (Stripe metadata updates
         // MERGE) — a declined /finalize leaves surcharge_policy_version on the
         // PI, and the webhook's surcharge-bypass quarantine reads that stale key
@@ -4612,6 +4681,44 @@ const StripeService = {
       updateParams.setup_future_usage = '';
     }
 
+    // A consent-stamp CHANGE never updates in place (pre-push Codex on
+    // #5434): a stale tab can still confirm this PI's client secret straight
+    // with Stripe (Express Checkout), and re-stamping the PI would let the
+    // webhook record consent text that tab never displayed — the rollout
+    // case being an UNSTAMPED older PI reused by a current tab with
+    // saveCard:false ('' = '') that then enables saving. Compared under the
+    // invoice lock on the PI's LIVE metadata; a change takes the existing
+    // replacement path (fresh PI, the old secret dead, the `replaced`
+    // response re-mounts Elements) — the same rule /setup's reuse applies.
+    const nextConsentStamp = String(updateParams.metadata[CONSENT_VERSION_METADATA_KEY] || '');
+    // The live read doubles as the replacement path's status inspection
+    // (one retrieve per update, the same fail-closed contract).
+    let liveIntent = null;
+    const refuseInPlaceOnConsentStampChange = async () => {
+      try {
+        liveIntent = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
+      } catch (retrieveErr) {
+        // Fail closed: a PI whose live stamp cannot be read is never
+        // re-stamped (or replaced) blind — the client retries.
+        throw new Error(`Could not verify the existing payment status for PI ${effectivePaymentIntentId}: ${retrieveErr.message}`);
+      }
+      if (String(liveIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || '') !== nextConsentStamp) {
+        const swap = new Error('consent stamp changed — replacing the PaymentIntent');
+        swap.consentStampChanged = true;
+        throw swap;
+      }
+    };
+    const replacementContext = () => ({
+      paymentMethodTypes,
+      metadata: updateParams.metadata,
+      customer: updateParams.customer || null,
+      setupFutureUsage: updateParams.setup_future_usage,
+      base,
+      baseCents,
+      methodCategory: selectedMethodCategory,
+      oldIntent: liveIntent,
+    });
+
     try {
       let paymentIntent;
       if (combinedCtx) {
@@ -4631,6 +4738,7 @@ const StripeService = {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
           });
+          await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       } else {
@@ -4645,6 +4753,7 @@ const StripeService = {
             throw err;
           }
           await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
+          await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       }
@@ -4743,6 +4852,10 @@ const StripeService = {
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
       if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
+      if (err && err.consentStampChanged) {
+        logger.info(`[stripe] PI ${effectivePaymentIntentId} consent stamp changed on update-amount; replacing for method=${selectedMethodCategory}`);
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
+      }
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover
@@ -4754,15 +4867,7 @@ const StripeService = {
           `[stripe] PI ${effectivePaymentIntentId} tender switch blocked by attached PM; `
           + `recreating for method=${selectedMethodCategory}`,
         );
-        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, {
-          paymentMethodTypes,
-          metadata: updateParams.metadata,
-          customer: updateParams.customer || null,
-          setupFutureUsage: updateParams.setup_future_usage,
-          base,
-          baseCents,
-          methodCategory: selectedMethodCategory,
-        });
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
       }
       logger.error(`[stripe] PI update failed for ${effectivePaymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
@@ -4789,12 +4894,16 @@ const StripeService = {
     // state. If its status can't be read, or it's processing/succeeded (money
     // in flight), do NOT detach it — repointing the invoice off an in-flight
     // ACH PI would let the customer pay the replacement while the original
-    // bank debit is still pending.
-    let oldIntent = null;
-    try {
-      oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
-    } catch (retrieveErr) {
-      logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
+    // bank debit is still pending. update-amount hands over the live read it
+    // just took under the invoice lock (ctx.oldIntent) so the inspection is
+    // one retrieve, not two.
+    let oldIntent = ctx.oldIntent && String(ctx.oldIntent.id) === String(oldPaymentIntentId) ? ctx.oldIntent : null;
+    if (!oldIntent) {
+      try {
+        oldIntent = await stripe.paymentIntents.retrieve(oldPaymentIntentId);
+      } catch (retrieveErr) {
+        logger.warn(`[stripe] Could not retrieve stale PI ${oldPaymentIntentId} during tender switch: ${retrieveErr.message}`);
+      }
     }
     if (!oldIntent) {
       // Status unknown — surface as a hard error (visible to ops) and never
@@ -4817,8 +4926,11 @@ const StripeService = {
       // replaced_from stamps one generation of lineage so update-amount can
       // recognize a lost-response replay of THIS replacement (client retries
       // still carrying the canceled PI's id) without opening a blanket
-      // stale-id retarget.
-      metadata: { ...metadata, replaced_from: String(oldPaymentIntentId) },
+      // stale-id retarget. The replacement carries a SUPERSET of the old
+      // PI's metadata (GH Codex r5 P1): every stamp the webhook mirrors read
+      // (waves_customer_id, save_card_opt_in, consent_text_version, …)
+      // survives the swap, with this update's values winning.
+      metadata: { ...(oldIntent?.metadata || {}), ...metadata, replaced_from: String(oldPaymentIntentId) },
       payment_method_types: paymentMethodTypes,
     };
     if (customer) {
@@ -4891,8 +5003,11 @@ const StripeService = {
       const replaceAllocPart = metadata?.combined_allocation
         ? require('crypto').createHash('sha1').update(String(metadata.combined_allocation)).digest('hex').slice(0, 10)
         : 'single';
+      // The replacement inherits the old PI's stamp via ctx.metadata; salt
+      // its key with it for the same reason as the setup key.
+      const replaceConsentPart = metadata?.[CONSENT_VERSION_METADATA_KEY] ? `cv-${metadata[CONSENT_VERSION_METADATA_KEY]}` : 'nocv';
       newIntent = await stripe.paymentIntents.create(piParams, {
-        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}_${baseCents}_${replaceAllocPart}`,
+        idempotencyKey: `invoice_pi_replace_${invoiceId}_${oldPaymentIntentId}_${paymentMethodTypes.join('-')}_${saveFlag}_${baseCents}_${replaceAllocPart}_${replaceConsentPart}`,
       });
 
       const invoiceUpdated = await trx('invoices')
@@ -4929,6 +5044,9 @@ const StripeService = {
       paymentIntentId: newIntent.id,
       clientSecret: newIntent.client_secret,
       replaced: true,
+      // The tender this replacement is locked to — the page re-mounts its
+      // form on it (codex local max-effort review on #5434).
+      methodCategory,
       base,
       surcharge: 0,
       total: base,
@@ -5111,6 +5229,7 @@ const StripeService = {
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',
         save_card_opt_in: saveCard ? 'true' : 'false',
+        ...consentVersionStamp(saveCard, opts.consentTextVersion),
       },
     };
 
@@ -5195,6 +5314,25 @@ const StripeService = {
           }
         }
 
+        // Consent-stamp fence (pre-push Codex on #5434): this update writes
+        // the stamp beside save_card_opt_in. If the live PI carries a
+        // DIFFERENT stamp (the customer ticked Save after the quote while the
+        // page skipped its /update-amount sync, or a pre-rollout PI with
+        // none), an in-place re-stamp would — should this confirm fail —
+        // leave a client secret an older tab can still confirm (Express
+        // Checkout) under text it never displayed. Refuse under the invoice
+        // lock instead: the page reloads and re-syncs through /setup, which
+        // replaces the PI on a stamp change. Read for the stamp only — the
+        // amount_details clear below stays unconditional (no probe).
+        const livePi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+        if (String(livePi?.metadata?.[CONSENT_VERSION_METADATA_KEY] || '')
+          !== String(updateParams.metadata[CONSENT_VERSION_METADATA_KEY] || '')) {
+          const fence = new Error('Your payment session changed. Please refresh the page and try again.');
+          fence.statusCode = 409;
+          fence.staleBalance = true;
+          throw fence;
+        }
+
         try {
           await stripe.paymentIntents.update(
             lockedInvoice.stripe_payment_intent_id,
@@ -5259,6 +5397,9 @@ const StripeService = {
         err.savedCardPending = true;
         throw err;
       }
+      // The consent-stamp fence's reloadable 409 reaches the route as-is
+      // (same contract as /update-amount's staleBalance), never wrapped.
+      if (err && err.staleBalance) throw err;
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }

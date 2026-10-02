@@ -611,6 +611,18 @@ describe('ported closeout compliance (typed path)', () => {
       completionPhotos: photos,
     });
     expect(injection.blocks.map((b) => b.code)).toContain('tree_shrub_injection_use_palm_flow');
+
+    // A catalog row marked only by its trunk-injection method / label unit
+    // (no injection word in the name) redirects to the palm flow too.
+    const phospho = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Disease treatment', pollinator_status: 'No insecticide applied', irac_frac_logged: 'Yes' },
+      products: [product('p6', 'Arborjet PHOSPHO-Jet Systemic Fungicide')],
+      productRows: [{ ...row('p6', 'Arborjet PHOSPHO-Jet Systemic Fungicide'), application_method: 'trunk_injection', default_unit: 'ml/inch dbh' }],
+      completionPhotos: photos,
+    });
+    expect(phospho.blocks.map((b) => b.code)).toContain('tree_shrub_injection_use_palm_flow');
   });
 });
 

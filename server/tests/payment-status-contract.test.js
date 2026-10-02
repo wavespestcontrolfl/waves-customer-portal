@@ -977,3 +977,14 @@ test.each([
   expect(c.copiesOffTarget(copied, inbound, { today: '2026-09-13' })).toBe(off);
 });
 
+
+// Merge with PR #5499 (VISIT STATUS & OPEN LOOPS): "we owe you a callback" is a promise, not money - an allow-list of non-money things
+describe('assertsPaymentStatus: a non-money "we owe you ..." promise is not payment status', () => {
+  const asserts = (t) => require('../services/payment-status-contract').assertsPaymentStatus(t, { inboundText: 'thanks!' });
+  test.each([
+    'Glad to help. We still owe you that callback about the quote.', 'We owe you a callback.', "We're owing you an update on the visit.",
+  ])('not status: %s', (t) => { expect(asserts(t)).toBe(false); });
+  test.each([
+    'We owe you a refund.', 'We owe you a callback about your $40 refund.', 'You still owe a balance.', 'You owe $50.', 'We owe you $20.',
+  ])('still status: %s', (t) => { expect(asserts(t)).toBe(true); });
+});

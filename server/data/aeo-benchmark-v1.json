@@ -177,7 +177,7 @@
       "city": "Sarasota",
       "service": "pest control",
       "intent": "decision",
-      "target_path": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/"
+      "target_path": "/pest-control/is-it-worth-getting-an-exterminator/"
     },
     {
       "id": "Q23",
@@ -313,7 +313,7 @@
       "city": "North Port",
       "service": "pest control",
       "intent": "cost",
-      "target_path": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/"
+      "target_path": "/pest-control/how-much-should-you-spend-on-pest-control/"
     },
     {
       "id": "Q40",

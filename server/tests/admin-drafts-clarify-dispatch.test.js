@@ -146,6 +146,7 @@ beforeEach(() => {
     return makeBuilder(table, cfg);
   });
   db.transaction = async (callback) => callback(db);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings })); // the review-provenance stamp (flags.review_verdict)
   db.fn = { now: () => new Date() };
   reopenClarifyAfterFailedSend.mockResolvedValue({ reopened: true, retired: false });
 });

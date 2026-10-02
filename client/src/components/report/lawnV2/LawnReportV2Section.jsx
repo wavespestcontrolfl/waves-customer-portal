@@ -24,6 +24,7 @@ import {
   RainLast7DaysChart,
   MowingHeightGauge,
   LawnTrends,
+  LawnProgramLine,
 } from './LawnReportV2';
 
 // GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout.
@@ -52,6 +53,7 @@ function LawnReportV2LeadSection({ data, print }) {
       {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} lead scoreExplanation={data.snapshot?.scoreExplanation && data.snapshot.scoreExplanation !== data.lead.why ? data.snapshot.scoreExplanation : null} /> : null}
       {data.rain7d?.length ? <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} source={data.rain7dSource} /> : null}
       {data.mowing ? <MowingHeightGauge mowing={data.mowing} /> : null}
+      <LawnProgramLine snapshot={data.snapshot} />
       {data.trends ? <LawnTrends trends={data.trends} baselineScore={data.snapshot?.overallScore} hasNextVisit={Boolean(data.snapshot?.nextVisit?.label && data.snapshot.nextVisit.label !== 'Invalid Date')} /> : null}
     </div>
     </PrintContext.Provider>

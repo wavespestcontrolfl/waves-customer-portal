@@ -17,6 +17,8 @@ jest.mock('../models/db', () => {
     chain.whereNot = record('whereNot');
     chain.forUpdate = record('forUpdate');
     chain.whereNotNull = record('whereNotNull');
+    // The office-parked setup fee probe (setup_fee_office_billing alert).
+    chain.whereRaw = record('whereRaw');
     chain.orderBy = record('orderBy');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
@@ -147,6 +149,14 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     // Missing row throws (fail closed) rather than pricing the fragment.
     setTables({ visit: null });
     await expect(resolveDirectRodentSetupObligation(db, { id: 'gone', ...rodentVisit })).rejects.toThrow('not found');
+  });
+
+  test('a setup fee already handed to the office (setup_fee_office_billing alert on the series) is never derived again', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    mockTableHandlers.dispatch_alerts = { first: () => ({ id: 'alert-1' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
   });
 
   test('service identity is CATALOG-first: a stale label never decides the setup obligation or the plan class (codex #3591 r32 P1)', async () => {

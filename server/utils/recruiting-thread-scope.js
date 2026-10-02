@@ -158,6 +158,6 @@ function newerEvidence(candidate, best) {
 }
 
 module.exports = {
-  RECRUITING_MESSAGE_TYPE_PREFIX, OPEN_APPLICATION_STATUSES, SMS_EVIDENCE_OUTCOMES,
+  RECRUITING_MESSAGE_TYPE_PREFIX, RECRUITING_MESSAGE_TYPE_PREFIX_LIKE, OPEN_APPLICATION_STATUSES, SMS_EVIDENCE_OUTCOMES,
   isRecruitingMessageType, hideRecruitingThreadsFromNonAdmin, excludeRecruitingSmsLog, isRecruitingPhone, effectiveSendMs, newerEvidence,
 };

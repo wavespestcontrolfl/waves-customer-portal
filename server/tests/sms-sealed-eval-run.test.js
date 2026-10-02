@@ -601,7 +601,7 @@ describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
     expect(judge.judgeOne).not.toHaveBeenCalled();
     const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
     expect(result).toMatchObject({ verdict: 'ungradable' });
-    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers_p \(items must carry "FOLLOW-UP SLA RIGHT NOW:" \+ "- Payment options:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "FREE RE-SERVICE:"\)/);
+    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers_p \(items must carry "FOLLOW-UP SLA RIGHT NOW:" \+ "- Payment options:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "FREE RE-SERVICE:"\)/);
     const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
     expect(finalPatch).toBeTruthy();
     // Excluded — never counted as graded (same rule the terminal no-progress
@@ -1024,7 +1024,7 @@ describe('category-aware sealed compatibility', () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
     const v12Pool = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` }), item('i2', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` })] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi: v12Pool }))
-      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "- Payment options:" \+ "FREE RE-SERVICE:"/);
+      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "- Payment options:" \+ "FREE RE-SERVICE:"/);
     const dbi = makeRunnerDb({
       runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v11', baseline_run_id: null }],
       items: [item('i1', { facts_block: `FROZEN\n${SLA}\nBILLING:\n` })],
@@ -1149,46 +1149,52 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   const PO = '- Payment options:';
   const CF = 'COMPANY FACTS (owner-approved; state these plainly):';
   const LBL = 'LABEL FACTS (';
+  const VL = 'VISIT STATUS & OPEN LOOPS:'; // '_cflv' (SMS facts-gap PR 1); contract order is SLA, CF, LBL, VL, RS
   const contract = (v) => ({ required: requiredFactMarkers(v), forbidden: forbiddenFactMarkers(v) });
 
   test('historical bare and _cf identities: FREE RE-SERVICE only with the complaints tag, forbidden otherwise', () => {
-    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, LBL, PO, RS] });
-    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, LBL, PO, RS] });
-    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, LBL, PO] });
-    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [LBL, PO, RS] });
-    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [LBL, PO] });
+    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, LBL, VL, PO] });
+    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [LBL, VL, PO, RS] });
+    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [LBL, VL, PO] });
   });
 
   test('the numeric token 2+ requires FREE RE-SERVICE (tagged or not), and composes with _cf', () => {
     for (const v of ['house_voice_v12_real_answers2', 'house_voice_v12_real_answers2+bl', 'house_voice_v12_real_answers2+c', 'house_voice_v12_real_answers3']) {
       expect(contract(v).required).toEqual([SLA, RS]);
-      expect(contract(v).forbidden).toEqual([CF, LBL, PO]);
+      expect(contract(v).forbidden).toEqual([CF, LBL, VL, PO]);
     }
     for (const v of ['house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers2_cf+bclm', 'house_voice_v12_real_answers2_cf+c']) {
       expect(contract(v).required).toEqual([SLA, RS, CF]);
-      expect(contract(v).forbidden).toEqual([LBL, PO]);
+      expect(contract(v).forbidden).toEqual([LBL, VL, PO]);
     }
-    // PR #5416's identity (3_cfl: re-service + COMPANY FACTS + LABEL FACTS, cumulative) is now historical: it forbids Payment options
+    // PR #5416's identity (3_cfl: re-service + COMPANY FACTS + LABEL FACTS) is historical: it forbids VISIT STATUS & OPEN LOOPS and Payment options
     for (const v of ['house_voice_v12_real_answers3_cfl', 'house_voice_v12_real_answers3_cfl+bclm', 'house_voice_v12_real_answers3_cfl+c']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, LBL]);
+      expect(contract(v).forbidden).toEqual([VL, PO]);
+    }
+    // PR #5499's identity (3_cflv: + VISIT STATUS & OPEN LOOPS) is historical too: it forbids Payment options
+    for (const v of ['house_voice_v12_real_answers3_cflv', 'house_voice_v12_real_answers3_cflv+bclm', 'house_voice_v12_real_answers3_cflv+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL]);
       expect(contract(v).forbidden).toEqual([PO]);
     }
   });
 
-  test('the current identity (5_cfl_p, PRs #5331 + #5416) requires SLA + FREE RE-SERVICE + COMPANY FACTS + LABEL FACTS + Payment options and forbids nothing', () => {
-    for (const v of ['house_voice_v12_real_answers5_cfl_p', 'house_voice_v12_real_answers5_cfl_p+bclm']) {
-      expect(contract(v).required).toEqual([SLA, RS, CF, LBL, PO]);
+  test('the current identity (5_cflvp, PRs #5331 + #5499) requires SLA + FREE RE-SERVICE + COMPANY FACTS + LABEL FACTS + VISIT STATUS & OPEN LOOPS + Payment options and forbids nothing', () => {
+    for (const v of ['house_voice_v12_real_answers5_cflvp', 'house_voice_v12_real_answers5_cflvp+bclm', 'house_voice_v12_real_answers5_cflvp+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL, PO]);
       expect(contract(v).forbidden).toEqual([]);
     }
     // 5 composes like 2/3: dropping a token re-forbids its marker
-    expect(contract('house_voice_v12_real_answers5_cfl').forbidden).toEqual([PO]);
-    expect(contract('house_voice_v12_real_answers5_cf_p').forbidden).toEqual([LBL]);
-    expect(contract('house_voice_v12_real_answers5_p').forbidden).toEqual([CF, LBL]);
+    expect(contract('house_voice_v12_real_answers5_cfl').forbidden).toEqual([VL, PO]);
+    expect(contract('house_voice_v12_real_answers5_cf_p').forbidden).toEqual([LBL, VL]);
+    expect(contract('house_voice_v12_real_answers5_p').forbidden).toEqual([CF, LBL, VL]);
   });
 
   test('the current identity with every category tag still fits the varchar(40) column', () => {
     expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
-    expect('house_voice_v12_real_answers5_cfl_p+bclm'.length).toBe(40);
+    expect('house_voice_v12_real_answers5_cflvp+bclm'.length).toBe(40);
   });
 });
 

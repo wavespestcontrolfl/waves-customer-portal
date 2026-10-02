@@ -3726,3 +3726,49 @@ describe('previewMergeEffects (shared merge-effect reader)', () => {
     expect(out.referral).toMatchObject({ loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: 'p-loser', winner_promoter_id: null, balances_added: {} });
   });
 });
+
+// #5467: the per-phone consent boundary travels with the loser's contact
+// slots, and the undo comparator compares a jsonb blob by content.
+describe('merge carries the per-phone consent boundary (service_preferences)', () => {
+  const winner = { id: 'w', service_preferences: { interior_spray: true } };
+  const loser = {
+    id: 'l', service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123',
+    service_contacts_consent_at: '2026-07-22T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v1',
+    service_preferences: { unconsented_slot_phone_keys: ['5550100123', '5550100999'] },
+  };
+
+  test('a held loser phone whose slot moves stays held on the winner; the winner\'s prior blob is journaled', () => {
+    const { backfills, winnerPriorValues } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills.service_contact_phone).toBe('+15550100123');
+    expect(backfills.service_preferences).toEqual({ interior_spray: true, unconsented_slot_phone_keys: ['5550100123'] });
+    expect(winnerPriorValues.service_preferences).toEqual({ interior_spray: true });
+  });
+
+  test('a held loser phone the winner ALREADY carries keeps its hold (no slot moves, the opt-in row is repointed)', () => {
+    const w = { ...winner, service_contact_name: 'Sample Spouse', service_contact_phone: '(555) 010-0123' };
+    const { backfills } = dedupe.predictWinnerBackfills(w, loser);
+    expect(backfills.service_contact_phone).toBeUndefined();
+    expect(backfills.service_preferences).toEqual({ interior_spray: true, unconsented_slot_phone_keys: ['5550100123'] });
+  });
+
+  test('when the merge clears the winner\'s own stamp (mixed list), the winner\'s existing slot phones are recorded as covered', () => {
+    const w = { id: 'w', service_preferences: {}, service_contact_name: 'Sample Manager', service_contact_phone: '+15550100777', service_contacts_consent_at: '2026-07-22T00:00:00Z' };
+    const l = { id: 'l', service_contact2_name: 'Sample Tenant', service_contact2_phone: '+15550100888', service_preferences: {} };
+    const { backfills } = dedupe.predictWinnerBackfills(w, l);
+    expect(backfills.service_contacts_consent_at).toBeNull();
+    expect(backfills.service_preferences.consent_covered_phone_keys).toEqual(['5550100777']);
+  });
+
+  test('no held phone moving = no service_preferences backfill', () => {
+    const { backfills } = dedupe.predictWinnerBackfills(winner, { ...loser, service_preferences: {} });
+    expect(backfills).not.toHaveProperty('service_preferences');
+  });
+
+  test('undo comparator: objects compare by content (key order ignored); dates keep their old rule', () => {
+    const { backfillValueUnchanged } = dedupe._test;
+    expect(backfillValueUnchanged({ a: 1, b: [2] }, { b: [2], a: 1 })).toBe(true);
+    expect(backfillValueUnchanged({ a: 1 }, { a: 2 })).toBe(false);
+    expect(backfillValueUnchanged({ a: 1 }, JSON.stringify({ a: 1 }))).toBe(true);
+  });
+});
+

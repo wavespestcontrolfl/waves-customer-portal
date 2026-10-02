@@ -23,7 +23,7 @@ const {
   paymentStatusSendBlockReason, paymentStatusVerdict, bodyNeedsPaymentRecheck, bodyNeedsBillingBoundaryCheck,
 } = require('../services/sms-amount-recheck');
 
-const V12 = 'house_voice_v12_real_answers5_cfl_p';
+const V12 = 'house_voice_v12_real_answers5_cflvp';
 
 function dbWithCustomer(row) {
   return () => ({ where: () => ({ first: async () => row }) });

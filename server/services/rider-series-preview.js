@@ -11,10 +11,12 @@
  * can never silently disagree about what "eligible" or "the plan" means.
  * `docs/design/rider-series-scheduling.md` has the full rule set.
  *
- * Nothing in this repository sets `scheduled_services.rides_parent_id` yet
- * (schema-only migration 20260928220000_scheduled_services_rides_parent —
- * see its own header) and nothing calls `previewRiderPair` from any hook,
- * cron, or writer. It is reached ONLY from
+ * `scheduled_services.rides_parent_id` is written in ONE place: estimate
+ * accept, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT (rider-accept-seeding.js
+ * links a quarterly rider series to the lawn series it was seeded on), and is
+ * read by the series extension (admin-schedule.js#extendSeriesOnceLocked, same
+ * gate) so a rider's next visit keeps riding the lawn. Nothing calls
+ * `previewRiderPair` from any hook, cron, or writer. It is reached ONLY from
  * scripts/rider-series-preview-report.js, a read-only ops report the owner
  * runs by hand.
  *
@@ -38,7 +40,7 @@ const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
 const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
-const { clearOfBlackout } = require('./scheduling/blackout-nudge');
+const { clearOfBlackout, isBlackedOut } = require('./scheduling/blackout-nudge');
 
 const MIN_GAP_DAYS = 77;
 const TARGET_GAP_DAYS = 84;
@@ -72,6 +74,22 @@ const STRUCTURAL_BLOCKERS = new Set([
   'cross_customer', 'not_recurring', 'not_series_root',
 ]);
 
+// Reasons that make the plan's host dates NOT a ride for the series extension
+// (admin-schedule.js#extendSeriesOnceLocked): the pair is structurally wrong, a
+// property compare failed or could not be made, the pairing table / host
+// service does not allow it, the plan has no anchor or a host/rider row is
+// waiting to be rescheduled (its dates are about to change), or a read the
+// plan depends on failed. Everything else the preview lists (customer holds,
+// plan hold, duplicate series, a stopped plan, ...) gates whether the SERIES
+// may be extended at all — a decision the extension's own callers already make
+// — and says nothing about whether the next date can ride the lawn.
+const RIDE_BLOCKING_REASONS = new Set([
+  ...STRUCTURAL_BLOCKERS,
+  'different_property', 'property_unresolved', 'pairing_not_enabled', 'no_anchor',
+  'host_reschedule_pending', 'rider_reschedule_pending', 'blackout_check_error',
+  'series_check_error', 'error',
+]);
+
 // Table-driven pair-structure gates (Codex P2 round on PR #5290 —
 // previewRiderPair's own complexity): every ROW is a plain sync predicate
 // over the already-loaded pair context, evaluated in order and never
@@ -86,6 +104,10 @@ const PAIR_STRUCTURE_GATES = [
   ['not_series_root', (ctx) => !!ctx.riderParent.recurring_parent_id],
   ['not_recurring', (ctx) => !ctx.riderParent.is_recurring || !ctx.riderParent.recurring_pattern],
   ['not_ongoing', (ctx) => !(ctx.cols.recurring_ongoing ? !!ctx.riderParent.recurring_ongoing : false)],
+  // The CURRENT services (loadPairContext overlays both roots with their
+  // series-scope service overrides): a host that is no longer a 6-week/monthly
+  // lawn series, or a rider the pairing table does not allow on it.
+  ['pairing_not_enabled', (ctx) => !riderPairingEnabled(ctx.hostParent, riderFamilyOf(ctx.riderParent), ctx.riderParent.recurring_pattern)],
 ];
 
 function dateOnly(value) {
@@ -153,6 +175,54 @@ function nextRiderDate({
   if (floor && next && next < floor) next = shiftPastWeekend(base, skipWeekends, 'forward');
   if (next && blackoutDates) next = clearOfBlackout(next, blackoutDates, { skipWeekends });
   return next;
+}
+
+// Which series may ride which (owner rulings 2026-10-01). Every pairing uses
+// the one 77/84/105 date rule below, so a 6-week lawn host gives a quarterly
+// rider every 2nd lawn date and a monthly lawn host every 3rd. One table: a
+// later host:rider mix (bi-monthly, semiannual, mosquito riders — they need
+// their own gaps) is one more row here, not another set of call-site tests.
+const QUARTERLY_RIDER_FAMILIES = ['pest_control', 'tree_shrub', 'termite_bait'];
+const RIDER_PAIRINGS = [
+  { host: 'lawn_6wk', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+  { host: 'lawn_monthly', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+];
+
+// 'lawn_6wk' | 'lawn_monthly' | null for a series row. Prod stores 6-week lawn
+// three ways: every_6_weeks, custom with a 42-day interval (whatever the
+// catalog key says — the interval is the cadence), and custom with a NULL
+// interval on lawn_care_6week.
+// Is this row's CURRENT service lawn care? The one predicate for "can this row
+// host a rider": its stamped catalog key when it has one (a later service
+// change stamps the new key, whatever the old label said), else its label.
+// Applied to the override-overlaid host root and to every host occurrence.
+function isLawnServiceRow(row) {
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  const snapshot = String(row?.service_key_snapshot || '');
+  return snapshot ? snapshot.startsWith('lawn_care') : serviceKeyFor({ service_type: row?.service_type }) === 'lawn_care';
+}
+
+function riderHostKind(row) {
+  if (!row) return null;
+  const snapshot = String(row.service_key_snapshot || '');
+  if (!isLawnServiceRow(row)) return null;
+  if (row.recurring_pattern === 'every_6_weeks') return 'lawn_6wk';
+  if (row.recurring_pattern === 'monthly') return 'lawn_monthly';
+  if (row.recurring_pattern !== 'custom') return null;
+  const interval = row.recurring_interval_days;
+  return Number(interval) === 42 || (interval == null && snapshot === 'lawn_care_6week') ? 'lawn_6wk' : null;
+}
+
+function riderFamilyOf(row) {
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  const snapshot = row?.service_key_snapshot;
+  return serviceKeyFor(snapshot ? { service_key: snapshot } : { service_type: row?.service_type });
+}
+
+function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
+  const host = riderHostKind(hostRow);
+  return !!host && RIDER_PAIRINGS.some((p) => p.host === host
+    && p.riderPattern === riderPattern && p.riderFamilies.includes(riderFamily));
 }
 
 /**
@@ -280,7 +350,7 @@ async function withComparableKeys(conn, scopes) {
 }
 
 // Pure, per-ROW twin of resolveSeriesPropertyScope (Codex P1 round #2 on PR
-// #5290 — loadHostDates' own host-date filter, below): a plain child row's
+// #5290 — loadHostRows' own host-row filter, below): a plain child row's
 // own stamped `property_id` and `service_address_*` columns, reduced to the
 // same {propertyId, key, resolved} shape with the SAME normalized key
 // (`estimate-property-linkage.js#normalizedEstimatePropertyKey`), but never
@@ -508,10 +578,18 @@ async function loadPairContext(conn, riderParentId, hostParentId) {
   if (!riderParent) return { blocked: 'rider_not_found' };
   const resolvedHostId = hostParentId || riderParent.rides_parent_id;
   if (!resolvedHostId) return { blocked: 'not_a_rider' };
-  const hostParent = await conn('scheduled_services').where({ id: resolvedHostId }).first();
-  if (!hostParent) return { blocked: 'host_missing' };
+  const hostRaw = await conn('scheduled_services').where({ id: resolvedHostId }).first();
+  if (!hostRaw) return { blocked: 'host_missing' };
+  // Both roots are read as the series CURRENTLY is: a "this and following"
+  // service change leaves the completed root's columns and stamps the new
+  // service in recurring_template_overrides.
+  const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
   return {
-    cols, riderParent, hostParent, riderParentId, resolvedHostId,
+    cols,
+    riderParent: overlayRecurringTemplateOverrides(riderParent, cols),
+    hostParent: overlayRecurringTemplateOverrides(hostRaw, cols),
+    riderParentId,
+    resolvedHostId,
   };
 }
 
@@ -520,7 +598,7 @@ async function loadPairContext(conn, riderParentId, hostParentId) {
 // caller decides whether a STRUCTURAL_BLOCKERS hit skips plan computation),
 // hostScope is the host's own resolved property scope (Codex P1 round #2 on
 // PR #5290 — computed here once, alongside the pair's own property compare,
-// and handed to loadHostDates below so it never re-resolves it).
+// and handed to loadHostRows below so it never re-resolves it).
 async function evaluatePairGates(conn, ctx) {
   const {
     cols, riderParent, hostParent, riderParentId,
@@ -576,11 +654,9 @@ async function evaluatePairGates(conn, ctx) {
   // one thing this preview exists to never disagree with the top-up about.
   try {
     const { topupAllSeriesSkipReasons } = require('../routes/admin-schedule');
-    const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
-    const overlaidRiderParent = overlayRecurringTemplateOverrides(riderParent, cols);
     // Savepoint: a failed read here must not abort the caller's
     // transaction (25P02) for every read after it.
-    const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, overlaidRiderParent, riderParentId, cols));
+    const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, riderParent, riderParentId, cols));
     // Owner ruling 2026-09-29: an annual-prepay pest series rides the lawn
     // rhythm too. Its prepaid visits stay pinned ('prepaid'), and only the
     // visits after them join lawn dates, so the prepay refusal the top-up
@@ -627,38 +703,61 @@ async function hostReschedulePending(conn, hostParent, cols) {
   return rows.some(isPlanSeriesRow);
 }
 
-async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
-  const addressCols = [
-    'service_address_line1', 'service_address_line2', 'service_address_city',
-    'service_address_state', 'service_address_zip',
-  ].filter((c) => cols[c]);
-  const hostRowsRaw = await conn('scheduled_services')
-    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+// THE live plan-row read for one or more series (roots and their cadence
+// children): status outside JOIN_INELIGIBLE_STATUSES (NULL counts as live),
+// tracker state not terminal, isPlanSeriesRow (no boosters, callbacks or
+// included follow-ups), optionally from a date on. Shared by this preview's
+// host dates and by accept-time rider seeding (rider-accept-seeding.js), so
+// "which rows of a series are live" has one answer.
+function livePlanSeriesRows(conn, parentIds, cols, { fromDate = null, extraColumns = [] } = {}) {
+  return conn('scheduled_services')
+    .where((q) => { q.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .modify((q) => {
       if (cols.track_state) q.where((t) => { t.whereNull('track_state').orWhereNotIn('track_state', TERMINAL_TRACK_STATES); });
+      if (fromDate) q.where('scheduled_date', '>=', fromDate);
     })
-    .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
     .select(
       'id', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
       ...['is_callback', 'followup_included'].filter((c) => cols[c]),
-      ...(cols.property_id ? ['property_id'] : []), ...addressCols,
+      ...extraColumns.filter((c) => cols[c]),
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
-  let filtered = hostRowsRaw;
+}
+
+// The host's live future plan rows that can carry a rider, as rows (the
+// extension needs each date's window and technician): same EFFECTIVE property
+// scope as the host, and each occurrence's OWN current service is lawn (a
+// "this and following" service change re-stamps upcoming rows; a mosquito or
+// pest row shares the lawn's visit group family but is not a lawn visit).
+async function loadHostRows(conn, hostParent, cols, todayStr, hostScope) {
+  const addressCols = [
+    'service_address_line1', 'service_address_line2', 'service_address_city',
+    'service_address_state', 'service_address_zip',
+  ];
+  const hostRowsRaw = await livePlanSeriesRows(conn, [hostParent.id], cols, {
+    fromDate: todayStr,
+    extraColumns: [
+      'property_id', ...addressCols, 'window_start', 'window_end', 'technician_id',
+      'service_type', 'service_key_snapshot',
+    ],
+  });
+  // The root is classified by the overlaid hostParent (its own columns are the
+  // historical first visit); a child by what it says it is now.
+  let filtered = hostRowsRaw.filter((r) => isLawnServiceRow(String(r.id) === String(hostParent.id) ? hostParent : r));
   if (cols.property_id && hostScope?.resolved) {
     // One batched key lookup for the whole host series (withComparableKeys):
     // an unstamped parent's address-only scope vs id-only child rows.
-    const rowScopes = hostRowsRaw.map(rowPropertyScope);
+    const rowScopes = filtered.map(rowPropertyScope);
     const [comparableHost, ...comparableRows] = await withComparableKeys(conn, [hostScope, ...rowScopes]);
-    filtered = hostRowsRaw.filter((r, i) => {
+    filtered = filtered.filter((r, i) => {
       if (String(r.id) === String(hostParent.id)) return true;
       if (!comparableRows[i].resolved) return true;
       return seriesPropertyVerdict(comparableRows[i], comparableHost) === 'same';
     });
   }
-  return Array.from(new Set(filtered.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
+  return filtered;
 }
 
 // Phase 4: every rider row (parent + children), classified, with the
@@ -730,8 +829,9 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
 
 /**
  * Read-only preview of ONE rider/host pairing — computable whether or not
- * `scheduled_services.rides_parent_id` is actually set (nothing writes it
- * yet): pass `hostParentId` explicitly to preview a CANDIDATE pair the ops
+ * `scheduled_services.rides_parent_id` is actually set (only accept-time
+ * rider seeding writes it, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT): pass
+ * `hostParentId` explicitly to preview a CANDIDATE pair the ops
  * report found by its own heuristic (same customer, same property, an
  * active ongoing lawn series + an active ongoing pest series), or omit it
  * to read the rider's own already-stamped link.
@@ -758,7 +858,8 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
  *   move: Array, insert: string[], cancel: Array,
  *   retained: Array<{id: string, date: string}>,
  *   beyondSchedule: Array<{id: string, date: string}>,
- *   pinned: Array<{id: string, date: ?string, why: string}>}>}
+ *   pinned: Array<{id: string, date: ?string, why: string}>,
+ *   hostRows: Array<object>}>}
  */
 async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
   const empty = (reasons) => ({
@@ -775,6 +876,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     retained: [],
     beyondSchedule: [],
     pinned: [],
+    hostRows: [],
   });
 
   try {
@@ -787,7 +889,8 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
 
     // --- Plan computation (read-only, same rules as buildRiderSyncPlan) ---
     const todayStr = etDateString();
-    const hostDates = await loadHostDates(conn, hostParent, cols, todayStr, hostScope);
+    const hostRows = await loadHostRows(conn, hostParent, cols, todayStr, hostScope);
+    const hostDates = Array.from(new Set(hostRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
     if (await hostReschedulePending(conn, hostParent, cols)) reasons.push('host_reschedule_pending');
     const {
       riderRows, classifications, lastRiderDate, reschedulePending,
@@ -838,8 +941,14 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       reasons.push('blackout_check_error');
     }
 
+    // A lawn date the rider cannot take (an owner blackout, a weekend the rider
+    // opted out of) is not a candidate: the plan goes on to the next lawn date.
+    // The horizon above still counts every lawn date.
+    const usableHost = (r) => !isBlackedOut(dateOnly(r.scheduled_date), blackoutDates)
+      && shiftPastWeekend(dateOnly(r.scheduled_date), skipRiderEffective, weekendShift) === dateOnly(r.scheduled_date);
+    const rideHostRows = hostRows.filter(usableHost);
     const plan = planRiderDates({
-      hostDates,
+      hostDates: rideHostRows.map((r) => dateOnly(r.scheduled_date)),
       lastRiderDate,
       horizonDate,
       earliestDate: planFloor,
@@ -872,6 +981,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       retained,
       beyondSchedule,
       pinned,
+      hostRows: rideHostRows,
     };
   } catch (err) {
     return {
@@ -888,6 +998,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       retained: [],
       beyondSchedule: [],
       pinned: [],
+      hostRows: [],
       error: err.message,
     };
   }
@@ -902,6 +1013,11 @@ module.exports = {
   MAX_HORIZON_EXTRA_DAYS,
   planRiderDates,
   computeRiderHorizon,
+  riderHostKind,
+  riderPairingEnabled,
+  isLawnServiceRow,
+  RIDE_BLOCKING_REASONS,
+  livePlanSeriesRows,
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,
