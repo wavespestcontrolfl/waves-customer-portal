@@ -200,6 +200,30 @@ describe('TechLayout staff-session verification', () => {
     }
   });
 
+  it('still clears a rejected session when the 401 body times out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      localStorage.setItem('waves_admin_token', 'staff-access-token');
+      localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+      vi.stubGlobal('fetch', vi.fn(async (_url, options = {}) => ({
+        ok: false, status: 401,
+        json: () => new Promise((_, reject) => {
+          options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        }),
+      })));
+
+      renderTech();
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+
+      expect(await screen.findByText(/Staff login \/admin\/login\?next=/)).toBeInTheDocument();
+      expect(localStorage.getItem('waves_admin_token')).toBeNull();
+      expect(localStorage.getItem('waves_admin_user')).toBeNull();
+      expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ['a server error', () => response(503, { error: 'Unavailable' }), { id: 'tech-1', name: 'River Tech', role: 'technician' }],
     ['no stored profile', () => { throw new TypeError('Failed to fetch'); }, null],

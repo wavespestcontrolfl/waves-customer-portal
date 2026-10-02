@@ -73,7 +73,13 @@ export default function TechLayout() {
       ...(abort ? { signal: abort.signal } : {}),
     })
       .then(async (response) => {
-        const profile = await response.json().catch((bodyErr) => { if (bodyErr?.name === 'AbortError') throw bodyErr; return null; });
+        // The server did answer: a body that times out keeps the status so a
+        // rejected session (401) is still cleared below and never mistaken
+        // for a dead zone.
+        const profile = await response.json().catch((bodyErr) => {
+          if (bodyErr?.name === 'AbortError') throw Object.assign(bodyErr, { status: response.status });
+          return null;
+        });
         if (!response.ok) {
           const error = new Error(profile?.error || 'Unable to verify staff access');
           error.status = response.status;
