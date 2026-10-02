@@ -848,7 +848,9 @@ router.post(
         files: req.files || [],
         note: req.body?.note,
         topic,
-        locationOnProperty: req.body?.locationOnProperty,
+        // Photos + an optional note only (the documented contract): no
+        // location field on this surface.
+        locationOnProperty: null,
         entry: 'reservice_page',
         recheck: (trx) => reloadReservicePhotoVisit(token, svc.id, svc.customer_id, svc.property_id || null, trx),
       });

@@ -49,6 +49,9 @@ jest.mock('../routes/appointment-public', () => ({
 jest.mock('../services/visit-prep', () => ({
   VISIT_PREP_LIMITS: { photosPerSubmission: 3 },
   visitPrepSummary: jest.fn(async () => ({ photoCount: 0, photosRemaining: 6, submissionCount: 0 })),
+  createVisitPrepSubmission: jest.fn(async () => ({
+    created: false, stored: 0, summary: { photoCount: 1, photosRemaining: 5 }, svc: {},
+  })),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
@@ -820,6 +823,26 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       } finally {
         firstResults.customers = saved;
       }
+    });
+
+    test('upload forwards photos + note only — never a posted locationOnProperty', async () => {
+      gateState.reservicePhotos = true;
+      const { createVisitPrepSubmission } = require('../services/visit-prep');
+      createVisitPrepSubmission.mockClear();
+      const layer = reservicePublicRouter.stack.find((l) => l.route?.path === '/:token/visits/:visitId/photos');
+      const handler = layer.route.stack.at(-1).handle;
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+      await handler({
+        params: { token: 'a'.repeat(64), visitId: VISIT_ID },
+        visitPrepSvc: { ...CALLBACK_ROW },
+        files: [],
+        body: { note: 'by the sink', locationOnProperty: 'backyard', topic: 'lawn' },
+      }, res, jest.fn());
+      const arg = createVisitPrepSubmission.mock.calls[0][0];
+      expect(arg.note).toBe('by the sink');
+      expect(arg.locationOnProperty).toBeNull();
+      expect(arg.topic).toBe('pest');
+      expect(arg.entry).toBe('reservice_page');
     });
 
     test.each([
