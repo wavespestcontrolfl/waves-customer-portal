@@ -131,6 +131,27 @@ function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, current
 }
 
 /**
+ * The shared judge backstop, on its own: the gates every autonomous send needs
+ * whatever else earned it. Read by the suggest → auto_send rung below and by
+ * the unanswered-text lane (evaluateJudgeBackstop), which requires nothing more.
+ */
+function judgeBackstopBlockers({ judge = {}, thresholds = THRESHOLDS, judgeAvailable = true } = {}) {
+  const t = thresholds.suggestToAutosend;
+  const blockers = [];
+  // Fail CLOSED: auto_send relies on the judge backstop (recent unsafe). If
+  // the live judge signal couldn't be loaded, the backstop is blind — never
+  // send autonomously on any other evidence.
+  if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
+  // ...and even when loaded, an intent with no live SCORED judge data has an
+  // empty backstop (recentUnsafe defaults to 0). Require a populated one.
+  const scored = judge.judged || 0;
+  if (scored < t.minScoredBackstop) blockers.push(`Needs ${t.minScoredBackstop - scored} more live judged drafts for the safety backstop (${scored}/${t.minScoredBackstop}).`);
+  const recentUnsafe = judge.recentUnsafe || 0;
+  if (recentUnsafe > t.maxRecentUnsafe) blockers.push(`${recentUnsafe} unsafe in last ${t.recentWindow} judged (must be ${t.maxRecentUnsafe}).`);
+  return blockers;
+}
+
+/**
  * suggest → auto_send verdict: the shared judge backstop plus either evidence
  * path (see the module header). Split out of evaluateRung so each rung reads
  * on its own; `blockers` is the shared-gate list evaluateRung started.
@@ -156,17 +177,8 @@ function evaluateAutoSendRung({ judge = {}, suggest = {}, thresholds = THRESHOLD
   const minGraded = t.minGraded ?? t.minDecided;
   const minGradedAcceptedRate = t.minGradedAcceptedRate ?? t.minAcceptedRate;
   const maxGradedCorrectedRate = t.maxGradedCorrectedRate ?? t.maxCorrectedRate;
-  const recentUnsafe = judge.recentUnsafe || 0;
 
-  // Shared gates, fail CLOSED: auto_send relies on the judge backstop (recent
-  // unsafe). If the live judge signal couldn't be loaded, the backstop is
-  // blind — never promote to autonomous sending on either path's counts.
-  if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
-  // ...and even when loaded, an intent with no live SCORED judge data has an
-  // empty backstop (recentUnsafe defaults to 0). Require a populated one.
-  const scored = judge.judged || 0;
-  if (scored < t.minScoredBackstop) blockers.push(`Needs ${t.minScoredBackstop - scored} more live judged drafts for the safety backstop (${scored}/${t.minScoredBackstop}).`);
-  if (recentUnsafe > t.maxRecentUnsafe) blockers.push(`${recentUnsafe} unsafe in last ${t.recentWindow} judged (must be ${t.maxRecentUnsafe}).`);
+  blockers.push(...judgeBackstopBlockers({ judge, thresholds, judgeAvailable }));
 
   const humanBlockers = [];
   if (decided < t.minDecided) humanBlockers.push(`Needs ${t.minDecided - decided} more human-decided suggestions (${decided}/${t.minDecided}).`);
@@ -656,6 +668,31 @@ async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersi
   return { eligible, basis: eligible ? (verdict.basis ?? null) : null, blockers: verdict.blockers, judge, suggest };
 }
 
+/**
+ * The judge backstop alone for ONE intent, from live data: enough scored
+ * judgments under the current prompt cohort and voice profile, none of the
+ * recent ones unsafe. The unanswered-text lane's quality gate — it answers
+ * only what nobody else answered, so the ladder's evidence paths (and its
+ * sealed-exam requirement) are not asked for. Fail closed on any read error.
+ */
+async function evaluateJudgeBackstop({ intent, dbi = db, voiceProfileVersion } = {}) {
+  const { isEscalationIntent } = require('./sms-suggest-mode');
+  if (isEscalationIntent(intent)) return { clear: false, blockers: ['Escalation intent — never auto-sends.'] };
+  let judge;
+  try {
+    const pin = voiceProfileVersion !== undefined
+      ? voiceProfileVersion
+      : await resolveVoiceProfilePin({ dbi });
+    const signals = await fetchLiveJudgeSignals(dbi, { voiceProfileVersion: pin });
+    judge = signals.get(intent) || {};
+  } catch (err) {
+    logger.warn(`[sms-graduation] judge backstop fetch failed (${intent}): ${err.message}; blocking`);
+    return { clear: false, blockers: judgeBackstopBlockers({ judgeAvailable: false }) };
+  }
+  const blockers = judgeBackstopBlockers({ judge });
+  return { clear: blockers.length === 0, blockers, judge };
+}
+
 module.exports = {
   LADDER,
   THRESHOLDS,
@@ -667,5 +704,7 @@ module.exports = {
   resolveVoiceProfilePin,
   fetchSuggestOutcomes,
   evaluateAutoSendEligibility,
+  evaluateJudgeBackstop,
+  judgeBackstopBlockers,
   computeReadiness,
 };

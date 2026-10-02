@@ -4138,6 +4138,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset three minutes) — Unanswered-text replies
+  // A suggested reply still waiting after two open hours goes out on its own
+  // (sms-unanswered-reply.js, GATE_SMS_UNANSWERED_REPLY read at call time).
+  // Same shape as the gratitude sweep above: no cron lease (each send holds
+  // pool connections through the provider call), claims are send-once per
+  // inbound under the thread lock, and the in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let unansweredSweepRunning = false;
+  cron.schedule('3-59/5 * * * *', async () => {
+    const unanswered = require('./sms-unanswered-reply');
+    if (!unanswered.unansweredReplyLive() || unansweredSweepRunning) return;
+    unansweredSweepRunning = true;
+    try {
+      const result = await unanswered.processUnansweredReplyCandidates();
+      if (result?.attempted) logger.info(`[sms-unanswered] sweep: ${result.sent} sent of ${result.attempted} attempted`);
+    } catch (err) {
+      logger.warn(`[sms-unanswered] sweep failed: ${err.message}`);
+    } finally {
+      unansweredSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

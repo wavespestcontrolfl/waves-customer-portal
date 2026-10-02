@@ -5833,6 +5833,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // scheduling-intent messages, and anything without a customer + inbound
     // link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
+    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft);
     const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
       customerId: customer?.id || null,
@@ -5842,7 +5843,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       // Any draft whose facts list something owed goes to a person: no check can
       // prove a non-empty reply actually addressed it (openLoopThanks is the
       // demoted-gratitude case of the same rule).
-      requireReview: openLoopThanks || factsListOpenLoop(factsForDraft),
+      requireReview,
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
@@ -5926,6 +5927,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               verifier_enabled: VERIFY_ENABLED,
             },
           } : {}),
+          // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; {} while it is off):
+          // what a later sweep needs to know about this draft and cannot re-derive.
+          ...require('./sms-unanswered-reply').draftStamp({
+            autoSendSafe: parsed.auto_send_safe, requireReview, lintPass: lint.pass, verifierEnabled: VERIFY_ENABLED,
+          }),
         }),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,

@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null, unanswered = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -220,6 +220,15 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     // replies. Under the same lock as the prior claim's commit, so they
     // serialize: one autonomous reply in flight per thread at a time.
     if (await hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
+      return null;
+    }
+
+    // Unanswered-text lane (sms-unanswered-reply.js): the suggestion it answers
+    // must still be waiting for a person, and nobody may have called since the
+    // text. Same lock, so a reviewer's send and this claim cannot both win.
+    if (unanswered && await require('./sms-unanswered-reply').claimGuard(trx, {
+      suggestionId: unanswered.suggestionId, draftId, smsLogId, threadLast10, customerId,
+    })) {
       return null;
     }
 
@@ -267,9 +276,14 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // PR #5499: the open call_commitments ids the draft's VISIT STATUS & OPEN LOOPS lines named.
           ...(Array.isArray(visitLoopCommitmentIds) && visitLoopCommitmentIds.length ? { visit_loop_commitment_ids: visitLoopCommitmentIds } : {}),
           ...(visitLoopStatus ? { visit_loop_status: visitLoopStatus } : {}),
+          // Which suggestion this send answered, for the unanswered-text lane's
+          // bookkeeping and for anyone reviewing why the text went out.
+          ...(unanswered ? { unanswered_reply: { suggestion_id: unanswered.suggestionId, wait_open_minutes: unanswered.waitOpenMinutes } } : {}),
         }),
         suggested_message: reply,
-        reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
+        reasoning_summary: unanswered
+          ? 'Suggested house-voice reply sent because no person answered the text in time (unanswered-text lane).'
+          : 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
         prompt_version: promptVersion || null,
         // Scope idempotency to the INBOUND, not the draft: message_drafts are
@@ -321,6 +335,8 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
       visitLoopCommitmentIds: Array.isArray(visitLoopCommitmentIds) ? visitLoopCommitmentIds : null,
       visitLoopStatus: visitLoopStatus || null,
+      // what the unanswered-text lane's provider-boundary check reads
+      unanswered: unanswered ? { suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId } : null,
     };
   });
 }
@@ -827,6 +843,8 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
         gratitudeLane
           ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
           : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
+        // unanswered-text lane: the customer texted again, or someone called, after the claim
+        claim.unanswered ? checkHandoff : undefined,
         laneFields.providerPreSendCheck,
       );
     })(),
@@ -885,7 +903,9 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
     return { sent: false, reason: 'reservation_failed' };
   }
-  const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
+  const checkHandoff = gratitudeLane
+    ? gratitudeHandoffCheck(claim, eligibilityPin)
+    : (claim.unanswered ? require('./sms-unanswered-reply').handoffCheck(claim) : undefined);
   let result;
   try {
     // OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
@@ -997,7 +1017,12 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
       }
     }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
-    if (!verdict.ok) return await notSent(verdict.reason);
+    if (!verdict.ok) {
+      const outcome = await notSent(verdict.reason);
+      // Gratitude parks no cards (a no-op there); the unanswered-text lane's own suggestion returns to a person.
+      await reopenParked('Auto-send held: the thread moved before the reply went out — suggestion reopened.');
+      return outcome;
+    }
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
     result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }));
   } catch (err) {
@@ -1392,6 +1417,8 @@ module.exports = {
   resolveSent,
   failClaim,
   maybeAutoSend,
+  dispatchClaimedSend,
+  pinDraftVoiceProfile,
   processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
   gratitudeCandidatePage,

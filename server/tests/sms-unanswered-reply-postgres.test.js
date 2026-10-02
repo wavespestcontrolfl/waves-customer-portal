@@ -1,0 +1,336 @@
+// The unanswered-text sweep against real SQL, in a rollback-only transaction on disposable/owned PostgreSQL.
+// Observable behavior: a suggested reply nobody acted on for two open hours is sent once, its card is
+// labeled answered (never a staff decision), and anything that moved on the thread leaves the card alone.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
+  resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
+  findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  findGroundedMinutesFigures: jest.fn(() => []),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+
+const { randomUUID } = require('node:crypto');
+const db = require('../models/db');
+const suggest = require('../services/sms-suggest-mode');
+const autoSend = require('../services/sms-auto-send');
+const graduation = require('../services/sms-graduation');
+const unanswered = require('../services/sms-unanswered-reply');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+jest.setTimeout(30000);
+
+// Tuesday 2026-10-06, 2:00 PM ET: inside the send window, an ordinary open day.
+const NOW = new Date('2026-10-06T18:00:00Z');
+const at = (iso) => new Date(iso);
+const INBOUND_AT = at('2026-10-06T15:00:00Z'); // 11:00 AM ET, three open hours before NOW
+const CUSTOMER_PHONE = '+12025550101';
+const WAVES_LINE = '+19413529161';
+const REPLY = 'Your next visit is this Thursday. We will text you the morning of.';
+
+postgres('unanswered-text reply sweep on PostgreSQL', () => {
+  let database;
+  let trx;
+  let customerId;
+
+  beforeAll(() => {
+    const url = new URL(process.env.DATABASE_URL);
+    const local = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!local && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+  });
+
+  beforeEach(async () => {
+    process.env.GATE_SMS_UNANSWERED_REPLY = 'true';
+    trx = await database.transaction();
+    const schema = `sms_unanswered_${randomUUID().replaceAll('-', '')}`;
+    await trx.raw('CREATE SCHEMA ??', [schema]);
+    for (const table of ['sms_log', 'agent_decisions', 'message_drafts', 'call_log', 'scheduled_services']) {
+      await trx.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
+    }
+    await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
+    db.connection = trx;
+    customerId = randomUUID();
+    jest.spyOn(graduation, 'evaluateJudgeBackstop').mockResolvedValue({ clear: true, blockers: [] });
+    sendCustomerMessage.mockReset();
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}` });
+  });
+
+  afterEach(async () => {
+    delete process.env.GATE_SMS_UNANSWERED_REPLY;
+    jest.restoreAllMocks();
+    await trx?.rollback();
+  });
+  afterAll(async () => { await database?.destroy(); });
+
+  // One waiting suggestion: inbound text → verified draft (stamped) → pending card.
+  async function waitingSuggestion({
+    inboundAt = INBOUND_AT, intent = 'general_customer_sms_needs_review', reply = REPLY, phone = CUSTOMER_PHONE,
+    stamp = {}, actions = [], snapshot = {},
+  } = {}) {
+    const inboundId = randomUUID();
+    const draftId = randomUUID();
+    const decisionId = randomUUID();
+    const draftedAt = new Date(inboundAt.getTime() + 5000);
+    await trx('sms_log').insert({
+      id: inboundId, customer_id: customerId, direction: 'inbound', from_phone: phone, to_phone: WAVES_LINE,
+      message_body: 'When is my next visit?', status: 'received', created_at: inboundAt, updated_at: inboundAt,
+    });
+    await trx('message_drafts').insert({
+      id: draftId, sms_log_id: inboundId, customer_id: customerId, inbound_message: 'When is my next visit?',
+      draft_response: reply, intent, status: 'suggested', model: 'synthetic-model', prompt_version: 'house_voice_v11',
+      scheduling_intent: false, created_at: draftedAt,
+      intended_actions: JSON.stringify({
+        actions,
+        verify: { passes: 2, converged: true },
+        voice_profile_version: null,
+        unanswered: {
+          policy_version: unanswered.STAMP_VERSION, actions_verified_safe: true, require_review: false,
+          lint_pass: true, verifier_enabled: true, ...stamp,
+        },
+      }),
+    });
+    await trx('agent_decisions').insert({
+      id: decisionId, workflow: suggest.SUGGEST_WORKFLOW, agent_name: 'synthetic-unanswered-test', decision_version: 'test-v1',
+      mode: 'suggest', status: 'pending_review', entity_type: 'message_draft', entity_id: draftId, customer_id: customerId,
+      source_channel: 'sms', sms_log_id: inboundId, detected_intent: intent, suggested_message: reply,
+      input_snapshot: JSON.stringify({ sms: { body: 'When is my next visit?' }, draft_id: draftId, facts_generated_at: draftedAt.toISOString(), ...snapshot }),
+      prompt_version: 'house_voice_v11', idempotency_key: `${suggest.SUGGEST_WORKFLOW}:draft:${draftId}`,
+      created_at: draftedAt, updated_at: draftedAt,
+    });
+    return { inboundId, draftId, decisionId };
+  }
+
+  const card = (id) => trx('agent_decisions').where({ id }).first();
+  const draft = (id) => trx('message_drafts').where({ id }).first();
+  const claimFor = (inboundId) => trx('agent_decisions')
+    .where({ idempotency_key: `${autoSend.AUTOSEND_WORKFLOW}:inbound:${inboundId}` }).first();
+  const sweep = () => unanswered.processUnansweredReplyCandidates({ now: NOW });
+
+  async function expectUntouched(s, totals, reason) {
+    expect(totals.sent).toBe(0);
+    if (reason) expect(totals.refused[reason]).toBe(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+    expect((await draft(s.draftId)).status).toBe('suggested');
+  }
+
+  test('a suggestion nobody acted on for two open hours is sent once and labeled answered', async () => {
+    const s = await waitingSuggestion();
+    const totals = await sweep();
+
+    expect(totals).toMatchObject({ scanned: 1, attempted: 1, sent: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+      to: CUSTOMER_PHONE, body: REPLY, customerId, entryPoint: 'sms_auto_send_executor',
+    });
+
+    // The card is answered, with no human verdict: never a staff decision or a correction.
+    expect(await card(s.decisionId)).toMatchObject({ status: unanswered.ANSWERED_STATUS, human_verdict: null, reviewed_by: 'auto' });
+    expect((await draft(s.draftId)).status).toBe(autoSend.DRAFT_SENT_STATUS);
+    const claim = await claimFor(s.inboundId);
+    expect(claim.status).toBe(autoSend.SENT_STATUS);
+    expect(claim.input_snapshot.unanswered_reply).toEqual({ suggestion_id: s.decisionId, wait_open_minutes: 120 });
+
+    // A second tick finds nothing to do.
+    const again = await sweep();
+    expect(again.scanned).toBe(0);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('graduation outcome counts ignore an answered card', async () => {
+    const s = await waitingSuggestion();
+    await sweep();
+    const outcomes = await graduation.fetchSuggestOutcomes({
+      intent: 'general_customer_sms_needs_review', cohortVersions: null, voiceProfileVersion: null,
+    });
+    expect(outcomes).toEqual({ accepted: 0, corrected: 0, ignored: 0 });
+    expect((await card(s.decisionId)).status).toBe(unanswered.ANSWERED_STATUS);
+  });
+
+  test('gate off: nothing is scanned or sent', async () => {
+    const s = await waitingSuggestion();
+    delete process.env.GATE_SMS_UNANSWERED_REPLY;
+    const totals = await sweep();
+    expect(totals).toMatchObject({ scanned: 0, sent: 0, reason: 'gate_off' });
+    await expectUntouched(s, totals);
+  });
+
+  test('outside 8 AM to 8 PM ET nothing is sent', async () => {
+    const s = await waitingSuggestion();
+    const totals = await unanswered.processUnansweredReplyCandidates({ now: at('2026-10-07T01:30:00Z') }); // 9:30 PM ET
+    expect(totals.reason).toBe('outside_send_window');
+    await expectUntouched(s, totals);
+  });
+
+  test('a text that has waited under two open hours stays with staff', async () => {
+    // 6:30 AM ET text: 7.5 wall hours old at 2 PM... so use a clock where open time is short.
+    const s = await waitingSuggestion({ inboundAt: at('2026-10-06T10:30:00Z') }); // 6:30 AM ET
+    const totals = await unanswered.processUnansweredReplyCandidates({ now: at('2026-10-06T13:30:00Z') }); // 9:30 AM ET: 1.5 open hours
+    await expectUntouched(s, totals, 'not_due');
+  });
+
+  test('a reply drafted yesterday evening is never sent the next day', async () => {
+    const s = await waitingSuggestion({ inboundAt: at('2026-10-05T22:30:00Z') }); // Monday 6:30 PM ET
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'not_same_day');
+  });
+
+  test('only ordinary intents are candidates', async () => {
+    const s = await waitingSuggestion({ intent: 'billing_question_needs_review' });
+    const totals = await sweep();
+    expect(totals.scanned).toBe(0);
+    await expectUntouched(s, totals);
+  });
+
+  test('a draft without the stamp (drafted while the gate was off) is not a candidate', async () => {
+    const s = await waitingSuggestion({ stamp: { policy_version: 'none' } });
+    const totals = await sweep();
+    expect(totals.scanned).toBe(0);
+    await expectUntouched(s, totals);
+  });
+
+  test.each([
+    ['review_required', { stamp: { require_review: true } }],
+    ['lint_flagged', { stamp: { lint_pass: false } }],
+    ['lint_flagged', { snapshot: { comms_lint: [{ rule: 'plan_total' }] } }],
+    ['not_verified', { stamp: { verifier_enabled: false } }],
+    ['action_required', { stamp: { actions_verified_safe: false } }],
+    ['action_required', { actions: [{ type: 'escalate' }] }],
+    ['price_quote', { reply: 'Your total is $89 for this visit.' }],
+    ['redaction_placeholder', { reply: 'Hello [name], your visit is Thursday.' }],
+  ])('%s keeps the card for a person', async (reason, overrides) => {
+    const s = await waitingSuggestion(overrides);
+    const totals = await sweep();
+    await expectUntouched(s, totals, reason);
+  });
+
+  test('a judge backstop that is not clear blocks the send', async () => {
+    graduation.evaluateJudgeBackstop.mockResolvedValue({ clear: false, blockers: ['Needs 30 more live judged drafts'] });
+    const s = await waitingSuggestion();
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'backstop_not_clear');
+  });
+
+  test('a visit that changed after the facts were read blocks the send', async () => {
+    const s = await waitingSuggestion();
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-10-08', service_type: 'Pest Control',
+      updated_at: at('2026-10-06T16:00:00Z'),
+    });
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'visit_changed');
+  });
+
+  test('a staff reply after the text blocks the send', async () => {
+    const s = await waitingSuggestion();
+    await trx('sms_log').insert({
+      id: randomUUID(), customer_id: customerId, direction: 'outbound', from_phone: WAVES_LINE, to_phone: CUSTOMER_PHONE,
+      message_body: 'Thursday morning.', status: 'delivered', message_type: 'manual', created_at: at('2026-10-06T16:00:00Z'),
+    });
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'guarded_or_claimed');
+    expect(await claimFor(s.inboundId)).toBeUndefined();
+  });
+
+  test('the customer texting again blocks the send', async () => {
+    const s = await waitingSuggestion();
+    await trx('sms_log').insert({
+      id: randomUUID(), customer_id: customerId, direction: 'inbound', from_phone: CUSTOMER_PHONE, to_phone: WAVES_LINE,
+      message_body: 'Never mind, found it.', status: 'received', created_at: at('2026-10-06T16:00:00Z'),
+    });
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'guarded_or_claimed');
+  });
+
+  test.each([
+    ['by customer', (id) => ({ customer_id: id, from_phone: WAVES_LINE, to_phone: '+12025550199' })],
+    ['by phone', () => ({ customer_id: null, from_phone: CUSTOMER_PHONE, to_phone: WAVES_LINE })],
+  ])('a call since the text (%s) blocks the send', async (_label, callRow) => {
+    const s = await waitingSuggestion();
+    await trx('call_log').insert({ id: randomUUID(), direction: 'inbound', created_at: at('2026-10-06T16:30:00Z'), ...callRow(customerId) });
+    const totals = await sweep();
+    await expectUntouched(s, totals, 'guarded_or_claimed');
+  });
+
+  test('a call BEFORE the text does not block it', async () => {
+    await waitingSuggestion();
+    await trx('call_log').insert({
+      id: randomUUID(), direction: 'inbound', customer_id: customerId, from_phone: CUSTOMER_PHONE, to_phone: WAVES_LINE,
+      created_at: at('2026-10-06T14:00:00Z'),
+    });
+    expect((await sweep()).sent).toBe(1);
+  });
+
+  test('a text that lands after the claim is caught at the provider boundary and the card returns', async () => {
+    const s = await waitingSuggestion();
+    sendCustomerMessage.mockImplementation(async (input) => {
+      await trx('sms_log').insert({
+        id: randomUUID(), customer_id: customerId, direction: 'inbound', from_phone: CUSTOMER_PHONE, to_phone: WAVES_LINE,
+        message_body: 'Actually, call me.', status: 'received', created_at: at('2026-10-06T17:59:00Z'),
+      });
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.newer_inbound).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+    expect((await draft(s.draftId)).status).toBe('suggested');
+    // One try per inbound: the failed claim holds the send-once key.
+    expect((await claimFor(s.inboundId)).status).toBe(autoSend.FAILED_STATUS);
+    sendCustomerMessage.mockClear();
+    expect((await sweep()).scanned).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the thread\'s other waiting cards resolve as passed over, the answered one as answered', async () => {
+    const older = await waitingSuggestion({ inboundAt: at('2026-10-06T14:00:00Z'), intent: 'billing_question_needs_review' });
+    // The older card belongs to an earlier text on the same thread; the newest inbound is the one answered.
+    const newest = await waitingSuggestion({ inboundAt: at('2026-10-06T15:30:00Z') });
+    const totals = await sweep();
+    expect(totals.sent).toBe(1);
+    expect((await card(newest.decisionId)).status).toBe(unanswered.ANSWERED_STATUS);
+    expect(await card(older.decisionId)).toMatchObject({ status: 'ignored', reviewed_by: 'auto' });
+  });
+
+  test('an answered card left mislabeled by a crash is repaired by the next sweep', async () => {
+    const s = await waitingSuggestion();
+    await sweep();
+    // What crash recovery leaves: the card ignored as if staff had replied, the draft back in the judge pool.
+    await trx('agent_decisions').where({ id: s.decisionId }).update({ status: 'ignored', human_verdict: 'ignored', reviewed_by: 'Admin' });
+    await trx('message_drafts').where({ id: s.draftId }).update({ status: 'shadow' });
+
+    const later = new Date(Date.now() + 5 * 60 * 1000);
+    expect(await unanswered.settleAnsweredSuggestions({ now: later })).toBe(1);
+    expect(await card(s.decisionId)).toMatchObject({ status: unanswered.ANSWERED_STATUS, human_verdict: null, reviewed_by: 'auto' });
+    expect((await draft(s.draftId)).status).toBe(autoSend.DRAFT_SENT_STATUS);
+    expect(await unanswered.settleAnsweredSuggestions({ now: later })).toBe(0);
+  });
+
+  test('an ordinary Phase E claim (no unanswered marker) is never relabeled', async () => {
+    const s = await waitingSuggestion();
+    await trx('agent_decisions').insert({
+      id: randomUUID(), workflow: autoSend.AUTOSEND_WORKFLOW, agent_name: 'synthetic', decision_version: 'test-v1',
+      mode: autoSend.AUTOSEND_MODE, status: autoSend.SENT_STATUS, entity_type: 'message_draft', entity_id: s.draftId,
+      source_channel: 'sms', sms_log_id: s.inboundId, input_snapshot: JSON.stringify({ draft_id: s.draftId }),
+      idempotency_key: `${autoSend.AUTOSEND_WORKFLOW}:inbound:${s.inboundId}`,
+      created_at: at('2026-10-06T15:01:00Z'), updated_at: at('2026-10-06T15:01:00Z'),
+    });
+    expect(await unanswered.settleAnsweredSuggestions({ now: new Date() })).toBe(0);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+  });
+});
