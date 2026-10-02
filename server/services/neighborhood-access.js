@@ -415,14 +415,19 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   const n = await db('neighborhoods').where({ id: neighborhoodId }).first('name');
   const live = await db('neighborhood_access').where({ neighborhood_id: neighborhoodId })
     .whereNotNull('code').whereNot('status', 'retired').count('* as n').first();
-  const name = String(n?.name || 'A neighborhood').slice(0, 40);
+  // At most 40 characters, cut at a word boundary.
+  const fullName = String(n?.name || 'A neighborhood');
+  const name = fullName.length <= 40 ? fullName : fullName.slice(0, 41).replace(/\s+\S*$/, '');
   const who = firstName ? `${String(firstName).slice(0, 20)}'s update` : 'the latest update';
   const { composeAdminAlert } = require('./admin-alert-compose');
   const { raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
+  const base = `${name} now has ${Number(live?.n) || 2} different gate codes on file`;
+  // The composer's why limit is 110; a long name drops the "after …" clause.
+  const why = `${base} after ${who}.`.length <= 110 ? `${base} after ${who}.` : `${base}.`;
   const composed = composeAdminAlert({
     area: 'Customers',
     action: 'confirm a neighborhood gate code',
-    why: `${name} now has ${Number(live?.n) || 2} different gate codes on file after ${who}.`,
+    why,
     severity: 'needs-you',
     link: `/admin/customers?customerId=${customerId}`,
     subject: { type: 'customer', id: String(customerId) },

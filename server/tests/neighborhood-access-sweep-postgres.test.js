@@ -198,6 +198,18 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect((await accessRows(n)).map((r) => r.status)).toEqual(['retired']);
   });
 
+  test('maximum-length names still make a valid bell', async () => {
+    const n = await neighborhood('Laurelwood Preserve at Cypress Banks West');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '2121', status: 'active', source: 'backfill' });
+    const customerId = await customerWithCode('2222', { neighborhoodId: n });
+    await trx('customers').where({ id: customerId }).update({ first_name: 'Maximiliana-Josephine' });
+    await sweepSavedGateCodes();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const why = mockRaise.mock.calls[0][2];
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(why).toBe('Laurelwood Preserve at Cypress Banks now has 2 different gate codes on file.');
+  });
+
   test('free text files for the office to confirm, with no bell', async () => {
     const n = await neighborhood('Pinebrook Village');
     await customerWithCode('Text the owner on arrival; north gate only', { neighborhoodId: n });
