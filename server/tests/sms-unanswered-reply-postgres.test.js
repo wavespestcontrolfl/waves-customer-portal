@@ -15,6 +15,8 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   currentPromptVersion: jest.fn(() => 'house_voice_v11'),
+  // deterministic stand-in for the facts block: what the fingerprint hashes
+  buildFactsBlock: jest.fn((context, extras) => JSON.stringify({ context, now: extras?.now })),
   findEtaMinutesClaims: jest.fn(() => []),
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
@@ -22,6 +24,15 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+// The facts the drafter renders, reduced to the fields these tests change (the real aggregator
+// reads every fact source; that breadth is the point of the fingerprint, not of this suite).
+jest.mock('../services/context-aggregator', () => ({
+  getContextForCustomer: jest.fn(async (customer) => {
+    const db = require('../models/db');
+    const row = await db('customers').where({ id: customer.id }).first('waveguard_tier', 'first_name');
+    return { customer: { id: customer.id, tier: row?.waveguard_tier ?? null, firstName: row?.first_name ?? null } };
+  }),
+}));
 
 const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
@@ -96,6 +107,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     const draftId = randomUUID();
     const decisionId = randomUUID();
     const draftedAt = new Date(inboundAt.getTime() + 5000);
+    const fingerprint = await unanswered.factsFingerprintFor({ id: customerId }, draftedAt);
     await trx('sms_log').insert({
       id: inboundId, customer_id: customerId, direction: 'inbound', from_phone: phone, to_phone: WAVES_LINE,
       message_body: inboundText, status: 'received', created_at: inboundAt, updated_at: inboundAt,
@@ -112,6 +124,7 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
         voice_profile_version: null,
         unanswered: {
           policy_version: unanswered.STAMP_VERSION, actions_verified_safe: true, require_review: false,
+          facts_fingerprint: fingerprint, facts_fingerprint_at: draftedAt.toISOString(),
           lint_pass: true, verifier_enabled: true, ...stamp,
         },
       }),
@@ -363,6 +376,31 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await expectUntouched(s, await sweep(), 'customer_changed');
   });
 
+  test('a plan change that bumps no timestamp is caught by the facts fingerprint', async () => {
+    // e.g. /admin/customers/fix-tiers writes waveguard_tier alone
+    const s = await waitingSuggestion({ inboundText: 'What plan am I on?' });
+    await trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Gold' });
+    await expectUntouched(s, await sweep(), 'facts_changed');
+  });
+
+  test('a fact change after the claim is caught at the provider boundary', async () => {
+    const s = await waitingSuggestion({ inboundText: 'What plan am I on?' });
+    sendCustomerMessage.mockImplementation(async (input) => {
+      await trx('customers').where({ id: customerId }).update({ waveguard_tier: 'Silver' });
+      const verdict = await input.providerPreSendCheck({ dbi: trx });
+      return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code, reason: verdict.reason };
+    });
+    const totals = await sweep();
+    expect(totals.sent).toBe(0);
+    expect(totals.refused.facts_changed).toBe(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
+  });
+
+  test('a draft stamped without a fingerprint is never sent', async () => {
+    const s = await waitingSuggestion({ stamp: { facts_fingerprint: null } });
+    await expectUntouched(s, await sweep(), 'facts_unverifiable');
+  });
+
   test('an estimate that expires later, untouched since the facts, does not block', async () => {
     await waitingSuggestion({ inboundText: 'Is the proposal still available?' });
     await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, expires_at: at('2026-10-20T17:00:00Z'), updated_at: at('2026-10-06T14:00:00Z') });
@@ -496,6 +534,19 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     expect((await sweep()).sent).toBe(1);
     expect(staff).toMatchObject({ sent: false, code: 'AUTO_REPLY_IN_FLIGHT' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a campaign draft (not a reply) goes straight to the sender and leaves the waiting question alone', async () => {
+    const s = await waitingSuggestion();
+    const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` });
+    const result = await sendManualCustomerSms({
+      to: CUSTOMER_PHONE, body: 'Spring special inside.', channel: 'sms', audience: 'customer',
+      purpose: 'marketing', customerId, entryPoint: 'admin_draft_approve', metadata: { original_message_type: 'campaign' },
+    });
+    expect(result.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect((await card(s.decisionId)).status).toBe('pending_review');
   });
 
   test('a staff reply in flight before the sweep keeps the card for the person', async () => {

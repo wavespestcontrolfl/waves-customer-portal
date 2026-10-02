@@ -114,17 +114,65 @@ function unansweredClaimsPossible() {
  * JSON is byte-identical to before), which also fences the lane to texts
  * drafted after it was switched on.
  */
-function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled } = {}) {
+function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled, factsFingerprint = null } = {}) {
   if (!unansweredReplyLive()) return {};
   return {
     unanswered: {
       policy_version: STAMP_VERSION,
+      facts_fingerprint: factsFingerprint?.hash || null,
+      facts_fingerprint_at: factsFingerprint?.at || null,
       actions_verified_safe: autoSendSafe === true,
       require_review: requireReview !== false,
       lint_pass: lintPass === true,
       verifier_enabled: verifierEnabled === true,
     },
   };
+}
+
+/**
+ * The customer's facts as the drafter renders them, hashed. Everything the
+ * context aggregator reads (profile, plan, property, payments, visits,
+ * service and lawn history, estimates, invoices, ...) flows into this one
+ * block, so ANY change to what the reply was written from changes the hash,
+ * whichever writer made it and whatever timestamp it did or did not bump.
+ * Rendered at a FIXED instant (`at`) so relative wording ("tomorrow", the
+ * follow-up phrase) is the same both times; live ETA is left out on both
+ * sides (no GPS/Distance Matrix call; the executor rechecks ETA itself), as
+ * are OPEN TIMES, LABEL FACTS and re-service state, which have their own
+ * send-time rechecks. Database reads only, no model call.
+ */
+async function factsFingerprintFor(customer, at, dbh = db) {
+  // Both sides render from the stored row itself, never a caller's partial
+  // copy of it (the webhook's match carries only some columns).
+  const row = await dbh('customers').where({ id: customer?.id, active: true }).whereNull('deleted_at').first();
+  if (!row) return null;
+  const ContextAggregator = require('./context-aggregator');
+  const { buildFactsBlock } = require('./sms-shadow-drafter');
+  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true });
+  const block = buildFactsBlock(context, { now: at });
+  return require('node:crypto').createHash('sha256').update(String(block)).digest('hex');
+}
+
+/** Draft time: the fingerprint to store, or null (gate off, no customer, or an unreadable context). */
+async function draftFactsFingerprint(customer) {
+  if (!unansweredReplyLive() || !customer?.id) return null;
+  const at = new Date();
+  try {
+    const hash = await factsFingerprintFor(customer, at);
+    return hash ? { hash, at: at.toISOString() } : null;
+  } catch (err) {
+    logger.warn(`[sms-unanswered] facts fingerprint failed at draft time: ${errLabel(err)}`);
+    return null; // no fingerprint → the draft is never sent by this lane
+  }
+}
+
+/** Send time: 'facts_changed' unless today's facts render to the stored hash. */
+async function factsFingerprintRefusal(dbh, { customerId, stamp }) {
+  const at = stamp?.facts_fingerprint_at ? new Date(stamp.facts_fingerprint_at) : null;
+  if (!stamp?.facts_fingerprint || !at || Number.isNaN(at.getTime())) return 'facts_unverifiable';
+  const now = await factsFingerprintFor({ id: customerId }, at, dbh);
+  if (!now) return 'customer_untrusted';
+  return now === stamp.facts_fingerprint ? null : 'facts_changed';
 }
 
 /**
@@ -266,6 +314,10 @@ async function readinessRefusal({ row, meta, snapshot }) {
   const changed = await accountChangedSince(db, { customerId: row.customer_id, factsAt: factsReadAt(row, snapshot) });
   if (changed) {
     return { reason: changed };
+  }
+  const facts = await factsFingerprintRefusal(db, { customerId: row.customer_id, stamp: jsonObject(meta.unanswered) });
+  if (facts) {
+    return { reason: facts };
   }
   return { reason: null };
 }
@@ -444,6 +496,8 @@ async function handoffState(claim, { dbi = db } = {}) {
   if (changed) {
     return { ok: false, code: changed, reason: changed };
   }
+  const facts = await factsFingerprintRefusal(dbi, { customerId, stamp: claim.unanswered.factsStamp });
+  if (facts) return { ok: false, code: facts, reason: facts };
   // Then the thread, in ONE statement, as the last read: a text or a call
   // landing between two separate queries cannot slip past.
   const thread = { threadLast10, customerId, smsLogId };
@@ -536,7 +590,10 @@ async function attemptCandidate({ row, meta, snapshot }) {
     techNames: snapshot.tech_names || null,
     visitLoopCommitmentIds: snapshot.visit_loop_commitment_ids || null,
     visitLoopStatus: snapshot.visit_loop_status || null,
-    unanswered: { suggestionId: row.decision_id, waitOpenMinutes: WAIT_OPEN_MINUTES, factsAt: factsReadAt(row, snapshot) },
+    unanswered: {
+      suggestionId: row.decision_id, waitOpenMinutes: WAIT_OPEN_MINUTES, factsAt: factsReadAt(row, snapshot),
+      factsStamp: jsonObject(meta.unanswered),
+    },
   });
   if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
   const result = await autoSend.dispatchClaimedSend({
@@ -649,6 +706,9 @@ module.exports = {
   unansweredReplyLive,
   unansweredClaimsPossible,
   draftStamp,
+  draftFactsFingerprint,
+  factsFingerprintFor,
+  factsFingerprintRefusal,
   candidatePage,
   candidateRefusal,
   readinessRefusal,

@@ -25,6 +25,12 @@ same send-once key per inbound, same send-time rechecks and policy-checked provi
   lint-clean and not owed a review. Drafts from before the flip are never candidates.
 - No price, no redaction placeholder, no unowned follow-up promise; the draft's voice profile is
   the effective one; the judge backstop (enough scored judgments, no recent unsafe) is clear.
+- **Facts fingerprint.** At draft time the lane hashes the customer's facts block exactly as the
+  drafter renders it (context aggregator → `buildFactsBlock`, at a fixed instant, live ETA / open
+  times / label facts / re-service left out because they have their own send-time rechecks).
+  Before sending it re-renders and compares, at readiness and again at the provider boundary.
+  Any change to anything the reply was written from refuses (`facts_changed`), whichever writer
+  made it and whatever timestamp it did or did not bump. No fingerprint → never sent.
 - Nothing moved on the thread: no staff reply or reply in flight, no newer customer text, no
   call either way, no visit changed after the facts were read. The newer-text and call checks
   run again at the provider boundary; a miss there returns the card to staff.

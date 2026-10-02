@@ -160,9 +160,16 @@ async function dispatchReserved(input, {
  * thread lock and persists recovery linkage before provider entry.
  */
 async function sendManualCustomerSms(input) {
-  if (!isEnabled('smsGratitudeReplies')
-    && !require('../sms-gratitude-context').gratitudeClaimsPossible()
-    && !require('../sms-unanswered-reply').unansweredClaimsPossible()) return sendCustomerMessage(input);
+  const gratitudeLifecycle = isEnabled('smsGratitudeReplies')
+    || require('../sms-gratitude-context').gratitudeClaimsPossible();
+  // The unanswered-text lane interlocks staff REPLIES only. A campaign or
+  // follow-up draft (purpose marketing, estimate_followup, ...) is not an
+  // answer: parking and settling the thread's waiting question as answered by
+  // staff would hide it from the lane and log a false 'ignored' outcome. Those
+  // sends still take the provider-handoff reservation the claim respects.
+  const unansweredReplyLifecycle = input?.purpose === 'conversational'
+    && require('../sms-unanswered-reply').unansweredClaimsPossible();
+  if (!gratitudeLifecycle && !unansweredReplyLifecycle) return sendCustomerMessage(input);
 
   const reviewedBy = input.metadata?.adminUserId || null;
   // Canonical send metadata historically also carries symbolic provenance

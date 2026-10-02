@@ -5780,6 +5780,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: liveEta, includeVisitLoops: true })
       : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: liveEta, includeVisitLoops: true }));
     let context = await loadContext(includeLiveEta);
+    // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
+    // a fingerprint of this customer's facts, taken now, that a delayed send
+    // re-derives and compares (sms-unanswered-reply.factsFingerprintFor).
+    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
     // pure thank-you — the gate-on rules require the reply to address it, which the
@@ -5931,6 +5935,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // what a later sweep needs to know about this draft and cannot re-derive.
           ...require('./sms-unanswered-reply').draftStamp({
             autoSendSafe: parsed.auto_send_safe, requireReview, lintPass: lint.pass, verifierEnabled: VERIFY_ENABLED,
+            factsFingerprint: unansweredFacts,
           }),
         }),
         scheduling_intent: Boolean(schedulingIntent),

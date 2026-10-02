@@ -339,6 +339,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // what the unanswered-text lane's provider-boundary check reads
       unanswered: unanswered ? {
         suggestionId: unanswered.suggestionId, threadLast10, customerId, smsLogId, factsAt: unanswered.factsAt || null,
+        factsStamp: unanswered.factsStamp || null,
         fromPhone: inbound.from_phone, toPhone: inbound.to_phone,
       } : null,
     };
