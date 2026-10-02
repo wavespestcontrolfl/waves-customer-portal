@@ -185,16 +185,20 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       const newer = await trx('sms_offers')
         .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
         .where('sent_at', '>', row.sent_at)
-        .first('id');
+        .orderBy('sent_at', 'asc')
+        .first('id', 'sent_at');
+      // closed_at is when the offer stopped standing: the superseding text's
+      // send time, not this write's (a recovered write can land hours late,
+      // and reports rebuild past state from closed_at).
       if (newer) {
         const [late] = await trx('sms_offers')
-          .insert({ ...row, status: 'superseded', superseded_by: newer.id, closed_at: trx.fn.now() })
+          .insert({ ...row, status: 'superseded', superseded_by: newer.id, closed_at: newer.sent_at })
           .returning('id');
         return { recorded: true, id: late?.id || late, superseded: 0, late: true };
       }
       const prior = await trx('sms_offers')
         .where({ phone_last10: row.phone_last10, kind: row.kind, status: 'open' })
-        .update({ status: 'superseded', closed_at: trx.fn.now(), updated_at: trx.fn.now() })
+        .update({ status: 'superseded', closed_at: row.sent_at, updated_at: trx.fn.now() })
         .returning('id');
       const [inserted] = await trx('sms_offers').insert(row).returning('id');
       const id = inserted?.id || inserted;

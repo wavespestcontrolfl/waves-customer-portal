@@ -78,7 +78,8 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     const rows = await trx('sms_offers').where({ phone_last10: phone }).select('id', 'kind', 'status', 'superseded_by', 'closed_at');
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(byId[first.id]).toMatchObject({ status: 'superseded', superseded_by: second.id });
-    expect(byId[first.id].closed_at).not.toBeNull();
+    // Closed when the newer text went out, not when the row was written.
+    expect(new Date(byId[first.id].closed_at).toISOString()).toBe(new Date(SENT_AT.getTime() + 3600000).toISOString());
     expect(byId[second.id]).toMatchObject({ status: 'open', superseded_by: null });
     expect(byId[other.id]).toMatchObject({ kind: 'book_new', status: 'open' });
   }));
@@ -93,6 +94,8 @@ describeOrSkip('sms_offers on PostgreSQL', () => {
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(byId[newer.id]).toMatchObject({ status: 'open', superseded_by: null });
     expect(byId[older.id]).toMatchObject({ status: 'superseded', superseded_by: newer.id });
+    const closed = await trx('sms_offers').where({ id: older.id }).first('closed_at');
+    expect(new Date(closed.closed_at).toISOString()).toBe(new Date(SENT_AT.getTime() + 3600000).toISOString());
   }));
 
   test('backfill re-records an accepted decision send whose ledger write was lost, once', () => inTrx(async (trx) => {
