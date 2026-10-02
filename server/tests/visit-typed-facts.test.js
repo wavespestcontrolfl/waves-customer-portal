@@ -338,6 +338,25 @@ describe('counts and the technician\'s rating (step 4)', () => {
     expect(facts.unclearFields).toContain('captures');
   });
 
+  test.each([
+    ['a fraction never states its whole part', 'Checked 2.5 traps worth of the attic.', 2, 'Checked 2.5 traps worth', false],
+    ['"one hundred" states 100, never 1', 'Checked one hundred traps.', 1, 'Checked one hundred traps', false],
+    ['"one hundred" states 100', 'Checked one hundred traps.', 100, 'Checked one hundred traps', true],
+    ['an ordinal states no count', 'The 2nd trap had a capture.', 2, 'The 2nd trap had a capture', false],
+    ['a compound number in words', 'Checked twenty-one traps.', 21, 'Checked twenty-one traps', true],
+    ['an ambiguous run of number words states nothing', 'Checked one fifty traps.', 150, 'Checked one fifty traps', false],
+  ])('the number a quote states is read whole (pre-push P1): %s', (_label, note, value, quote, fills) => {
+    const facts = read(trapAnswer({ traps_checked: { said: true, value, quote } }), note);
+    if (fills) expect(facts.values.traps_checked).toBe(String(value));
+    else expect(facts.unclearFields).toContain('traps_checked');
+  });
+
+  test('a rating stated as a fraction waits for a person (pre-push P1)', () => {
+    const facts = read(trapAnswer({}, { said: true, value: 2, quote: 'Activity rating 2.5' }), `${TRAP_NOTE} Activity rating 2.5.`);
+    expect(facts).not.toHaveProperty('score');
+    expect(facts.scoreUnclear).toBe(true);
+  });
+
   test('a count not said fills nothing and asks nothing; one already on the form is never filled over', () => {
     expect(read(trapAnswer({})).unclearFields).toEqual([]);
     const facts = read(trapAnswer({ traps_checked: { said: true, value: 8, quote: 'Checked all eight traps' } }), TRAP_NOTE, { traps_checked: '6' });
