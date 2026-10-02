@@ -91,6 +91,10 @@ async function openSheet(request = makeRequest(), props = {}) {
 const tile = (name) => screen.getByRole('button', { name: new RegExp(`^${name}`) });
 const editorFor = (name) => screen.getByRole('group', { name });
 const enterAmount = (name, amount) => fireEvent.change(within(editorFor(name)).getByLabelText('How much?'), { target: { value: String(amount) } });
+// A Treating-for chip (the same label also shows as a product row's "For" chip).
+const issue = (name) => within(screen.getByRole('heading', { name: 'Treating for' }).closest('section')).getByRole('button', { name });
+// What one product was applied against, on its own row.
+const forTarget = (product, name) => fireEvent.click(within(within(editorFor(product)).getByRole('group', { name: 'For' })).getByRole('button', { name }));
 const completeButton = () => screen.getByRole('button', { name: 'Complete lawn re-service' });
 const completeBody = async (request) => {
   fireEvent.click(completeButton());
@@ -102,7 +106,8 @@ const completeBody = async (request) => {
 async function readyVisit(request) {
   await openSheet(request);
   fireEvent.click(tile('Celsius WG'));
-  fireEvent.click(screen.getByRole('button', { name: 'Dollarweed' }));
+  fireEvent.click(issue('Dollarweed'));
+  forTarget('Celsius WG', 'Dollarweed');
   fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
   fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
 }
@@ -168,6 +173,9 @@ describe('products', () => {
     // Headway recorded no usable method last time: the tech's tap is still owed.
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(within(within(editorFor('Headway G')).getByRole('group', { name: 'How' })).getByRole('button', { name: 'Spot treatment' }));
+    // A fungicide also owes what it was applied against.
+    expect(screen.getByText('Pick what Headway G was for.')).toBeTruthy();
+    forTarget('Headway G', 'Dollarweed');
     expect(completeButton().disabled).toBe(false);
   });
 
@@ -242,6 +250,7 @@ describe('application method and area', () => {
     expect(pressed('Talak 7.9%', 'Spot treatment')).toBe('false');
     // The tech changes Celsius to granular: that is what goes to the server.
     fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Granular broadcast' }));
+    forTarget('Talak 7.9%', 'Dollarweed');
     const body = await completeBody(request);
     expect(body.products.map((p) => [p.productId, p.applicationMethod])).toEqual([['celsius', 'granular_broadcast'], ['talak', 'broadcast_spray']]);
   });
@@ -279,6 +288,7 @@ describe('application method and area', () => {
     expect(screen.getByText('Pick how Headway G went down.')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(within(howGroup('Headway G')).getByRole('button', { name: 'Spot treatment' }));
+    forTarget('Headway G', 'Dollarweed');
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.find((p) => p.productId === 'headway')).toEqual({
@@ -349,7 +359,7 @@ describe('application method and area', () => {
   test('a context with no methods cannot complete a product (nothing is guessed)', async () => {
     await openSheet(makeRequest({ context: { ...CONTEXT, methods: [] } }));
     fireEvent.click(tile('Celsius WG'));
-    fireEvent.click(screen.getByRole('button', { name: 'Dollarweed' }));
+    fireEvent.click(issue('Dollarweed'));
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
     expect(screen.getByText('Pick how Celsius WG went down.')).toBeTruthy();
@@ -385,7 +395,9 @@ describe('required taps', () => {
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     fireEvent.click(tile('Celsius WG'));
     expect(screen.getByText('Select what you treated for.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Sedge' }));
+    fireEvent.click(issue('Sedge'));
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
+    forTarget('Celsius WG', 'Sedge');
     expect(screen.getByText('Select the weed pressure.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     expect(screen.getByText('Select the lawn condition.')).toBeTruthy();
@@ -421,7 +433,13 @@ describe('the /complete body', () => {
     const request = makeRequest();
     await readyVisit(request);
     fireEvent.click(tile('Talak 7.9%'));
-    fireEvent.click(screen.getByRole('button', { name: 'Chinch bug damage' }));
+    fireEvent.click(issue('Chinch bug damage'));
+    fireEvent.click(issue('Drought stress'));
+    // Each product records only what it was applied against; a condition like
+    // drought stress is never a target.
+    const talakFor = within(editorFor('Talak 7.9%')).getByRole('group', { name: 'For' });
+    expect(within(talakFor).queryByRole('button', { name: 'Drought stress' })).toBeNull();
+    forTarget('Talak 7.9%', 'Chinch bug damage');
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: '  Spot-treated the driveway edge.  ' } });
     const body = await completeBody(request);
 
@@ -434,13 +452,13 @@ describe('the /complete body', () => {
         scheduledDate: '2026-10-04', address: { line1: '123 Main St' },
       },
       products: [
-        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Chinch bug damage', 'Dollarweed'] },
-        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: ['Chinch bug damage', 'Dollarweed'], areaValue: 5200, areaUnit: 'sqft' },
+        { productId: 'celsius', applicationMethod: 'spot_treatment', totalAmount: 1.5, amountUnit: 'oz', targets: ['Dollarweed'] },
+        { productId: 'talak', applicationMethod: 'broadcast_spray', totalAmount: 4, amountUnit: 'fl_oz', targets: ['Chinch bugs'], areaValue: 5200, areaUnit: 'sqft' },
       ],
       structuredFindings: {
         type: 'one_time_lawn_treatment',
         // Chips in the form's own option order, comma-joined.
-        values: { lawn_condition: 'Fair', weed_pressure: 'Moderate', turf_issues: 'Chinch bug damage, Dollarweed' },
+        values: { lawn_condition: 'Fair', weed_pressure: 'Moderate', turf_issues: 'Chinch bug damage, Dollarweed, Drought stress' },
       },
       technicianNotes: 'Spot-treated the driveway edge.',
       sendCompletionSms: true,
@@ -453,6 +471,26 @@ describe('the /complete body', () => {
     // A spot row sends no area.
     expect(body.products[0]).not.toHaveProperty('areaValue');
     expect(body.products[0]).not.toHaveProperty('areaUnit');
+  });
+
+  test('clearing a Treating-for chip drops it from every row, and a non-pesticide row records no target', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Empty Jug Surfactant/ }));
+    expect(within(editorFor('Empty Jug Surfactant')).queryByRole('group', { name: 'For' })).toBeNull();
+    fireEvent.click(issue('Sedge'));
+    forTarget('Celsius WG', 'Sedge');
+    fireEvent.click(issue('Dollarweed'));
+    // Celsius now targets only Sedge.
+    expect(within(within(editorFor('Celsius WG')).getByRole('group', { name: 'For' })).queryByRole('button', { name: 'Dollarweed' })).toBeNull();
+    // Picking Dollarweed again does not revive Celsius's old Dollarweed target.
+    fireEvent.click(issue('Dollarweed'));
+    expect(within(within(editorFor('Celsius WG')).getByRole('group', { name: 'For' })).getByRole('button', { name: 'Dollarweed' }).getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(within(editorFor('Empty Jug Surfactant')).getByRole('button', { name: 'Remove' }));
+    fireEvent.click(issue('Sedge'));
+    expect(screen.getByText('Pick what Celsius WG was for.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
   });
 
   test('a product left off the sheet is not sent, and an empty note is an empty string', async () => {
@@ -470,6 +508,7 @@ describe('the /complete body', () => {
     const editor = editorFor('Talak 7.9%');
     fireEvent.click(within(within(editor).getByRole('group', { name: 'Unit' })).getByRole('button', { name: 'tsp' }));
     fireEvent.change(within(editor).getByLabelText('How much?'), { target: { value: '3' } });
+    forTarget('Talak 7.9%', 'Dollarweed');
     const body = await completeBody(request);
     expect(body.products[1]).toMatchObject({ productId: 'talak', totalAmount: 0.5, amountUnit: 'fl_oz', applicationMethod: 'broadcast_spray' });
   });
@@ -479,7 +518,8 @@ describe('the /complete body', () => {
     const request = makeRequest();
     await openSheet(request, { onCompleted });
     fireEvent.click(tile('Celsius WG'));
-    fireEvent.click(screen.getByRole('button', { name: 'Dollarweed' }));
+    fireEvent.click(issue('Dollarweed'));
+    forTarget('Celsius WG', 'Dollarweed');
     fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
     fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
     fireEvent.click(completeButton());

@@ -99,7 +99,18 @@ function lawnMethodChoices() {
  * is a valid last lawn visit. Paged newest-first and classified in memory.
  * Throws on a failed read; the caller degrades to no last visit.
  */
+// Whether the customer has more than one property on file: per-customer facts
+// (another visit's history, the turf profile's lawn size) may then describe a
+// different address.
+async function customerHasSeveralProperties(svc, knex) {
+  const properties = await knex('customer_properties').where({ customer_id: svc.customer_id }).count('* as n').first();
+  return Number(properties?.n || 0) > 1;
+}
+
 async function findLastLawnRecord(svc, knex, visitDate) {
+  // No property on the visit and several on file: the customer's history
+  // cannot say which address a record treated, so there is no last visit.
+  if (!svc.property_id && await customerHasSeveralProperties(svc, knex)) return null;
   for (let offset = 0; offset < HISTORY_MAX_ROWS; offset += HISTORY_PAGE_SIZE) {
     const query = knex('service_records as sr')
       .where('sr.customer_id', svc.customer_id)
@@ -175,8 +186,7 @@ async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = ne
 // file it may describe another address, so it prefills nothing then.
 async function loadLawnSqft(svc, knex) {
   try {
-    const properties = await knex('customer_properties').where({ customer_id: svc.customer_id }).count('* as n').first();
-    if (Number(properties?.n || 0) > 1) return null;
+    if (await customerHasSeveralProperties(svc, knex)) return null;
     const profile = await knex('customer_turf_profiles').where({ customer_id: svc.customer_id }).first('lawn_sqft');
     return positiveOrNull(profile?.lawn_sqft);
   } catch (err) {

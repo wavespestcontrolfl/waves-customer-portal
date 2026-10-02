@@ -61,6 +61,38 @@ export const TURF_ISSUE_OPTIONS = [
   'Large patch', 'Gray leaf spot', 'Dollarweed', 'Sedge', 'Crabgrass',
   'Broadleaf weeds', 'Drought stress', 'Scalping', 'Excess shade', 'Compaction', 'Pet damage',
 ];
+// The Treating-for issues a product can be applied against, and the target
+// name each records (service_products.targets → the compliance ledger's
+// target_pest). The rest of the list (drought stress, scalping, shade,
+// compaction, pet damage) are conditions, never an application's target.
+const TARGET_NAME_BY_ISSUE = {
+  'Chinch bug damage': 'Chinch bugs',
+  'Sod webworm signs': 'Sod webworms',
+  'Armyworm signs': 'Armyworms',
+  'Grub activity': 'Grubs',
+  'Large patch': 'Large patch',
+  'Gray leaf spot': 'Gray leaf spot',
+  Dollarweed: 'Dollarweed',
+  Sedge: 'Sedge',
+  Crabgrass: 'Crabgrass',
+  'Broadleaf weeds': 'Broadleaf weeds',
+};
+// products_catalog categories that are pest-control applications: each needs
+// what it was applied against. A fertilizer, surfactant or anything else
+// records no target.
+const PESTICIDE_CATEGORIES = new Set([
+  'herbicide', 'pre-emergent', 'post-emergent', 'insecticide', 'fungicide', 'igr', 'bait',
+  'miticide', 'nematicide', 'termiticide / insecticide',
+]);
+const categoryKeyOf = (product) => String(product?.category || '').trim().toLowerCase()
+  .replace(/_/g, ' ').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ');
+const isPesticideRow = (row) => PESTICIDE_CATEGORIES.has(categoryKeyOf(row.product));
+// The visit's selected issues a product can target, in option order.
+const targetIssuesOf = (form) => TURF_ISSUE_OPTIONS.filter((issue) => TARGET_NAME_BY_ISSUE[issue] && form.issues.has(issue));
+// A row's targets as sent: only issues still selected for the visit (a chip
+// the tech later clears drops off every row).
+const rowTargetIssues = (row, form) => targetIssuesOf(form).filter((issue) => (row.targets || []).includes(issue));
+
 export const WEED_PRESSURE_OPTIONS = ['None observed', 'Light', 'Moderate', 'Heavy'];
 export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Recovering', 'Stressed'];
 
@@ -255,6 +287,7 @@ function useProductRows(ctx) {
   return { rows, updateRow, addProduct, removeRow, applyStock };
 }
 
+const toggleInList = (list, value) => (list.includes(value) ? list.filter((item) => item !== value) : [...list, value]);
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
 function missingRequirement({ form, rows, ctx, dictationPending }) {
@@ -265,6 +298,8 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
   // method needs them. Nothing is defaulted.
   const missingMethod = active.find((row) => !methodChoice(ctx, row.method));
   const missingArea = active.find((row) => needsSqft(ctx, row) && !(Number(row.area) > 0));
+  // A pest-control product needs what it was applied against; nothing else does.
+  const missingTarget = active.find((row) => isPesticideRow(row) && !rowTargetIssues(row, form).length);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -274,6 +309,7 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
     [missingMethod, missingMethod && `Pick how ${missingMethod.name} went down.`],
     [missingArea, missingArea && `Enter the square feet treated for ${missingArea.name}.`],
     [!form.issues.size, 'Select what you treated for.'],
+    [missingTarget, missingTarget && `Pick what ${missingTarget.name} was for.`],
     [!form.pressure, 'Select the weed pressure.'],
     [!form.condition, 'Select the lawn condition.'],
   ].find(([missing]) => missing) || [];
@@ -291,10 +327,10 @@ function completionBody({ form, rows, ctx }) {
         applicationMethod: row.method,
         totalAmount,
         amountUnit,
-        // What the tech treated for rides every row (as the pest sheet's pests
-        // do): service_products.targets feeds the compliance ledger's
-        // target_pest and the report's per-product facts.
-        targets: TURF_ISSUE_OPTIONS.filter((option) => form.issues.has(option)),
+        // What this product was applied against, picked on its own row:
+        // service_products.targets feeds the compliance ledger's target_pest
+        // and the report's per-product facts. A non-pesticide row sends none.
+        targets: isPesticideRow(row) ? rowTargetIssues(row, form).map((issue) => TARGET_NAME_BY_ISSUE[issue]) : [],
         // Only a method /complete needs an area for sends one.
         ...(needsSqft(ctx, row) ? { areaValue: Number(row.area), areaUnit: 'sqft' } : {}),
       };
@@ -367,6 +403,16 @@ function SheetBody({ service, ctx, submission, locked, dictationPending, onDicta
 
 function LawnForm({ ctx, service, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const products = useProductRows(ctx);
+  // Clearing a Treating-for chip also clears it as a target on every product
+  // row, so picking it again never revives an old per-row choice.
+  const toggleIssue = (label) => {
+    if (form.issues.has(label)) {
+      for (const row of products.rows) {
+        if ((row.targets || []).includes(label)) products.updateRow(row.productId, { targets: row.targets.filter((item) => item !== label) });
+      }
+    }
+    setField('issues', toggleInSet(form.issues, label));
+  };
   const { rows } = products;
   const [form, setForm] = useState({ note: '', issues: new Set(), pressure: '', condition: '' });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -413,10 +459,10 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
         <fieldset className="tech-visit-form" disabled={locked}>
           <CustomerRequest request={ctx.customerRequest} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
-          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
+          <ProductsSection ctx={ctx} form={form} products={products} locked={locked} other={picker.button} popover={picker.popover} />
           <ChoiceSection title="Treating for" columns={2}>
             {TURF_ISSUE_OPTIONS.map((label) => (
-              <Chip disabled={locked} key={label} label={label} pressed={form.issues.has(label)} onClick={() => setField('issues', toggleInSet(form.issues, label))} />
+              <Chip disabled={locked} key={label} label={label} pressed={form.issues.has(label)} onClick={() => toggleIssue(label)} />
             ))}
           </ChoiceSection>
           <ChoiceSection title="Pressure seen" columns={2}>
@@ -466,7 +512,7 @@ function CustomerRequest({ request }) {
 }
 
 // The last lawn visit's products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, products, locked, other, popover }) {
+function ProductsSection({ ctx, form, products, locked, other, popover }) {
   const { rows, updateRow, removeRow } = products;
   const hint = ctx.lastVisit ? 'Tap what you applied' : 'Add what you applied';
   return (
@@ -482,7 +528,7 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
         ))}
       </div>
       {rows.filter((row) => row.active).map((row) => (
-        <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} targetIssues={isPesticideRow(row) ? targetIssuesOf(form) : null} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
@@ -523,11 +569,12 @@ function ProductTile({ row, locked, onClick }) {
 // An applied product: how much (blank until the tech enters it, or last
 // time's amount, labeled), how it went down (the tech's tap), and the area
 // when that method needs one.
-function ProductEditor({ row, methods, sqft, locked, onChange, onRemove }) {
+function ProductEditor({ row, methods, sqft, targetIssues, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
   const methodId = useId();
   const areaId = useId();
+  const forId = useId();
   // An older context without `common` shows every method as a button.
   const hasCommon = methods.some((choice) => choice.common);
   const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
@@ -561,6 +608,20 @@ function ProductEditor({ row, methods, sqft, locked, onChange, onRemove }) {
         )}
         <p className="tech-visit-muted">Perimeter spray? Use Full form.</p>
       </div>
+      {targetIssues && (
+        <div>
+          <span id={forId} className="tech-product-editor-label">For</span>
+          {targetIssues.length ? (
+            <div role="group" aria-labelledby={forId} className="tech-visit-tile-grid">
+              {targetIssues.map((issue) => (
+                <Chip disabled={locked} key={issue} label={issue} pressed={(row.targets || []).includes(issue)} onClick={() => onChange({ targets: toggleInList(row.targets || [], issue) })} />
+              ))}
+            </div>
+          ) : (
+            <p className="tech-visit-muted">Pick the weeds, insects or disease under Treating for.</p>
+          )}
+        </div>
+      )}
       {sqft && (
         <div>
           <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>

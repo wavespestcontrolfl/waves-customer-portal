@@ -243,6 +243,16 @@ describe('buildLawnReserviceFastContext', () => {
     expect(sr.some(([method]) => method === 'join')).toBe(false);
   });
 
+  test('a visit with no property id and several properties on file has no last visit (the address is ambiguous)', async () => {
+    const calls = {};
+    const ctx = await buildLawnReserviceFastContext('visit-1', fakeKnex({
+      scheduled_services: visit({ property_id: null }), products_catalog: catalog, customer_properties: { n: '2' },
+      'service_records as sr': [{ id: 'rec-1', service_type: 'Lawn Care', service_line: 'lawn', service_date: '2026-09-20' }],
+    }, calls));
+    expect(ctx).toMatchObject({ eligible: true, lastVisit: null });
+    expect(calls['service_records as sr']).toBeUndefined();
+  });
+
   test('a failed history read degrades to no suggestions without throwing or logging the driver message', async () => {
     const ctx = await buildLawnReserviceFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': new Error('secret SQL text'),
