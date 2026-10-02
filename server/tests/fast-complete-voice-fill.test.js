@@ -1266,3 +1266,30 @@ describe('Codex #5580 round 6', () => {
     expect(out.officeNote).toBe('Gate code changed to 4412.');
   });
 });
+
+describe('Codex #5580 round 7', () => {
+  const row = (productId, amount, heard) => ({ productId, amount, unit: 'fl_oz', sameAsLast: false, method: '', heard });
+
+  test('"Last time ... but today I used Talstar": today ends the other-visit scope', () => {
+    const t = 'Last time, I used four ounces of Taurus, but today I used five ounces of Talstar.';
+    const out = validateFill(answer({ products: [row('p-talak', 5, 'five ounces of Talstar')] }), ctx, t);
+    expect(out.products[0]).toMatchObject({ productId: 'p-talak', amount: 5 });
+    const old = validateFill(answer({ products: [row('p-taurus', 4, 'four ounces of Taurus')] }), ctx, t);
+    expect(old.products.some((p) => p.productId === 'p-taurus')).toBe(false);
+  });
+
+  test.each(['Mixed Taurus at four ounces for every gallon.', 'Taurus, four ounces to the gallon.', 'Taurus four ounces for each gallon.'])('a rate form is never the amount: "%s"', (t) => {
+    expect(validateFill(answer({ products: [row('p-taurus', 4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"four ounces, no, five ounces": the five is the amount, the four is not', () => {
+    const t = 'Taurus, four ounces, no, five ounces.';
+    expect(validateFill(answer({ products: [row('p-taurus', 5, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBe(5);
+    expect(validateFill(answer({ products: [row('p-taurus', 4, t.replace(/\.$/, ''))] }), ctx, t).products[0].amount).toBeNull();
+  });
+
+  test('"Taurus four ounces, no surfactant" keeps the four', () => {
+    const t = 'Taurus four ounces, no surfactant.';
+    expect(validateFill(answer({ products: [row('p-taurus', 4, 'Taurus four ounces')] }), ctx, t).products[0].amount).toBe(4);
+  });
+});

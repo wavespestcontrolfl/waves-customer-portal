@@ -493,12 +493,16 @@ function isCarrierVolume(tokens, start, end, unit) {
 const RETRACT_BEFORE = 3;
 const CORRECTION_AFTER = 3;
 const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
+// A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
+// first and is not a negation of the second.
+const isCorrectingNo = (tokens, j) => tokens[j] === 'no' && Boolean(readSpokenNumber(tokens, j + 1));
 function isRetracted(tokens, breaks, start, end) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
-    if (isNegationAt(tokens, j)) return true;
+    if (isNegationAt(tokens, j) && !isCorrectingNo(tokens, j)) return true;
     if (breaks[j]) break;
   }
   for (let j = end; j < tokens.length && j - end < CORRECTION_AFTER; j += 1) {
+    if (isCorrectingNo(tokens, j)) return true;
     if (readSpokenNumber(tokens, j)) break;
     if (CORRECTION_CUES.some((cue) => cue.every((w, k) => tokens[j + k] === w))) return true;
   }
@@ -508,7 +512,10 @@ function isRetracted(tokens, breaks, start, end) {
 // "four ounces per gallon", "two ounces a gallon", "per thousand square feet": a
 // mixing rate, never the amount used.
 const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square', 'sq', 'acre', 'acres', 'tank', 'liter', 'litre']);
-const isRate = (tokens, end) => tokens[end] === 'per' || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]));
+// also "for every gallon", "for each gallon", "to the gallon" ("in a gallon" is the tank mix, the amount used)
+const isRate = (tokens, end) => tokens[end] === 'per'
+  || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
+  || (['for', 'to'].includes(tokens[end]) && ['every', 'each', 'the', 'a', 'an'].includes(tokens[end + 1]) && RATE_BASES.has(tokens[end + 2]));
 
 function quantitiesIn(text) {
   const { tokens, breaks } = tokenize(text);
@@ -727,6 +734,8 @@ function isOtherVisitAt(tokens, j) {
   if (tokens[j - 1] === 'as' || tokens[j - 1] === 'like') return false;
   return ['last', 'next', 'previous', 'prior', 'earlier'].includes(tokens[j]) && OTHER_VISIT_NEXT.has(tokens[j + 1]);
 }
+const isCurrentVisitAt = (tokens, j) => tokens[j] === 'today' || tokens[j] === 'now'
+  || (tokens[j] === 'this' && OTHER_VISIT_NEXT.has(tokens[j + 1]));
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
@@ -753,9 +762,15 @@ function isNegatedMention(mention, world) {
   for (let j = from; j < mention.start; j += 1) if (isNegationAt(world.tokens, j)) return true;
   // "Last time I used four ounces of Taurus", "Last time, I used...": another
   // visit's, anywhere earlier in the sentence (a comma does not end it).
+  // A current-visit word after the marker ("..., but today I used Talstar") ends it.
   let clause = from;
   while (clause > 0 && !world.stops[clause]) clause -= 1;
-  for (let j = clause; j < from; j += 1) if (isOtherVisitAt(world.tokens, j)) return true;
+  let other = false;
+  for (let j = clause; j < mention.start; j += 1) {
+    if (isOtherVisitAt(world.tokens, j)) other = true;
+    else if (isCurrentVisitAt(world.tokens, j)) other = false;
+  }
+  if (other) return true;
   // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
   // a negation after the name, past auxiliary words, in the same clause.
   for (let j = mention.end; j < world.tokens.length && j - mention.end < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
