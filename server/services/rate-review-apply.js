@@ -163,6 +163,7 @@ const HOLD_COPY = Object.freeze({
   successor_already_created: 'The next prepaid term was already created, so the noticed amount was not written to the old one.',
   renewal_window_changed: 'The prepaid term now renews on a different day than the notice named, so nothing was changed.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
+  row_owner_changed: 'The ranking row moved to another customer record, so no notice was created.',
   rate_moved_since_ranking: 'The rate on file changed since the ranking was approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
@@ -520,8 +521,14 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     // read before this row's lock, and a concurrent schedule (a different
     // planned send → a different effective date) must find the link, not
     // race it. The partial UNIQUE index on rate_review_row_id is the belt.
-    const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status');
+    // The customer's comms fence first (the apply's lock order), then the
+    // row: a merge undo can repoint the ranking row after the candidate
+    // read, and a notice is only ever created for the owner the row still
+    // has under its lock.
+    await lockCustomerComms(sp, row.customer_id);
+    const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status', 'customer_id');
     if (!live || String(live.status) !== 'approved') throw hold('row_not_approved', { status: live ? live.status : null });
+    if (String(live.customer_id) !== String(row.customer_id)) throw hold('row_owner_changed', { customerId: live.customer_id });
     if (live.notice_id) return { alreadyScheduled: true, noticeId: live.notice_id };
     // One notice per change EVENT: a legacy notice with the same customer,
     // date and amounts is the same event; another rate-review notice is

@@ -1076,6 +1076,20 @@ describe('scheduling races', () => {
     expect(mockDb.store.rate_review_snapshots[0].notice_id).toBe('n-landed-first');
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'rate_review_snapshots')).toBe(true);
   });
+  test('a ranking row repointed to another customer after the candidate read (a merge undo) creates no notice under the stale owner — held, nothing inserted; the comms fence is taken first', async () => {
+    const book = pestBook();
+    book.customers.push(fixture.customerRow(2));
+    mockDb.reset(book);
+    const commsLock = require('../utils/customer-comms-lock').lockCustomerComms;
+    commsLock.mockImplementationOnce(async (conn, customerId) => {
+      mockDb.log.push(['commsLock', customerId]);
+      mockDb.store.rate_review_snapshots[0].customer_id = CUSTOMER(2);
+    });
+    const out = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
+    expect(out.held.map((h) => h.reason)).toEqual(['row_owner_changed']);
+    expect(notices() || []).toHaveLength(0);
+    expect(mockDb.log.find((e) => e[0] === 'commsLock')[1]).toBe(CUSTOMER(1));
+  });
   test('a row that lost its approval before the lock creates no notice', async () => {
     mockDb.reset(pestBook());
     const stale = { ...mockDb.store.rate_review_snapshots[0] };
