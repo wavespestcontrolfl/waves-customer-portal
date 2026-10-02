@@ -50,7 +50,7 @@ import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
-import { Button, ActionFeedback, Input, cn } from '../ui';
+import { Button, ActionFeedback, Input, Select, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The typed form's option lists (server/services/project-types.js
@@ -528,6 +528,10 @@ function ProductEditor({ row, methods, sqft, locked, onChange, onRemove }) {
   const amountId = useId();
   const methodId = useId();
   const areaId = useId();
+  // An older context without `common` shows every method as a button.
+  const hasCommon = methods.some((choice) => choice.common);
+  const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
+  const more = hasCommon ? methods.filter((choice) => !choice.common) : [];
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
@@ -539,10 +543,23 @@ function ProductEditor({ row, methods, sqft, locked, onChange, onRemove }) {
       <div>
         <span id={methodId} className="tech-product-editor-label">How</span>
         <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
-          {methods.map((choice) => (
+          {common.map((choice) => (
             <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
           ))}
         </div>
+        {more.length > 0 && (
+          <Select
+            aria-label={`More methods for ${row.name}`}
+            className="tech-visit-control"
+            disabled={locked}
+            value={more.some((choice) => choice.value === row.method) ? row.method : ''}
+            onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+          >
+            <option value="">More methods</option>
+            {more.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+          </Select>
+        )}
+        <p className="tech-visit-muted">Perimeter spray? Use Full form.</p>
       </div>
       {sqft && (
         <div>

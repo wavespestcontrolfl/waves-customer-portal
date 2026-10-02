@@ -284,13 +284,16 @@ describe('methods, areas and lawn size', () => {
       normalizeServiceReportApplicationMethod, requiresSqftForReportApplication, requiresLinearFtForReportApplication,
     } = require('../services/complete-scheduled-service');
     const choices = lawnMethodChoices();
-    expect(choices.map((c) => c.value)).toEqual(['spot_treatment', 'broadcast_spray', 'granular_broadcast']);
+    // The full completion form's method list (SchedulePage.jsx) minus perimeter
+    // spray, the one that needs linear feet: every real method can be recorded.
+    expect(choices.map((c) => c.value)).toEqual(['spot_treatment', 'broadcast_spray', 'granular_broadcast', 'soil_drench', 'foliar_spray', 'fog_ulv', 'pin_stream', 'bait_placement', 'station_check', 'trunk_injection']);
+    expect(choices.filter((c) => c.common).map((c) => c.value)).toEqual(['spot_treatment', 'broadcast_spray', 'granular_broadcast']);
     for (const { value, requiresSqft } of choices) {
       expect(normalizeServiceReportApplicationMethod(value)).toBe(value);
       expect(requiresLinearFtForReportApplication(value)).toBe(false);
       expect(requiresSqft).toBe(requiresSqftForReportApplication(value, 'lawn'));
     }
-    expect(Object.fromEntries(choices.map((c) => [c.value, c.requiresSqft]))).toEqual({
+    expect(Object.fromEntries(choices.slice(0, 3).map((c) => [c.value, c.requiresSqft]))).toEqual({
       spot_treatment: false, broadcast_spray: true, granular_broadcast: true,
     });
     // A method that needs linear feet is never offered (the sheet collects none).
@@ -307,11 +310,13 @@ describe('methods, areas and lawn size', () => {
       ],
       customer_turf_profiles: { lawn_sqft: 6400 },
     });
-    expect(ctx.methods).toEqual([
-      { value: 'spot_treatment', label: 'Spot treatment', requiresSqft: false },
-      { value: 'broadcast_spray', label: 'Broadcast spray', requiresSqft: true },
-      { value: 'granular_broadcast', label: 'Granular broadcast', requiresSqft: true },
+    expect(ctx.methods.slice(0, 3)).toEqual([
+      { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+      { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+      { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
     ]);
+    expect(ctx.methods.find((m) => m.value === 'soil_drench')).toMatchObject({ label: 'Soil drench', common: false });
+    expect(ctx.methods.some((m) => m.value === 'perimeter_spray')).toBe(false);
     expect(ctx.lawnSqft).toBe(6400);
     expect(ctx.lastVisit.products).toEqual([
       expect.objectContaining({ productId: 'talak', method: 'broadcast_spray', areaValue: 5200, areaUnit: 'sqft' }),

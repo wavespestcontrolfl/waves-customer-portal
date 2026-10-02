@@ -42,9 +42,11 @@ const CONTEXT = {
   customerRequest: { text: 'Weeds are back along the driveway.', pests: ['Weeds'] },
   products: CATALOG,
   methods: [
-    { value: 'spot_treatment', label: 'Spot treatment', requiresSqft: false },
-    { value: 'broadcast_spray', label: 'Broadcast spray', requiresSqft: true },
-    { value: 'granular_broadcast', label: 'Granular broadcast', requiresSqft: true },
+    { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+    { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+    { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    { value: 'soil_drench', label: 'Soil drench', common: false, requiresSqft: false },
+    { value: 'foliar_spray', label: 'Foliar spray', common: false, requiresSqft: false },
   ],
   lawnSqft: 6400,
   lastVisit: {
@@ -242,6 +244,30 @@ describe('application method and area', () => {
     fireEvent.click(within(howGroup('Celsius WG')).getByRole('button', { name: 'Granular broadcast' }));
     const body = await completeBody(request);
     expect(body.products.map((p) => [p.productId, p.applicationMethod])).toEqual([['celsius', 'granular_broadcast'], ['talak', 'broadcast_spray']]);
+  });
+
+  test('a method outside the three buttons is picked from More methods and sent as is', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    const more = within(editorFor('Celsius WG')).getByLabelText('More methods for Celsius WG');
+    expect(more.value).toBe('');
+    fireEvent.change(more, { target: { value: 'soil_drench' } });
+    expect(more.value).toBe('soil_drench');
+    for (const label of ['Spot treatment', 'Broadcast spray', 'Granular broadcast']) expect(pressed('Celsius WG', label)).toBe('false');
+    // Soil drench needs no area on a lawn row (the server's verdict).
+    expect(within(editorFor('Celsius WG')).queryByLabelText('Area treated (sq ft)')).toBeNull();
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'celsius')).toMatchObject({ applicationMethod: 'soil_drench' });
+    expect(body.products.find((p) => p.productId === 'celsius').areaValue).toBeUndefined();
+  });
+
+  test('a last-visit method under More methods starts selected there', async () => {
+    const context = { ...CONTEXT, lastVisit: { ...CONTEXT.lastVisit, products: CONTEXT.lastVisit.products.map((p) => (p.productId === 'celsius' ? { ...p, method: 'foliar_spray' } : p)) } };
+    const request = makeRequest({ context });
+    await readyVisit(request);
+    expect(within(editorFor('Celsius WG')).getByLabelText('More methods for Celsius WG').value).toBe('foliar_spray');
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'celsius')).toMatchObject({ applicationMethod: 'foliar_spray' });
   });
 
   test('a last-visit tile with no usable recorded method has none selected, and Complete waits for a tap', async () => {

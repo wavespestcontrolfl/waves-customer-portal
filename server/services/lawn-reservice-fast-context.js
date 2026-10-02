@@ -18,16 +18,25 @@ const { pestLabels } = require('./reservice-request');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const SERVICE_KEY = 'lawn_re_service';
-// The application methods the sheet offers on a lawn row, in screen order. Each
-// value is one /complete accepts as is (normalizeServiceReportApplicationMethod
-// keeps it); `requiresSqft` is /complete's own verdict for the lawn line
-// (requiresSqftForReportApplication), so the sheet never decides it. A method
-// that needs linear feet (perimeter spray) is not offered: the sheet does not
-// collect them.
+// The application methods the sheet offers on a lawn row, in screen order: the
+// full completion form's own method list (SchedulePage.jsx), so a tech can
+// always record how a product really went down. Each value is one /complete
+// accepts as is; `requiresSqft` is /complete's own verdict for the lawn line
+// (requiresSqftForReportApplication), so the sheet never decides it. `common`
+// ones are buttons on the row, the rest sit under "More methods". A method that
+// needs linear feet (perimeter spray) is left out: the sheet collects none, so
+// that application takes the full form.
 const LAWN_METHODS = [
-  { value: 'spot_treatment', label: 'Spot treatment' },
-  { value: 'broadcast_spray', label: 'Broadcast spray' },
-  { value: 'granular_broadcast', label: 'Granular broadcast' },
+  { value: 'spot_treatment', label: 'Spot treatment', common: true },
+  { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
+  { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
+  { value: 'soil_drench', label: 'Soil drench' },
+  { value: 'foliar_spray', label: 'Foliar spray' },
+  { value: 'fog_ulv', label: 'Fog/ULV' },
+  { value: 'pin_stream', label: 'Pin stream' },
+  { value: 'bait_placement', label: 'Bait' },
+  { value: 'station_check', label: 'Station check' },
+  { value: 'trunk_injection', label: 'Trunk injection' },
 ];
 const FINDINGS_TYPE = 'one_time_lawn_treatment';
 const HISTORY_PAGE_SIZE = 50;
@@ -78,7 +87,7 @@ function lawnMethodChoices() {
   } = require('./complete-scheduled-service');
   return LAWN_METHODS
     .filter(({ value }) => normalizeServiceReportApplicationMethod(value) === value && !requiresLinearFtForReportApplication(value))
-    .map(({ value, label }) => ({ value, label, requiresSqft: requiresSqftForReportApplication(value, 'lawn') }));
+    .map(({ value, label, common }) => ({ value, label, common: common === true, requiresSqft: requiresSqftForReportApplication(value, 'lawn') }));
 }
 
 /**
