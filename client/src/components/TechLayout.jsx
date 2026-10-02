@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { TrendingUp } from 'lucide-react';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
+import { installStaffSessionGuard } from '../lib/staffSessionGuard';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
@@ -69,6 +70,11 @@ export default function TechLayout() {
     const abort = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = abort ? setTimeout(() => abort.abort(), AUTH_CHECK_TIMEOUT_MS) : null;
 
+    // Only a failure to REACH the server (or to receive the 2xx body) may
+    // fall back to the stored profile; it is tagged `transport` here. Any
+    // other error — including the profile cache write below — keeps the
+    // verification error.
+    const transport = (err) => Object.assign(err instanceof Error ? err : new Error('Staff check failed'), { transport: true });
     fetch(`${API_BASE}/admin/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
       ...(abort ? { signal: abort.signal } : {}),
@@ -82,7 +88,7 @@ export default function TechLayout() {
         //     an invalid profile — no status, so the stored-profile fallback
         //     applies and the valid session is NOT cleared.
         const profile = await response.json().catch((bodyErr) => {
-          if (response.ok) throw Object.assign(new Error('Staff profile unreadable'), { name: bodyErr?.name || 'Error' });
+          if (response.ok) throw transport(Object.assign(new Error('Staff profile unreadable'), { name: bodyErr?.name || 'Error' }));
           if (bodyErr?.name === 'AbortError') throw Object.assign(bodyErr, { status: response.status });
           return null;
         });
@@ -102,7 +108,15 @@ export default function TechLayout() {
         }
         if (cancelled) return;
 
-        localStorage.setItem('waves_admin_user', JSON.stringify(profile));
+        // The freshly verified profile is what renders; a failed cache write
+        // (quota, private mode) must not drop to the stored — possibly
+        // another login's — profile. The stale copy is removed instead so an
+        // offline reopen cannot unlock from it.
+        try {
+          localStorage.setItem('waves_admin_user', JSON.stringify(profile));
+        } catch {
+          try { localStorage.removeItem('waves_admin_user'); } catch { /* storage unavailable */ }
+        }
         setTechName(profile.name || getAdminDisplayName('Tech'));
         setTechRole(profile.role);
         if (profile.mustChangePassword) {
@@ -110,7 +124,7 @@ export default function TechLayout() {
           return;
         }
         setAuthStatus('ready');
-      })
+      }, (fetchErr) => { throw transport(fetchErr); })
       .catch((error) => {
         if (cancelled) return;
         if (error?.status === 401 || error?.invalidProfile) {
@@ -129,7 +143,7 @@ export default function TechLayout() {
         // the token and the server rejects a dead session the moment it is
         // reachable; a server answer of any kind (401 above, 5xx here) and a
         // missing or malformed stored profile keep the verification error.
-        const stored = error?.status === undefined && !error?.invalidProfile ? getAdminUser() : null;
+        const stored = error?.transport === true && error?.status === undefined ? getAdminUser() : null;
         // A profile stored with mustChangePassword (written just before the
         // forced-reset redirect) never unlocks the shell offline.
         if (stored?.id && ['admin', 'technician'].includes(stored.role) && !stored.mustChangePassword) {
@@ -147,6 +161,26 @@ export default function TechLayout() {
       if (timer) clearTimeout(timer);
     };
   }, [navigate]);
+
+  // Any staff API call on these screens that the server answers with 401
+  // for the current token ends the session here, whichever handler made it:
+  // token, stored profile and saved route go, so an offline reopen cannot
+  // unlock the shell from a session the server already refused.
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  useEffect(() => installStaffSessionGuard({
+    getToken: getAdminAuthToken,
+    onRejected: () => {
+      localStorage.removeItem('waves_admin_token');
+      localStorage.removeItem('adminToken');
+      localStorage.removeItem('waves_admin_user');
+      clearStaffDeviceData();
+      setAuthStatus('unauthenticated');
+      Promise.resolve().then(refetchFlags).catch(() => {});
+      const { pathname, search } = locationRef.current;
+      navigate(`/admin/login?next=${encodeURIComponent(`${pathname}${search}`)}`, { replace: true });
+    },
+  }), [navigate]);
 
   // While in the tech portal, point the PWA manifest + home-screen title at
   // the field app. The default manifest pins start_url to "/" (the customer
