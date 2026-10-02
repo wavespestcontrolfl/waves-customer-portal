@@ -3742,6 +3742,31 @@ function serviceContactOnlyPhone(customer, phone) {
   return SERVICE_CONTACT_SLOTS.some((slot) => samePhone(phone, customer[slot.phone]));
 }
 
+// Identity protection for a saved household / service contact, independent of
+// the rollout gate that creates NEW address matches (codex pre-push round 6): a
+// number held only in a service-contact slot is protected when the gate is on
+// (any such contact), and — gate on or off, either call direction — whenever a
+// call from that number was ever household-linked to this account, so rolling
+// the gate back never re-opens the account to that person's name/email. A failed
+// lookup protects (the safe direction for the account holder's record).
+async function protectedServiceContactCaller(customer, phone, conn = db) {
+  if (!serviceContactOnlyPhone(customer, phone)) return false;
+  if (require('../config/feature-gates').callHouseholdAddressMatchLive()) return true;
+  try {
+    const key = phoneKey(phone);
+    if (!key) return false;
+    const digits = (col) => `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`;
+    const prior = await conn('call_log')
+      .where({ customer_id: customer.id })
+      .whereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'household_link')")
+      .where((q) => q.whereRaw(digits('from_phone'), [key.slice(-10)]).orWhereRaw(digits('to_phone'), [key.slice(-10)]))
+      .first('id');
+    return !!prior;
+  } catch {
+    return true;
+  }
+}
+
 function householdLinkCompleted(call) {
   let meta = call?.metadata;
   if (typeof meta === 'string') {
@@ -12212,7 +12237,7 @@ const CallRecordingProcessor = {
         // account holder: link, never backfill (see serviceContactOnlyPhone).
         customerId = existing.id;
         phoneMatchedThisPass = true;
-        slotOnlyCaller = require('../config/feature-gates').callHouseholdAddressMatchLive() && serviceContactOnlyPhone(existing, phone);
+        slotOnlyCaller = await protectedServiceContactCaller(existing, phone);
         if (!slotOnlyCaller) {
           await backfillLinkedCustomerFromExtraction({
             customerId, existing, extracted, source: 'call-extraction-backfill',
@@ -12476,13 +12501,13 @@ const CallRecordingProcessor = {
 
     // A pre-linked / reprocessed call (call.customer_id already set) whose caller
     // number is only a service-contact slot on that account is the same case.
-    if (!slotOnlyCaller && !householdLinkedThisPass && customerId && !createdCustomerFromCall && !isOutboundCall(call)
-      && require('../config/feature-gates').callHouseholdAddressMatchLive()) {
-      const identityAni = firstExternalPhone(call.from_phone);
-      if (identityAni) {
+    if (!slotOnlyCaller && !householdLinkedThisPass && customerId && !createdCustomerFromCall) {
+      // Either direction: the contact is the number WE dialed on an outbound call.
+      const identityPhone = prelinkedBackfillIdentityPhone(call);
+      if (identityPhone) {
         const slotRow = await db('customers').where({ id: customerId })
-          .first(['phone', 'secondary_phone', ...CONTACT_MATCH_PHONE_COLS.filter((c) => c !== 'phone')]).catch(() => null);
-        slotOnlyCaller = serviceContactOnlyPhone(slotRow, identityAni);
+          .first(['id', 'phone', 'secondary_phone', ...CONTACT_MATCH_PHONE_COLS.filter((c) => c !== 'phone')]).catch(() => null);
+        slotOnlyCaller = await protectedServiceContactCaller(slotRow, identityPhone);
       }
     }
     // Every customer-field backfill below honours this: the caller is not the
@@ -22644,6 +22669,7 @@ CallRecordingProcessor._test = {
   householdLinkFromCall,
   householdLinkCompleted,
   serviceContactOnlyPhone,
+  protectedServiceContactCaller,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,

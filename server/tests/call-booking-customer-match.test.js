@@ -32,7 +32,7 @@ const { _test } = require('../services/call-recording-processor');
 
 const {
   validatePhoneCallAppointmentCustomer, findHouseholdCustomerByAddress, householdLinkFromCall, householdLinkCompleted,
-  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone,
+  backfillCustomerFromAppointmentContact, prelinkedBackfillGate, serviceContactOnlyPhone, protectedServiceContactCaller,
 } = _test;
 const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
@@ -202,8 +202,10 @@ describe('FIX 2: household identity survives reprocess, retry and later backfill
   });
 
   test('wiring: the phone-match branch and the pre-linked path both derive slot-only protection (gated), and every backfill reads it', () => {
-    expect(source).toContain('serviceContactOnlyPhone(existing, phone)');
-    expect(source).toContain('slotOnlyCaller = serviceContactOnlyPhone(slotRow, identityAni);');
+    expect(source).toContain('slotOnlyCaller = await protectedServiceContactCaller(existing, phone);');
+    expect(source).toContain('slotOnlyCaller = await protectedServiceContactCaller(slotRow, identityPhone);');
+    expect(source).toContain('const identityPhone = prelinkedBackfillIdentityPhone(call);');
+    expect(source).not.toMatch(/!createdCustomerFromCall && !isOutboundCall\(call\)\s*&& require/);
     expect(source).toContain('const householdIdentityProtected = householdLinkedThisPass || slotOnlyCaller;');
     expect(source).toContain('if (customerId && householdIdentityProtected) {');
   });
@@ -251,6 +253,7 @@ const SKIP = !process.env.DATABASE_URL;
     trx = await database.transaction();
     await trx.raw('CREATE TEMP TABLE customers (LIKE public.customers INCLUDING DEFAULTS) ON COMMIT DROP');
     await trx.raw('CREATE TEMP TABLE customer_properties (LIKE public.customer_properties INCLUDING DEFAULTS) ON COMMIT DROP');
+    await trx.raw('CREATE TEMP TABLE call_log (LIKE public.call_log INCLUDING DEFAULTS) ON COMMIT DROP');
   });
   afterEach(async () => { await trx.rollback(); });
   afterAll(async () => { await database.destroy(); });
@@ -407,6 +410,30 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').del();
     await trx('customers').insert(member({ pipeline_stage: 'new_lead' }));
     expect((await lookup()).reason).toBe('not_established_customer');
+  });
+
+  test('protectedServiceContactCaller: gate-independent for a contact a household call once linked, either direction', async () => {
+    const holder = member({ service_contact_phone: NOT_ON_FILE });
+    await trx('customers').insert(holder);
+    delete process.env[HOUSEHOLD_GATE];
+    // gate OFF, no household history -> an ordinary slot contact is untouched (pre-existing behaviour)
+    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(false);
+    // gate OFF, an earlier INBOUND call from that number was household-linked -> protected
+    const sid = () => `CA${randomUUID().replace(/-/g, '')}`;
+    await trx('call_log').insert({ twilio_call_sid: sid(), customer_id: holder.id, from_phone: NOT_ON_FILE, to_phone: '+19415550000', direction: 'inbound', metadata: { household_link: { customer_id: holder.id } } });
+    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
+    // the account holder's own number and a stranger are never "protected contacts"
+    expect(await protectedServiceContactCaller(holder, holder.phone, trx)).toBe(false);
+    expect(await protectedServiceContactCaller(holder, '+19415550999', trx)).toBe(false);
+    // OUTBOUND to the saved contact (the number we dialed is on to_phone) after a linked call
+    await trx('call_log').del();
+    await trx('call_log').insert({ twilio_call_sid: sid(), customer_id: holder.id, from_phone: '+19415550000', to_phone: NOT_ON_FILE, direction: 'outbound', metadata: { household_link: { customer_id: holder.id } } });
+    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
+    // gate ON -> any slot-only contact is protected, with or without history
+    await trx('call_log').del();
+    process.env[HOUSEHOLD_GATE] = 'true';
+    expect(await protectedServiceContactCaller(holder, NOT_ON_FILE, trx)).toBe(true);
+    delete process.env[HOUSEHOLD_GATE];
   });
 
   test('a number stored only in secondary_phone is identity evidence, never "unknown"', async () => {
