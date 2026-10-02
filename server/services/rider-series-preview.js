@@ -11,10 +11,11 @@
  * can never silently disagree about what "eligible" or "the plan" means.
  * `docs/design/rider-series-scheduling.md` has the full rule set.
  *
- * Nothing in this repository sets `scheduled_services.rides_parent_id` yet
- * (schema-only migration 20260928220000_scheduled_services_rides_parent —
- * see its own header) and nothing calls `previewRiderPair` from any hook,
- * cron, or writer. It is reached ONLY from
+ * `scheduled_services.rides_parent_id` is written in ONE place: estimate
+ * accept, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT (rider-accept-seeding.js
+ * links a quarterly rider series to the lawn series it was seeded on). No
+ * hook, cron or extension reads it yet, and nothing calls `previewRiderPair`
+ * from any hook, cron, or writer. It is reached ONLY from
  * scripts/rider-series-preview-report.js, a read-only ops report the owner
  * runs by hand.
  *
@@ -153,6 +154,39 @@ function nextRiderDate({
   if (floor && next && next < floor) next = shiftPastWeekend(base, skipWeekends, 'forward');
   if (next && blackoutDates) next = clearOfBlackout(next, blackoutDates, { skipWeekends });
   return next;
+}
+
+// Which series may ride which (owner rulings 2026-10-01). Every pairing uses
+// the one 77/84/105 date rule below, so a 6-week lawn host gives a quarterly
+// rider every 2nd lawn date and a monthly lawn host every 3rd. One table: a
+// later host:rider mix (bi-monthly, semiannual, mosquito riders — they need
+// their own gaps) is one more row here, not another set of call-site tests.
+const QUARTERLY_RIDER_FAMILIES = ['pest_control', 'tree_shrub', 'termite_bait'];
+const RIDER_PAIRINGS = [
+  { host: 'lawn_6wk', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+  { host: 'lawn_monthly', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
+];
+
+// 'lawn_6wk' | 'lawn_monthly' | null for a series row. Prod stores 6-week lawn
+// three ways: every_6_weeks, custom with a 42-day interval (whatever the
+// catalog key says — the interval is the cadence), and custom with a NULL
+// interval on lawn_care_6week.
+function riderHostKind(row) {
+  if (!row) return null;
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  const snapshot = String(row.service_key_snapshot || '');
+  if (!snapshot.startsWith('lawn_care') && serviceKeyFor({ service_type: row.service_type }) !== 'lawn_care') return null;
+  if (row.recurring_pattern === 'every_6_weeks') return 'lawn_6wk';
+  if (row.recurring_pattern === 'monthly') return 'lawn_monthly';
+  if (row.recurring_pattern !== 'custom') return null;
+  const interval = row.recurring_interval_days;
+  return Number(interval) === 42 || (interval == null && snapshot === 'lawn_care_6week') ? 'lawn_6wk' : null;
+}
+
+function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
+  const host = riderHostKind(hostRow);
+  return !!host && RIDER_PAIRINGS.some((p) => p.host === host
+    && p.riderPattern === riderPattern && p.riderFamilies.includes(riderFamily));
 }
 
 /**
@@ -627,25 +661,37 @@ async function hostReschedulePending(conn, hostParent, cols) {
   return rows.some(isPlanSeriesRow);
 }
 
-async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
-  const addressCols = [
-    'service_address_line1', 'service_address_line2', 'service_address_city',
-    'service_address_state', 'service_address_zip',
-  ].filter((c) => cols[c]);
-  const hostRowsRaw = await conn('scheduled_services')
-    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+// THE live plan-row read for one or more series (roots and their cadence
+// children): status outside JOIN_INELIGIBLE_STATUSES (NULL counts as live),
+// tracker state not terminal, isPlanSeriesRow (no boosters, callbacks or
+// included follow-ups), optionally from a date on. Shared by this preview's
+// host dates and by accept-time rider seeding (rider-accept-seeding.js), so
+// "which rows of a series are live" has one answer.
+function livePlanSeriesRows(conn, parentIds, cols, { fromDate = null, extraColumns = [] } = {}) {
+  return conn('scheduled_services')
+    .where((q) => { q.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .modify((q) => {
       if (cols.track_state) q.where((t) => { t.whereNull('track_state').orWhereNotIn('track_state', TERMINAL_TRACK_STATES); });
+      if (fromDate) q.where('scheduled_date', '>=', fromDate);
     })
-    .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
     .select(
       'id', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
       ...['is_callback', 'followup_included'].filter((c) => cols[c]),
-      ...(cols.property_id ? ['property_id'] : []), ...addressCols,
+      ...extraColumns.filter((c) => cols[c]),
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
+}
+
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+  const addressCols = [
+    'service_address_line1', 'service_address_line2', 'service_address_city',
+    'service_address_state', 'service_address_zip',
+  ];
+  const hostRowsRaw = await livePlanSeriesRows(conn, [hostParent.id], cols, {
+    fromDate: todayStr, extraColumns: ['property_id', ...addressCols],
+  });
   let filtered = hostRowsRaw;
   if (cols.property_id && hostScope?.resolved) {
     // One batched key lookup for the whole host series (withComparableKeys):
@@ -730,8 +776,9 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
 
 /**
  * Read-only preview of ONE rider/host pairing — computable whether or not
- * `scheduled_services.rides_parent_id` is actually set (nothing writes it
- * yet): pass `hostParentId` explicitly to preview a CANDIDATE pair the ops
+ * `scheduled_services.rides_parent_id` is actually set (only accept-time
+ * rider seeding writes it, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT): pass
+ * `hostParentId` explicitly to preview a CANDIDATE pair the ops
  * report found by its own heuristic (same customer, same property, an
  * active ongoing lawn series + an active ongoing pest series), or omit it
  * to read the rider's own already-stamped link.
@@ -902,6 +949,9 @@ module.exports = {
   MAX_HORIZON_EXTRA_DAYS,
   planRiderDates,
   computeRiderHorizon,
+  riderHostKind,
+  riderPairingEnabled,
+  livePlanSeriesRows,
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,

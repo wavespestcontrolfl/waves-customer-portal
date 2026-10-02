@@ -15,6 +15,9 @@ const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const ConsentService = require('../services/payment-method-consents');
+const {
+  CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
+} = require('../services/payment-method-consent-text');
 const logger = require('../services/logger');
 const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -595,10 +598,26 @@ async function rejectIfRenewalNotPayable(invoice, res) {
   return true;
 }
 
+// Rendered-version attestation for a save-the-method capture (codex #5434
+// r1 P1): the pay page bundles its own copy of the consent text, so every
+// request that captures (or prepares to capture) a consent carries the
+// CONSENT_VERSION the tab rendered beside its checkbox. A capture that
+// attests another version — or none (a bundle from before the attestation
+// existed, left open across a copy change) — is refused BEFORE any Stripe
+// work with a 409 the page surfaces as "refresh the page", so a tab can
+// never be recorded as agreeing to text it did not show. Only when a
+// method is actually being saved: a plain one-off payment attests nothing.
+function rejectStaleConsentVersion(req, res, saving) {
+  if (!saving) return false;
+  if (renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) return false;
+  res.status(409).json(consentVersionStaleResponse());
+  return true;
+}
+
 router.post('/:token/setup', async (req, res, next) => {
   let invoice = null;
   try {
-    const { saveCard, cardOnly, invoiceVersion } = req.body || {};
+    const { saveCard, cardOnly, invoiceVersion, consentTextVersion } = req.body || {};
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     // Phase 2: an accrued invoice is payable only via its consolidated statement.
@@ -663,11 +682,15 @@ router.post('/:token/setup', async (req, res, next) => {
     // invoice.captureNeeded), never permanently bypassed by a swallowed
     // error (Codex #2507 P1 round-3).
     const holdCoverageForCapture = requireSave && (await invoiceCaptureNeeded(invoice));
+    if (rejectStaleConsentVersion(req, res, !!saveCard || requireSave)) return;
     const result = await StripeService.createInvoicePaymentIntent(invoice.id, {
       saveCard: !!saveCard || requireSave,
       cardOnly: !!cardOnly,
       holdCoverageForCapture,
       expectedVersion: invoiceVersion,
+      // Stamped into the PaymentIntent's metadata beside save_card_opt_in:
+      // the webhook mirror records the consent only under a current stamp.
+      consentTextVersion,
       // Combined full-balance charge (GATE_PAY_INCLUDE_BALANCE): the mint
       // decides server-side whether siblings ride this PI; gate off or no
       // open balance ⇒ identical to today.
@@ -776,7 +799,7 @@ router.post('/:token/setup', async (req, res, next) => {
 router.post('/:token/update-amount', async (req, res, next) => {
   let invoice = null;
   try {
-    const { paymentIntentId, methodCategory, saveCard } = req.body || {};
+    const { paymentIntentId, methodCategory, saveCard, consentTextVersion } = req.body || {};
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
@@ -796,12 +819,14 @@ router.post('/:token/update-amount', async (req, res, next) => {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
 
+    // Required-save invoices force the flag server-side (see /setup).
+    const savingOnUpdate = !!saveCard || (await invoiceRequiresSavedMethod(invoice));
+    if (rejectStaleConsentVersion(req, res, savingOnUpdate)) return;
     const result = await StripeService.updateInvoicePaymentIntentMethod(
       invoice.id,
       paymentIntentId,
       methodCategory,
-      // Required-save invoices force the flag server-side (see /setup).
-      { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) },
+      { saveCard: savingOnUpdate, consentTextVersion },
     );
 
     res.json(result);
@@ -881,7 +906,7 @@ router.post('/:token/quote', async (req, res, next) => {
 router.post('/:token/finalize', async (req, res, next) => {
   let invoice = null;
   try {
-    const { quoteToken, saveCard } = req.body || {};
+    const { quoteToken, saveCard, consentTextVersion } = req.body || {};
     if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
@@ -902,7 +927,8 @@ router.post('/:token/finalize', async (req, res, next) => {
     // Codex #4971 r26 P1: a termite renewal's payment is finalized UNDER the
     // renewal gate, re-checked there (an ordinary invoice runs straight
     // through).
-    const finalizeOptions = { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) };
+    const finalizeOptions = { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)), consentTextVersion };
+    if (rejectStaleConsentVersion(req, res, finalizeOptions.saveCard)) return;
     let result;
     try {
       result = await require('../services/termite-annual-renewal-charge')
@@ -926,6 +952,12 @@ router.post('/:token/finalize', async (req, res, next) => {
         savedCardPending: true,
         reconciliationRequired: !!err.reconciliationRequired,
       });
+    }
+    // Expected races (the consent-stamp fence, combined-balance drift): the
+    // page reloads to the live session — same contract as /setup and
+    // /update-amount, no admin bill-payment-error alert.
+    if (err.statusCode === 409 && err.staleBalance) {
+      return res.status(409).json({ error: err.message, staleBalance: true });
     }
     reportBillPaymentError(req, {
       invoice,
@@ -1182,6 +1214,19 @@ router.post('/:token/consent', async (req, res, next) => {
       logger.info(`[pay-v2] Consent skipped — PI ${pi.id} not configured for save-on-file (setup_future_usage=${pi.setup_future_usage}, save_card_opt_in=${pi?.metadata?.save_card_opt_in})`);
       return res.json({ success: false, skipped: true, reason: 'not_opted_in' });
     }
+    // The consent text the customer read is the one the tab that MINTED the
+    // opt-in attested (codex #5434 r1 P1): /setup and /update-amount stamped
+    // that version into the PI beside save_card_opt_in. The stamp — never
+    // the posting bundle's constant (a redirect return posts from a freshly
+    // loaded, possibly newer bundle) — must be this server's current
+    // version; a stale or absent stamp (an opt-in minted under older copy)
+    // is refused, nothing is recorded, and the webhook mirror applies the
+    // same rule. The payment itself already settled; only the saved-method
+    // authorization is withheld.
+    if (!renderedConsentVersionIsCurrent(pi?.metadata?.[CONSENT_VERSION_METADATA_KEY])) {
+      logger.warn(`[pay-v2] Consent refused — PI ${pi.id} opt-in stamped consent text version ${pi?.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (invoice ${invoice.id})`);
+      return res.status(409).json(consentVersionStaleResponse());
+    }
 
     // Prefer the verified charge.payment_method_details.type — that's
     // the method that actually ran. Fall back to pi.payment_method_types
@@ -1428,8 +1473,17 @@ router.post('/:token/capture-setup', async (req, res) => {
       const achRow = await db('customers').where({ id: invoice.customer_id }).first('ach_status');
       if (achRow?.ach_status && achRow.ach_status !== 'active') methodTypes = 'card';
     } catch { /* fail toward card_or_bank */ }
+    // The capture form renders the (locked) consent beside the Payment
+    // Element: the tab attests the version it renders, the mint stamps it,
+    // and /setup-complete + the covered_capture webhook record only under a
+    // current stamp (codex #5434 r1 P1).
+    if (rejectStaleConsentVersion(req, res, true)) return;
     const setup = await StripeService.createSetupIntent(invoice.customer_id, methodTypes, {
-      metadata: { purpose: 'covered_capture', invoice_id: String(invoice.id) },
+      metadata: {
+        purpose: 'covered_capture',
+        invoice_id: String(invoice.id),
+        [CONSENT_VERSION_METADATA_KEY]: String(req.body.consentTextVersion),
+      },
     });
     res.json({
       clientSecret: setup.clientSecret,
@@ -1492,6 +1546,14 @@ router.post('/:token/setup-complete', async (req, res) => {
     if (setupIntent.metadata?.waves_customer_id !== String(invoice.customer_id)) {
       logger.warn(`[pay-v2] setup-complete customer mismatch: SI ${setupIntentId} meta=${setupIntent.metadata?.waves_customer_id} invoice customer=${invoice.customer_id}`);
       return res.status(409).json({ error: 'Setup does not belong to this invoice' });
+    }
+    // The consent text the customer read is the version the tab that MINTED
+    // this capture attested (/capture-setup stamped it); a stale or absent
+    // stamp is refused before any save — same rule as /consent and the
+    // covered_capture webhook (codex #5434 r1 P1).
+    if (!renderedConsentVersionIsCurrent(setupIntent.metadata?.[CONSENT_VERSION_METADATA_KEY])) {
+      logger.warn(`[pay-v2] setup-complete refused — SI ${setupIntentId} stamped consent text version ${setupIntent.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (invoice ${invoice.id})`);
+      return res.status(409).json(consentVersionStaleResponse());
     }
 
     // Idempotent save: stripe_payment_method_id is unique — a retry after a

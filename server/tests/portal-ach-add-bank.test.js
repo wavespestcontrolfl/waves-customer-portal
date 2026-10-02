@@ -84,6 +84,11 @@ jest.mock('../models/db', () => {
 const billingRouter = require('../routes/billing-v2');
 const autopayRouter = require('../routes/customer-autopay');
 const { CONSENT_VERSION, ACH_CONSENT_TEXT, CARD_CONSENT_TEXT } = require('../services/payment-method-consent-text');
+// Every capture attests the consent text version the tab rendered (codex
+// #5434 r1 P1): the mint stamps it on the SetupIntent, POST /cards records
+// only under a current stamp.
+const ATTEST = { consentTextVersion: CONSENT_VERSION };
+const STAMP = { consent_text_version: CONSENT_VERSION };
 const { consentVersionQualifiesForEnrollment } = jest.requireActual('../services/payment-method-consents');
 
 function routeHandler(router, method, path) {
@@ -116,8 +121,9 @@ beforeEach(() => {
 describe('consent v10 (ACH revocation contact aligned to billing@)', () => {
   test('version bumped and ACH text names billing@, not contact@', () => {
     // v11 added the prepay-card variant (GATE_PREPAY_CARD_AND_CHARGE);
-    // the ACH and card texts this suite pins are unchanged since v10.
-    expect(CONSENT_VERSION).toBe('v11_2026-08-25');
+    // v12 added the rate-then-in-effect sentence to every variant. The
+    // billing@ contact this suite pins is unchanged since v10.
+    expect(CONSENT_VERSION).toBe('v12_2026-09-30');
     expect(ACH_CONSENT_TEXT).toContain('billing@wavespestcontrol.com');
     expect(ACH_CONSENT_TEXT).not.toContain('contact@wavespestcontrol.com');
     // Card text unchanged by the bump.
@@ -135,9 +141,9 @@ describe('POST /cards/setup-intent — gate-authoritative method types', () => {
   test('gate OFF: card_or_bank downgrades to card-only', async () => {
     mockIsEnabled.mockReturnValue(false);
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'si_1', paymentMethodTypes: ['card'] });
-    const { body } = await invoke(handler(), { body: { paymentMethodType: 'card_or_bank' } });
+    const { body } = await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', ...ATTEST } });
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({
-      metadata: { purpose: 'portal_add_method' },
+      metadata: { purpose: 'portal_add_method', ...STAMP },
     }));
     expect(body.paymentMethodTypes).toEqual(['card']);
   });
@@ -145,11 +151,23 @@ describe('POST /cards/setup-intent — gate-authoritative method types', () => {
   test('gate ON: card_or_bank passes through with the portal_add_method purpose', async () => {
     mockIsEnabled.mockReturnValue(true);
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'si_1', paymentMethodTypes: ['card', 'us_bank_account'] });
-    const { body } = await invoke(handler(), { body: { paymentMethodType: 'card_or_bank' } });
+    const { body } = await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', ...ATTEST } });
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
-      metadata: { purpose: 'portal_add_method' },
+      metadata: { purpose: 'portal_add_method', ...STAMP },
     }));
     expect(body.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
+  });
+
+  test.each([
+    ['an older bundle (stale version)', { consentTextVersion: 'v11_2026-08-25' }],
+    ['a bundle that predates the attestation (absent)', {}],
+  ])('%s is refused with 409 CONSENT_VERSION_STALE before any mint (codex #5434 r1 P1)', async (_name, attest) => {
+    mockIsEnabled.mockReturnValue(true);
+    const { statusCode, body } = await invoke(handler(), { body: { paymentMethodType: 'card', ...attest } });
+    expect(statusCode).toBe(409);
+    expect(body.code).toBe('CONSENT_VERSION_STALE');
+    expect(body.error).toMatch(/refresh/i);
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 });
 
@@ -160,6 +178,7 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     status: 'requires_action',
     next_action: { type: 'verify_with_microdeposits' },
     payment_method: 'pm_bank_1',
+    metadata: STAMP,
   };
   const pendingRow = {
     id: 'pm-row-1',
@@ -224,6 +243,7 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
       id: 'si_md',
       status: 'succeeded',
       payment_method: 'pm_bank_1',
+      metadata: STAMP,
     });
     state.tables.payment_methods = [pendingRow];
     const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_md' } });
@@ -242,6 +262,7 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
       id: 'si_fc',
       status: 'succeeded',
       payment_method: 'pm_bank_1',
+      metadata: STAMP,
     });
     // Financial Connections verifies instantly — the row never passes
     // through pending, so a pending-only conditional left the customer
@@ -264,6 +285,20 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     });
     const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_late' } });
     expect(statusCode).toBe(409);
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a stale stamp (minted by an older bundle)', { consent_text_version: 'v11_2026-08-25' }],
+    ['no stamp (minted before stamps existed)', {}],
+  ])('a SetupIntent carrying %s is refused with 409 CONSENT_VERSION_STALE before any save (codex #5434 r1 P1)', async (_name, metadata) => {
+    mockIsEnabled.mockReturnValue(true);
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_old', status: 'succeeded', payment_method: 'pm_bank_1', metadata });
+    const { statusCode, body } = await invoke(handler(), { body: { setupIntentId: 'si_old', ...ATTEST } });
+    expect(statusCode).toBe(409);
+    expect(body.code).toBe('CONSENT_VERSION_STALE');
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
     expect(mockRecordConsent).not.toHaveBeenCalled();
     expect(mockEnroll).not.toHaveBeenCalled();

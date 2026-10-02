@@ -40,6 +40,22 @@ export function productGroup(product) {
   return PEST_CATEGORIES.has(key) ? "pest" : "other";
 }
 
+// The categories a lawn visit applies, listed first in the lawn-aware picker.
+// Everything else (pest baits, termiticides, ...) waits behind "Show other
+// products".
+const LAWN_CATEGORIES = new Set([
+  "herbicide", "pre-emergent", "post-emergent", "fungicide", "insecticide", "fertilizer",
+  "liquid fertilizer", "micronutrient", "micronutrient fertilizer", "pgr", "amendment", "soil amendment", "biostimulant",
+  "wetting agent", "adjuvant", "surfactant", "soil surfactant",
+]);
+
+/** 'pest' (the primary list) | 'other' | 'hidden' for the lawn-aware picker. */
+export function lawnProductGroup(product) {
+  const key = categoryKey(product);
+  if (HIDDEN_CATEGORIES.has(key)) return "hidden";
+  return LAWN_CATEGORIES.has(key) ? "pest" : "other";
+}
+
 /** The category as the tech reads it: "Insecticide", "IGR", "Termite bait". */
 export function categoryLabel(product) {
   const text = String(product?.category || "").trim().replace(/_/g, " ");

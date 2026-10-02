@@ -17,6 +17,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -297,6 +298,8 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
       .whereNotExists(function stillUnread() {
         this.select(1).from('messages as m').join('conversations as c2', 'c2.id', 'm.conversation_id')
           .whereRaw('c2.customer_id = cv.customer_id').where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+          // Hidden recruiting replies never ring this bell, so they never hold it open.
+          .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
           .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); });
       })
       // legacy-ONLY (no unified twin) and recent — historical rows were
@@ -304,6 +307,7 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
       .whereNotExists(function stillUnreadLegacy() {
         this.select(1).from('sms_log as l').whereRaw('l.customer_id = cv.customer_id').where({ 'l.direction': 'inbound' })
           .where('l.created_at', '>', new Date(Date.now() - LEGACY_WINDOW_MS))
+          .modify((q) => excludeRecruitingSmsLog(q, 'l.message_type'))
           .andWhere(function unread() { this.where({ 'l.is_read': false }).orWhereNull('l.is_read'); })
           .whereNotExists(function hasTwin() { this.select(1).from('messages as mm').whereRaw('mm.twilio_sid = l.twilio_sid').where({ 'mm.channel': 'sms' }); });
       })

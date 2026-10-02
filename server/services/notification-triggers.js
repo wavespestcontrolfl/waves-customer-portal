@@ -299,7 +299,10 @@ const TRIGGER_REGISTRY = {
     techVisible: true,
     group: 'Communication',
     build: (p) => ({
-      title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
+      // One bell row per conversation: a known sender's later texts rewrite the
+      // row while it is still open, so a count leads the title ("3 texts from
+      // Name") and the body is always the latest text.
+      title: `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
       // The whole text, for the bell's "Show full text": the 140-character
       // body above (also the push text) used to be all the bell ever kept.
@@ -1017,7 +1020,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1123,11 +1126,36 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.body,
             { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
+              // A standing thread row (sms_reply, one per customer) is rewritten
+              // in place by each new message instead of inserting another row.
+              ...(dedupeKey && refreshOnDedupe ? { refreshOnDedupe: true, ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}) } : {}),
+              // Decided inside notifyAdmin's keyed lock against the row as it stands:
+              // refreshPayload(existingRow, existingPayload) -> null | { payload, keepContent }.
+              // keepContent: this emission is OLDER than what the row shows, so the
+              // row keeps its text, link and position and only its payload (the
+              // count) moves, quietly.
+              ...(dedupeKey && refreshOnDedupe && typeof refreshPayload === 'function' ? {
+                standingRefresh: async (existing, existingMeta) => {
+                  const base = existingMeta?.payload || {};
+                  const r = await refreshPayload(existing, base);
+                  if (!r) return null;
+                  if (r.keepContent) {
+                    const kept = { ...base, ...r.payload };
+                    const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
+                    return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
+                  }
+                  const merged = { ...payload, ...r.payload };
+                  const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
+                  return { title: rebuilt.title, body: rebuilt.body, link: rebuilt.link, detail: rebuilt.detail, metadata: { payload: sanitizeNotificationPayload(triggerKey, merged) } };
+                },
+              } : {}),
               ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
-          if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
+          // A refresh carries a NEW message onto the standing row: that is not
+          // an event that already delivered, so its push still goes.
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

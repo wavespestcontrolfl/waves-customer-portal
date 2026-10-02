@@ -142,7 +142,16 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // quote for each; services/call-commercial-dictated-booking.js only verifies
 // the judgements, that each quote is word for word in a turn of its required
 // speaker, and their order. A missing judgement fails closed there.
-const SCHEMA_VERSION = '1.21.0';
+// 1.22.0: additive — secondary_contact(s).wants_appointment_texts and
+// .on_site (optional booleans in both schemas, never `required`). Owner ruling
+// 2026-09-30 "on-site person is the contact point", redesigned 2026-10-01:
+// wants_notifications is channel-neutral (it is also set for "email him the
+// report"), so the extraction separately records whether the caller agreed
+// THIS person gets the appointment TEXTS and whether the call says they will
+// be AT the property. The call pipeline uses them only to decide whether to
+// send that person the recipient opt-in ask; consent is their own YES. Older
+// payloads, which lack both, still validate and simply never qualify.
+const SCHEMA_VERSION = '1.22.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -28,6 +28,8 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
       t.boolean('active').defaultTo(true); t.boolean('is_primary').defaultTo(false);
       for (const key of ['address_line1','address_line2','city','state','zip']) t.string(key);
       t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at');
+      // 20261001190000_neighborhood_access: an address move clears these.
+      t.uuid('neighborhood_id'); t.string('neighborhood_source'); t.string('county_subdivision'); t.timestamp('neighborhood_checked_at');
     });
     await knex.schema.createTable('scheduled_services', t => {
       t.uuid('id').primary(); t.uuid('customer_id').references('id').inTable('customers'); t.uuid('property_id').references('id').inTable('customer_properties');
