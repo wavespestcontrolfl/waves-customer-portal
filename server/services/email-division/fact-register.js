@@ -773,7 +773,9 @@ function foldTemperatures(sentence) {
   };
   let text = String(sentence).replace(TEMP_RANGE, (match, a, unitA, b, unitB) => {
     if (!unitA && !unitB) return match; // "80 to 90 lawns" is not a temperature
-    const low = Math.min(tempValueF(a, unitA, unitB), tempValueF(b, unitA, unitB));
+    // Each end is read in its own unit; an end with no unit takes the other's
+    // ("29 to 35°C"), so "between 70°F and 30°C" keeps 70°F as its low end.
+    const low = Math.min(tempValueF(a, unitA || unitB), tempValueF(b, unitB || unitA));
     return token(isHotValue(low) ? 'hottemp' : 'cooltemp', match);
   });
   text = text.replace(TEMP_TRAILING, (match, figure, unit, direction) => {

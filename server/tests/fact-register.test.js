@@ -662,6 +662,7 @@ describe('findUnverifiedClaims', () => {
       'Large patch thrives when temperatures are 30 degrees Celsius or higher.',
       'Large patch thrives when temperatures are between 29 and 35°C.',
       'Large patch spreads when temperatures are above 30°C.',
+      'Large patch thrives between 85°F and 35°C.',
       'Large patch is worst when it is 32 Celsius out.',
       // a degree figure with real temperature context is still hot, even near a geometry word
       'Large patch thrives when temperatures are 90 degrees, forming arcs around sprinkler heads.',
@@ -764,6 +765,8 @@ describe('findUnverifiedClaims', () => {
       'Large patch is active when temperatures are at or below 80°F.',
       'Large patch is active when temperatures are equal to or less than 80 degrees Fahrenheit.',
       // cool Celsius figures stay cool once converted
+      'Large patch is active between 70°F and 30°C.',
+      'Large patch is active between 20°C and 85°F.',
       'Large patch is active when temperatures are 20°C.',
       'Large patch is most likely when temperatures are 15 to 25 degrees Celsius.',
       'Large patch is active when temperatures are below 30°C.',

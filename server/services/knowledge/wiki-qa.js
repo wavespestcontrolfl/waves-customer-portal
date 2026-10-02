@@ -51,6 +51,8 @@ const SPECIES_RULE = ' Articles titled "SPECIES CATALOG" are the owner-approved 
 // minutes-long DEEP turn is unacceptable. The DEEP tier writes/audits the
 // wiki content offline; this path just reads it back fast.
 
+// Every read here uses `active IS NOT FALSE`: an admin's active=false hides
+// the article, and a legacy row with no flag (NULL) counts as on.
 class WikiQA {
 
   /**
@@ -217,7 +219,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    */
   async lookup(topic) {
     const article = await db('knowledge_base')
-      .where('active', true)
+      .whereRaw('active IS NOT FALSE')
       .where(function () {
         this.where('title', 'ilike', `%${topic}%`)
           .orWhereRaw("tags::text ILIKE ?", [`%${topic.toLowerCase()}%`]);
@@ -235,7 +237,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (keywords.length === 0) return [];
 
     const results = await db('knowledge_base')
-      .where('active', true)
+      .whereRaw('active IS NOT FALSE')
       .where(function () {
         for (const kw of keywords) {
           this.orWhere('title', 'ilike', `%${kw}%`)
@@ -328,14 +330,14 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
    * Get all articles in a specific category.
    */
   async getCategory(category) {
-    return db('knowledge_base').where({ category, active: true }).select('path', 'title', 'summary', 'content', 'tags');
+    return db('knowledge_base').where({ category }).whereRaw('active IS NOT FALSE').select('path', 'title', 'summary', 'content', 'tags');
   }
 
   /**
    * List all active articles (used by dispatch module).
    */
   async listAll() {
-    return db('knowledge_base').where('active', true)
+    return db('knowledge_base').whereRaw('active IS NOT FALSE')
       .select('path', 'title', 'category', 'summary', 'tags', 'word_count', 'last_compiled')
       .orderBy('category');
   }
