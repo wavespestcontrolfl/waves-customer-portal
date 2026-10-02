@@ -58,7 +58,7 @@ has a method and targets. 140 of 240 pest product rows have an area.
 | capture | meaning |
 |---|---|
 | `tap` | the tech types or picks it on the Complete Service form (`client/src/pages/admin/SchedulePage.jsx` CompletionPanel) or the Fast Complete sheet |
-| `voice` | voice fill must write it. Voice fill ships **dark** on the Fast Complete report flow (`GATE_FAST_COMPLETE_REPORT`): where product went down, the pests named and how the sprays went down are read from the note (`server/services/visit-voice-facts.js`) and sent as the visit's areas serviced (a product's area only when one place was heard), each product's targets and the sprays' method. Every other `voice` fact is still filled by `tap` |
+| `voice` | voice fill must write it. Voice fill ships **dark** on the Fast Complete report flow (`GATE_FAST_COMPLETE_REPORT`): where product went down, the pests named and how the sprays went down are read from the note (`server/services/visit-voice-facts.js`) and sent as the visit's areas serviced (a product's area only when one place was heard), each product's targets and the sprays' method. Lane voice fill ships **dark** too (`GATE_LANE_VOICE_FILL`): a bed bug, fire ant, tick, bee & wasp, mud dauber or recurring mosquito visit's places and one value per finding group are read from the note (`server/services/visit-lane-facts.js`); the office form's Generate fills only fields nobody picked, and the tech's Fast Complete sheet shows them on its record card for the tech to confirm, both sending them as `areasServiced` and `structuredObservations`. Every other `voice` fact is still filled by `tap` |
 | `prefill` | defaulted from the protocol, the product label or the service config; the tech confirms it |
 | `derived` | computed by the server from other facts or photos |
 | `photo` | an uploaded image, optionally captioned |
@@ -105,6 +105,7 @@ stay internal, without a decision either way.
 | `recommendations` | prefill, tap | `structured_notes.recommendations` | Recommendations | hidden |
 | `form_recommendations` | prefill, tap | `structured_notes.formRecommendations` | Recommendations, form-sourced only | hidden |
 | `tech_tips` | prefill, tap | `structured_notes.techTips` | Tips from your tech (`techNote`, `GATE_TECH_TIPS`) | hidden |
+| `blog_post` | tap only | `structured_notes.blogPost` | From the Waves blog (`payload.blogPost`, `GATE_REPORT_BLOG_POST`) | hidden |
 | `protocol_actions_completed` | prefill, tap | `structured_notes.protocolActionsCompleted` | What we did (protocol actions) | hidden |
 | `protocol_action_scopes_completed` | derived | `structured_notes.protocolActionScopesCompleted` | Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (`structuredActionScope`/`treatmentScope`, report-data.js) | fallback to area-text/product-based scope classification |
 | `technician_notes` (internal) | voice, tap, derived | `service_records.technician_notes` | AI report writer prompt ("Service Notes", `redactAccessCodes`); Visit summary / Today's Result body **only** through `technicianReportCustomerCopy`'s screened parse | fallback to the deterministic summary |

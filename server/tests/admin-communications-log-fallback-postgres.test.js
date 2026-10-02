@@ -203,6 +203,9 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     });
     expect(ordinary.body.messages.find((message) => message.id === pendingId)).toMatchObject({
       from: originalPhone, to: ours, customerId: null, customerName: 'Ada Changed',
+      // The reply recipient is cleared, but the linked row still rides as the
+      // call hint (#5614) — /call re-validates it against the customer's numbers.
+      linkedCustomerId: customerId,
     });
     expect(ordinary.body.messages.every((message) => !Object.hasOwn(message, 'responseNeedsResponse'))).toBe(true);
   });

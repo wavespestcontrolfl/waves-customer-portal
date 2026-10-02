@@ -110,6 +110,7 @@ const {
   lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
+const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -3931,6 +3932,31 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(completionInput.body?.techTips)
       : { tips: [], dropped: [] };
+    // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
+    // keep / confirm / hide / edit decisions on the service record whether or
+    // not the signed preview is accepted below (a failed signature re-scores
+    // and drops them). Gate off or no decisions = null = nothing written.
+    const treeShrubTechFindingsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezeTechFindings(completionInput.body?.treeShrubReview)
+      : null;
+    // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
+    // is checked against the one link rule (report-blog-post.js) and its
+    // title and live URL frozen, so the report shows the post the customer
+    // was sent to on the day. Gated here too: with the switch off a stale or
+    // crafted client cannot keep it alive. An optional read: in a grouped
+    // closeout `db` is the packet's transaction, so it runs in a savepoint,
+    // and a failed read is a pick that cannot be verified (refused below).
+    // Every service but WDO, termite pre-treat, lawn and tree, shrub & palm
+    // (owner ruling 2026-10-02; blogPostAllowedFor is the search route's rule
+    // too): a post sent for any other visit is ignored, never frozen.
+    const ReportBlogPost = require('../services/service-report/report-blog-post');
+    const blogPostPick = require('../config/feature-gates').reportBlogPostLive()
+      && ReportBlogPost.blogPostAllowedFor({ serviceType: svc.service_type, profile: completionProfile })
+      ? await ReportBlogPost.resolveReportBlogPostPick(
+        (reader) => failSoftRead(db, reader, null),
+        completionInput.body?.blogPostId,
+      )
+      : { post: null, rejected: false };
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -4310,6 +4336,38 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
         code: unknownTip ? 'TECH_TIP_UNKNOWN' : overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { ...(drop.id ? { id: drop.id } : {}), ...(drop.copy ? { copy: drop.copy } : {}), violations: drop.violations },
+      } });
+    }
+    // A blog post that is no longer live on the site (unpublished, moved,
+    // never live) is an actionable 400 for a fresh attempt, before any write,
+    // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && blogPostPick.rejected) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('blog_post_unavailable'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'That blog post is not live on the Waves site right now. Pick another or remove it, then complete.',
+        code: 'BLOG_POST_UNAVAILABLE',
+      } });
+    }
+    // GATE_TS_TECH_FINDINGS_COPY: an edited finding prints verbatim, so its
+    // wording passes the same customer-copy screen as a tech's own tip line.
+    const rejectedFindingEdit = claim.action === 'proceed' && treeShrubTechFindingsFreeze
+      ? rejectedTechFindingEdits(completionInput.body?.treeShrubReview)[0]
+      : null;
+    if (rejectedFindingEdit) {
+      logger.warn(`[ts-tech-findings] edit rejected on ${completionInput.serviceId}: ${rejectedFindingEdit.violations.join(', ')}`);
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('ts_finding_edit_rejected'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: `Your wording for "${rejectedFindingEdit.label}" needs to change before the report can print it (flagged: ${rejectedFindingEdit.violations.join(', ')}). Reword it, then complete.`,
+        code: 'TS_FINDING_EDIT_COPY_REJECTED',
+        treeShrubFinding: { key: rejectedFindingEdit.key, violations: rejectedFindingEdit.violations },
       } });
     }
     if (claim.action === 'proceed') {
@@ -6188,6 +6246,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treeShrubCloseout: treeShrubCloseoutSummary,
               treeShrubCloseoutWarnings,
             } : {}),
+            ...(treeShrubTechFindingsFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
@@ -6196,6 +6255,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formObservations,
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
+            ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -6440,6 +6500,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (primaryFreezeTrusted && primaryIdentityFreezable(frozenCompletionProfile || {})) {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          }
+          // The blog post was judged on the pre-lock identity (Codex #5547):
+          // a repoint since to a service that carries none (WDO, pre-treat,
+          // a report the customer never gets) drops it, and so does an
+          // identity the re-resolve could not establish.
+          if (structuredNotes.blogPost && (!primaryFreezeTrusted
+            || !require('../services/service-report/report-blog-post').blogPostAllowedFor({
+              serviceType: lockedSvcRow ? lockedSvcRow.service_type : svc.service_type,
+              profile: frozenCompletionProfile,
+            }))) {
+            delete structuredNotes.blogPost;
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the

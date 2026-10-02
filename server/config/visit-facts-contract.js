@@ -408,12 +408,13 @@ function productFacts(opts = {}) {
  * termite-bait primary and palm. All land in service_records.structured_notes
  * (the object built ~5755 in complete-scheduled-service.js) except
  * technician_notes, a service_records column.
- * @param {{ extraReaders?: Record<string, VisitFactReader[]> }} [opts]
+ * @param {{ extraReaders?: Record<string, VisitFactReader[]>, extraWriters?: Record<string, VisitFactWriter[]> }} [opts]
  * @returns {VisitFact[]}
  */
 function genericCompletionFacts(opts = {}) {
   const extra = opts.extraReaders || {};
   const withExtra = (key, base) => base.concat(extra[key] || []);
+  const writersFor = (key, base) => base.concat((opts.extraWriters || {})[key] || []);
   return [
     {
       key: 'areas_treated',
@@ -440,7 +441,7 @@ function genericCompletionFacts(opts = {}) {
       label: 'Observations — form provenance only (no protocol defaults)',
       capture: ['voice', 'tap'],
       storage: 'structured_notes.formObservations',
-      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')],
+      writers: writersFor('form_observations', [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'structuredObservations')]),
       readers: withExtra('form_observations', [{ file: REPORT_DATA, section: 'Findings (form-sourced, structuredObservations)' }]),
       whenMissing: 'hidden',
     },
@@ -485,6 +486,21 @@ function genericCompletionFacts(opts = {}) {
       ]),
       whenMissing: 'hidden',
       notes: 'The tech picks tip ids; the server resolves and freezes the copy (freezeTechTips). Merges into the Recommendations list per the 2026-09-28 ruling.',
+    },
+    {
+      key: 'blog_post',
+      label: 'A Waves blog post for the customer (one, picked from a search of the live blog)',
+      capture: ['tap'],
+      tapOnly: true,
+      reason: 'The tech searches the live Waves blog and picks one post; a dictated note never names a post.',
+      storage: 'structured_notes.blogPost',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'blogPostId')],
+      readers: [
+        { file: REPORT_DATA, section: 'From the Waves blog (payload.blogPost, GATE_REPORT_BLOG_POST)' },
+        { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
+      ],
+      whenMissing: 'hidden',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, lawn and tree, shrub & palm (report-blog-post.js blogPostAllowedFor).',
     },
     {
       key: 'protocol_actions_completed',
@@ -1229,7 +1245,9 @@ const VISIT_FACTS_CONTRACT = {
     catalogKeys: ['one_time_pest_control', 'fire_ant', 'tick_control', 'bee_wasp_removal', 'mud_dauber_removal', 'pest_initial_cleanout', 'bed_bug_treatment'],
     voiceFill: true,
     facts: [
-      ...genericCompletionFacts(),
+      // The lane visits' findings also come from the tech's Fast Complete
+      // sheet (GATE_LANE_VOICE_FILL: its record card, read from the note).
+      ...genericCompletionFacts({ extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] } }),
       pestActivityRatingFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1333,6 +1351,9 @@ const VISIT_FACTS_CONTRACT = {
         extraReaders: {
           finding_rows: [{ file: MOSQUITO_REPORT_V2, section: 'Habitat watch card (standing water / foliage / lanai)' }],
         },
+        // The mosquito lane's findings also come from the tech's Fast
+        // Complete sheet (GATE_LANE_VOICE_FILL).
+        extraWriters: { form_observations: [via(FAST_COMPLETE_SHEET, 'structuredObservations')] },
       }),
       ...productFacts(),
       ...photoFacts(),
