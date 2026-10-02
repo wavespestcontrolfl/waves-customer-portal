@@ -12,7 +12,7 @@ const { buildRecapContext } = require('../services/pest-recap');
 
 function contextDb(visit) {
   return jest.fn((table) => {
-    if (!['scheduled_services', 'job_status_history', 'products_catalog', 'service_records'].includes(table)) {
+    if (!['scheduled_services', 'job_status_history', 'products_catalog', 'service_records', 'scheduled_service_addons'].includes(table)) {
       throw new Error(`Unexpected recap context table: ${table}`);
     }
     const q = {
@@ -141,6 +141,32 @@ describe('the lane the Fast Complete sheet reads (GATE_LANE_VOICE_FILL)', () => 
       expect((await buildRecapContext(bedBug.id, contextDb(bedBug))).traceOnReport).toBe(false);
       resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'fire_ant' });
       expect((await buildRecapContext(fireAnt.id, contextDb(fireAnt))).traceOnReport).toBe(true);
+    });
+
+    test('the line is judged from the profile already resolved: a second lookup that would fail is never made', async () => {
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+      process.env.GATE_TRACE_ELIGIBILITY = 'true';
+      resolveCompletionProfileForScheduledService.mockClear();
+      resolveCompletionProfileForScheduledService
+        .mockResolvedValueOnce({ category: 'specialty', serviceKey: 'fire_ant' })
+        .mockRejectedValueOnce(new Error('profile store down'));
+      expect((await buildRecapContext(fireAnt.id, contextDb(fireAnt))).traceOnReport).toBe(true);
+      expect(resolveCompletionProfileForScheduledService).toHaveBeenCalledTimes(1);
+      // The unconsumed rejection must not reach the next case (the outer
+      // afterEach restores the default answer).
+      resolveCompletionProfileForScheduledService.mockReset();
+    });
+
+    test('an add-on read that fails counts as shown, so the sheet\'s holds stand', async () => {
+      process.env.GATE_LANE_VOICE_FILL = 'true';
+      process.env.GATE_TRACE_ELIGIBILITY = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue({ category: 'specialty', serviceKey: 'bed_bug_treatment' });
+      const db = contextDb(bedBug);
+      const failingAddons = jest.fn((table) => {
+        if (table === 'scheduled_service_addons') throw new Error('addon read failed');
+        return db(table);
+      });
+      expect((await buildRecapContext(bedBug.id, failingAddons)).traceOnReport).toBe(true);
     });
 
     test('a pest visit carries no such field', async () => {

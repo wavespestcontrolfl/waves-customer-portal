@@ -302,20 +302,31 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
  * most-used list; only that sheet asks for it, so the recap modal (and the
  * sheet's stock re-read) never pay for the aggregate.
  */
-// Whether a trace saved on a lane visit would show on its report: the
-// report's own render verdict (trace-eligibility.js resolveTraceRenderVerdict:
-// bed bug's indoor work and bee, wasp and mud dauber nest work never carry
-// a map), and with the eligibility gate off the report's legacy indoor-only
-// rule for bed bug. A verdict that cannot be read counts as shown, so the
-// sheet's trace holds stand.
-async function laneTraceOnReport(svc, lane, knex) {
-  const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./service-report/trace-eligibility');
-  if (!traceEligibilityGateOn() && lane === 'bed_bug_treatment') return false;
-  const verdict = await resolveTraceRenderVerdict(
-    { scheduled_service_id: svc.id, service_type: svc.service_type, service_data: null },
-    knex,
-  ).catch(() => null);
-  return !verdict?.suppressed;
+// Whether a trace saved on a lane visit would show on its report, judged as
+// the report judges it (trace-eligibility.js): with the eligibility gate on,
+// the visit's own line (bed bug's indoor work and bee, wasp and mud dauber
+// nest work carry no map) or, when it carries none, an add-on line that
+// does; with the gate off, the report's legacy indoor-only rule for bed bug.
+// The line is judged from the profile this context already resolved, never
+// a second lookup, and an add-on read that fails counts as shown: the
+// report's render fails closed, but here an unknown must keep the sheet's
+// trace holds (codex local r6 on #5629).
+async function laneTraceOnReport(svc, profile, lane, knex) {
+  const traceEligibility = require('./service-report/trace-eligibility');
+  if (!traceEligibility.traceEligibilityGateOn()) return lane !== 'bed_bug_treatment';
+  const satellite = (verdict) => !!verdict?.eligible && verdict.variant !== 'photo';
+  const own = traceEligibility.resolveTraceEligibility({
+    serviceKey: profile?.serviceKey || null,
+    findingsType: profile?.findingsType || null,
+    displayName: svc.service_type || '',
+  });
+  if (satellite(own)) return true;
+  try {
+    const addons = await traceEligibility.resolveAddonVerdicts(svc.id, knex, { renderSide: true });
+    return addons.some(satellite);
+  } catch {
+    return true;
+  }
 }
 
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
@@ -388,7 +399,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
   const lane = profile && require('../config/feature-gates').laneVoiceFillLive() && !profile.projectBacked && !profile.requiresProject
     ? require('./visit-lane-facts').voiceLaneFor({ profile, serviceType: svc.service_type })
     : null;
-  const traceOnReport = lane ? await laneTraceOnReport(svc, lane, knex) : undefined;
+  const traceOnReport = lane ? await laneTraceOnReport(svc, profile, lane, knex) : undefined;
 
   return {
     ok: true,
