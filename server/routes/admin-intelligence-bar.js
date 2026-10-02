@@ -2943,7 +2943,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop — unconditionally (no mode switch exists). The
           // confirmation id goes to the client only.
-          if (platformEnabled && writeFrontierBlocked) {
+          // A card closes the frontier under the platform only (set below);
+          // an uncertain owner-direct commit closes it on either path.
+          if (writeFrontierBlocked) {
             result = { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
             failed = true;
             errorMessage = result.error;

@@ -402,6 +402,30 @@ describe('owner-direct in /query', () => {
     });
   });
 
+  test('owner + gate: after an unknown outcome, a second write in the same model turn is refused', async () => {
+    let confirmedCalls = 0;
+    mockExecuteTool.mockImplementation(async (...call) => {
+      if (confirmedCall(call)) { confirmedCalls += 1; throw new Error('socket hang up'); }
+      return { preview: true };
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_customer', input: { first_name: 'Synthetic', last_name: 'Fixture', phone: '9415550100' } },
+        { type: 'tool_use', id: 'tu_2', name: 'create_customer', input: { first_name: 'Synthetic', last_name: 'Fixture', phone: '9415550100' } }],
+      [{ type: 'text', text: 'Checking.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture twice', context: 'customers' }, 'owner');
+      expect(status).toBe(200);
+      expect(body.pendingActions).toEqual([]);
+      const messages = mockMessagesCreate.mock.calls[1][0].messages;
+      const results = messages[messages.length - 1].content.map(block => JSON.parse(block.content));
+      expect(results[0]).toMatchObject({ outcome: 'outcome_unknown' });
+      expect(results[1]).toMatchObject({ code: 'dependency_unresolved' });
+      expect(confirmedCalls).toBe(1);
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('owner + gate: the emergency write freeze still stops a direct edit', async () => {
     process.env.IB_WRITES_DISABLED = 'true';
     try {
