@@ -644,5 +644,8 @@ describe('Codex r9 (#5542)', () => {
     expect(where(['Inside', 'Outside'])).toBe('inside and outside');
     expect(where(['Somewhere odd', 'Kitchen'])).toBe('the kitchen');
     expect(where(['Somewhere odd'])).toBeNull();
+    // Garage is in both vocabularies: a mixed selection keeps every area.
+    expect(where(['Perimeter', 'Kitchen', 'Garage'])).toBe('the garage, the perimeter and the kitchen');
+    expect(where(['Inside', 'Garage', 'Attic'])).toBe('inside, the garage and the attic');
   });
 });

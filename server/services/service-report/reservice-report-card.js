@@ -309,11 +309,12 @@ const LEGACY_PEST_AREA_PHRASES = new Map([
   ['bedding areas', 'the bedding areas'],
 ]);
 
+// Both vocabularies merge ("Garage" sits in each): Fast Complete's phrases
+// first, then the panel's labels in the order recorded, once each.
 function pestWhereOf(areas) {
   const fast = whereOf(areas);
-  if (fast) return fast;
-  const seen = new Set();
-  const phrases = [];
+  const phrases = fast ? fast.split(/, | and /) : [];
+  const seen = new Set(phrases);
   for (const area of areas) {
     const phrase = LEGACY_PEST_AREA_PHRASES.get(String(area || '').replace(/\s+/g, ' ').trim().toLowerCase());
     if (!phrase || seen.has(phrase)) continue;
