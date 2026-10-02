@@ -89,6 +89,14 @@ async function firstPerformedVisit(estimateId, customerId) {
     // never releases a charge (waves-billing: backfill suppresses every money
     // path); the office bills that work itself.
     .whereRaw("COALESCE(r.structured_notes ->> 'backfill', '') <> 'true'")
+    // Completion's own billing must have finished first: a completion still
+    // resuming its side effects decides the visit's bill from the deferred
+    // hold, which a release (then an active term) would pull out from under it.
+    .whereNotExists(function unfinishedCompletion() {
+      this.select(db.raw('1')).from('service_completion_attempts as a')
+        .whereRaw('a.service_id = s.id')
+        .whereIn('a.status', ['pending', 'side_effects_pending', 'side_effects_running']);
+    })
     .orderBy('s.scheduled_date', 'asc')
     .first('s.id');
 }
@@ -107,7 +115,7 @@ async function releaseOne(row, now) {
   // never releases the job before the first visit.
   const settled = !dead && (['paid', 'prepaid'].includes(invStatus)
     || (invStatus === 'processing' && String(invoice.payment_method || '') === 'us_bank_account'));
-  const visit = invoice && !settled ? await firstPerformedVisit(row.id, invoice.customer_id) : null;
+  const visit = invoice ? await firstPerformedVisit(row.id, invoice.customer_id) : null;
 
   if (dead) {
     const reason = !invoice ? 'invoice_missing' : (DEAD_INVOICE_STATUSES.includes(invStatus) ? `invoice_${invStatus}` : 'term_cancelled');
@@ -130,11 +138,17 @@ async function releaseOne(row, now) {
     // the reads above must take the cancel branch on the next pass (so held
     // work reaches the office), never be released into a charge that skips.
     return db.transaction(async (trx) => {
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status');
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status', 'payment_method');
       const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status');
-      if (!locked || DEAD_INVOICE_STATUSES.includes(String(locked.status || '').toLowerCase())
-        || String(lockedTerm?.status || '') === 'cancelled') return null;
-      if (!settled && String(locked.status || '').toLowerCase() === 'draft') {
+      const lockedStatus = String(locked?.status || '').toLowerCase();
+      if (!locked || DEAD_INVOICE_STATUSES.includes(lockedStatus) || String(lockedTerm?.status || '') === 'cancelled') return null;
+      // Settlement as the LOCKED row shows it: a bank debit returned since
+      // the first read is no longer settled, and then only a performed visit
+      // may release the charge.
+      const lockedSettled = ['paid', 'prepaid'].includes(lockedStatus)
+        || (lockedStatus === 'processing' && String(locked.payment_method || '') === 'us_bank_account');
+      if (!lockedSettled && !visit) return null;
+      if (!lockedSettled && lockedStatus === 'draft') {
         await trx('invoices').where({ id: invoice.id }).update({ due_date: etDateString(now) });
       }
       const released = await patchJob(row.id, {
@@ -209,7 +223,19 @@ async function reconcileJobAlerts(estimateId) {
     const outcome = invoice ? require('./recurring-card-on-file').classifySavedMethodChargeInvoice(invoice) : 'unexpected';
     const round = Number(job.charge_alert_round) || 0;
     const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus);
-    if (outcome === 'paid' || dead) {
+    if (dead) {
+      // The year died unpaid after its charge failed: the first visit (and any
+      // visit held since) was never billed. Close the collection alert and
+      // hand the work to the unbilled-visits alert, like a cancel after the
+      // visit.
+      await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice was closed unpaid.');
+      await patchJob(estimateId, {
+        charge_alert_closed_at: nowIso,
+        status: 'cancelled_after_visit',
+        reason: `invoice_${invStatus || 'missing'}_after_failed_charge`,
+        performed_visit_id: job.performed_visit_id || job.released_for_visit_id || null,
+      }, (q) => q.whereRaw(`${JOB} ->> 'status' = 'delivered_fallback'`));
+    } else if (outcome === 'paid') {
       // Closed whether or not the raised stamp landed: a raise that persisted
       // just before a failed stamp must not stay open. Closing a key with no
       // alert is a no-op.
@@ -240,10 +266,12 @@ async function reconcileJobAlerts(estimateId) {
   // was charged: that visit was held, not billed.
   if (job.status === 'cancelled_after_visit' && !job.unbilled_alert_raised_at) {
     await raise({
-      action: 'Bill a visit done before the prepay was cancelled',
-      why: 'The first visit was done, then the annual prepay was cancelled before it was charged; that visit is unbilled.',
+      action: 'Bill visits done before the prepay was cancelled',
+      why: 'The annual prepay was cancelled before it was paid; visits done while it was pending were not billed.',
       link: job.customer_id ? `/admin/customers?customerId=${job.customer_id}` : `/admin/invoices?invoice=${job.invoice_id}`,
-      subject: { type: 'visit', id: String(job.performed_visit_id) },
+      subject: job.performed_visit_id
+        ? { type: 'visit', id: String(job.performed_visit_id) }
+        : { type: 'estimate', id: String(estimateId) },
       doneWhen: 'visit_billed',
     }, unbilledAlertKey(estimateId));
     await patchJob(estimateId, { unbilled_alert_raised_at: nowIso }, whileUnset('unbilled_alert_raised_at'));

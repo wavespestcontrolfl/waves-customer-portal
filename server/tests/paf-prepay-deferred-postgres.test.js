@@ -305,6 +305,30 @@ postgres('annual prepay charged after the first visit', () => {
       expect((await jobOf(f)).status).toBe('awaiting_first_visit');
     });
 
+    it('waits while the visit\'s completion billing is still finishing', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.parentId, idempotency_key: `k-${attemptId}`, status: 'side_effects_pending' });
+      expect(await release()).toMatchObject({ released: 0 });
+      await trx('service_completion_attempts').where({ id: attemptId }).update({ status: 'succeeded' });
+      expect(await release()).toMatchObject({ released: 1 });
+    });
+
+    it('a bank debit returned between the first read and the lock does not release without a visit', async () => {
+      const f = await deferredAccept({ invoiceStatus: 'processing' });
+      await trx('invoices').where({ id: f.invoiceId }).update({ payment_method: 'us_bank_account' });
+      const dbModule = require('../models/db');
+      const spy = jest.spyOn(dbModule, 'transaction').mockImplementationOnce(async (fn) => {
+        // The payment-failed webhook reopens the invoice just before the lock.
+        await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent' });
+        return trx.transaction(fn);
+      });
+      expect(await release()).toMatchObject({ released: 0 });
+      expect((await jobOf(f)).status).toBe('awaiting_first_visit');
+      spy.mockRestore();
+    });
+
     it('releases on a performed child visit of the series', async () => {
       const f = await deferredAccept();
       await perform(f.childId, f.customerId);
@@ -473,6 +497,21 @@ postgres('annual prepay charged after the first visit', () => {
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.anything(), { dedupeKey: `paf-prepay-charge-failed:${f.estimateId}:1` });
       closeSpy.mockRestore();
+    });
+
+    it('a year closed unpaid after a failed charge hands the held visits to the office', async () => {
+      const f = await deferredAccept({ jobPatch: { status: 'delivered_fallback', released_for_visit_id: null, charge_alert_raised_at: new Date().toISOString() } });
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: trx.raw("jsonb_set(estimate_data, '{prepayAutoChargeJob,released_for_visit_id}', to_jsonb(?::text))", [f.parentId]),
+      });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+      expect(await covers(f.childId)).toBe(false);
+      await release();
+      const { raiseAdminAlert } = require('../services/admin-alert-compose');
+      expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'visit', id: f.parentId } }),
+        { dedupeKey: `paf-prepay-cancelled-after-visit:${f.estimateId}` });
     });
 
     it('activating the year paid after visit 1 counts that visit: the plan gets exactly the visits sold', async () => {
