@@ -33,7 +33,7 @@ const { buildRescheduleLink } = require('../services/reschedule-link');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, homeLineLive } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
   markSuggestionScheduled,
@@ -154,6 +154,14 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
+        // Independent-review P1 (round 6, PR #5331): the customer's own
+        // inbound wording — the thing a tender/date the customer named must
+        // be bound against, since a confirmation must never bind a generic
+        // "we received your payment" to a DIFFERENT tender than the one the
+        // customer actually asked about. input_snapshot's own `sms.body` is
+        // the same text for a drafted card and is kept as the fallback in
+        // agent-decision-send-checks.js for a row with no linked sms_log.
+        's.message_body as inbound_message',
         'c.phone as customer_phone'
       )
       .first();
@@ -206,7 +214,9 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // (stale or edited timing), and the billing amounts (re-read now). This
     // route keeps ownership + thread staleness and orchestrates. Any block
     // refuses and retires the decision the same way a stale anchor does.
-    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const { agentDecisionSendBlockReason, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+    // Codex round-49 P1: the billing fingerprint BEFORE the full recheck - the provider-boundary check refuses if anything changes after
+    decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
@@ -235,6 +245,18 @@ async function customerOfSourceCall(callId, to) {
     .whereIn('c.id', db('call_log').select('customer_id').where({ id: callId }).whereNotNull('customer_id'))
     .whereNull('c.deleted_at').first('c.*')
     .catch((e) => { logger.warn(`[admin-call] source-call customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
+// The customer `customerId` when `to` is one of their known-caller numbers;
+// null otherwise (deleted, unknown, or a number they are not known by).
+async function customerKnownByNumber(customerId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first()
+    .catch((e) => { logger.warn(`[admin-call] hinted customer lookup failed: ${e.message}`); return null; });
   if (!customer) return null;
   const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
   return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
@@ -594,13 +616,17 @@ router.post('/sms', async (req, res, next) => {
     // rolling disable an older instance can still claim until the activation
     // stamp is cleared.
     const providerCoordinationEnabled = gratitudeClaimsPossible() || unansweredClaimsPossible();
+    // The sender when the composer picked none. GATE_HOME_LINE: the line they
+    // texted us on within 30 days, else their home line, else main
+    // (services/home-line.js staffTextSender). Off: the old derivation.
+    const resolveStaffSender = async (customerId) => (homeLineLive()
+      ? (await require('../services/home-line').staffTextSender({ phone: to, customerId })).fromNumber
+      : TwilioService.deriveOutboundNumber({ customerId }));
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {
       try {
-        providerCoordinationFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
-          customerId: trustedCustomerId || null,
-        });
+        providerCoordinationFromNumber = fromNumber || await resolveStaffSender(trustedCustomerId || null);
       } catch (deriveErr) {
         logger.warn(`[communications] provider sender resolution failed before dispatch: ${deriveErr.message}`);
         return res.status(503).json({
@@ -620,9 +646,7 @@ router.post('/sms', async (req, res, next) => {
     const refreshProviderCoordinationOwner = async () => {
       if (!providerCoordinationEnabled || !trustedCustomerId
         || providerCoordinationCustomerId === trustedCustomerId) return;
-      const resolvedFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
-        customerId: trustedCustomerId,
-      });
+      const resolvedFromNumber = fromNumber || await resolveStaffSender(trustedCustomerId);
       if (manualReservationId) {
         const threadLast10 = normalizePhoneLast10(to);
         await db.transaction(async (trx) => {
@@ -1110,6 +1134,13 @@ router.post('/sms', async (req, res, next) => {
     // these exports with jest.spyOn, which a module-scope destructure
     // would capture before the spy ever lands.
     const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+    // GATE_HOME_LINE: no line picked by the composer and none resolved for a
+    // provider reservation — resolve it here, after every customer adoption
+    // above, instead of leaving the send layer to derive a home line that
+    // ignores a live conversation on another line.
+    const homeLineSender = !fromNumber && !providerCoordinationFromNumber && homeLineLive()
+      ? await resolveStaffSender(trustedCustomerId || null)
+      : null;
     const sendMessage = (reservationId = null) => sendCustomerMessage({
       to,
       body: cleanBody,
@@ -1124,6 +1155,8 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // BILLING FACTS (amounts / payment status / Zelle) at the same boundary (Codex round-48 P1): a payment landing during those
+      // awaits must not let an approved balance / status sentence reach the customer after it became false.
       // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
       // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
@@ -1134,6 +1167,7 @@ router.post('/sms', async (req, res, next) => {
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
+            checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
           );
         })(),
       } : {}),
@@ -1226,7 +1260,7 @@ router.post('/sms', async (req, res, next) => {
         parkedDecisionIds: parkedThreadIds.length ? parkedThreadIds : undefined,
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
-        fromNumber: providerCoordinationFromNumber || fromNumber || undefined,
+        fromNumber: providerCoordinationFromNumber || fromNumber || homeLineSender || undefined,
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
         media,
@@ -1796,12 +1830,37 @@ router.post('/send-prep', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/communications/sender?phone=&customerId= — the line a
+// staff text to this person leaves from (home-line PR 3): the line they
+// texted within 30 days, else their home line, else main. GATE_HOME_LINE off
+// → { fromNumber: null } and the composer keeps its own thread-line choice.
+router.get('/sender', async (req, res, next) => {
+  try {
+    if (!homeLineLive()) return res.json({ fromNumber: null });
+    const phone = typeof req.query.phone === 'string' ? req.query.phone.trim() : '';
+    if (!normalizePhone(phone)) return res.status(400).json({ error: 'phone required' });
+    // A thread on a non-customer line (recruiting, a tech line, a tracking
+    // number) keeps that line: only an office or main line is re-pointed.
+    const currentLine = typeof req.query.currentLine === 'string' ? normalizePhone(req.query.currentLine.trim()) : null;
+    const customerLines = [TWILIO_NUMBERS.mainLine.number, ...Object.values(TWILIO_NUMBERS.locations).map((l) => l.number)];
+    if (currentLine && !customerLines.includes(currentLine)) return res.json({ fromNumber: null });
+    const rawCustomerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
+    const customerId = UUID_RE.test(rawCustomerId) ? rawCustomerId : null;
+    const { fromNumber, reason } = await require('../services/home-line').staffTextSender({ phone, customerId });
+    const line = TWILIO_NUMBERS.findByNumber(fromNumber);
+    // replaceableLines: the composer applies fromNumber only while its own
+    // line is empty or one of these, so a recruiting / tech / tracking line
+    // set after the request (or without currentLine) is never replaced.
+    res.json({ fromNumber, label: line?.label || fromNumber, reason, replaceableLines: customerLines });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    const { to, fromNumber, customerId, customerIdHint, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
     if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
       return res.status(400).json({ error: 'Invalid callback id' });
     }
@@ -1822,11 +1881,10 @@ router.post('/call', async (req, res, next) => {
     // below); it also owns the call_log row, the Twilio call, and the
     // touchpoint. This handler keeps the admin-only validations.
 
-    // All outbound calls present the main company line, regardless of which
-    // endpoint the UI picker selected (fromNumber is still validated above so
-    // garbage input fails loudly rather than silently dialing as main).
-    const from = TWILIO_NUMBERS.mainLine.number;
-    attemptedFrom = from;
+    // The caller ID is server-chosen, regardless of which endpoint the UI
+    // picker selected (fromNumber is still validated above so garbage input
+    // fails loudly): the linked customer's home line under GATE_HOME_LINE,
+    // else the main company line — set below once the customer is resolved.
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     // A callback attempt placed while the card policy is on is stamped so
     // rollback keeps its strict customer-leg proof and completion action,
@@ -1884,6 +1942,12 @@ router.post('/call', async (req, res, next) => {
       // number is one they are known by. Otherwise the phone-only lookup
       // below decides, as for any click-to-call.
       if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      // A soft link (the client's customerIdHint — the customer whose page,
+      // thread, estimate or lead the number came from): used only when the
+      // dialed number is one that customer is known by (primary, secondary or
+      // a service contact); otherwise the phone-only lookup decides, so a
+      // stale number on an old thread or estimate is never refused.
+      if (!customer && customerIdHint && UUID_RE.test(String(customerIdHint))) customer = await customerKnownByNumber(customerIdHint, to);
       if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;
@@ -1892,6 +1956,8 @@ router.post('/call', async (req, res, next) => {
     const leadName = customer
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
+    const from = require('../services/home-line').homeLineCallerId(customer);
+    attemptedFrom = from;
 
     let bridgeClaimIds = [];
     // Every callback attempt under the card policy takes the customer claim
@@ -1900,8 +1966,8 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the NUMBER being called: every
-      // card dials from the shared main line, so a line-wide key would let
+      // before call_log is inserted, keyed to the NUMBER being called: cards
+      // share caller-ID lines (main or a home line), so a line-wide key would let
       // one ringing callback block every other customer's card; a
       // per-commitment or per-customer key would let a linked and an
       // unlinked attempt ring the same phone twice at once.
@@ -2209,6 +2275,11 @@ router.get('/log', async (req, res, next) => {
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
         customerId: recipientCustomerId, customerName,
+        // The row's linked customer even when the contact is one of their
+        // service-contact numbers (customerId above is the REPLY recipient and
+        // stays null then). Call actions send it as a soft customerIdHint,
+        // which /call re-validates against that customer's known numbers.
+        linkedCustomerId: m.customer_id || fallbackCustomer?.id || null,
         createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,

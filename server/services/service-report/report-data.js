@@ -2712,6 +2712,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // stamp rides only while the gate is live: gate off leaves every signature,
   // and so every cached PDF key, byte-identical to before.
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
+  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
+  // its PDF key moves with it; the stamp rides only while the gate is live.
+  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3817,6 +3820,9 @@ function buildWateringBanner(instruction, weekPlan = null) {
     ...(mowHold ? { mowHold } : {}),
   };
 }
+
+// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null });
 
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
@@ -5571,6 +5577,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // a real upcoming scheduled_services row (same allow-list as context-aggregator);
       // otherwise a clearly-labeled cadence ESTIMATE from the service frequency; else
       // omitted entirely. Never invent a precise date the data can't back.
+      // The visit day the v6 copy reads (the SELECTED assessment's date: an
+      // A→B re-do or a pinned render can differ from the record's service_date,
+      // the same anchor the water snapshot and gap history use).
+      const lawnCopyAnchor = lawnAssessment.assessmentDate || service.service_date || null;
+      const lawnCopyVisitDate = lawnCopyAnchor
+        ? (lawnCopyAnchor instanceof Date ? lawnCopyAnchor.toISOString().slice(0, 10) : String(lawnCopyAnchor).slice(0, 10))
+        : null;
       if (reportV2) {
         try {
           const svcRaw = service.service_date;
@@ -5629,7 +5642,57 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         } catch { /* next-visit lookup is best-effort */ }
       }
 
-      if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
+      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
+        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
+        // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
+        // read while this is live). Fixed sentences from this visit's facts, no
+        // model (owner 2026-10-02); frozen copy replays; a degraded read or an
+        // unverifiable treatment ships the lead's own copy. The fields ride the
+        // in-process report as `copyV6` for the lead derivation (a non-enumerable
+        // hand-off, like reportV2.progress, so the payload gains a key only
+        // through reportV2.lead).
+        try {
+          const { resolveLawnCopyV6ForRender } = require('./lawn-copy-v6');
+          const outcome = await resolveLawnCopyV6ForRender({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            assessmentId: lawnAssessment.assessmentId,
+            reportV2,
+            ctx: { visitDate: lawnCopyVisitDate },
+            // Never CREATE the first-writer-wins entry from a degraded read
+            // (any input read that failed is in readFailures) or from
+            // unverifiable treatment data; a stored entry still replays first.
+            degraded: readFailures.size > 0 || !!(lawnTreatmentGuard && !lawnTreatmentGuard.verified),
+            knex,
+          });
+          // No copy (a degraded read): an all-null carrier still marks the v6
+          // contract live, so the lead keeps the snapshot headline and leaves
+          // applied empty rather than fall back to the AI treatment narrative
+          // that has replaced snapshot.treatmentSummary by now.
+          Object.defineProperty(reportV2, 'copyV6', { value: outcome.copy || LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
+          // The frozen headline IS this report's status line from now on: the
+          // lead's banner rule may drop it and fall back to the snapshot, and
+          // the PDF prints the snapshot's Overall line, so a later assessment
+          // correction must not reach either through statusHeadline (a no-op
+          // on the render that froze it: the copy was built from this value).
+          if (outcome.copy && outcome.copy.headline && reportV2.snapshot) {
+            reportV2.snapshot.statusHeadline = outcome.copy.headline;
+          }
+          if (outcome.unfrozen) {
+            lawnAssessment.weekWeatherUncacheable = true;
+            // DELIVERY: an emailed PDF is permanent, so it must not carry copy a
+            // later render could freeze differently. Every unfrozen cause is one
+            // a retry can fix (a failed read, an unverifiable treatment, which
+            // is itself a failed products or catalog read, or a failed freeze
+            // write), so the send waits.
+            lawnAssessment.lawnCopyV6Unfrozen = true;
+          }
+        } catch {
+          Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
+          lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.lawnCopyV6Unfrozen = true;
+        }
+      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
         // The overlay rewrites customer-facing prose and validates only
         // banned-copy + rain-window rules — it can reintroduce advice that
         // contradicts today's applications (codex P1 r28). Skip it entirely

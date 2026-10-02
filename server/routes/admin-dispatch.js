@@ -846,7 +846,9 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
 // the client names. Writes nothing: the form shows each field with its words
 // for a person to confirm. A visit whose form this step does not read
 // answers { available: false }; a failed read answers { available: true,
-// status: 'failed' } with nothing filled, never an error. Off = 404.
+// status: 'failed' } with nothing filled, never an error, and a form that
+// already holds every field the note could fill answers status
+// 'nothing_to_fill' with no model call. Off = 404.
 router.post('/:serviceId/typed-facts', async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').typedVoiceFillLive()) {
@@ -874,7 +876,10 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     const profile = await resolveCompletionProfileForScheduledService(svc);
     const findingsType = voiceTypeFor(profile);
     if (!findingsType) return res.json({ available: false });
-    const facts = await readTypedFacts({ note, findingsType });
+    // The form's present values judge the fill (never stored): a field
+    // already set is never filled, and a fill that clashes with one is left
+    // for a person.
+    const facts = await readTypedFacts({ note, findingsType, current: req.body?.current });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });

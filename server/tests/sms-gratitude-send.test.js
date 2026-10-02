@@ -167,6 +167,9 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  // the amount pattern sms-amount-recheck reads off the drafter (bodyAmountCents); without it every body looks amount-bearing and
+  // takes the billing-fingerprint boundary check (PR #5331 round 49)
+  AMOUNT_MASK_RE: /\$\s?\d[\d,]*(?:\.\d{1,2})?/g,
   reserviceBookedReferenceBlock: jest.fn(async () => null),
   PROMPT_VERSION: 'house_voice_v11',
   REAL_ANSWERS_VERSION_FAMILY: 'house_voice_v12_real_answers',

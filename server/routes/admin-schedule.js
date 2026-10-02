@@ -5147,6 +5147,22 @@ async function loadProjectCompletionContextByServiceId(services) {
       // (services/visit-lane-facts.js voiceLaneFor).
       laneVoiceFillEnabled: require('../config/feature-gates').laneVoiceFillLive()
         && require('../services/visit-lane-facts').voiceLaneFor({ profile: completionProfile, serviceType: service.service_type }) != null,
+      // GATE_TYPED_VOICE_FILL: Generate on the completion form fills a typed
+      // visit's own findings from the notes; only a form the reader reads,
+      // the completion profile's own (services/visit-typed-facts.js
+      // voiceTypeFor).
+      typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
+      // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
+      // opens a typed visit the reader reads in the Fast Complete sheet's
+      // report flow, its record read from the note, in place of the typed
+      // form (fastCompleteReportEnabled above stays off for typed forms). Not
+      // a combined service: its companion sections are required at
+      // completion and the sheet has none.
+      typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null
+        && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6306,6 +6322,8 @@ router.get('/', async (req, res, next) => {
         fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+        typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+        typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6901,6 +6919,8 @@ router.get('/week', async (req, res, next) => {
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+          typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+          typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
