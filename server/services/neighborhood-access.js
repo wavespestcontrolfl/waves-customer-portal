@@ -376,9 +376,10 @@ async function fileOneSavedCode(customerId, lookup) {
       'neighborhood_id', 'neighborhood_source', 'neighborhood_checked_at');
   if (props.length !== 1) return { status: props.length ? 'multi_property' : 'no_property' };
   const snapshot = props[0];
-  // A NULL or blank pin is no pin (Number(null) is 0, which would look up 0,0).
-  const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== '')
-    && Number.isFinite(Number(snapshot.latitude)) && Number.isFinite(Number(snapshot.longitude));
+  // A NULL, blank or zero coordinate is no pin (Number(null) is 0, and a stored
+  // 0 is the placeholder customer-geocode-review.js also treats as no pin).
+  const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== ''
+    && Number.isFinite(Number(v)) && Number(v) !== 0);
   const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
     ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) })
     : null;
@@ -508,11 +509,15 @@ async function conflictedNeighborhoods(conn) {
 
 // The customer the conflict bell opens: of the customers whose CURRENT code is
 // filed in this neighborhood and matches one of its unconfirmed codes, the one
-// whose preferences changed last (the newest update, whatever order the pass
-// filed them in). Else the newest unconfirmed row's own source customer. Null
-// when no customer record backs the conflict (the office tab, PR 3, lists it).
+// whose code was filed last (filed_at moves only when the code itself changes:
+// the reset trigger clears the row on a change, a re-filing rewrites it — an
+// unrelated preference edit never does). Else the newest unconfirmed row's own
+// source customer. Internal test accounts are skipped: the bell's central
+// suppression would silence a conflict a real customer is part of. Null when
+// no customer record backs the conflict (the office tab, PR 3, lists it).
 async function conflictCustomer(conn, neighborhoodId) {
-  const [filed] = (await conn.raw(`SELECT f.customer_id, c.first_name
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  const filed = (await conn.raw(`SELECT f.customer_id, c.first_name
     FROM neighborhood_access_filings f
     JOIN property_preferences pp ON pp.customer_id = f.customer_id
     JOIN customers c ON c.id = f.customer_id AND c.deleted_at IS NULL
@@ -520,17 +525,16 @@ async function conflictCustomer(conn, neighborhoodId) {
       AND EXISTS (SELECT 1 FROM neighborhood_access a
         WHERE a.neighborhood_id = f.neighborhood_id AND a.status = 'needs_confirm'
           AND a.code IS NOT NULL AND lower(a.code) = lower(${CANONICAL_VALUE_SQL}))
-    ORDER BY pp.updated_at DESC NULLS LAST, f.filed_at DESC, f.customer_id
-    LIMIT 1`, [neighborhoodId])).rows;
-  if (filed) return { customerId: filed.customer_id, firstName: filed.first_name || null };
-  const row = await conn('neighborhood_access as a')
+    ORDER BY f.filed_at DESC, f.customer_id`, [neighborhoodId])).rows;
+  const sources = await conn('neighborhood_access as a')
     .join('customers as c', 'c.id', 'a.source_customer_id')
     .whereNull('c.deleted_at')
     .where({ 'a.neighborhood_id': neighborhoodId, 'a.status': 'needs_confirm' })
     .whereNotNull('a.code')
     .orderBy('a.updated_at', 'desc')
-    .first('a.source_customer_id as customer_id', 'c.first_name');
-  return row ? { customerId: row.customer_id, firstName: row.first_name || null } : null;
+    .select('a.source_customer_id as customer_id', 'c.first_name');
+  const pick = [...filed, ...sources].find((r) => !isInternalTestCustomerId(r.customer_id));
+  return pick ? { customerId: pick.customer_id, firstName: pick.first_name || null } : null;
 }
 
 // Ring (or refresh) the bell for one conflicted neighborhood; false when no
