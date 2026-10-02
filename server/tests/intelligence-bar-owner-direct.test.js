@@ -67,7 +67,7 @@ describe('which writes skip the card', () => {
   test('customer messages, money, bulk and destructive writes keep their card', () => {
     for (const name of ['send_sms', 'reply_via_sms', 'send_email_reply', 'trigger_review_request', 'submit_review_reply',
       'bulk_update_customers', 'bulk_update_leads', 'optimize_all_routes', 'swap_tech_assignments', 'move_stops_to_day',
-      'create_appointment', 'cancel_appointment', 'cancel_plan', 'merge_customers', 'save_customer_estimate',
+      'create_appointment', 'cancel_appointment', 'cancel_plan', 'merge_customers', 'save_customer_estimate', 'switch_appointment_property',
       'create_pending_estimate', 'approve_price', 'set_railway_gate', 'request_instant_payout']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, false]);
     }
@@ -90,17 +90,18 @@ describe('which writes skip the card', () => {
     expect(OwnerDirect.executesWithoutCard('assign_technician', { technician_name: 'Synthetic Tech' })).toBe(false);
   });
 
-  test('update_customer skips the card only for name, phone, address, pipeline, source and note fields', () => {
+  test('update_customer skips the card only for name, phone, address, source and note fields', () => {
     const run = updates => OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates });
     expect(run({ first_name: 'Jay' })).toBe(true);
     expect(run({ phone: '9415550100', notes: 'gate code moved' })).toBe(true);
-    expect(run({ pipeline_stage: 'active' })).toBe(true);
-    // Money, a customer message, and the churn wind-down keep the card.
+    expect(run({ lead_source: 'Referral' })).toBe(true);
+    // Money, a customer message, and lifecycle (churn / reactivation) keep the card.
     expect(run({ monthly_rate: 49 })).toBe(false);
     expect(run({ email: 'new@example.test' })).toBe(false);
     expect(run({ first_name: 'Jay', email: 'new@example.test' })).toBe(false);
     expect(run({ pipeline_stage: 'churned' })).toBe(false);
-    expect(run({ pipeline_stage: ' Churned ' })).toBe(false);
+    expect(run({ pipeline_stage: 'won' })).toBe(false);
+    expect(run({ pipeline_stage: 'active_customer' })).toBe(false);
     expect(run({ first_name: 'Jay', waveguard_tier: 'Gold' })).toBe(false);
     expect(run({ active: false })).toBe(false);
     expect(run({ some_new_field: 1 })).toBe(false);

@@ -1,9 +1,11 @@
 /**
  * Owner-direct mode in the /query loop (owner ruling 2026-10-01,
- * GATE_IB_OWNER_DIRECT). For the owner login an internal edit is proposed
- * and then committed in the same turn through the one commit path — no
- * confirmation card. Everything else keeps its card: other logins, the gate
- * off, and customer messages / money / bulk changes even for the owner.
+ * GATE_IB_OWNER_DIRECT). Direct commits run under the platform task only
+ * (request-key dedupe + durable checkpoint) and are exercised end to end in
+ * intelligence-bar-platform-db.test.js. This suite pins the legacy path: the
+ * owner block in the prompt, and that with the platform off — or for any
+ * other login, or with the gate off — the edit still waits on its card. It
+ * also pins /confirm-action after its body moved into commitPendingAction.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -192,17 +194,14 @@ const CREATE_CUSTOMER = [
   [{ type: 'text', text: 'Added Synthetic Fixture.' }],
 ];
 
-describe('owner-direct in /query', () => {
+describe('owner-direct in /query (legacy path: GATE_IB_PLATFORM off)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_IB_OWNER_DIRECT = 'true';
+    delete process.env.GATE_IB_PLATFORM;
     mockCreatePendingAction.mockResolvedValue(pendingRow('create_customer'));
     mockCancelPendingAction.mockResolvedValue({ cancelled: true });
     mockRecordResult.mockResolvedValue(true);
-    mockClaimForConfirm.mockResolvedValue({
-      action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Synthetic', last_name: 'Fixture', phone: '9415550100' } },
-    });
-    // Unconfirmed = the mutation-free preview; confirmed = the write.
     mockExecuteTool.mockImplementation(async (...call) => (confirmedCall(call)
       ? { success: true, customer_id: 'c-new' }
       : { preview: true, would_create: { first_name: 'Synthetic', last_name: 'Fixture' } }));
@@ -210,41 +209,6 @@ describe('owner-direct in /query', () => {
 
   afterAll(() => {
     delete process.env.GATE_IB_OWNER_DIRECT;
-  });
-
-  test('owner + gate: an internal edit commits in the same turn, with no card', async () => {
-    scriptModelTurns(CREATE_CUSTOMER);
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture 941-555-0100', context: 'customers' }, 'owner');
-      expect(status).toBe(200);
-      expect(body.pendingActions).toEqual([]);
-      expect(body.response).toBe('Added Synthetic Fixture.');
-
-      // Proposed first (pins + audit row), then claimed by the same actor
-      // with the hash the proposal minted — the Confirm click's own path.
-      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
-      const stored = mockCreatePendingAction.mock.calls[0][0];
-      expect(stored.requestedBy).toBe('owner-1');
-      expect(mockClaimForConfirm).toHaveBeenCalledTimes(1);
-      const [claimedId, claimedBy, claimOptions] = mockClaimForConfirm.mock.calls[0];
-      expect(claimedId).toBe(PENDING_ID);
-      expect(claimedBy).toBe('owner-1');
-      expect(claimOptions.contractHash).toMatch(CONTRACT_HASH_RE);
-      expect(claimOptions.contractHash).toBe(stored.contractHash);
-
-      // The write ran once, confirmed by the server, and left its receipt.
-      const confirmedCalls = mockExecuteTool.mock.calls.filter(confirmedCall);
-      expect(confirmedCalls).toHaveLength(1);
-      expect(confirmedCalls[0][0]).toBe('create_customer');
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, { success: true, customer_id: 'c-new' });
-      expect(mockCancelPendingAction).not.toHaveBeenCalled();
-
-      const seen = writeResultSeenByModel();
-      expect(seen).toMatchObject({ executed: true, outcome: 'completed', result: { success: true, customer_id: 'c-new' } });
-      expect(seen.pending_confirmation).toBeUndefined();
-      // The pending-action id never reaches the model.
-      expect(JSON.stringify(mockMessagesCreate.mock.calls[1][0])).not.toContain(PENDING_ID);
-    });
   });
 
   test('owner + gate: the prompt carries the owner block; other logins never see it', async () => {
@@ -267,10 +231,11 @@ describe('owner-direct in /query', () => {
   });
 
   test.each([
+    ['the owner login, gate on, platform off (no request-key dedupe)', 'owner', 'true'],
     ['another admin login, gate on', 'admin', 'true'],
     ['the owner login, gate off', 'owner', undefined],
     ['the owner login, gate set to a non-true value', 'owner', 'false'],
-  ])('%s: the same edit still waits on its card', async (_label, token, gate) => {
+  ])('%s: the edit waits on its card and nothing commits', async (_label, token, gate) => {
     if (gate === undefined) delete process.env.GATE_IB_OWNER_DIRECT;
     else process.env.GATE_IB_OWNER_DIRECT = gate;
     scriptModelTurns(CREATE_CUSTOMER);
@@ -281,152 +246,12 @@ describe('owner-direct in /query', () => {
       expect(mockClaimForConfirm).not.toHaveBeenCalled();
       expect(mockExecuteTool.mock.calls.some(confirmedCall)).toBe(false);
       expect(writeResultSeenByModel().pending_confirmation).toBe(true);
+      // The pending-action id never reaches the model.
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[1][0])).not.toContain(PENDING_ID);
     });
   });
 
-  test('owner + gate: a billing or email field on update_customer keeps the card; a contact field commits', async () => {
-    // The update_customer proposal resolves the target to a name for the card.
-    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Fixture' });
-    mockCreatePendingAction.mockResolvedValue(pendingRow('update_customer'));
-    mockClaimForConfirm.mockResolvedValue({ action: { id: PENDING_ID, tool_name: 'update_customer', params: { customer_id: 'c1', updates: { first_name: 'Jay' } } } });
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { monthly_rate: 49 } } }],
-      [{ type: 'text', text: 'Tap Confirm.' }],
-    ]);
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'set the monthly rate to 49', context: 'customers' }, 'owner');
-      expect(body.pendingActions).toHaveLength(1);
-      expect(mockClaimForConfirm).not.toHaveBeenCalled();
-
-      // An email change can re-send the customer's opt-in confirmation: card.
-      jest.clearAllMocks();
-      mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Fixture' });
-      mockCreatePendingAction.mockResolvedValue(pendingRow('update_customer'));
-      scriptModelTurns([
-        [{ type: 'tool_use', id: 'tu_3', name: 'update_customer', input: { customer_id: 'c1', updates: { email: 'new@example.test' } } }],
-        [{ type: 'text', text: 'Tap Confirm.' }],
-      ]);
-      const emailEdit = await postQuery(baseUrl, { prompt: 'change the email', context: 'customers' }, 'owner');
-      expect(emailEdit.body.pendingActions).toHaveLength(1);
-      expect(mockClaimForConfirm).not.toHaveBeenCalled();
-
-      jest.clearAllMocks();
-      mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Fixture' });
-      mockCreatePendingAction.mockResolvedValue(pendingRow('update_customer'));
-      mockClaimForConfirm.mockResolvedValue({ action: { id: PENDING_ID, tool_name: 'update_customer', params: { customer_id: 'c1', updates: { first_name: 'Jay' } } } });
-      scriptModelTurns([
-        [{ type: 'tool_use', id: 'tu_2', name: 'update_customer', input: { customer_id: 'c1', updates: { first_name: 'Jay' } } }],
-        [{ type: 'text', text: 'Renamed to Jay.' }],
-      ]);
-      // A legacy bare write is never run at proposal; its one executor call
-      // is the commit itself (no confirmed flag on the input or options).
-      mockExecuteTool.mockResolvedValue({ success: true, updated: ['first_name'] });
-      const direct = await postQuery(baseUrl, { prompt: 'change the first name to Jay', context: 'customers' }, 'owner');
-      expect(direct.body.pendingActions).toEqual([]);
-      expect(mockClaimForConfirm).toHaveBeenCalledTimes(1);
-      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
-      expect(mockExecuteTool.mock.calls[0].slice(0, 2)).toEqual(['update_customer', { customer_id: 'c1', updates: { first_name: 'Jay' } }]);
-      expect(writeResultSeenByModel()).toMatchObject({ executed: true, outcome: 'completed' });
-    });
-  });
-
-  test('owner + gate: an approval that cannot be claimed is cancelled and reported as not done', async () => {
-    mockClaimForConfirm.mockResolvedValue({ error: 'expired' });
-    scriptModelTurns(CREATE_CUSTOMER);
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
-      expect(status).toBe(200);
-      expect(body.pendingActions).toEqual([]);
-      expect(mockCancelPendingAction).toHaveBeenCalledWith(PENDING_ID, 'owner-1');
-      expect(mockExecuteTool.mock.calls.some(confirmedCall)).toBe(false);
-      const seen = writeResultSeenByModel();
-      expect(seen.executed).toBe(false);
-      expect(seen.error).toBe('Pending action expired');
-    });
-  });
-
-  test('owner + gate: a write the domain refuses is reported as not done, and its receipt is kept', async () => {
-    mockExecuteTool.mockImplementation(async (...call) => (confirmedCall(call)
-      ? { error: 'A customer with this phone already exists' }
-      : { preview: true }));
-    scriptModelTurns(CREATE_CUSTOMER);
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
-      expect(body.pendingActions).toEqual([]);
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, { error: 'A customer with this phone already exists' });
-      // Claimed and consumed: nothing left to cancel.
-      expect(mockCancelPendingAction).not.toHaveBeenCalled();
-      expect(writeResultSeenByModel()).toMatchObject({ executed: false, error: 'A customer with this phone already exists' });
-    });
-  });
-
-  test('owner + gate: a direct commit joins the conversation thread so its receipt is recallable', async () => {
-    process.env.GATE_IB_THREADS = 'true';
-    mockAppendExchange.mockResolvedValue({ threadId: 'thread-1', lastSeq: 4 });
-    try {
-      scriptModelTurns(CREATE_CUSTOMER);
-      await withServer(async (baseUrl) => {
-        const { body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
-        expect(body.pendingActions).toEqual([]);
-        expect(mockAttachThread).toHaveBeenCalledWith([PENDING_ID], 'thread-1', 4, 'owner-1');
-      });
-      // An approval that was never consumed is cancelled, not attached.
-      jest.clearAllMocks();
-      mockAppendExchange.mockResolvedValue({ threadId: 'thread-1', lastSeq: 5 });
-      mockClaimForConfirm.mockResolvedValue({ error: 'expired' });
-      scriptModelTurns(CREATE_CUSTOMER);
-      await withServer(async (baseUrl) => {
-        await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
-        expect(mockAttachThread).not.toHaveBeenCalled();
-      });
-    } finally {
-      delete process.env.GATE_IB_THREADS;
-    }
-  });
-
-  test('owner + gate: an unknown outcome is reported as unknown, never as not done', async () => {
-    // The runner throws after the approval was consumed: the commit path
-    // answers outcome_unknown (recovery found no receipt).
-    mockExecuteTool.mockImplementation(async (...call) => { if (confirmedCall(call)) throw new Error('socket hang up'); return { preview: true }; });
-    scriptModelTurns(CREATE_CUSTOMER);
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture', context: 'customers' }, 'owner');
-      expect(body.pendingActions).toEqual([]);
-      const seen = writeResultSeenByModel();
-      expect(seen).toMatchObject({ executed: null, outcome: 'outcome_unknown' });
-      expect(seen.note).toMatch(/Do NOT call this tool again/);
-      expect(seen.note).not.toMatch(/did NOT complete/);
-      // Consumed, so never cancelled; the unknown receipt was written.
-      expect(mockCancelPendingAction).not.toHaveBeenCalled();
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ outcome_unknown: true }), { onlyIfEmpty: true });
-    });
-  });
-
-  test('owner + gate: after an unknown outcome, a second write in the same model turn is refused', async () => {
-    let confirmedCalls = 0;
-    mockExecuteTool.mockImplementation(async (...call) => {
-      if (confirmedCall(call)) { confirmedCalls += 1; throw new Error('socket hang up'); }
-      return { preview: true };
-    });
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_customer', input: { first_name: 'Synthetic', last_name: 'Fixture', phone: '9415550100' } },
-        { type: 'tool_use', id: 'tu_2', name: 'create_customer', input: { first_name: 'Synthetic', last_name: 'Fixture', phone: '9415550100' } }],
-      [{ type: 'text', text: 'Checking.' }],
-    ]);
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'add a customer Synthetic Fixture twice', context: 'customers' }, 'owner');
-      expect(status).toBe(200);
-      expect(body.pendingActions).toEqual([]);
-      const messages = mockMessagesCreate.mock.calls[1][0].messages;
-      const results = messages[messages.length - 1].content.map(block => JSON.parse(block.content));
-      expect(results[0]).toMatchObject({ outcome: 'outcome_unknown' });
-      expect(results[1]).toMatchObject({ code: 'dependency_unresolved' });
-      expect(confirmedCalls).toBe(1);
-      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  test('owner + gate: the emergency write freeze still stops a direct edit', async () => {
+  test('owner + gate: the emergency write freeze still stops every write', async () => {
     process.env.IB_WRITES_DISABLED = 'true';
     try {
       scriptModelTurns(CREATE_CUSTOMER);

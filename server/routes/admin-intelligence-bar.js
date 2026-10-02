@@ -2622,6 +2622,11 @@ async function runQuery(req, res, next) {
     // replies. Read from the live request on every run; the isolated tech
     // and agent_estimate rails keep their own contracts.
     const ownerDirect = OwnerDirect.ownerDirectLive(req) && context !== 'tech' && context !== 'agent_estimate';
+    // Direct commits need the platform task: its request key dedupes a
+    // retried /query and its checkpoint carries the committed receipt, so a
+    // response failure after the commit cannot lead to a second execution
+    // (Codex r1 on #5563). Platform off = the owner still gets the card.
+    const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -2967,7 +2972,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirect && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
