@@ -1,20 +1,15 @@
 /**
- * One-tap correction reason (AI acceleration scope idea D, PR 2). Adds
- * agent_decisions.correction_reason (nullable, closed CHECK: the five reasons
- * in server/services/correction-reasons.js, pinned by test) and restates the
- * `corrections` view (fifth cut; the earlier files are frozen once pushed)
- * with one trailing column, `reason`: the decision's correction_reason, or
- * the typed label's `reason`, NULL for the other sources. CREATE OR REPLACE
- * may append a column, so every reader of the earlier cuts keeps working.
- * down drops the view, restores the fourth cut and drops the column.
+ * `corrections` view, sixth cut: the fifth cut (20261002135000: the
+ * parked-suggestion link, the reply-training source, the sms_log indexes)
+ * with the trailing `reason` column of 20261002140000. Both earlier files are
+ * pushed and so frozen: 140000 was written against the fourth cut, and in
+ * name order it runs AFTER 135000, so without this file a fresh database
+ * would end on the fourth cut plus reason and lose the fifth cut's sources.
+ * Same columns in the same order as 140000. down drops the view and restores
+ * 140000's cut (fourth cut plus reason); the column itself is 140000's.
  */
-const previous = require('./20261002130000_corrections_view_human_text');
+const previous = require('./20261002140000_correction_reason');
 
-const TABLE = 'agent_decisions';
-const COLUMN = 'correction_reason';
-const CHECK = 'agent_decisions_correction_reason_check';
-// Literal on purpose: a migration never follows a live constant.
-const REASONS = ['wrong_fact', 'wrong_tone', 'missing_promise', 'should_have_escalated', 'other'];
 const VIEW = 'corrections';
 
 const SQL = `
@@ -28,7 +23,8 @@ CREATE OR REPLACE VIEW ${VIEW} AS
          d.suggested_message::text AS ai_text,
          COALESCE(
            (SELECT s.message_body FROM sms_log s
-             WHERE s.metadata ->> 'agent_decision_id' = d.id::text
+             WHERE (s.metadata ->> 'agent_decision_id' = d.id::text
+                    OR s.metadata -> 'parked_decision_ids' @> to_jsonb(ARRAY[d.id::text]))
                AND s.direction = 'outbound'
                AND TRIM(COALESCE(s.message_body, '')) <> ''
              ORDER BY s.created_at DESC
@@ -161,26 +157,46 @@ UNION ALL
          NULL::text
     FROM voice_profiles p
    WHERE p.status = 'rejected'
+UNION ALL
+  SELECT 'reply_training'::text,
+         t.id,
+         t.review_verdict::text,
+         'sms'::text,
+         t.scenario_label::text,
+         t.customer_id,
+         t.agent_draft::text,
+         t.outbound_body::text,
+         jsonb_build_object(
+           'source_agent_decision_id', t.source_agent_decision_id,
+           'review_note', t.review_note,
+           'edit_summary', t.edit_summary,
+           'capture_reason', t.capture_reason,
+           'inbound_message_id', t.inbound_message_id,
+           'outbound_message_id', t.outbound_message_id
+         ),
+         NULL::text,
+         NULL::text,
+         t.reviewed_by::text,
+         t.reviewed_at,
+         NULL::text
+    FROM reply_training_examples t
+   WHERE t.review_verdict IN ('edited', 'rejected', 'no_reply_needed')
+     AND t.reviewed_by IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM agent_decisions ad
+        WHERE ad.id = t.source_agent_decision_id
+          AND ad.human_verdict IN ('corrected', 'ignored', 'dismissed')
+     )
 `;
 
 exports.up = async function up(knex) {
-  if (!(await knex.schema.hasColumn(TABLE, COLUMN))) {
-    await knex.schema.alterTable(TABLE, (t) => { t.string(COLUMN, 32); });
-  }
-  await knex.raw(`ALTER TABLE ${TABLE} DROP CONSTRAINT IF EXISTS ${CHECK}`);
-  await knex.raw(`ALTER TABLE ${TABLE} ADD CONSTRAINT ${CHECK} CHECK (${COLUMN} IS NULL OR ${COLUMN} IN (${REASONS.map((r) => `'${r}'`).join(', ')}))`);
   await knex.raw(SQL);
 };
 
 exports.down = async function down(knex) {
   await knex.raw(`DROP VIEW IF EXISTS ${VIEW}`);
   await previous.up(knex);
-  await knex.raw(`ALTER TABLE ${TABLE} DROP CONSTRAINT IF EXISTS ${CHECK}`);
-  if (await knex.schema.hasColumn(TABLE, COLUMN)) {
-    await knex.schema.alterTable(TABLE, (t) => { t.dropColumn(COLUMN); });
-  }
 };
 
-exports.REASONS = REASONS;
-exports.SQL = SQL;
 exports.VIEW = VIEW;
+exports.SQL = SQL;
