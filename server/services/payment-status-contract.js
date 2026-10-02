@@ -690,6 +690,13 @@ function remainderIsInert(remainder) {
  * null when `reply` may auto-send; 'payment_status_not_auto_sendable' when it is payment-scoped and says anything beyond verbatim
  * copies of `snapshot.sentences` and inert text. A reply that is not payment-scoped is not this check's business.
  */
+// The reply with every verbatim copy of a snapshotted rendered sentence removed (Codex round-72 P2): a copied receipt / invoice / Zelle
+// line carries a record's own figure, so the auto-send price-quote rung reads only what the model wrote itself. The copies are gated by
+// autoSendScopeBlock below and re-rendered at dispatch.
+function withoutSnapshotCopies(reply, snapshot) {
+  const text = String(reply ?? '');
+  return withoutCopies(text, copiedSentences(text, asTexts(snapshot?.sentences)));
+}
 function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   const sentences = asTexts(snapshot?.sentences);
   const scoped = isPaymentScoped({ reply, inboundText, scoped: snapshot?.scoped === true || sentences.length > 0 });
@@ -768,6 +775,7 @@ module.exports = {
   sentencesFromFactsBlock,
   hasOutstandingObligation,
   RESOLVED_PAYMENT_STATUSES,
+  withoutSnapshotCopies,
   canonText,
   copiedSentences,
   withoutCopies,

@@ -214,3 +214,22 @@ test('autoSendMessage composes the billing fingerprint again AFTER the lane pred
   expect(lane).toBeGreaterThan(-1);
   expect(again).toBeGreaterThan(lane);
 });
+
+// Codex round-72 P2: the REAL price-quote matcher (the harness mock always says no) must not block a verbatim copied receipt - the
+// copy carries the record's own figure - while any figure the model wrote itself is still a price quote
+describe('price-quote rung reads only what the model wrote (real hasPriceQuote)', () => {
+  const realHasPriceQuote = jest.requireActual('../services/sms-suggest-mode').hasPriceQuote;
+  beforeEach(() => { require('../services/sms-suggest-mode').hasPriceQuote.mockImplementation(realHasPriceQuote); });
+  afterEach(() => { require('../services/sms-suggest-mode').hasPriceQuote.mockImplementation(() => false); });
+  test('a copied receipt (with its $ figure) auto-sends', async () => {
+    expect(realHasPriceQuote(COPY)).toBe(true); // the matcher alone would refuse it
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    await expect(attempt()).resolves.toMatchObject({ sent: true });
+  });
+  test('a figure outside the copy is still a price quote; a non-v12 draft is unchanged', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    await expect(attempt({ reply: `${COPY} The next one is $45.` })).resolves.toEqual({ sent: false, reason: 'price_quote' });
+    await expect(attempt({ promptVersion: 'house_voice_v11' })).resolves.toEqual({ sent: false, reason: 'price_quote' });
+    await expect(attempt({ paymentStatusSnapshot: null })).resolves.toEqual({ sent: false, reason: 'price_quote' });
+  });
+});

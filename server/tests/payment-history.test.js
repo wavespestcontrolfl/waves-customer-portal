@@ -170,3 +170,9 @@ test('hasInFlightMoney reuses a passed linkage instead of loading its own', asyn
   await expect(hasInFlightMoney('c1', dbh, { linkage })).resolves.toBe(true);
   expect(dbh).not.toHaveBeenCalled();
 });
+
+// Codex round-72 P2: an 'upcoming' autopay row is a future charge, never attempted - not unresolved money
+test('the unresolved-payment probe excludes upcoming (future) autopay rows', () => {
+  const { IN_FLIGHT_PAYMENTS_SQL } = require('../services/payment-history');
+  expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/NOT IN \([^)]*'upcoming'\)/);
+});

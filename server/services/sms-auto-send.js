@@ -605,6 +605,11 @@ async function maybeAutoSend(params = {}) {
 function replyContentReadinessBlock(params, gratitudeLane) {
   const { reply, intent, intendedActions = null } = params;
   const suggest = require('./sms-suggest-mode');
+  // a v12 reply's verbatim copies of its snapshotted rendered sentences are the records' own figures, not quotes (Codex round-72 P2,
+  // owner 'hold when ambiguous' ruling 2026-10-02: an unambiguous copied payment line auto-sends); they are gated at (3.75) instead
+  const quotable = isV12PaymentLane(params, gratitudeLane)
+    ? require('./payment-status-contract').withoutSnapshotCopies(reply, params.paymentStatusSnapshot || null)
+    : reply;
   // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
   //       allows real amounts in texts, and the suggest lane now delivers
   //       them (a human reviews before send) — but at the autonomy
@@ -612,7 +617,7 @@ function replyContentReadinessBlock(params, gratitudeLane) {
   //       worst-case failure, so this lane stays refused until an explicit
   //       owner call relaxes it. Deterministic, independent of the LLM
   //       verifier.
-  if (suggest.hasPriceQuote(reply)) {
+  if (suggest.hasPriceQuote(quotable)) {
     logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
     return { reason: 'price_quote' };
   }
@@ -643,8 +648,9 @@ function replyContentReadinessBlock(params, gratitudeLane) {
 
 // (3.75) of autoSendReadiness: { reason } when a v12 payment-scoped reply is not copy-only, else null (Codex round-71 P2: its own
 // function, so the readiness ladder stays one decision per rung).
+const isV12PaymentLane = (params, gratitudeLane) => !gratitudeLane && typeof params.promptVersion === 'string' && params.promptVersion.startsWith('house_voice_v12');
 function paymentScopeReadinessBlock(params, gratitudeLane) {
-  if (gratitudeLane || typeof params.promptVersion !== 'string' || !params.promptVersion.startsWith('house_voice_v12')) return null;
+  if (!isV12PaymentLane(params, gratitudeLane)) return null;
   const scopeBlock = require('./payment-status-contract').autoSendScopeBlock({
     reply: params.reply, inboundText: params.inboundMessage == null ? null : String(params.inboundMessage), snapshot: params.paymentStatusSnapshot || null,
   });

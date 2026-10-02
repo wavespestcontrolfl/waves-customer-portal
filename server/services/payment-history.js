@@ -21,13 +21,14 @@ const logger = require('./logger');
 // counts only if it is the homeowner's (payer_id NULL and not withdrawn to a payer by stamp).
 const IN_FLIGHT_PAYMENTS_LIMIT = 200;
 // Codex round-71 P2: not only pending / processing / requires_action - ANY status outside the renderer's resolved set (disputed, an
-// unknown status) is unresolved money, so an old dispute pushed out of the display window still blocks "no balance due".
+// unknown status) is unresolved money, so an old dispute pushed out of the display window still blocks "no balance due". An
+// 'upcoming' autopay row is a FUTURE charge, never attempted (Codex round-72 P2): excluded, as the context reader does.
 const { RESOLVED_PAYMENT_STATUSES } = require('./payment-status-contract');
 const RESOLVED_STATUS_SQL_LIST = [...RESOLVED_PAYMENT_STATUSES].map((s) => `'${s}'`).join(', ');
 const IN_FLIGHT_PAYMENTS_SQL = `SELECT id, metadata, stripe_payment_intent_id, stripe_charge_id, description
   FROM payments
   WHERE customer_id = ? AND payer_id IS NULL
-    AND lower(coalesce(status, '')) NOT IN (${RESOLVED_STATUS_SQL_LIST})
+    AND lower(coalesce(status, '')) NOT IN (${RESOLVED_STATUS_SQL_LIST}, 'upcoming')
   LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
 // Processing invoices come back as ids (capped) and are judged through the LIVE payer verdict in JS (Codex round-41 P1): a processing
 // invoice that resolves to a payer today is the payer's money in flight, not the homeowner's.
