@@ -605,6 +605,13 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
           // fall through to the ask_failed release below
         }
       }
+      // A provider timeout resolves as UNCERTAIN: the ask may have gone out,
+      // so it is never released — it stays pending (an on-site ask keeps its
+      // lease until stale) for the sweep's sms_log reconcile.
+      if (result?.deliveryOutcome === 'uncertain') {
+        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; left pending for reconcile`);
+        continue;
+      }
       if (result.blocked || result.sent === false || result.suppressed === true || sentinelSid) {
         // They were never asked: keep a BLOCKING ask_failed row (texts
         // stay held) that the next consented save re-claims and retries —

@@ -473,6 +473,12 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     expect(writes.some((w) => w.patch && (w.patch.status === 'ask_failed' || w.patch.dispatch_lease_at === null))).toBe(false);
   });
 
+  test('a RESOLVED uncertain outcome (provider timeout) is never released to ask_failed', async () => {
+    const { optin, writes } = load({ sendResult: { sent: false, deliveryOutcome: 'uncertain' } });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
+    expect(writes.some((w) => w.patch && (w.patch.status === 'ask_failed' || w.patch.dispatch_lease_at === null))).toBe(false);
+  });
+
   test('an office-review hold returns the lease (pending, for the sweep); nothing sent', async () => {
     const { optin, writes, send } = load({ visitState: 'wait' });
     await optin.dispatchRecipientOptins([claim], { id: 'c1' });
