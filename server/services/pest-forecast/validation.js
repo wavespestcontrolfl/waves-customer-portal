@@ -32,20 +32,44 @@ function observationFromRecord(record) {
   if (record.status !== 'completed' || !record.technician_id || !record.customer_id
     || serviceRecordSuppressesCustomerArtifacts(record)) return { excluded: 'not_confirmed_completed_visit' };
   const data = parseJsonObject(record.service_data);
-  const snapshot = data.typedReportSnapshot;
-  if (!['one_time_pest_treatment', 'cockroach'].includes(snapshot?.type)) return { excluded: 'unsupported_form' };
-  const values = snapshot.values || {};
-  // The general one-time form was retired in July. New cockroach visits
-  // still freeze this controlled species field and explicit live evidence.
-  // Unknown/mixed species and signs such as droppings are not live sightings.
-  const pests = snapshot.type === 'cockroach'
-    ? [{ German: 'German cockroaches', American: 'American / palmetto cockroaches' }[values.species]]
-    : chips(values.pests_observed);
-  if (pests.length !== 1 || !Object.hasOwn(PEST_MAP, pests[0])) return { excluded: 'ambiguous_or_unmapped_pest' };
-  const evidence = chips(values.evidence_observed);
-  const live = evidence.some(e => LIVE_EVIDENCE[snapshot.type].has(e));
-  if (!live || evidence.some(e => CONTRADICTORY_EVIDENCE.has(e))
-    || values.activity_level === 'None observed') return { excluded: 'no_unambiguous_live_evidence' };
+  // Combined visits freeze additional forms as companion snapshots. Only an
+  // explicitly customer-visible companion is eligible; its own delivery
+  // posture is authoritative and missing delivery fails closed.
+  const snapshots = [
+    data.typedReportSnapshot,
+    ...(Array.isArray(data.companionReportSnapshots)
+      ? data.companionReportSnapshots.filter(snapshot => snapshot?.delivery === 'auto_send')
+      : []),
+  ].filter(snapshot => ['one_time_pest_treatment', 'cockroach'].includes(snapshot?.type));
+  if (!snapshots.length) return { excluded: 'unsupported_form' };
+  const pestsObserved = [];
+  const rejected = [];
+  for (const snapshot of snapshots) {
+    const values = snapshot.values || {};
+    // The general one-time form was retired in July. New cockroach visits
+    // still freeze this controlled species field and explicit live evidence.
+    // Unknown/mixed species and signs such as droppings are not live sightings.
+    const pests = snapshot.type === 'cockroach'
+      ? [{ German: 'German cockroaches', American: 'American / palmetto cockroaches' }[values.species]]
+      : chips(values.pests_observed);
+    if (pests.length !== 1 || !Object.hasOwn(PEST_MAP, pests[0])) {
+      rejected.push('ambiguous_or_unmapped_pest');
+      continue;
+    }
+    const evidence = chips(values.evidence_observed);
+    const live = evidence.some(e => LIVE_EVIDENCE[snapshot.type].has(e));
+    if (!live || evidence.some(e => CONTRADICTORY_EVIDENCE.has(e))
+      || values.activity_level === 'None observed') {
+      rejected.push('no_unambiguous_live_evidence');
+      continue;
+    }
+    pestsObserved.push(PEST_MAP[pests[0]]);
+  }
+  if (!pestsObserved.length) {
+    const reason = rejected.every(value => value === rejected[0])
+      ? rejected[0] : 'no_unambiguous_live_evidence';
+    return { excluded: reason };
+  }
   // Frozen identity is authoritative even when its city is missing. Never
   // follow a customer who moved, or approximate a ZIP into another city.
   const frozen = data.reportIdentitySnapshot?.address;
@@ -55,10 +79,10 @@ function observationFromRecord(record) {
   if (!location || !['fl', 'florida'].includes(cityKey(state))) return { excluded: 'unverified_location' };
   const day = validCalendarDate(dateOnlyString(record.service_date));
   if (!day) return { excluded: 'invalid_observation_date' };
-  return { observation: {
+  return { observations: pestsObserved.map(pest => ({
     customerId: record.customer_id, serviceRecordId: record.id, date: day,
-    location, pest: PEST_MAP[pests[0]], source: 'technician_recorded_live_pest',
-  } };
+    location, pest, source: 'technician_recorded_live_pest',
+  })) };
 }
 
 // Average rank for tied scores avoids rewarding a pest merely because its
@@ -87,7 +111,7 @@ function evaluateForecasts({ records, forecasts }) {
   for (const record of records) {
     const result = observationFromRecord(record);
     if (result.excluded) excluded[result.excluded] = (excluded[result.excluded] || 0) + 1;
-    else observations.push(result.observation);
+    else observations.push(...result.observations);
   }
   const saved = forecasts.filter(usableForecast).sort((a, b) => b.as_of_date.localeCompare(a.as_of_date));
   const seen = new Set();
@@ -156,8 +180,10 @@ async function loadEvaluationData(knex, { from, to }) {
       .whereBetween('sr.service_date', [from, to]).where('sr.status', 'completed')
       .select('sr.id', 'sr.customer_id', 'sr.technician_id', 'sr.status', 'sr.service_date', 'sr.service_data', 'sr.structured_notes',
         'ss.service_address_city', 'ss.service_address_state');
+    // Load every stored model in the range so the aggregate can distinguish
+    // rejected versions from missing history.
     const rows = await trx('pest_forecast_snapshots').whereBetween('forecast_date', [since, to])
-      .where('model_version', MODEL_VERSION).select('forecast');
+      .select('forecast');
     return { records, forecasts: rows.map(r => r.forecast) };
   });
 }

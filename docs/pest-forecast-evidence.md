@@ -49,10 +49,17 @@ wording correction does not depend on the history gate.
 `server/scripts/evaluate-pest-forecast.js` produces an aggregate, read-only
 evaluation. It consumes completed, technician-attributed cockroach forms
 with an exact German or American species selection and explicit "Live roaches"
-evidence. It also supports legacy one-time pest forms with one exact controlled
-pest choice and explicit live-pest/active-trail evidence; that general form was
+evidence, including customer-visible cockroach sections on combined visits.
+Internal-only companion sections remain excluded. It also supports legacy
+one-time pest forms with one exact controlled pest choice and explicit
+live-pest/active-trail evidence; that general form was
 retired for new completions in July 2026. Generic pest visits do not provide
 the species-specific evidence this evaluator requires and remain excluded.
+Eligibility is evaluated per supported form section. Each eligible section
+contributes an observation; the existing customer/city/pest/week rule collapses
+the same sighting across visit sections. A multi-pest combined visit can make
+`eligibleObservations` exceed `recordsReviewed`. Exclusions count records only
+when none of their supported sections supplies an eligible observation.
 It rejects ambiguous identity, customer-only reports, no-activity
 findings, AI identification outputs and free-text guesses. The serviced city
 comes from frozen report identity (or the visit's stamped address if no frozen

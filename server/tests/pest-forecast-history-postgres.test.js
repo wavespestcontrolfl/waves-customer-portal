@@ -86,16 +86,23 @@ jest.setTimeout(30000);
   });
 
   test('read-only evaluator preserves source rows and bounds blocked reads', async () => {
-    await saveSnapshot(make('2026-10-01'), db);
+    const saved = make('2026-10-01');
+    await saveSnapshot(saved, db);
+    const oldModel = { ...saved, model_version: 'retired-model' };
+    await db('pest_forecast_snapshots').insert({
+      location_slug: oldModel.location.slug, forecast_date: oldModel.as_of_date,
+      model_version: oldModel.model_version, generated_at: oldModel.generated_at,
+      forecast: JSON.stringify(oldModel),
+    });
     await db('service_records').insert({ id: randomUUID(), customer_id: randomUUID(), technician_id: randomUUID(),
       status: 'completed', service_date: '2026-10-02', service_data: JSON.stringify({
         reportIdentitySnapshot: { address: { city: 'Bradenton', state: 'FL' } },
         typedReportSnapshot: { type: 'cockroach', values: { species: 'German', evidence_observed: 'Live roaches', activity_level: 'Moderate' } },
       }) });
     const input = await loadEvaluationData(db, { from: '2026-10-01', to: '2026-10-03' });
-    expect(evaluateForecasts(input).coverage.matchedObservations).toBe(1);
+    expect(evaluateForecasts(input).coverage).toMatchObject({ matchedObservations: 1, invalidOrOtherModelSnapshots: 1 });
     expect((await db('service_records').count('* as n').first()).n).toBe('1');
-    expect((await db('pest_forecast_snapshots').count('* as n').first()).n).toBe('1');
+    expect((await db('pest_forecast_snapshots').count('* as n').first()).n).toBe('2');
 
     for (const table of ['service_records', 'pest_forecast_snapshots']) {
       const blocker = await db.transaction();
