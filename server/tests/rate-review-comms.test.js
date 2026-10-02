@@ -163,6 +163,32 @@ describe('sendPreview', () => {
     expect(out.counts.letters).toBe(0);
   });
 
+  test('a rate moved on file since the notice is held (rate_moved), never announced', async () => {
+    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const b = book({ notices: [n] });
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '125.00' }];
+    mockDb.reset(b);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].suppressedLines[0].reason).toBe('rate_moved');
+  });
+
+  test('a prepaid renewal needs 32 days (the apply writes the successor amount before the 30-day reminder)', () => {
+    const plan = (eff) => {
+      const notice = draft(1, {
+        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: eff,
+        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+      });
+      const data = {
+        notices: [notice], snapshots: new Map([[String(notice.id), fixture.snapshotRow(1)]]), customers: new Map([[CUSTOMER(1), customer(1)]]),
+        prefs: new Map(), firstVisits: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'annual_prepay']]), ratesMoved: new Set(),
+      };
+      return comms._private.planBatch(data, { today: '2026-11-02', now: NOW })[0];
+    };
+    expect(plan('2026-12-03').suppressedLines[0].reason).toBe('too_late'); // 31 days
+    expect(plan('2026-12-04').lines).toHaveLength(1); // 32 days
+  });
+
   test('the digest moves with the cost block, not only the list', async () => {
     mockDb.reset(book());
     const a = await previewDigest();
@@ -398,12 +424,12 @@ describe('letter wording and order', () => {
   test('the first application is the stored visit only while it is live and on/after the effective date', async () => {
     const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
     const b = book({ notices: [n] });
-    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-01', status: 'pending' }];
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-01', status: 'pending', estimated_price: '117.00' }];
     mockDb.reset(b);
     let out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
     expect(emailLeg.mock.calls[0][0].vars.line1_first).toBe('on or after December 10, 2026');
-    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed' }];
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed', estimated_price: '117.00' }];
     mockDb.reset(b);
     out = await comms.sendPreview(BATCH_KEY, { now: NOW });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
@@ -462,13 +488,13 @@ describe('customer surfaces', () => {
     b.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '60.00' }];
     mockDb.reset(b);
     expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400, chargeDate: '2027-01-01' });
-    // delivered under 30 days before the effective date: the apply holds it
+    // delivered under 30 days before the effective date: the apply holds it — not upcoming
     mockDb.store.price_change_notices[0].sent_at = new Date('2026-11-25T15:00:00Z');
-    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ chargeCents: null, chargeDate: null });
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
     mockDb.store.price_change_notices[0].sent_at = NOW;
-    // the line's rate moved since the notice: the apply would hold, nothing is announced
+    // the line's rate moved since the notice: the apply would refuse — not upcoming
     mockDb.store.customer_plan_rates[0].monthly_rate = '35.00';
-    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ chargeCents: null, chargeDate: null });
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 
   test('portal: two monthly increases on one account project the cumulative dues', async () => {

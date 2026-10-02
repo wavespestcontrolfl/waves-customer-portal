@@ -17,6 +17,7 @@ const {
 } = require('../services/autopay-eligibility');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
@@ -56,7 +57,8 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
     }) };
     // The card's own "Next charge" is the same debit when the dates meet:
     // it must state the new amount too, never two totals for one charge.
-    const sameDebit = out.rate_changes.map((c) => c.nextCharge).filter((c) => c && c.date === String(customer.next_charge_date || '').slice(0, 10)).pop();
+    const nextDay = dateOnlyString(customer.next_charge_date);
+    const sameDebit = out.rate_changes.map((c) => c.nextCharge).filter((c) => c && nextDay && c.date === nextDay).pop();
     if (sameDebit) Object.assign(out, { next_charge_amount: sameDebit.total, next_charge_base_amount: sameDebit.base, next_charge_surcharge_amount: sameDebit.surcharge });
     return out;
   } catch (err) {

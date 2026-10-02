@@ -70,7 +70,7 @@ const SERVICE_LABELS = Object.freeze({
 const REASONS = Object.freeze({
   customer_inactive: 'Customer is inactive or deleted',
   not_approved: 'Ranking row is no longer approved',
-  too_late: `Effective date is under ${MIN_NOTICE_DAYS} days away — reschedule the notices`,
+  too_late: `Effective date is under ${MIN_NOTICE_DAYS} days away (${MIN_NOTICE_DAYS + 2} for a prepaid renewal) — reschedule the notices`,
   invalid_amount: 'New rate is not above the current rate',
   unsupported_line: 'Service line has no letter wording',
   too_many_lines: `More than ${LINE_SLOTS} reviewed lines on one account`,
@@ -79,6 +79,7 @@ const REASONS = Object.freeze({
   send_uncertain: 'An earlier send may have reached the customer — check the email log before anything else is sent',
   renewal_declined: 'Customer declined to renew the prepaid plan',
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
+  rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
 });
 
 function badInput(message, status = 400) {
@@ -243,6 +244,50 @@ function letterPayload({ customer, lines, costBlock, noticeUrl }) {
   return payload;
 }
 
+// Notices whose rate on file is no longer the noticed current rate — read
+// the way the nightly apply reads it, so a letter never announces a change
+// the apply would refuse (rate_moved_since_notice): monthly the family's
+// ledger slices or the dues; per application the first visit's stamped
+// price; prepaid the live term's amount. An unreadable rate counts as moved.
+async function ratesMovedFor(dbh, notices, { customers, visitById }) {
+  const customerById = new Map(customers.map((c) => [String(c.id), c]));
+  const moved = new Set();
+  const monthly = notices.filter((n) => n.billing_lane === 'monthly_membership');
+  const ok = new Set();
+  for (const n of monthly) {
+    const live = await liveMonthlyCents(dbh, n, customerById.get(String(n.customer_id))).catch(() => null);
+    if (live === noticedCurrent(n)) ok.add(String(n.id));
+  }
+  const termIds = notices.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
+  const terms = new Map((termIds.length ? await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'prepay_amount') : []).map((t) => [String(t.id), t]));
+  for (const n of notices) {
+    const meta = parseJson(n.metadata, {});
+    if (n.billing_lane === 'monthly_membership' && !ok.has(String(n.id))) moved.add(String(n.id));
+    if (n.billing_lane === 'annual_prepay') {
+      const term = terms.get(String(meta.term_id || ''));
+      if (!term || Math.round(Number(term.prepay_amount) * 100) !== noticedCurrent(n)) moved.add(String(n.id));
+    }
+    if (n.billing_lane === 'per_application') {
+      const visit = visitById.get(String(meta.first_visit_id || ''));
+      if (visit && ['pending', 'confirmed'].includes(String(visit.status)) && Math.round(Number(visit.estimated_price) * 100) !== noticedCurrent(n)) moved.add(String(n.id));
+    }
+  }
+  return moved;
+}
+
+function noticedCurrent(n) {
+  return Number(n.noticed_current_cents ?? n.current_amount_cents);
+}
+
+// applyMonthly's own read of the lane's current rate.
+async function liveMonthlyCents(dbh, n, customer) {
+  const { loadFamilySlices, sumSlices, cents } = require('./rate-review-apply')._private;
+  if (parseJson(n.metadata, {}).current_rate_source === 'ledger_slice') {
+    return cents(sumSlices((await loadFamilySlices(dbh, n.customer_id, n.family_key)).family));
+  }
+  return cents(customer?.monthly_rate);
+}
+
 // The live lane per unsent notice; an unreadable lane reads as null (held).
 async function liveLanesFor(dbh, notices, { snapshots, customers, today }) {
   const { resolveLiveLane } = require('./rate-review-apply')._private;
@@ -293,7 +338,7 @@ async function loadBatch(dbh, batchKey, today) {
   const customers = customerIds.length ? await dbh('customers').whereIn('id', customerIds) : [];
   const prefs = customerIds.length ? await dbh('notification_prefs').whereIn('customer_id', customerIds).catch(() => []) : [];
   const visitIds = notices.map((n) => parseJson(n.metadata, {}).first_visit_id).filter(Boolean);
-  const visits = visitIds.length ? await dbh('scheduled_services').whereIn('id', visitIds).select('id', 'scheduled_date', 'status') : [];
+  const visits = visitIds.length ? await dbh('scheduled_services').whereIn('id', visitIds).select('id', 'scheduled_date', 'status', 'estimated_price') : [];
   const visitById = new Map(visits.map((v) => [String(v.id), v]));
   const firstVisits = new Map();
   for (const n of notices) {
@@ -309,6 +354,7 @@ async function loadBatch(dbh, batchKey, today) {
     firstVisits,
     declinedTerms: await declinedPrepayTermIds(dbh, notices),
     liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
+    ratesMoved: await ratesMovedFor(dbh, notices.filter((n) => !n.sent_at), { customers, visitById }),
     unscheduled: approvedUnscheduled.length,
   };
 }
@@ -324,12 +370,14 @@ const LINE_RULES = [
   // be the lane the notice was priced for; anything else would announce a
   // change the apply refuses.
   ['lane_changed', ({ notice, liveLanes }) => liveLanes.get(String(notice.id)) !== notice.billing_lane],
+  ['rate_moved', ({ notice, ratesMoved }) => ratesMoved.has(String(notice.id))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
   ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
-  // At least 30 days out from today, the delivery day (31 for a prepaid
-  // renewal, the apply lane's own rule).
-  ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)],
+  // At least 30 days out from today, the delivery day; a prepaid renewal
+  // 32 (the apply lane's own rule: the nightly apply must write the
+  // successor amount before the 30-day renewal reminder goes out).
+  ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 2 : 0)],
 ];
 const ACCOUNT_RULES = [
   ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
@@ -345,7 +393,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
-    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes });
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes, ratesMoved: data.ratesMoved });
     if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
     else entry.lines.push({ ...line, notice });
   }
@@ -713,19 +761,12 @@ function chargeAtNewRate(notice, { monthly, customer }) {
 // current rate. A rate moved since the notice holds there, so no charge at
 // the new rate is announced for it.
 async function applicableMonthly(dbh, rows, customer) {
-  const monthly = rows.filter((n) => n.billing_lane === 'monthly_membership');
-  if (!monthly.length) return [];
-  const { loadFamilySlices, sumSlices, cents } = require('./rate-review-apply')._private;
   const out = [];
-  for (const n of monthly) {
-    const source = parseJson(n.metadata, {}).current_rate_source;
-    const live = source === 'ledger_slice'
-      ? cents(sumSlices((await loadFamilySlices(dbh, n.customer_id, n.family_key)).family))
-      : cents(customer?.monthly_rate);
+  for (const n of rows.filter((r) => r.billing_lane === 'monthly_membership')) {
     // ...and the delivery preceded the effective date by the 30 days the
     // apply enforces from sent_at (a later stamp holds there).
     const noticedInTime = n.sent_at && daysBetween(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS;
-    if (noticedInTime && live === Number(n.noticed_current_cents ?? n.current_amount_cents)) out.push(n);
+    if (noticedInTime && (await liveMonthlyCents(dbh, n, customer)) === noticedCurrent(n)) out.push(n);
   }
   return out;
 }
@@ -756,7 +797,10 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const pending = rows.filter((n) => !n.apply_hold_reason && (!n.applied_at || n.billing_lane === 'annual_prepay')
     && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
   const monthly = await applicableMonthly(dbh, pending, customer);
-  return pending.map((n) => ({
+  // A monthly change the apply would refuse (rate moved, or delivered too
+  // late) is not upcoming at all.
+  const applicable = new Set(monthly.map((n) => String(n.id)));
+  return pending.filter((n) => n.billing_lane !== 'monthly_membership' || applicable.has(String(n.id))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
     unit: unitFor(n),
     current: money(n.noticed_current_cents ?? n.current_amount_cents),

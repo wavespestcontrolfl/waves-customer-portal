@@ -203,7 +203,7 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
 
   test('the card\'s own next charge on the same date states the new amount too', async () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([change]);
-    state.customers[0].next_charge_date = '2027-01-01';
+    state.customers[0].next_charge_date = new Date('2027-01-01T00:00:00Z'); // pg DATE → Date
     const { body } = await getAutopay();
     expect(body.next_charge_amount).toBe(body.rate_changes[0].nextCharge.total);
     expect(body.next_charge_base_amount).toBe(104);
