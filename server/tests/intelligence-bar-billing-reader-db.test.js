@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M;
   const inv = {};
   const tokens = [];
 
@@ -133,6 +133,21 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const uRow = await invoice('u_attempt_tender', U, { total: 33, stripe_payment_intent_id: `pi_u_${run}` });
     await db('stripe_invoice_charge_attempts').insert({ invoice_id: uRow.id, stripe_payment_method_id: `pm_bank_${run}`, idempotency_key: `k-u-${run}`, status: 'ambiguous', amount: 33, stripe_payment_intent_id: `pi_u_${run}`, submitted_at: new Date() });
     await db('payments').insert({ customer_id: U, payment_date: day(0), amount: 33, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_u_${run}`, description: 'In flight', metadata: json({ invoice_id: uRow.id }) });
+    // An email and a PAN-like number in EVERY free-text column the readers select (each sized to its column).
+    const LEAK = 'x@y.example 4111 1111 1111 1111'; const MID = 'a@b.co 4111111111111'; const TINY = 'a@b.co';
+    L = await customer(MID, MID);
+    const [leakPayer] = await db('payers').insert({ display_name: LEAK }).returning('id');
+    const [leakMethod] = await db('payment_methods').insert({ customer_id: L, method_type: MID, card_brand: MID, stripe_payment_method_id: `pm_leak_${run}` }).returning('id');
+    const leakInvoice = await invoice('l_leak', L, { total: 20, title: LEAK, service_type: LEAK, discount_label: LEAK, payment_reference: LEAK, payment_recorded_by: LEAK, payment_method: MID,
+      line_items: JSON.stringify([{ description: LEAK, name: LEAK, category: LEAK, quantity: 1, unit_price: 20, amount: 20 }]) });
+    await db('invoices').where({ id: leakInvoice.id }).update({ invoice_number: `L${run}-LEAK` });
+    await db('payments').insert({ customer_id: L, payer_id: leakPayer.id || leakPayer, payment_method_id: leakMethod.id || leakMethod, payment_date: day(0), amount: 5, status: 'paid', processor: TINY, card_brand: MID,
+      payment_method_type: MID, refund_status: MID, metadata: json({ invoice_id: leakInvoice.id, payment_method: LEAK }) });
+    await db('payment_plans').insert({ customer_id: L, invoice_id: leakInvoice.id, total_balance: 20, payment_amount: 5, payment_frequency: MID, status: MID, plan_start_date: day(0), next_payment_date: day(7) });
+    // More payment plans than the history shows.
+    M = await customer(`Plans${run}`, `Many${run}`);
+    const manyPlans = await invoice('m_plans', M, { total: 70 });
+    await db('payment_plans').insert(Array.from({ length: 7 }, (_, n) => ({ customer_id: M, invoice_id: manyPlans.id, total_balance: 70, payment_amount: 10, payment_frequency: 'monthly', status: 'cancelled', plan_start_date: day(-n - 1), next_payment_date: day(7) })));
     // ACH evidence accounts for the attempt only: an unresolved orphan charge, or a failed row flagged ambiguous, still holds.
     W2 = await customer(`Mixed${run}`, `Holds${run}`);
     for (const key of ['w2_orphan', 'w2_failamb', 'w2_dbfail']) {
@@ -354,10 +369,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     });
     let spy = fake(5000);
     try {
+      spy.mockClear();
       const { account_summary: summary } = await read('get_customer_invoices', { customer_id: E, limit: 5 });
       for (const field of ['total_due', 'not_yet_sent_due', 'presented_self_pay_due', 'needs_reconciliation_count']) expect(summary[field]).toBeNull();
       expect(summary.outstanding_count).toBe(5000);
       expect(summary.unknown).toMatch(/null \(unknown\), not zero/);
+      // Stopped at the first page: the total proved the fence cap was exceeded (no ten-page crawl).
+      expect(spy.mock.calls.filter(([params]) => params.status === 'unpaid' && params.limit === 100)).toHaveLength(1);
     } finally { spy.mockRestore(); }
     spy = fake(150);
     try {
@@ -435,6 +453,47 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
     expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
     expect(json(detail)).not.toContain(`pi_attached_${run}`);
+  });
+
+  test('egress: an email and a PAN-like number seeded in every free-text column the readers select never appear in any result', async () => {
+    const list = await read('get_customer_invoices', { customer_id: L, limit: 50 });
+    const detail = await read('get_invoice_detail', { invoice_id: inv.l_leak.id });
+    const text = json([list, detail]);
+    expect(text).not.toContain('@');
+    expect(text).not.toMatch(/4111/);
+    expect(text).toContain('[email]');
+    expect(text).toContain('[number]');
+    // The fields really were read (so the test proves the scrubber, not an empty projection).
+    expect(detail.line_items[0]).toMatchObject({ description: expect.stringContaining('[email]'), category: expect.stringContaining('[email]') });
+    expect(detail.invoice.payment_reference).toContain('[email]');
+    expect(detail.recorded_payments[0].funded_by_payer.name).toContain('[email]');
+    expect(detail.payment_plan.active).toBeNull();
+    expect(detail.payment_plan.history[0].payment_frequency).toContain('[email]');
+  });
+
+  test('payment-plan history is bounded with a truncation flag and an unknown warning', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.m_plans.id });
+    expect(detail.payment_plan.history).toHaveLength(5);
+    expect(detail.payment_plan.history_truncated).toBe(true);
+    expect(detail.unknowns.join(' ')).toMatch(/more than 5 payment plans/);
+    const single = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+    expect(single.payment_plan.history_truncated).toBe(false);
+  });
+
+  test('every verdict, held ones included, projects the facts from a fresh read of the invoice', async () => {
+    const InvoiceService = require('../services/invoice');
+    const original = InvoiceService.list.bind(InvoiceService);
+    // The list hands back an older snapshot: the invoice has since been paid.
+    const spy = jest.spyOn(InvoiceService, 'list').mockImplementation(async (params) => {
+      const result = await original(params);
+      if (params.limit === 100 || params.customerId !== A) return result;
+      return { ...result, invoices: result.invoices.map((row) => (String(row.id) === String(inv.paid.id) ? { ...row, status: 'sent', credit_applied: 0, total: 999 } : row)) };
+    });
+    try {
+      const item = by(await read('get_customer_invoices', { customer_id: A, limit: 50 }), 'paid');
+      expect(item).toMatchObject({ status: 'paid', total: 120, collectible: false, balance_due: null, amount_due_after_credit: null });
+      expect(item.reason).toMatch(/already paid/);
+    } finally { spy.mockRestore(); }
   });
 
   test('bank_payment_processing needs bank-tender evidence: a processing card intent, or an unknown tender, needs reconciliation ("a card payment did not complete")', async () => {

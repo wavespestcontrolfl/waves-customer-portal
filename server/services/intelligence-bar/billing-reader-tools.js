@@ -54,6 +54,7 @@ const SUMMARY_MAX_PAGES = 10;
 const FENCE_SUMMARY_CAP = 100;
 const FENCE_BATCH = 5;
 const PAYMENT_ROW_CAP = 50;
+const PLAN_HISTORY_CAP = 5;
 // metadata keys that name the invoice a payment settles (the admin-invoices applied-money fence's keys).
 const INVOICE_LINK_KEYS = ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id'];
 const NOT_YET_SENT_STATUSES = ['draft', 'scheduled', 'sending'];
@@ -113,6 +114,16 @@ function scrub(value, max = 240) {
   if (value === null || value === undefined) return null;
   const text = String(value).replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]').trim();
   return text ? text.slice(0, max) : null;
+}
+
+// THE egress scrubber: every string that leaves either tool (any free-text column, a reason built from row data, a
+// payer or customer name) passes through it once, at the single exit (executeBillingReaderTool), so a field added
+// later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
+function scrubEgress(value) {
+  if (typeof value === 'string') return value.replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]');
+  if (Array.isArray(value)) return value.map(scrubEgress);
+  if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner)]));
+  return value;
 }
 
 function iso(value) {
@@ -327,7 +338,7 @@ async function processingStatusOutcome(invoice, database, terminalError) {
  * flag), which the list reports as dispute_hold, and visitRefusesSettlement, a lock-taking settlement-write guard.
  * Anything unexpected, or a check that cannot run, holds the balance.
  */
-async function invoiceCollectibility(invoice, database = db) {
+async function decideCollectibility(invoice, listed, database) {
   const status = invoiceStatusKey(invoice.status);
   try {
     try {
@@ -338,7 +349,7 @@ async function invoiceCollectibility(invoice, database = db) {
       if (status === 'processing') return await processingStatusOutcome(invoice, database, err);
       return held('not_collectible', fenceReason(err.message) || MEMBER_REASONS.not_collectible);
     }
-    const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: invoice.customer_id });
+    const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: listed.customer_id });
     if (member.reason === 'deposit_settlement') return needsReconciliation('an estimate deposit has been received and is not yet applied to this invoice');
     if (member.reason === 'charge_reconciliation') return await heldAttemptOutcome(invoice, database, CHARGE_FENCE_REASONS[member.code] || CHARGE_FENCE_REASONS.STRIPE_CHARGE_IN_PROGRESS, { allowBank: member.code !== 'STRIPE_CHARGED_DB_FAILED' });
     if (member.reason) return held('not_collectible', MEMBER_REASONS[member.reason] || MEMBER_REASONS.not_collectible);
@@ -351,6 +362,19 @@ async function invoiceCollectibility(invoice, database = db) {
     logger.warn(`[intelligence-bar:billing-reader] collectibility check could not run (${err.code || err.name || 'error'})`);
     return needsReconciliation('the payment-state check could not be completed');
   }
+}
+
+// The caller's row may be older than the checks: the invoice is re-read once here, every check runs on that row,
+// and EVERY verdict (held ones included) carries it back so the projected facts and the reason come from one state.
+async function invoiceCollectibility(listed, database = db) {
+  let current = listed;
+  try {
+    current = (await database('invoices').where({ id: listed.id }).first()) || listed;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:billing-reader] invoice re-read failed (${err.code || err.name || 'error'})`);
+  }
+  const verdict = await decideCollectibility(current, listed, database);
+  return { ...verdict, row: verdict.row || current };
 }
 
 async function fenceAll(invoices) {
@@ -425,13 +449,15 @@ async function readCredit(customerId) {
 
 // Every page of one InvoiceService.list query (the Invoices page's own
 // reader), bounded. `complete: false` is returned when the bound was hit.
-async function listAllInvoices(InvoiceService, params) {
+async function listAllInvoices(InvoiceService, params, { stopAbove = Infinity } = {}) {
   const rows = [];
   let total = 0;
   for (let page = 0; page < SUMMARY_MAX_PAGES; page += 1) {
     const result = await InvoiceService.list({ ...params, limit: SUMMARY_PAGE, offset: page * SUMMARY_PAGE });
     total = result.total;
     rows.push(...result.invoices);
+    // Provably more rows than the caller can use: stop now (each page costs a joined query plus a count).
+    if (total > stopAbove) return { rows, total, complete: false };
     if (rows.length >= total || result.invoices.length < SUMMARY_PAGE) return { rows, total, complete: true };
   }
   return { rows, total, complete: false };
@@ -461,9 +487,9 @@ function paymentPlanFromList(row) {
 async function accountSummary(InvoiceService, customer, today) {
   const customerId = customer.id;
   const [unpaid, overdue, processing, credit, hold] = await Promise.all([
-    listAllInvoices(InvoiceService, { customerId, status: 'unpaid', archived: 'hide' }),
+    listAllInvoices(InvoiceService, { customerId, status: 'unpaid', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP }),
     InvoiceService.list({ customerId, status: 'overdue', archived: 'hide', limit: 1, offset: 0 }),
-    listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }),
+    listAllInvoices(InvoiceService, { customerId, status: 'processing', archived: 'hide' }, { stopAbove: FENCE_SUMMARY_CAP }),
     readCredit(customerId),
     readDisputeHold(customerId),
   ]);
@@ -471,13 +497,11 @@ async function accountSummary(InvoiceService, customer, today) {
   // total_due is the sum of the invoices whose fences passed. It needs every unpaid invoice read AND fenced:
   // a partial read, or more invoices than the fence is run for, makes it unknown rather than a partial number.
   let fenced = null;
-  if (!unpaid.complete) unknowns.push('More unpaid invoices than the summary reads in one call: total_due and its splits are null (unknown), not zero.');
-  else if (unpaid.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} unpaid invoices to check for reconciliation: total_due and its splits are null (unknown), not zero. Page through get_customer_invoices.`);
+  if (!unpaid.complete || unpaid.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} unpaid invoices to check for reconciliation: total_due and its splits are null (unknown), not zero. Page through get_customer_invoices.`);
   else fenced = await fenceAll(unpaid.rows);
   // Each processing invoice is classified by the same per-invoice result as the list.
   let fencedProcessing = null;
-  if (!processing.complete) unknowns.push('More processing invoices than the summary reads in one call: the processing split and needs_reconciliation_count are null (unknown).');
-  else if (processing.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} processing invoices to check: the processing split and needs_reconciliation_count are null (unknown).`);
+  if (!processing.complete || processing.rows.length > FENCE_SUMMARY_CAP) unknowns.push(`More than ${FENCE_SUMMARY_CAP} processing invoices to check: the processing split and needs_reconciliation_count are null (unknown).`);
   else fencedProcessing = await fenceAll(processing.rows);
   const states = fenced && fencedProcessing
     ? [...unpaid.rows.map((invoice) => fenced.get(String(invoice.id)).state), ...processing.rows.map((invoice) => fencedProcessing.get(String(invoice.id)).state)]
@@ -597,13 +621,15 @@ function lineItems(raw) {
     quantity: item.quantity === undefined || item.quantity === null ? null : Number(item.quantity),
     unit_price: money(item.unit_price),
     amount: money(item.amount),
-    category: item.category || null,
+    category: scrub(item.category, 80),
     is_discount: Number(item.amount) < 0,
   }));
 }
 
-function paymentPlanDetail(rows, fence) {
-  if (!rows.length) return null;
+function paymentPlanDetail(allRows, fence) {
+  if (!allRows.length) return null;
+  const truncated = allRows.length > PLAN_HISTORY_CAP;
+  const rows = allRows.slice(0, PLAN_HISTORY_CAP);
   const mapped = rows.map((plan) => projectPlan({
     id: plan.id,
     status: plan.status,
@@ -619,6 +645,7 @@ function paymentPlanDetail(rows, fence) {
   return {
     active: mapped.find((plan) => plan.status === 'active') || null,
     history: mapped.filter((plan) => plan.status !== 'active'),
+    history_truncated: truncated,
     installments: 'The portal stores the plan schedule (amount, frequency, next date), not per-installment records: whether any installment was collected is unknown here.',
   };
 }
@@ -719,7 +746,7 @@ async function getInvoiceDetail(input, actionContext) {
   const fence = await invoiceCollectibility(invoice);
   const facts = effectiveRow(invoice, fence);
   const recorded = await loadRecordedPayments(customer.id, invoice);
-  const plans = await db('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(5)
+  const plans = await db('payment_plans').where({ invoice_id: invoice.id }).orderBy('created_at', 'desc').limit(PLAN_HISTORY_CAP + 1)
     .select('id', 'status', 'payment_amount', 'payment_frequency', 'plan_start_date', 'next_payment_date', 'total_balance', 'created_at', 'completed_at', 'cancelled_at');
   const hold = await readDisputeHold(customer.id);
 
@@ -732,6 +759,7 @@ async function getInvoiceDetail(input, actionContext) {
   const lines = lineItems(facts.line_items);
   const unknowns = [];
   if (hold.unknown) unknowns.push(hold.unknown);
+  if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);
   if (recorded.truncated) unknowns.push('More payment rows are tied to this invoice than were read: the newest are shown.');
 
   return {
@@ -797,8 +825,8 @@ async function executeBillingReaderTool(toolName, input = {}, actionContext = {}
   const context = actionContext || {};
   try {
     switch (toolName) {
-      case 'get_customer_invoices': return await getCustomerInvoices(input || {}, context);
-      case 'get_invoice_detail': return await getInvoiceDetail(input || {}, context);
+      case 'get_customer_invoices': return scrubEgress(await getCustomerInvoices(input || {}, context));
+      case 'get_invoice_detail': return scrubEgress(await getInvoiceDetail(input || {}, context));
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
