@@ -25468,6 +25468,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           typedProductNameGuards,
         ])}`
         : '')
+      // GATE_TS_TECH_FINDINGS_COPY: a draft built without the crown backstop is
+      // never served once it applies (a gate flip within the cache window).
+      .update(techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub' ? '|tsCrown:1' : '')
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });

@@ -430,6 +430,9 @@ function applyTechFindingsToAssessment(assessment, findings) {
     next.observations = '';
     next.aiSummary = null;
     next.customerSummary = '';
+    // Plant-group findings are photo-read prose too, with no reliable link to
+    // one finding: withheld whole, like the captions.
+    if (Array.isArray(assessment.plantGroups)) next.plantGroups = [];
   }
   const confirmed = (key) => !!list.find((f) => f.key === key && f.action === 'confirmed');
   next.techConfirmedPest = !!assessment.techConfirmedPest || confirmed('pest_activity');

@@ -908,3 +908,19 @@ describe('writer grounding applies normalized hides (pre-push P1 on cfd376f364)'
     expect(on.grounding.scores.pestActivity).toBe(80);
   });
 });
+
+describe('Codex r3 on #5587 (non-vocabulary findings)', () => {
+  test('any hide or edit withholds the photo-read plant groups; monitor keeps them', () => {
+    gateOn();
+    const groups = [{ key: 'front_palms', label: 'Front palms', status: 'watch', finding: 'Scale-like bumps on the fronds' }];
+    const hidden = build(assessment({ plantGroups: groups }), [decide('pest_activity', 'hidden')]);
+    expect(JSON.stringify(hidden)).not.toMatch(/Scale-like bumps/);
+    const kept = build(assessment({ plantGroups: groups }), [decide('pest_activity', 'monitor')]);
+    expect(JSON.stringify(kept)).toMatch(/Scale-like bumps/);
+  });
+
+  test('the draft cache key carries the crown backstop state', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src).toContain(".update(techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub' ? '|tsCrown:1' : '')");
+  });
+});
