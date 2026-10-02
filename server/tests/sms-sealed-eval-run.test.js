@@ -601,7 +601,7 @@ describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
     expect(judge.judgeOne).not.toHaveBeenCalled();
     const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
     expect(result).toMatchObject({ verdict: 'ungradable' });
-    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers \(items must carry "FOLLOW-UP SLA RIGHT NOW:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "\(MISSED VISIT lists a logged no-show from the last 7 days that nobody has rebooked\.\)" \+ "FREE RE-SERVICE:"\)/);
+    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers \(items must carry "FOLLOW-UP SLA RIGHT NOW:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "\(MISSED VISIT lists a logged no-show from the last 7 days whose visit has not been rebooked\.\)" \+ "FREE RE-SERVICE:"\)/);
     const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
     expect(finalPatch).toBeTruthy();
     // Excluded — never counted as graded (same rule the terminal no-progress
@@ -987,7 +987,7 @@ describe('category-aware sealed compatibility', () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
     const v12Pool = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi: v12Pool }))
-      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "\(MISSED VISIT lists a logged no-show from the last 7 days that nobody has rebooked\.\)" \+ "FREE RE-SERVICE:"/);
+      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "VISIT STATUS & OPEN LOOPS:" \+ "\(MISSED VISIT lists a logged no-show from the last 7 days whose visit has not been rebooked\.\)" \+ "FREE RE-SERVICE:"/);
     const dbi = makeRunnerDb({
       runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v11', baseline_run_id: null }],
       items: [item('i1', { facts_block: `FROZEN\n${SLA}` })],
@@ -1017,7 +1017,7 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   const LBL = 'LABEL FACTS (';
   const VL = 'VISIT STATUS & OPEN LOOPS:'; // '_cflv' (SMS facts-gap PR 1); contract order is SLA, CF, LBL, VL, RS
   // '_cflvm' (#5610): the section's fixed MISSED VISIT scope line; contract order SLA, CF, LBL, VL, MV, RS
-  const MV = '(MISSED VISIT lists a logged no-show from the last 7 days that nobody has rebooked.)';
+  const MV = '(MISSED VISIT lists a logged no-show from the last 7 days whose visit has not been rebooked.)';
   const contract = (v) => ({ required: requiredFactMarkers(v), forbidden: forbiddenFactMarkers(v) });
 
   test('historical bare and _cf identities: FREE RE-SERVICE only with the complaints tag, forbidden otherwise', () => {

@@ -3471,7 +3471,7 @@ function serviceIdentityVisits(context) {
   return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
 }
 
-function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, missed = null) {
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
   const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
   return [
     'A customer of Waves Pest Control texted:',
@@ -3480,7 +3480,6 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, m
     'Their visits:',
     ...(visitLines.length ? visitLines : ['none on file']),
     ...(openEstimate ? ['', `Their open estimate: ${openEstimate.service || 'service not stated'}`] : []),
-    ...(missed ? ['', `Their missed visit (not yet rebooked): ${missed.type}${missed.date ? ` on ${formatEtDate(missed.date)}` : ''}`] : []),
     '',
     'Services Waves books (key: name):',
     ...services.map((s) => `${s.service_key}: ${s.name}`),
@@ -3488,7 +3487,6 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, m
     'A reply may offer open appointment times, sized for one job. Which job is this text about?',
     ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
-    ...(missed ? ['- "missed": the missed visit above (we did not show, rebooking it, when we will come back for it).'] : []),
     ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
@@ -3500,10 +3498,10 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, m
 // to offer (a brand-new customer has no visit; a catalog load that failed
 // open has no service) is left out of the answer entirely rather than sent
 // as a bare null-typed property.
-function serviceIdentitySchema(visits, openEstimate, services, missed = null) {
+function serviceIdentitySchema(visits, openEstimate, services) {
   const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
   const properties = {
-    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(missed ? ['missed'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
     ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
     ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
   };
@@ -3529,25 +3527,7 @@ function visitIdField(visit, visits = []) {
   return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
 }
 
-// The open MISSED VISIT the facts list (gate-on context.visitLoops), or null.
-function openMissedVisit(context) {
-  const m = context?.visitLoops?.missedVisit;
-  return m && typeof m === 'object' && String(m.type || '').trim() ? m : null;
-}
-// Re-booking a missed visit is a new visit of the missed service (/book under
-// GATE_SMS_OFFERS_SCHEDULER: the missed row is no longer a live visit to move).
-// The availability lookup is located by the customer, not the missed property: with
-// another address on the account the times could be for the wrong house, so the
-// identity is uncertain and OPEN TIMES are withheld (the line then routes to the SLA).
-function missedVisitIdentity(missed) {
-  if (missed.singleLocation !== true) return { serviceType: null, certain: false, reason: 'missed_visit_other_location' };
-  return { serviceType: String(missed.type), certain: true, reason: 'missed_visit' };
-}
-
-function unnamedServiceIdentity(visits, openEstimate, missed = null) {
-  // an unrebooked miss is the job still owed: it outranks every other fallback
-  // (a "when can you come?" beside it is about the miss, not a future visit)
-  if (missed) return missedVisitIdentity(missed);
+function unnamedServiceIdentity(visits, openEstimate) {
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
@@ -3559,14 +3539,13 @@ function unnamedServiceIdentity(visits, openEstimate, missed = null) {
 
 // Code accepts only an option it offered (the schema already constrains the
 // provider; this re-checks) — anything else is uncertain.
-function serviceIdentityFromAnswer(answer, visits, openEstimate, services, missed = null) {
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
-  if (answer?.about === 'missed' && missed) return missedVisitIdentity(missed);
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
-  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate, missed);
+  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
 
@@ -3574,19 +3553,18 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services, misse
 // estimate is the job.
 async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
   const visits = serviceIdentityVisits(context);
-  const missed = openMissedVisit(context);
   try {
     const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
     const { dispatchWithFallback } = require('./llm/call');
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       laneId: 'sms_service_identity',
-      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, missed),
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
       jsonMode: true,
-      jsonSchema: serviceIdentitySchema(visits, openEstimate, services, missed),
+      jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, missed);
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
@@ -4340,7 +4318,8 @@ LABEL FACTS (product timing from the label):
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
-- With MISSED VISIT, apologize in one plain sentence (no corporate hedging). Offer a specific time from OPEN TIMES for it (declared in offered_times) ONLY when its line says the OPEN TIMES are for that service; otherwise never offer OPEN TIMES for the missed visit — say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions — the office rebooks it. Never offer OPEN TIMES for the missed visit.
+- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4563,19 +4542,15 @@ function visitLoopPastWindowLine(past) {
 }
 // A logged customer no-show nobody followed up (visit-loops-facts loadMissedVisit):
 // the service and the day/window that were missed, as frozen when it was logged.
-// timesForMiss: the OPEN TIMES in this block were fetched FOR the missed service
-// (generateGroundedDraft: identity reason 'missed_visit' and a non-empty block).
-// Otherwise any OPEN TIMES are sized for another job — offered_times checks the
-// day and window, not the service — so the line routes the miss to the SLA.
-function visitLoopMissedLine(missed, { timesForMiss = false } = {}) {
+// The office rebooks a miss (owner 10-02, #5610): the line always hands off — the
+// SLA plus followup_promised, never an OPEN TIMES offer (validateOpenLoopAnswer
+// enforces the escalation).
+function visitLoopMissedLine(missed) {
   if (!missed || typeof missed !== 'object') return null;
   const type = visitLoopText(missed.type, 60) || 'visit';
   const date = visitLoopText(formatEtDate(missed.date), 40);
   const win = visitLoopText(missed.windowDisplay, 40);
-  const what = `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and not yet rebooked — apologize once, `;
-  return timesForMiss
-    ? `${what}then offer the earliest OPEN TIMES slot (the OPEN TIMES are for this service); never point them to a visit weeks out without an apology`
-    : `${what}then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised (no OPEN TIMES here are for this service: never offer times for it)`;
+  return `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and has not been rebooked — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
@@ -4636,9 +4611,31 @@ function factsListOpenLoop(factsBlock) {
   const end = lines.findIndex((l) => !l.startsWith('- '));
   return lines.slice(0, end < 0 ? lines.length : end).some((line) => MUST_ANSWER_LINE_RE.test(line));
 }
-function validateOpenLoopAnswer({ reply, factsBlock }) {
-  if (!factsListOpenLoop(factsBlock) || String(reply || '').trim()) return { ok: true, violations: [] };
-  return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+// The lines whose rule is a hand-off (WINDOW PASSED, MISSED VISIT): the reply must
+// carry the follow-up timing AND record the escalation a person owns — the
+// verifier only fact-checks claims and never sees intended_actions (Codex #5610 r2).
+const HANDOFF_LINE_RE = /^- (?:WINDOW PASSED|MISSED VISIT)\b/;
+function factsListHandoff(factsBlock) {
+  const text = String(factsBlock || '');
+  const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
+  if (at < 0) return false;
+  const lines = text.slice(at + VISIT_LOOPS_HEADER.length + 2).split('\n');
+  const end = lines.findIndex((l) => !l.startsWith('- '));
+  return lines.slice(0, end < 0 ? lines.length : end).some((line) => HANDOFF_LINE_RE.test(line));
+}
+function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null }) {
+  const text = String(reply || '').trim();
+  if (factsListOpenLoop(factsBlock) && !text) {
+    return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
+  }
+  if (!factsListHandoff(factsBlock)) return { ok: true, violations: [] };
+  const { replyPromisesFollowup } = require('./sms-followup-sla');
+  // any escalation counts for a real-answers draft (sms-followup-sla draftPromisedFollowup)
+  const escalated = Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate');
+  const violations = [];
+  if (!replyPromisesFollowup(text)) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
+  if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
+  return { ok: violations.length === 0, violations };
 }
 // Marks a draft whose section showed time-sensitive VISIT STATUS (a delay, a
 // passed window): { signature } from visit-loops-facts
@@ -4656,12 +4653,12 @@ function visitLoopStatus(context, factsBlock) {
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
 // header, then one line per present field, or the single line "- none", then the
 // fixed MISSED_VISIT_SCOPE_LINE. Pure.
-function renderVisitLoopsSection(visitLoops, { timesForMiss = false } = {}) {
+function renderVisitLoopsSection(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const lines = [
     visitLoopLateLine(v.lateAlert),
     visitLoopPastWindowLine(v.pastWindow),
-    visitLoopMissedLine(v.missedVisit, { timesForMiss }),
+    visitLoopMissedLine(v.missedVisit),
     // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);
@@ -4727,7 +4724,7 @@ function buildFactsBlock(context, extras = {}) {
   // sms-company-facts all trust the exact "...SLA\nFREE RE-SERVICE\n[COMPANY
   // FACTS][LABEL FACTS]BILLING:" tail, so nothing may be inserted there.
   const visitLoopsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? renderVisitLoopsSection(context.visitLoops, { timesForMiss: extras.missedOpenTimes === true && Boolean(extras.openTimesBlock) })
+    ? renderVisitLoopsSection(context.visitLoops)
     : '';
   // LABEL FACTS (owner ruling 2026-09-30), gate-on only, and only when the
   // fetch found verified label timing for the last visit's products.
@@ -5413,15 +5410,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // its service_interest wins inside the engine — so no classification
   // then. Carried on the snapshot so the send-time recheck asks the same
   // question.
-  // A listed MISSED VISIT (#5610, Codex r1 P1): its rule offers the earliest OPEN
-  // TIMES slot whatever the inbound says ("thanks" included), so the times are
-  // fetched for it too — sized for the missed service (missedVisitIdentity).
-  const missedVisit = openMissedVisit(context);
-  const asksAboutJob = Boolean(schedulingIntent)
+  const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
     || pestReportSignal(inboundMessage, context);
-  const needsOpenTimes = asksAboutJob || Boolean(missedVisit);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -5443,11 +5435,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  // Only the missed visit asks for times: they are for re-booking it — no identity
-  // model call. Otherwise the identity step picks the job (the missed visit is one
-  // of its fallbacks: unnamedServiceIdentity).
   const identity = willFetchOpenTimes && !estimateId
-    ? (asksAboutJob ? await serviceIdentityFor(inboundMessage, context, { openEstimate }) : missedVisitIdentity(missedVisit))
+    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
     : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
@@ -5501,9 +5490,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  // the OPEN TIMES were sized for the missed visit (missedVisitIdentity), not another job
-  const missedOpenTimes = identity.reason === 'missed_visit' && identity.certain === true;
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, missedOpenTimes, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -5585,7 +5572,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
-    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock });
+    const singlePassOpenLoop = validateOpenLoopAnswer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions });
     if (!singlePassOpenLoop.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassOpenLoop.violations);
@@ -5618,7 +5605,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
       const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock }).ok) { converged = true; break; }
+      if (owed.ok && validateOpenLoopAnswer({ reply: '', factsBlock, intendedActions: parsed.intended_actions }).ok) { converged = true; break; }
     }
 
     // Owner-directed structural fix: check the model's own offered_times
@@ -5630,7 +5617,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
-    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock });
+    const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;

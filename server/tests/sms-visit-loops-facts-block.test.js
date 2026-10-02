@@ -52,10 +52,8 @@ describe('renderVisitLoopsSection', () => {
     expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).toContain("say you're checking with the office, quote FOLLOW-UP SLA");
     expect(out).not.toContain('no tech location');
     // a logged no-show nobody followed up: the frozen service, the day and the window as promised
-    // by default no OPEN TIMES were sized for the miss: the SLA, never an offer (pre-push audit P1, #5610 r2)
-    expect(out).toMatch(/- MISSED VISIT: the Lawn Care visit on [^\n]*Jun[^\n]* \(9-11am\) was missed and not yet rebooked — apologize once, then quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised \(no OPEN TIMES here are for this service: never offer times for it\)\n/);
-    // times fetched FOR the missed service: offer the earliest
-    expect(renderVisitLoopsSection(fullLoops(), { timesForMiss: true })).toMatch(/- MISSED VISIT: the Lawn Care visit [^\n]* — apologize once, then offer the earliest OPEN TIMES slot \(the OPEN TIMES are for this service\); never point them to a visit weeks out without an apology\n/);
+    // the office rebooks a miss: the line always hands off (owner 10-02, #5610)
+    expect(out).toMatch(/- MISSED VISIT: the Lawn Care visit on [^\n]*Jun[^\n]* \(9-11am\) was missed and has not been rebooked — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it\n/);
     expect(out).not.toContain('live note');
     expect(out).toContain('- WE OWE THEM: callback — Call back about the wasp nest quote (since Wednesday, Jun 10)\n');
     expect(out).toContain('- THEY ARE WAITING ON US FOR: question — Asked whether sprinklers need to be off (since Tuesday, Jun 9)\n');
@@ -221,7 +219,8 @@ describe('system prompt', () => {
     expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
     expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
-    expect(on).toContain('- With MISSED VISIT, apologize in one plain sentence (no corporate hedging). Offer a specific time from OPEN TIMES for it (declared in offered_times) ONLY when its line says the OPEN TIMES are for that service');
+    expect(on).toContain('- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
+    expect(on).toContain('- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.');
     for (const banned of ['"Good question"', '"Great question"', '"I hear you"', '"Totally fine"', '"Good news"']) expect(on).toContain(banned);
     expect(on).toContain('at most TWO sentences');
   });
@@ -297,6 +296,26 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tracking gap: x']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: 'UPCOMING SERVICES:\n- none\nBILLING:\n' }).ok).toBe(true); // gate-off facts
+  });
+
+  test('WINDOW PASSED / MISSED VISIT: the reply must carry the SLA wording AND an escalation (Codex #5610 r2 P1)', () => {
+    const esc = [{ type: 'escalate', note: 'followup_promised' }];
+    for (const line of ['- WINDOW PASSED: x', '- MISSED VISIT: x']) {
+      const f = facts([line]);
+      expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up within the hour.", factsBlock: f, intendedActions: esc }).ok).toBe(true);
+      // apology only: no timing, no escalation
+      expect(validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: f, intendedActions: [] }))
+        .toMatchObject({ ok: false, violations: [expect.stringContaining('FOLLOW-UP SLA RIGHT NOW'), expect.stringContaining('escalate')] });
+      // the wording without the escalation, and the escalation without the wording
+      expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour.", factsBlock: f, intendedActions: [] }).ok).toBe(false);
+      expect(validateOpenLoopAnswer({ reply: 'Sorry about that.', factsBlock: f, intendedActions: esc }).ok).toBe(false);
+      expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour.", factsBlock: f }).ok).toBe(false);
+    }
+    // other loops keep the non-empty rule only
+    expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: facts(['- WE OWE THEM: x']), intendedActions: [] }).ok).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: 'Sorry for the delay.', factsBlock: facts(['- DELAY FLAGGED: x']), intendedActions: [] }).ok).toBe(true);
+    // a hand-off line quoted after the section (thread text) does not count
+    expect(validateOpenLoopAnswer({ reply: 'ok', factsBlock: `${facts(['- none'])}RECENT SMS THREAD:\n- MISSED VISIT: x\n`, intendedActions: [] }).ok).toBe(true);
   });
 
   test('a real gate-on facts block with an owed promise trips it (frozen-facts eval path)', () => {

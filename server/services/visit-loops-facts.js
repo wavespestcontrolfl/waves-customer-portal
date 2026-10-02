@@ -410,7 +410,7 @@ const MISSED_LOOKBACK_DAYS = 7;
 // missed-visit read exists: tells the model what MISSED VISIT covers, and marks
 // the section's contract — a sealed-eval item frozen before this read (which could
 // have hidden an open miss) lacks it, so it never grades the '_cflvm' prompt.
-const MISSED_VISIT_SCOPE_LINE = `(MISSED VISIT lists a logged no-show from the last ${MISSED_LOOKBACK_DAYS} days that nobody has rebooked.)`;
+const MISSED_VISIT_SCOPE_LINE = `(MISSED VISIT lists a logged no-show from the last ${MISSED_LOOKBACK_DAYS} days whose visit has not been rebooked.)`;
 const MISSED_PAGE = 10;
 const MISSED_PAGES_MAX = 20;
 const LIVE_OR_DONE = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
@@ -447,45 +447,29 @@ function missedWindowStart(originalWindow) {
   if (!start) return null;
   return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
 }
-// Was this logged miss followed up? The logged row itself — only while it still
-// holds the frozen scope (same property, same service; a row staff repurposed for
-// another service or address is no evidence) — rebooked in place (new_date), moved
-// off the missed slot, completed, or performed (tracker complete or a service
-// record); or a visit BOOKED AFTER the miss was logged (a recurring series
-// pre-creates its future children, so a visit that already existed is not one) at
-// the same frozen property, after the missed slot, for the same service
-// (serviceIdentityKey on the frozen catalog id / label).
-async function noshowFollowedUp(conn, customerId, noshow) {
+// Was this logged miss followed up? Only the logged row itself can say so (owner
+// 10-02, #5610: the office rebooks a miss; the drafter never infers a follow-up
+// from some other booking — a series top-up or an unreviewed call booking looks
+// just like one). The row counts while it still holds the frozen scope (same
+// property, same catalog service — a row staff repurposed is no evidence) and was
+// rebooked in place (new_date), moved off the missed slot, completed, or performed
+// (tracker complete or a service record). A move the office has not reviewed yet (a
+// call-booked or voice-agent row, call-booking-source-actions) is not a rebooking.
+async function noshowFollowedUp(conn, noshow) {
+  if (!noshow.scheduled_service_id || !noshow.ss_status_present) return false;
+  const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
+  if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
+    && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
   const date = calendarDay(noshow.original_date);
   const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
-  if (noshow.scheduled_service_id && noshow.ss_status_present) {
-    const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
-      || (missedStart != null && hhmmToMinutes(noshow.window_start) !== missedStart);
-    const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true
-      || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
-    if (rowEvidence && (noshow.ss_property_id || null) === (noshow.occurrence_property_id || null)) {
-      const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, noshow.ss_service_type]);
-      const missedKey = serviceIdentityKey(noshow.occurrence_service_id, noshow.occurrence_service_type, byName);
-      if (missedKey && serviceIdentityKey(noshow.ss_service_id, noshow.ss_service_type, byName) === missedKey) return true;
-    }
-  }
-  // without a frozen property no other visit can be shown to be at the same address
-  if (!noshow.occurrence_property_id || !date) return false;
-  let query = conn('scheduled_services')
-    .where({ customer_id: customerId, property_id: noshow.occurrence_property_id })
-    .where('scheduled_date', '>=', date)
-    .whereIn('status', LIVE_OR_DONE)
-    .where('created_at', '>', noshow.logged_at);
-  if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
-  const later = (await query.select('service_id', 'service_type', 'scheduled_date', 'window_start')) || [];
-  // a same-day visit counts only when it starts AFTER the missed slot; unknown starts do not
-  const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
-    || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
-  const candidates = later.filter(afterMiss);
-  if (!candidates.length) return false;
-  const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, ...candidates.map((r) => r.service_type)]);
+  const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
+    || (missedStart != null && hhmmToMinutes(noshow.window_start) !== missedStart);
+  const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true
+    || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
+  if (!rowEvidence || (noshow.ss_property_id || null) !== (noshow.occurrence_property_id || null)) return false;
+  const byName = await catalogIdsByName(conn, [noshow.occurrence_service_type, noshow.ss_service_type]);
   const missedKey = serviceIdentityKey(noshow.occurrence_service_id, noshow.occurrence_service_type, byName);
-  return Boolean(missedKey) && candidates.some((r) => serviceIdentityKey(r.service_id, r.service_type, byName) === missedKey);
+  return Boolean(missedKey) && serviceIdentityKey(noshow.ss_service_id, noshow.ss_service_type, byName) === missedKey;
 }
 // The newest UNFOLLOWED no-show in the lookback, paged in a stable order so a page
 // of followed-up rows never hides an older open one (the page cap is a backstop).
@@ -505,20 +489,14 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
         'rl.occurrence_service_type', 'rl.occurrence_service_id', 'rl.occurrence_property_id',
         'ss.scheduled_date as ss_scheduled_date', 'ss.window_start', 'ss.status', 'ss.track_state',
         'ss.service_id as ss_service_id', 'ss.service_type as ss_service_type', 'ss.property_id as ss_property_id',
+        'ss.source_action as ss_source_action', 'ss.customer_confirmed as ss_customer_confirmed',
         conn.raw('(ss.id IS NOT NULL) AS ss_status_present'),
         conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'))) || [];
     for (const noshow of noshows) {
-      if (await noshowFollowedUp(conn, customerId, noshow)) continue;
+      if (await noshowFollowedUp(conn, noshow)) continue;
       const startHms = missedWindowStart(noshow.original_window);
-      // Rebooking times come from the customer's booking location, not the frozen
-      // property: offer them for the miss only when that cannot be another address
-      // (no property rows — the account address — or exactly the missed one).
-      const props = ((await conn('customer_properties').where({ customer_id: customerId }).select('id')) || []).map((r) => String(r.id));
-      const singleLocation = props.length === 0
-        || (props.length === 1 && props[0] === String(noshow.occurrence_property_id || ''));
       return {
         logId: String(noshow.id),
-        singleLocation,
         type: noshow.occurrence_service_type,
         date: calendarDay(noshow.original_date),
         windowStart: startHms,
@@ -698,7 +676,7 @@ function visitStatusSignature(visitLoops) {
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
     // the logged occurrence: a newer miss, or this one followed up, changes it
-    v.missedVisit && `missed:${key(v.missedVisit.logId, v.missedVisit.type, `${v.missedVisit.date ?? ''}@${v.missedVisit.windowStart ?? ''}`)}${v.missedVisit.singleLocation === true ? '' : ':elsewhere'}`,
+    v.missedVisit && `missed:${key(v.missedVisit.logId, v.missedVisit.type, `${v.missedVisit.date ?? ''}@${v.missedVisit.windowStart ?? ''}`)}`,
     v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}:${v.pastWindow.assigned === false ? 'unassigned' : 'assigned'}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
