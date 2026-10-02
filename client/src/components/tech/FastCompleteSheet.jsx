@@ -79,7 +79,7 @@ import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
-  ActivitySection, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
+  ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
   PromisesSection, ReportCard, SentSummary, StepFooter, TraceSection, WritingView, customerHomeWriterLabel,
   factsHold, perimeterFeetOf, photoCaptionsOf, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
@@ -976,6 +976,7 @@ function ReportFlowForm({
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} />
+        <CollectPayment result={submission.done.response} visit={ctx.visit} onOverlay={onOverlay} />
       </SavedView>
     );
   }

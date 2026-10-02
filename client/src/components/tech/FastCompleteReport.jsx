@@ -7,11 +7,12 @@
 // again), what was heard from the technician's note, and the spray trace.
 // FastCompleteSheet.jsx composes them with the products and the /complete
 // submit it shares with the re-service sheet.
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   PROMISE_MARKS, STILL_LEFT_MAX, currentMark, promiseCountLabel, promiseSourceLabel, toggledMarks,
 } from '../schedule/PromiseCheck';
 import { Chip, ChoiceSection } from './FastCompleteParts';
+import MobilePaymentSheet from '../schedule/MobilePaymentSheet';
 import { Button, Field, Input, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -495,5 +496,58 @@ export function SentSummary({ result, doneMarks = [], base, request }) {
         </p>
       ))}
     </div>
+  );
+}
+
+// A bill the completion says still needs collecting on the spot: an unpaid
+// invoice whose pay link did not go out with the report (a blocked text, no
+// phone). The rule Dispatch applies after a completion (DispatchPageV2
+// applyCompletionResult); null when nothing is owed now.
+const INVOICE_TEXT_TYPES = new Set(['service_complete_with_invoice', 'service_report_v1_with_invoice']);
+export function collectibleBill(result) {
+  const amount = Number(result?.invoiceTotal || 0);
+  const linkWent = INVOICE_TEXT_TYPES.has(result?.completionSmsType) && result?.completionSmsStatus === 'sent';
+  const owed = result?.invoiceId && result?.invoiceToken && amount > 0
+    && result?.invoicePaymentActionRequired !== false && result?.invoiceStatus !== 'paid';
+  return owed && !linkWent ? { invoiceId: result.invoiceId, invoiceToken: result.invoiceToken, amount } : null;
+}
+
+// The office's payment sheet (card on file, card, cash, check, Tap to Pay,
+// send the invoice) over the saved sheet, opened once on its own as Dispatch
+// opens it; "Collect payment" opens it again.
+export function CollectPayment({ result, visit, onOverlay }) {
+  const bill = useMemo(() => collectibleBill(result), [result]);
+  const [settled, setSettled] = useState('');
+  const opened = useRef(false);
+  const open = useCallback(() => {
+    if (!bill) return;
+    const close = () => onOverlay(null);
+    onOverlay(
+      <MobilePaymentSheet
+        key={bill.invoiceId}
+        service={{ customerId: visit?.customerId, customerName: visit?.customerName }}
+        invoiceId={bill.invoiceId}
+        invoiceToken={bill.invoiceToken}
+        amount={bill.amount}
+        desktopVisible
+        onClose={close}
+        onInvoiceSent={() => { setSettled('The invoice went to the customer.'); close(); }}
+        onChargeSuccess={() => setSettled('Payment collected.')}
+        onPrepaidRecorded={() => setSettled('Payment recorded.')}
+      />,
+    );
+  }, [bill, visit, onOverlay]);
+  useEffect(() => {
+    if (bill && !opened.current) {
+      opened.current = true;
+      open();
+    }
+  }, [bill, open]);
+  if (!bill) return null;
+  if (settled) return <p className="tech-visit-muted">{settled}</p>;
+  return (
+    <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={open}>
+      Collect payment ({money(bill.amount)})
+    </Button>
   );
 }
