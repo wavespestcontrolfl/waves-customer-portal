@@ -395,6 +395,45 @@ describe('validateVoiceFacts', () => {
     ])).toEqual(['ants']);
   });
 
+  test('pests named before their treatment share it, unless only seen (codex local r21 on #5538)', () => {
+    const read = (note, pests) => validateVoiceFacts({ areas: [], pests, spray: { method: 'not_said', quote: '' } }, note).pests.map((pest) => pest.name);
+    expect(read('For ants and roaches I sprayed around the house.', [
+      { name: 'ants', quote: 'ants' },
+      { name: 'roaches', quote: 'roaches' },
+    ])).toEqual(['ants', 'roaches']);
+    expect(read('For ants and roaches, I sprayed around the house.', [
+      { name: 'ants', quote: 'For ants' },
+      { name: 'roaches', quote: 'roaches' },
+    ])).toEqual(['ants', 'roaches']);
+    expect(read('Ants seen in the kitchen, sprayed for roaches.', [
+      { name: 'ants', quote: 'Ants seen in the kitchen' },
+      { name: 'roaches', quote: 'sprayed for roaches' },
+    ])).toEqual(['roaches']);
+    expect(read("For roaches I didn't spray. Sprayed outside for ants.", [
+      { name: 'roaches', quote: 'For roaches' },
+      { name: 'ants', quote: 'Sprayed outside for ants' },
+    ])).toEqual(['ants']);
+    // The nearest treatment before a pest decides: a denied one is never
+    // passed over for an earlier one.
+    expect(read('Treated for ants, did not spray for roaches.', [
+      { name: 'ants', quote: 'Treated for ants' },
+      { name: 'roaches', quote: 'roaches' },
+    ])).toEqual(['ants']);
+  });
+
+  test('an undone place in another clause is that place\'s, never the fact\'s (codex local r21 on #5538)', () => {
+    const note = 'Sprayed inside for ants, left the garage untreated. Sprayed around the house, garage untreated. The inside was left untreated, sprayed outside. The perimeter was left unsprayed, sprayed the kitchen.';
+    const area = (name, quote) => validateVoiceFacts({ areas: [{ area: name, quote }], pests: [], spray: { method: 'not_said', quote: '' } }, note);
+    const spray = (quote) => validateVoiceFacts({ areas: [], pests: [], spray: { method: 'perimeter', quote } }, note);
+    expect(area('inside', 'Sprayed inside for ants, left the garage untreated')).toMatchObject({ areas: [{ area: 'Inside' }], unclearAreas: [] });
+    expect(area('garage', 'Sprayed inside for ants, left the garage untreated')).toMatchObject({ areas: [], unclearAreas: ['Garage'] });
+    expect(spray('Sprayed around the house, garage untreated').spray).toMatchObject({ method: 'perimeter' });
+    // The fact's own place, or way of spraying, undone in its own clause
+    // still holds it.
+    expect(area('inside', 'The inside was left untreated, sprayed outside')).toMatchObject({ areas: [], unclearAreas: ['Inside'] });
+    expect(spray('The perimeter was left unsprayed, sprayed the kitchen')).toMatchObject({ spray: null, unclearSpray: true });
+  });
+
   test('a place is judged by the treatment of its own clause (codex local r18 on #5538)', () => {
     const note = 'Did not treat inside but sprayed outside for ants.';
     const read = (area) => validateVoiceFacts({ areas: [{ area, quote: 'Did not treat inside but sprayed outside for ants' }], pests: [], spray: { method: 'not_said', quote: '' } }, note);

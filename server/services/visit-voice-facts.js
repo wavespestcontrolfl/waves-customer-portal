@@ -108,7 +108,8 @@ const VOICE_FACTS_SCHEMA = {
 // the visit. A word that says the treatment was left out reads as a denial
 // in the same place ("skipped treating the garage", "avoided spraying
 // inside", "held off on baiting"), and a quote that calls its own treatment
-// undone ("left the garage untreated") never counts.
+// undone ("left the garage untreated") in the clauses the fact stands on
+// never counts (undoneInQuote).
 const DENIAL_WORDS = String.raw`no|not|none|never|nothing|zero|without|nowhere|didn'?t|doesn'?t|don'?t|wasn'?t|weren'?t|isn'?t|aren'?t|hadn'?t|haven'?t|couldn'?t|cannot|can'?t`
   + String.raw`|skip(?:s|ped|ping)?|avoid(?:s|ed|ing)?|(?:held|hold|holding)\s+off(?:\s+on)?|forgot|refused|declined|omitted|passed\s+on`;
 const DENIAL_RIGHT_BEFORE_RE = new RegExp(String.raw`\b(?:${DENIAL_WORDS})\s+$`);
@@ -142,19 +143,47 @@ function treatmentAssertion(quote) {
 // not name the place in its plain words is judged at its first treatment
 // word, as before.
 const CLAUSE_BREAK_RE = /[,;.!?]|\bbut\b/g;
-function areaAssertion(area) {
+// The clause of a quote around an offset: from the clause break before it to
+// the next one after it.
+function clauseBounds(quote, offset) {
+  const breaks = [...quote.matchAll(CLAUSE_BREAK_RE)].map((m) => m.index);
+  return {
+    from: Math.max(0, ...breaks.filter((at) => at < offset)),
+    to: Math.min(quote.length, ...breaks.filter((at) => at > offset)),
+  };
+}
+const spanOf = (match) => (match ? { offset: match.index, length: match[0].length } : null);
+// The first place a quote names in its plain words.
+function areaSubject(area) {
   const placeRe = new RegExp(String.raw`\b(?:${AREA_WORDS[area]})\b`);
+  return (quote) => spanOf(placeRe.exec(quote));
+}
+function areaAssertion(area) {
+  const subject = areaSubject(area);
   return (quote) => {
-    const place = placeRe.exec(quote);
+    const place = subject(quote);
     if (!place) return treatmentAssertion(quote);
-    const breaks = [...quote.matchAll(CLAUSE_BREAK_RE)].map((m) => m.index);
-    const from = Math.max(0, ...breaks.filter((at) => at < place.index));
-    const to = Math.min(quote.length, ...breaks.filter((at) => at > place.index));
+    const { from, to } = clauseBounds(quote, place.offset);
     const words = [...quote.slice(from, to).matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))]
       .map((m) => ({ offset: from + m.index, length: m[0].length }));
-    const before = words.filter((w) => w.offset < place.index).pop();
+    const before = words.filter((w) => w.offset < place.offset).pop();
     return before || words[0] || treatmentAssertion(quote);
   };
+}
+
+// A quote that calls its own treatment undone ("left the garage untreated")
+// never counts, judged in the clauses the fact stands on: its treatment
+// word's, and its subject's (the place it names, or the words that say how
+// the sprays went down). An undone place in another clause is that place's:
+// "sprayed inside for ants, left the garage untreated" still sprayed inside
+// (codex local r21 on #5538). A quote with no treatment word is read whole.
+function undoneInQuote(quote, { assertion, subject }) {
+  const span = assertion(quote);
+  if (!span) return UNDONE_RE.test(quote);
+  return [span, subject?.(quote)].filter(Boolean).some(({ offset }) => {
+    const { from, to } = clauseBounds(quote, offset);
+    return UNDONE_RE.test(quote.slice(from, to));
+  });
 }
 
 // What a pest quote asserts: the pest's own name, as a whole word.
@@ -185,23 +214,39 @@ function deniedInNote(quote, note, { assertion, denialAfter }) {
 
 const TREATMENT_FACT = { assertion: treatmentAssertion, denialAfter: TRAILING_DENIAL.treatment };
 
-// A pest named after its sentence's treatment shares it: "treated for ants
-// outside and roaches inside" treats the roaches too. Only a treatment word
-// earlier in the same sentence that the note does not deny counts, so "saw
-// ants inside, treated outside for spiders" still leaves the ants out, and an
-// observation in between ("treated for ants outside and saw roaches inside")
-// breaks it: the roaches were only seen (codex local r19 on #5538).
+// A pest named with others shares a treatment its sentence ties to it, at
+// any mention of it the note holds: the nearest treatment or observation
+// word before it in its clause decides ("treated for ants outside and
+// roaches inside"); with neither there, the nearest after it in its sentence
+// ("for ants and roaches I sprayed around the house", codex local r21 on
+// #5538), else the nearest before it in its sentence ("treated for ants
+// outside, roaches inside"). A treatment word the note denies, or an
+// observation word, deciding leaves the pest out: "saw ants inside, treated
+// outside for spiders", "treated for ants outside and saw roaches inside"
+// (codex local r19 on #5538), "ants seen in the kitchen, sprayed for
+// roaches", "didn't treat for ants or roaches".
 const SENTENCE_BREAK_RE = /[.!?;\n]/g;
 const OBSERVATION_WORDS_RE = /\b(?:saw|see|sees|seen|seeing|noticed|notice|found|find|spotted|observed|checked|check(?:ing)?|inspected|inspect(?:ing)?|looked|look(?:ing)?|heard|showed|shows)\b/;
-function treatedEarlierInSentence(name, quote, note) {
-  const at = note.indexOf(quote);
-  if (at < 0) return false;
-  const nameAt = at + quote.indexOf(name);
-  const start = Math.max(0, ...[...note.matchAll(SENTENCE_BREAK_RE)].map((m) => m.index + 1).filter((i) => i <= nameAt));
-  const before = note.slice(start, nameAt);
-  const words = [...before.matchAll(new RegExp(TREATMENT_WORD_RE.source, 'g'))];
-  return words.some((m) => !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, start + m.index))
-    && !OBSERVATION_WORDS_RE.test(before.slice(m.index + m[0].length)));
+function wordsIn(note, from, to, re, kind) {
+  return [...note.slice(from, to).matchAll(new RegExp(re.source, 'g'))]
+    .map((m) => ({ kind, at: from + m.index, end: from + m.index + m[0].length }));
+}
+function treatedInSentence(name, note) {
+  const breaksOf = (re) => [...note.matchAll(re)].map((m) => m.index);
+  const sentenceBreaks = breaksOf(SENTENCE_BREAK_RE);
+  const clauseBreaks = breaksOf(CLAUSE_BREAK_RE);
+  const mentions = [...note.matchAll(new RegExp(`(?<![a-z])${escapeRegExp(name)}(?![a-z])`, 'g'))];
+  return mentions.some(({ index: at }) => {
+    const end = at + name.length;
+    const start = Math.max(0, ...sentenceBreaks.filter((i) => i < at).map((i) => i + 1));
+    const stop = Math.min(note.length, ...sentenceBreaks.filter((i) => i >= end));
+    const clauseStart = Math.max(start, ...clauseBreaks.filter((i) => i < at));
+    const words = [...wordsIn(note, start, stop, TREATMENT_WORD_RE, 'treatment'), ...wordsIn(note, start, stop, OBSERVATION_WORDS_RE, 'observation')]
+      .sort((a, b) => a.at - b.at);
+    const before = words.filter((w) => w.end <= at);
+    const decider = before.filter((w) => w.at >= clauseStart).pop() || words.find((w) => w.at >= end) || before.pop();
+    return decider?.kind === 'treatment' && !DENIAL_RIGHT_BEFORE_RE.test(note.slice(0, decider.at));
+  });
 }
 
 // An area whose own word the quote denies ("sprayed outside but not the
@@ -269,7 +314,7 @@ function pestName(name, quote) {
 // the quote, else the quote and whether the note denies it there.
 function readQuote(quote, note, fact) {
   const grounded = groundedQuote(quote, note);
-  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) || UNDONE_RE.test(grounded) } : null;
+  return grounded ? { quote: grounded, denied: deniedInNote(grounded, note, fact) || undoneInQuote(grounded, fact) } : null;
 }
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
@@ -280,7 +325,7 @@ function validateVoiceFacts(json, note) {
   const unresolvedAreas = new Set();
   for (const entry of listOf(answer.areas)) {
     if (!AREA_LABELS[entry?.area]) continue;
-    const read = readQuote(entry.quote, grounding, { assertion: areaAssertion(entry.area), denialAfter: TRAILING_DENIAL.treatment });
+    const read = readQuote(entry.quote, grounding, { assertion: areaAssertion(entry.area), subject: areaSubject(entry.area), denialAfter: TRAILING_DENIAL.treatment });
     // Heard, but the note does not hold the quote, denies it there, or the
     // quote only names the place ("ants in the kitchen" is a sighting, not a
     // treated inside): never recorded, and never silently dropped either,
@@ -298,12 +343,13 @@ function validateVoiceFacts(json, note) {
   }
   // Every product's targets come from these. A pest whose own words deny the
   // treatment ("didn't treat for roaches") is never one; and with more than
-  // one pest heard, each must be tied to the treatment in its own words
-  // ("treated outside for spiders"), so one only seen ("saw ants inside") is
-  // left out (Codex #5538). A single pest is the note's one subject.
+  // one pest heard, each must be tied to the treatment, in its own words
+  // ("treated outside for spiders") or by its sentence (treatedInSentence),
+  // so one only seen ("saw ants inside") is left out (Codex #5538). A single
+  // pest is the note's one subject.
   const targets = [...pests].filter(([name, quote]) => (treatmentAssertion(quote)
     ? !deniedInNote(quote, grounding, TREATMENT_FACT)
-    : pests.size === 1 || treatedEarlierInSentence(name, quote, grounding)));
+    : pests.size === 1 || treatedInSentence(name, grounding)));
   return {
     areas: AREA_ORDER.filter((area) => heardAreas.has(area)).map((area) => ({ area: AREA_LABELS[area], quote: heardAreas.get(area) })),
     unclearAreas: AREA_ORDER.filter((area) => unresolvedAreas.has(area) && !heardAreas.has(area)).map((area) => AREA_LABELS[area]),
@@ -327,6 +373,12 @@ const METHOD_SUPPORTED = {
   perimeter: (quote) => PERIMETER_WORDS_RE.test(quote) && !SPOT_WORDS_RE.test(quote),
   spot: (quote) => SPOT_WORDS_RE.test(quote) || !PERIMETER_WORDS_RE.test(quote),
 };
+// The words a spray quote says how the sprays went down with: an undone word
+// in their clause undoes the spray (undoneInQuote).
+const SPRAY_SUBJECT = {
+  perimeter: (quote) => spanOf(PERIMETER_WORDS_RE.exec(quote)),
+  spot: (quote) => spanOf(SPOT_WORDS_RE.exec(quote)),
+};
 
 // How the sprays went down: only a grounded quote the note does not deny. A
 // perimeter spray decides the trace and the sprays' method, so one the note
@@ -341,7 +393,7 @@ function readSpray(spray, grounding) {
     const grounded = !!groundedQuote(spray.quote, grounding);
     return { spray: null, unclearSpray: !grounded, noSpray: grounded };
   }
-  const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, TREATMENT_FACT);
+  const read = SPRAY_METHODS.has(spray.method) && readQuote(spray.quote, grounding, { ...TREATMENT_FACT, subject: SPRAY_SUBJECT[spray.method] });
   const contradicted = !!read && !METHOD_SUPPORTED[spray.method](read.quote);
   const holds = !!read && !read.denied && !contradicted;
   return {
