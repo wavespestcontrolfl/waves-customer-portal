@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { TrendingUp } from 'lucide-react';
-import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
+import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 import TechFieldShell from './tech/TechFieldShell';
@@ -100,6 +100,20 @@ export default function TechLayout() {
           navigate(`/admin/login?next=${encodeURIComponent(loginDestination)}`, {
             replace: true,
           });
+          return;
+        }
+        // No answer at all (dead zone, DNS, airplane mode): a TypeError with
+        // no HTTP status. The stored profile was written by a previous
+        // successful /admin/auth/me, so let the shell render from it — the
+        // route page then shows its saved copy. Every API call still carries
+        // the token and the server rejects a dead session the moment it is
+        // reachable; a server answer of any kind (401 above, 5xx here) and a
+        // missing or malformed stored profile keep the verification error.
+        const stored = error?.status === undefined && !error?.invalidProfile ? getAdminUser() : null;
+        if (stored?.id && ['admin', 'technician'].includes(stored.role)) {
+          setTechName(stored.name || getAdminDisplayName('Tech'));
+          setTechRole(stored.role);
+          setAuthStatus('ready');
           return;
         }
         setAuthStatus('error');

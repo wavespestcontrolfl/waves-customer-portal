@@ -143,6 +143,25 @@ it('falls back to the saved route when the live request times out', async () => 
   expect(screen.getAllByText(/Fixture saved-two/).length).toBeGreaterThan(0);
 });
 
+it('treats a body that stalls after the headers as offline, not as an empty route', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  seedSnapshot();
+  fetchMock.mockImplementation(async (path, options = {}) => {
+    if (path.includes('/admin/schedule?')) {
+      return { ok: true, status: 200, json: () => new Promise((_, reject) => {
+        options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ line: null }) };
+  });
+  mount();
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  await screen.findByText(/No connection — showing your route as saved at 7:42 AM/);
+  expect(screen.getAllByText(/Fixture saved-one/).length).toBeGreaterThan(0);
+  // The good snapshot is untouched: nothing was saved from the stalled body.
+  expect(JSON.parse(localStorage.getItem(ROUTE_SNAPSHOT_KEY)).data.services.map((s) => s.id)).toEqual(['saved-one', 'saved-two']);
+});
+
 it('shows the offline notice in the field layout too', async () => {
   seedSnapshot();
   scheduleMode = 'offline';

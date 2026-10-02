@@ -369,7 +369,10 @@ export default function TechHomePage({ section = 'today' }) {
         headers: { Authorization: `Bearer ${token}` },
         ...(abort ? { signal: abort.signal } : {}),
       });
-      const data = await res.json().catch(() => ({}));
+      // A body that stalls after the headers arrive is still a dead zone:
+      // let the timeout's AbortError reach the offline handler instead of
+      // reading it as an empty (and then saved) route.
+      const data = await res.json().catch((parseErr) => { if (parseErr?.name === 'AbortError') throw parseErr; return {}; });
       if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
       const next = scheduleStateFromResponse(data);

@@ -168,6 +168,33 @@ describe('TechLayout staff-session verification', () => {
     });
   });
 
+  it('renders from the stored profile when /admin/auth/me gets no answer at all', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-1', name: 'River Tech', role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+
+    renderTech();
+
+    expect(await screen.findByText('Protected field protocols')).toBeInTheDocument();
+    expect(screen.getByText('River Tech')).toBeInTheDocument();
+    expect(localStorage.getItem('waves_admin_token')).toBe('staff-access-token');
+  });
+
+  it.each([
+    ['a server error', () => response(503, { error: 'Unavailable' }), { id: 'tech-1', name: 'River Tech', role: 'technician' }],
+    ['no stored profile', () => { throw new TypeError('Failed to fetch'); }, null],
+    ['a stored profile with a non-staff role', () => { throw new TypeError('Failed to fetch'); }, { id: 'x', role: 'customer' }],
+  ])('keeps the verification error offline with %s', async (_label, respond, stored) => {
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    if (stored) localStorage.setItem('waves_admin_user', JSON.stringify(stored));
+    vi.stubGlobal('fetch', vi.fn(async () => respond()));
+
+    renderTech();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to verify staff access');
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
+  });
+
   it('clears invalid session state and sends a 401 to login with the field destination', async () => {
     localStorage.setItem('waves_admin_token', 'revoked-token');
     localStorage.setItem('adminToken', 'legacy-token');
