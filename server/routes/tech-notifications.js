@@ -163,8 +163,9 @@ router.post('/:id/confirm-start', async (req, res, next) => {
 
     let entry;
     try {
-      entry = await timeTracking.startJob(req.technicianId, jobId, { lat, lng });
+      entry = await timeTracking.startJob(req.technicianId, jobId, { lat, lng, scopeReq: req });
     } catch (err) {
+      if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
       return res.status(409).json({ error: err.message });
     }
 

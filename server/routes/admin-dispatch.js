@@ -1040,6 +1040,14 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
 router.post('/recap-preview', async (req, res, next) => {
   try {
     const body = req.body || {};
+    // The preview runs the paid model chain: a technician needs a visit of
+    // their own; admins keep the id-less path (codex #5568 r7 P1).
+    if (isTechnicianRequest(req)) {
+      const owned = body.serviceId
+        ? await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('scheduled_services.id')
+        : null;
+      if (!owned) return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     // Season/weather/expectations context (owner directive 2026-07-21).
     // serviceId → customer geocode for the weather line; without it the
     // season + what-to-expect context still applies. Best-effort only.

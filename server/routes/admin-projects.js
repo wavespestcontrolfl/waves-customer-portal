@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { TECH_DEAD_ASSIGNMENT_STATUSES, techAccessCutoff } = require('../services/technician-visit-scope');
 const {
   PROJECT_TYPES,
   PROJECT_TYPE_KEYS,
@@ -1352,7 +1353,14 @@ router.get('/', async (req, res, next) => {
       q = q.where(function () {
         this.where('p.created_by_tech_id', req.technicianId)
           .orWhere('srp.technician_id', req.technicianId)
-          .orWhere('ssp.technician_id', req.technicianId);
+          // A project-linked visit authorizes only while it is current
+          // (dead statuses and the access window, as in hasProjectAccess;
+          // codex #5568 r7 P1).
+          .orWhere(function () {
+            this.where('ssp.technician_id', req.technicianId)
+              .whereNotIn('ssp.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+              .where('ssp.scheduled_date', '>=', techAccessCutoff());
+          });
       });
     }
     if (status) q = q.where('p.status', status);

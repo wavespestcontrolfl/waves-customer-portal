@@ -220,7 +220,12 @@ async function clockOut(technicianId, { lat, lng, notes } = {}) {
 /**
  * Start a job entry (tech must be clocked in).
  */
-async function startJob(technicianId, jobId, { lat, lng } = {}) {
+// scopeReq: the HTTP request when a technician starts the timer themselves.
+// The locked job read then applies the current-live-assignment predicate, so
+// a technician cannot start a timer (and the arrival transition/SMS) on a
+// visit that is not theirs (codex #5568 r7 P1). The geofence path passes
+// none: the server matched the job, and an admin request is unscoped.
+async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {}) {
   // Keep replacement atomic across writer-generation cutovers. If this app
   // generation is stale, its insert is rejected by the active-write CHECK;
   // the transaction then rolls back the preceding close instead of leaving
@@ -246,7 +251,12 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
     let customerId = null;
     let serviceType = null;
     if (jobId) {
-      const job = await trx('scheduled_services').where({ id: jobId }).forUpdate().first();
+      const jobQuery = trx('scheduled_services').where('scheduled_services.id', jobId);
+      if (scopeReq) require('./technician-visit-scope').technicianLiveVisitFilter(scopeReq, jobQuery);
+      const job = await jobQuery.forUpdate().first();
+      if (!job && scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq)) {
+        throw Object.assign(new Error('Job not found'), { status: 404, code: 'job_not_assigned' });
+      }
       if (job) {
         customerId = job.customer_id;
         serviceType = job.service_type;
