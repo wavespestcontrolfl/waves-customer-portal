@@ -288,11 +288,15 @@ async function treeShrubComponent(customerId, knex, activeLines) {
   // service_date first — a late-entered older visit must not become the
   // current assessment (created_at is only the tie-breaker, matching the
   // established tree/shrub trend ordering).
+  const tsFindings = require('./service-report/tree-shrub-tech-findings');
+  // GATE_TS_TECH_FINDINGS_COPY: a visit with a hidden finding has no overall, so
+  // a few more rows are read to find the two newest scored ones (gate off: the
+  // two newest, as before).
   const rows = await knex('tree_shrub_assessments')
     .where({ customer_id: customerId, confirmed_by_tech: true })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
-    .limit(2)
+    .limit(tsFindings.techFindingsCopyLive() ? 12 : 2)
     .catch(() => []);
   // formatAssessmentScores computes the category-fallback overall for legacy
   // rows whose overall_score is null — the same formatter the tree/shrub
@@ -300,7 +304,6 @@ async function treeShrubComponent(customerId, knex, activeLines) {
   // GATE_TS_TECH_FINDINGS_COPY: a visit's frozen hide decisions (kept only on its
   // service record when the preview was rejected) withhold its overall here too,
   // the same chokepoint the report history uses. Gate off = no extra read.
-  const tsFindings = require('./service-report/tree-shrub-tech-findings');
   const frozenByRecord = tsFindings.techFindingsCopyLive()
     ? await tsFindings.loadFrozenTechFindingsByRecord(rows, knex)
     : null;

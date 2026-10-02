@@ -74,14 +74,13 @@ function techFindingsCopyLive() {
 // claim about a palm's crown, spear leaf, upper or newest fronds. It is run on
 // tree_shrub copy only (callers decide), never on lawn or pest copy.
 
-const CROWN_TERM = /\b(?:crown(?:shaft)?s?|spear(?:\s+(?:leaf|leaves|fronds?))?|newest\s+(?:fronds?|growth|leaves)|new\s+fronds?|emerging\s+(?:fronds?|growth|leaves)|upper\s+(?:fronds?|canopy)|(?:top|head)\s+of\s+(?:the|a|this|that|each)\s+palms?)\b/i;
-// Only a palm-crown claim when the sentence is about a palm: "new growth" or a
-// "canopy" on a hedge is not.
-const PALM_ONLY_TERM = /\b(?:new(?:est)?\s+(?:growth|leaves|foliage|shoots)|canopy)\b/i;
-// A clause that names a non-palm plant is about that plant, even when a palm is
-// named elsewhere in the sentence ("..., but the hedge canopy looks healthy").
+// Palm-only crown terms: a claim on its own.
+const CROWN_TERM = /\b(?:crownshafts?|spear(?:\s+(?:leaf|leaves|fronds?))?|newest\s+fronds?|new\s+fronds?|emerging\s+fronds?|upper\s+fronds?|(?:top|head)\s+of\s+(?:the|a|this|that|each)\s+palms?)\b/i;
+// Terms every tree has ("the oak crown", "new growth on the hedge"): a palm-crown
+// claim only when the clause is about a palm.
+const PALM_ONLY_TERM = /\b(?:crowns?|new(?:est)?\s+(?:growth|leaves|foliage|shoots)|emerging\s+(?:growth|leaves)|upper\s+canopy|canopy)\b/i;
 const NON_PALM_SUBJECT = /\b(?:hedges?|shrubs?|bush(?:es)?|trees?|oaks?|maples?|magnolias?|citrus|crotons?|ixoras?|viburnums?|hibiscus|gardenias?|azaleas?|podocarpus|cocoplums?|clusias?|jasmine|bougainvilleas?|roses?|ferns?|beds?|groundcovers?|perennials?|annuals?|plantings?)\b/i;
-const PALM_WORD = /\b(?:palms?|fronds?|spear|crown|cabbage|sabal|royal|queen|date|coconut|areca|foxtail|sylvester|washingtonia|pindo|bismarck|livistona)\b/i;
+const PALM_WORD = /\b(?:palms?|fronds?|spear|crownshafts?|cabbage|sabal|royal|queen|date|coconut|areca|foxtail|sylvester|washingtonia|pindo|bismarck|livistona)\b/i;
 const HEALTH_TERM = /\b(?:healthy|fine|normal|good|great|excellent|vibrant|full|robust|firm|upright|strong|vigorous|vigor|thriving|green|lush|intact|unaffected|undamaged|clean|okay|ok|looking good|free (?:of|from)|no (?:visible )?(?:signs?|issues?|problems?|concerns?|damage|decline|stress|pests?))\b/gi;
 // A health word is NOT a positive claim when a negator, an adverse word or a
 // can't-assess marker sits in the few words before it ("not healthy", "poor
@@ -166,13 +165,15 @@ function splitClauses(body) {
 
 // Strip positive crown claims from ONE sentence (terminator and trailing
 // whitespace included); returns the sentence unchanged when nothing matched.
-function stripSentence(sentence) {
+function stripSentence(sentence, textHasPalm = false) {
   const m = /^([\s\S]*?)([.!?]+["')\]”’*_~]*\s*)?$/.exec(sentence);
   const body = m[1];
   const tail = m[2] || '';
   const lead = /^\s*/.exec(body)[0];
   const core = body.slice(lead.length);
-  const hasPalm = PALM_WORD.test(core);
+  // Palm context: named in this sentence or anywhere in the same text ("The
+  // crown looks healthy. Older fronds are yellowing.").
+  const hasPalm = textHasPalm || PALM_WORD.test(core);
   const clauses = splitClauses(core);
   let dropNext = false;
   let changed = false;
@@ -209,11 +210,12 @@ function stripSentence(sentence) {
 function stripCrownHealthClaims(text) {
   if (typeof text !== 'string' || !text) return text;
   let changed = false;
+  const textHasPalm = PALM_WORD.test(text);
   const original = text.split('\n');
   const lines = original.map((line) => {
     const sentences = splitSentences(line);
     const rebuilt = sentences.map((sentence) => {
-      const next = stripSentence(sentence);
+      const next = stripSentence(sentence, textHasPalm);
       if (next !== sentence) changed = true;
       return next;
     });
@@ -243,7 +245,17 @@ function cleanDetail(value) {
 
 // Decisions from the wire -> the durable shape. Unknown keys/actions drop; the
 // first decision for a key wins.
+// An edit whose printable text is empty (all crown claims, or wording the
+// customer-copy screen rejects) still withdrew the photo read: it reads as a
+// hide, so no path falls back to the read the technician replaced. Completion
+// refuses such an edit first (rejectedTechFindingEdits); this is the backstop
+// for every reader, which all come through here.
 function normalizeTechFindings(decisions) {
+  return normalizeRawTechFindings(decisions)
+    .map((f) => (f.action === 'edit' && !editText(f) ? { ...f, action: 'hidden' } : f));
+}
+
+function normalizeRawTechFindings(decisions) {
   if (!Array.isArray(decisions)) return [];
   const seen = new Set();
   const out = [];
@@ -303,9 +315,14 @@ function editText(finding) {
 // the gate off.
 function rejectedTechFindingEdits(review) {
   if (!techFindingsCopyLive()) return [];
-  return normalizeTechFindings(review && review.decisions)
-    .filter((f) => f.action === 'edit' && f.detail)
-    .map((f) => ({ key: f.key, label: f.label, violations: copyViolations(f.detail) }))
+  return normalizeRawTechFindings(review && review.decisions)
+    .filter((f) => f.action === 'edit')
+    .map((f) => {
+      const violations = f.detail ? copyViolations(f.detail) : [];
+      // Nothing printable left once crown claims go (or no text at all).
+      if (!violations.length && !editText(f)) violations.push(f.detail ? 'palm_crown_claim' : 'empty_edit');
+      return { key: f.key, label: f.label, violations };
+    })
     .filter((r) => r.violations.length);
 }
 
@@ -357,35 +374,21 @@ async function loadFrozenTechFindingsByRecord(rows, knex) {
   return byRecord;
 }
 
-// Caption vocabulary per finding. A caption is tied to a finding when it uses
-// that finding's words; one with generic assessment wording ("visible signals")
-// cannot be placed reliably and is treated as tied to every replaced finding.
-const CAPTION_WORDS = {
-  pest_activity: /\b(?:pests?|insects?|scale|mites?|aphids?|whiteflies|whitefly|mealybugs?|thrips|caterpillars?|crawlers?|stippl\w*|speckl\w*|sticky|residue|black\s+film|webbing|sooty|chew\w*|honeydew|infest\w*)\b/i,
-  disease_leaf_spot: /\b(?:leaf[-\s]?spot\w*|fung\w*|disease\w*|mildew|blight|anthracnose|mold|rot|lesions?|spotting)\b/i,
-  water_heat_mechanical_stress: /\b(?:dry|wilt\w*|scorch\w*|stress\w*|water\w*|crispy|prun\w*|drought|heat|sunburn|mechanical|damage\w*)\b/i,
-  leaf_color_vigor: /\b(?:yellow\w*|chlorosis|pale|bronz\w*|colou?r\w*|discolou?r\w*|deficien\w*|vigor|off-color)\b/i,
-  foliage_fullness: /\b(?:thin\w*|sparse|bare|dieback|gaps?|dense|fullness|canopy|foliage)\b/i,
-};
-const GENERIC_ASSESSMENT_WORDS = /\b(?:signals?|visible|possible|appears?|apparent|issues?|concerns?|problems?|activity|symptoms?|conditions?|health\w*|signs?|observed|noted|detected)\b/i;
-
-// True when a photo caption speaks for a finding the technician replaced
-// (hidden, or edited with their own text) and must not reach customer copy.
-function captionTiedToReplacedFinding(caption, replacedKeys) {
-  if (typeof caption !== 'string' || !caption.trim() || !replacedKeys.length) return false;
-  if (GENERIC_ASSESSMENT_WORDS.test(caption)) return true;
-  return replacedKeys.some((key) => CAPTION_WORDS[key] && CAPTION_WORDS[key].test(caption));
+// True when the technician replaced any part of the photo read (a hide, or an
+// edit in their own words).
+function replacedAnyFinding(findings) {
+  return (Array.isArray(findings) ? findings : [])
+    .some((f) => f && (f.action === 'hidden' || (f.action === 'edit' && editText(f))));
 }
 
-// Customer-facing photo captions under the technician's decisions: a caption on
-// a hidden / edited finding's subject is dropped, then the crown strip runs.
+// Customer-facing photo captions under the technician's decisions. Captions
+// are photo-read prose with no reliable link to one finding, so ANY hide or
+// edit withholds them all (the photos stay); otherwise the crown strip runs.
 // Strings in, strings out (empties removed).
 function filterCaptionsForCustomer(captions, findings) {
-  const replaced = (Array.isArray(findings) ? findings : [])
-    .filter((f) => f && (f.action === 'hidden' || (f.action === 'edit' && editText(f))))
-    .map((f) => f.key);
+  if (replacedAnyFinding(findings)) return [];
   return (Array.isArray(captions) ? captions : [])
-    .filter((c) => typeof c === 'string' && !captionTiedToReplacedFinding(c, replaced))
+    .filter((c) => typeof c === 'string')
     .map((c) => stripCrownHealthClaims(c))
     .filter((c) => typeof c === 'string' && c.trim());
 }
@@ -395,9 +398,7 @@ function filterCaptionsForCustomer(captions, findings) {
 // crown strip applies otherwise. Returns null when nothing is left.
 function summaryForCustomer(summary, findings) {
   if (typeof summary !== 'string' || !summary.trim()) return null;
-  const replacedAny = (Array.isArray(findings) ? findings : [])
-    .some((f) => f && (f.action === 'hidden' || (f.action === 'edit' && editText(f))));
-  if (replacedAny) return null;
+  if (replacedAnyFinding(findings)) return null;
   const out = stripCrownHealthClaims(summary);
   return typeof out === 'string' && out.trim() ? out : null;
 }
@@ -421,12 +422,10 @@ function applyTechFindingsToAssessment(assessment, findings) {
     }
   }
   if (hidden.length || edited.length) {
-    // A caption on a replaced finding's subject goes too; the photo itself stays.
-    const replaced = [...hidden, ...edited].map((f) => f.key);
+    // Every photo-read caption goes too (see filterCaptionsForCustomer); the
+    // photos themselves stay.
     if (Array.isArray(assessment.photos)) {
-      next.photos = assessment.photos.map((p) => (
-        p && captionTiedToReplacedFinding(p.caption, replaced) ? { ...p, caption: null } : p
-      ));
+      next.photos = assessment.photos.map((p) => (p ? { ...p, caption: null } : p));
     }
     next.observations = '';
     next.aiSummary = null;
@@ -506,7 +505,6 @@ module.exports = {
   withholdScores,
   summaryForCustomer,
   filterCaptionsForCustomer,
-  captionTiedToReplacedFinding,
   hasTechFindingLines,
   hideFrozenFindingsInScores,
   loadFrozenTechFindingsByRecord,

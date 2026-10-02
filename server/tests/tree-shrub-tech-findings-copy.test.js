@@ -184,7 +184,10 @@ describe('palm-crown rule', () => {
     // Prohibited reassurance, ground-level prefix or not.
     expect(stripCrownHealthClaims('From the ground, the palm crown looks healthy.')).toBe('');
     expect(stripCrownHealthClaims('Ground-level photos show the spear leaf is normal.')).toBe('');
-    expect(stripCrownHealthClaims("We couldn't see the crown well, but it looks healthy.")).toBe("We couldn't see the crown well.");
+    expect(stripCrownHealthClaims("We couldn't see the palm crown well, but it looks healthy.")).toBe("We couldn't see the palm crown well.");
+    // Codex #5587 r2: "crown" with no palm context is any tree's crown.
+    expect(stripCrownHealthClaims('The oak crown looks healthy.')).toBe('The oak crown looks healthy.');
+    expect(stripCrownHealthClaims('The crown looks healthy.')).toBe('The crown looks healthy.');
     expect(stripCrownHealthClaims('The crown is fine and the newest fronds are green.')).toBe('');
     // Adverse findings are kept.
     expect(stripCrownHealthClaims('The palm crown is not healthy.')).toBe('The palm crown is not healthy.');
@@ -196,8 +199,8 @@ describe('palm-crown rule', () => {
     expect(stripCrownHealthClaims('No healthy spear leaf was visible.')).toBe('No healthy spear leaf was visible.');
     expect(stripCrownHealthClaims('The crown has no healthy fronds.')).toBe('The crown has no healthy fronds.');
     // ...but a "no" further back, or "no visible damage", still reads as a claim.
-    expect(stripCrownHealthClaims('No problems, crown looks healthy.')).toBe('');
-    expect(stripCrownHealthClaims('The crown shows no visible damage.')).toBe('');
+    expect(stripCrownHealthClaims('No problems, palm crown looks healthy.')).toBe('');
+    expect(stripCrownHealthClaims('The palm crown shows no visible damage.')).toBe('');
     // Pure can't-assess disclaimers are kept.
     expect(stripCrownHealthClaims("We couldn't check the crown from the ground.")).toBe("We couldn't check the crown from the ground.");
     expect(stripCrownHealthClaims('Crown health is not visible from the ground.')).toBe('Crown health is not visible from the ground.');
@@ -365,7 +368,7 @@ describe('a hidden or replaced finding does not survive in photo captions', () =
     })),
   });
 
-  test('hiding pest_activity drops pest and generic-assessment captions and keeps plain location labels', () => {
+  test('hiding any finding withholds every photo-read caption (no vocabulary guess); the photos and slot labels stay', () => {
     gateOn();
     const out = build(withCaptions([
       'Visible pest-pressure signals on foliage.',
@@ -373,15 +376,19 @@ describe('a hidden or replaced finding does not survive in photo captions', () =
       'Possible concern near the entry',
       'Front bed, east side',
     ]), [decide('pest_activity', 'hidden')]);
-    expect(out.photos.map((p) => p.caption)).toEqual([null, null, null, 'Front bed, east side']);
+    expect(out.photos.map((p) => p.caption)).toEqual([null, null, null, null]);
+    expect(out.photos).toHaveLength(4);
     expect(JSON.stringify(out)).not.toMatch(/pest-pressure|scale on/i);
+    // Codex #5587 r2: an unlisted synonym is withheld too.
+    const beetle = build(withCaptions(['Beetle holes in the leaves']), [decide('pest_activity', 'hidden')]);
+    expect(beetle.photos[0].caption).toBeNull();
   });
 
   test('an edited finding\'s captions are replaced by the technician\'s text; the photos stay', () => {
     gateOn();
     const out = build(withCaptions(['Yellowing on the ixora', 'Back fence line']), [decide('leaf_color_vigor', 'edit', 'Iron chlorosis, treated today.')]);
     expect(out.photos).toHaveLength(2);
-    expect(out.photos.map((p) => p.caption)).toEqual([null, 'Back fence line']);
+    expect(out.photos.map((p) => p.caption)).toEqual([null, null]);
   });
 
   test('monitor / confirmed leave captions alone; gate off leaves them alone', () => {
@@ -522,7 +529,7 @@ describe('crown backstop works one clause at a time', () => {
     expect(stripCrownHealthClaims('The ixora is 3.5 m wide. The palm crown looks healthy.) Older fronds are yellowing.'))
       .toBe('The ixora is 3.5 m wide. Older fronds are yellowing.');
     expect(stripCrownHealthClaims('The crown looks healthy!! Older fronds are yellowing.')).toBe('Older fronds are yellowing.');
-    expect(stripCrownHealthClaims('The crown looks healthy.** Done.')).toBe('Done.');
+    expect(stripCrownHealthClaims('The palm crown looks healthy.** Done.')).toBe('Done.');
     // Round trip: with nothing to strip every line comes back byte-identical.
     const plain = 'Treated 3.5 m hedge (see photo). e.g. ok.\n\nNext line vs. last.';
     expect(stripCrownHealthClaims(plain)).toBe(plain);
@@ -556,13 +563,13 @@ describe('the crown instruction is the primary guard', () => {
 });
 
 describe('PDF and gallery surfaces', () => {
-  test('captions: hidden / edited ties and the crown strip apply to gallery captions; a plain label stays', () => {
+  test('captions: any hide / edit withholds them all; the crown strip applies otherwise', () => {
     const { filterCaptionsForCustomer, summaryForCustomer } = require('../services/service-report/tree-shrub-tech-findings');
     const hidden = [decide('pest_activity', 'hidden')];
     expect(filterCaptionsForCustomer(
       ['Visible pest-pressure signals on foliage.', 'Sticky residue on the hibiscus', 'Black film on leaves', 'Crawlers on the stems', 'The palm crown looks healthy', 'Front bed'],
       hidden,
-    )).toEqual(['Front bed']);
+    )).toEqual([]);
     expect(filterCaptionsForCustomer(['The palm crown looks healthy', 'Back fence'], [])).toEqual(['Back fence']);
     // The summary: withdrawn by a hide / edit, crown-stripped otherwise.
     expect(summaryForCustomer('Stippling on shrubs.', hidden)).toBeNull();
@@ -819,5 +826,65 @@ describe('Codex r1 on #5587', () => {
   test('the report summary gets the crown backstop whatever wrote it (saved recap included)', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
     expect(src).toContain('summary: tsCopyFindings ? stripCrownHealthClaims(visitSummary) : visitSummary,');
+  });
+});
+
+describe('Codex r2 on #5587', () => {
+  const { rejectedTechFindingEdits, normalizeTechFindings: norm } = require('../services/service-report/tree-shrub-tech-findings');
+
+  test('an edit with nothing printable left reads as a hide everywhere, and completion refuses it', () => {
+    gateOn();
+    const decisions = [{ key: 'leaf_color_vigor', action: 'edit', detail: 'The palm crown looks healthy.' }];
+    expect(norm(decisions)[0].action).toBe('hidden');
+    expect(rejectedTechFindingEdits({ decisions })[0].violations).toEqual(['palm_crown_claim']);
+    const out = build(assessment(), decisions.map((d) => decide(d.key, d.action, d.detail)));
+    expect(out.snapshot ? JSON.stringify(out) : '').not.toMatch(/crown looks healthy/i);
+  });
+
+  test('a tech-only card documents; it never claims a program change or treatment', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/tree-shrub-report-insights.js'), 'utf8');
+    const block = src.slice(src.indexOf('const TECH_CARD_COPY'), src.indexOf('};', src.indexOf('const TECH_CARD_COPY')));
+    expect(block).not.toMatch(/adjusted|built .*into the plan|treated|will monitor/i);
+  });
+
+  test('the writer filters captions before its input gate', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src.indexOf('promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);'))
+      .toBeLessThan(src.indexOf('const baseHasReportInput ='));
+    expect(src).toContain('|| promptPhotoCaptions.length > 0;');
+    expect(src).toContain('photoGroundingUsed = promptPhotoCaptions.length > 0;');
+  });
+});
+
+describe('property score looks past visits with hidden findings (Codex r2 on #5587)', () => {
+  const { _test } = require('../services/property-score');
+  const row = (id, rec, date, overall) => ({
+    id, customer_id: 'c1', service_record_id: rec, service_date: date, confirmed_by_tech: true,
+    foliage_fullness: overall, leaf_color_vigor: overall, pest_activity: overall, disease_leaf_spot: overall,
+    water_heat_stress: overall, overall_score: overall, observations: '', plant_groups: [], composite_scores: null,
+  });
+  const all = [row('a3', 'r3', '2026-09-20', 70), row('a2', 'r2', '2026-08-20', 72), row('a1', 'r1', '2026-07-20', 64)];
+  const makeKnex = (limits) => (table) => {
+    if (table === 'service_records') {
+      return { whereIn: () => ({ select: async () => ['r3', 'r2'].map((id) => ({ id, structured_notes: { treeShrubTechFindings: [{ key: 'pest_activity', action: 'hidden' }] } })) }) };
+    }
+    let n = all.length;
+    const q = { where: () => q, orderBy: () => q, limit: (k) => { limits.push(k); n = k; return q; }, then: (r) => Promise.resolve(all.slice(0, n)).then(r), catch: async () => all.slice(0, n) };
+    return q;
+  };
+
+  test('gate on: the two newest hide a finding, the older scored visit still gives the score', async () => {
+    gateOn();
+    const limits = [];
+    const out = await _test.treeShrubComponent('c1', makeKnex(limits), new Set(['tree_shrub']));
+    expect(limits[0]).toBeGreaterThan(2);
+    expect(out).toMatchObject({ status: 'scored', score: 64 });
+  });
+
+  test('gate off: the two newest, as before', async () => {
+    gateOff();
+    const limits = [];
+    await _test.treeShrubComponent('c1', makeKnex(limits), new Set(['tree_shrub']));
+    expect(limits[0]).toBe(2);
   });
 });

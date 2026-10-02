@@ -421,7 +421,8 @@ describe('Generate tree/shrub reviewed-photo payload contract', () => {
     const start = scheduleSource.indexOf("router.post('/generate-report'");
     const block = scheduleSource.slice(start, start + 60000);
     expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview[^;]*\|\| cappedPhotoCaptions\.length > 0;/s);
-    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0\n      || cappedPhotoCaptions.length > 0;');
+    // Captions count after the technician's decisions filter them (Codex #5587 r2).
+    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0\n      || promptPhotoCaptions.length > 0;');
     expect(block).toContain('treeShrubReviewGrounding,');
     expect(block).not.toMatch(/buildDeterministicReportCopy\(\{[^}]*treeShrubReview/s);
   });

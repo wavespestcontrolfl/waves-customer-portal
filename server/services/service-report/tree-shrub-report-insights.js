@@ -20,11 +20,13 @@
 const { insightOverride, insightHidden } = require('./tree-shrub-tech-findings');
 
 // Card copy for a finding only the technician raised (no photo signal behind it).
+// Documentation only: the decision records an observation, never a treatment or
+// program change, so no line here claims work.
 const TECH_CARD_COPY = {
   pest_pressure: {
     headline: 'Pest activity your technician noted',
     whyItMatters: 'Catching pest pressure early keeps it from spreading across the planting.',
-    wavesAction: 'Documented it and built follow-up monitoring into the plan.',
+    wavesAction: 'Documented it for follow-up.',
     nextVisitPlan: 'Recheck it next visit.',
   },
   disease_leaf_spot: {
@@ -36,13 +38,13 @@ const TECH_CARD_COPY = {
   water_stress: {
     headline: 'Water or heat stress your technician noted',
     whyItMatters: 'Stress signals tell us where the planting needs a little extra support.',
-    wavesAction: 'Documented the stressed areas and will monitor them on future visits.',
+    wavesAction: 'Documented the stressed areas for comparison next visit.',
     nextVisitPlan: 'Recheck the stressed plants next visit.',
   },
   color_vigor: {
     headline: 'Foliage your technician noted',
     whyItMatters: 'Plants weaken when they can’t recover between stresses.',
-    wavesAction: 'Documented it and adjusted the program as needed.',
+    wavesAction: 'Documented it for comparison next visit.',
     nextVisitPlan: 'Recheck fullness and color next visit.',
   },
 };

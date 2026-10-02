@@ -72,7 +72,7 @@ const { resolveSeriesChildIdentity } = require('../services/service-catalog-name
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
 const {
-  techFindingsCopyLive, stripCrownHealthClaims, hasTechFindingLines, filterCaptionsForCustomer,
+  techFindingsCopyLive, stripCrownHealthClaims, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer,
 } = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
@@ -24920,7 +24920,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // mirrors when photoObservationsBlock is non-empty; reused across every
     // response branch below (a cache hit reuses a prior generation built
     // from this SAME identity, so it carries the same grounding truth).
-    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
+    // Re-derived from the technician-filtered captions once grounding is known.
+    let photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -25223,6 +25224,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
     // leaves no scores, but the technician's own findings still ground the
     // report (grounding.techFindings exists only while the gate is on).
+    // GATE_TS_TECH_FINDINGS_COPY: the photo text the writer may use, filtered
+    // BEFORE the input gate below so captions withheld by the technician's
+    // decisions can never hold that gate open on their own.
+    let promptPhotoCaptions = cappedPhotoCaptions;
+    let promptPhotoSummary = photoSummaryText;
+    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
+      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
+      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
+      // The summary was written about the photos as a whole: a replaced finding
+      // withdraws it, and the crown strip still applies.
+      promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
+    }
+    photoGroundingUsed = promptPhotoCaptions.length > 0;
     const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
@@ -25236,7 +25250,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       || hasValidLawnAssessment
       || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
-      || cappedPhotoCaptions.length > 0;
+      || promptPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
     // promises (owner "ok yes add these" 2026-10-01): with the writer rules
     // on a grounded visit only. Fail-soft: no record, no mention. Resolved
@@ -25349,7 +25363,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // proceed on the photo block even when the assessment load itself
       // fails; only a TRUE assessment-only request (no captions either)
       // still 503s retryable.
-      && !cappedPhotoCaptions.length;
+      && !promptPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -25436,16 +25450,6 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         const block = bookedReasonBlock(booked, scrubCustomerText);
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
-    }
-    let promptPhotoCaptions = cappedPhotoCaptions;
-    let promptPhotoSummary = photoSummaryText;
-    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
-      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
-      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
-      // The summary was written about the photos as a whole: a replaced finding
-      // withdraws it, and the crown strip still applies.
-      const replacedAny = techDecisions.some((f) => f.action === 'hidden' || (f.action === 'edit' && f.detail));
-      promptPhotoSummary = replacedAny ? '' : stripCrownHealthClaims(photoSummaryText);
     }
     const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);
     const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
