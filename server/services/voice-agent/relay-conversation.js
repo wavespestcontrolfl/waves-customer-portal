@@ -2339,6 +2339,9 @@ class RelayConversation {
       // legs shows N distinct values here, one per leg.
       segmentGeneration: this.sessionGeneration != null ? this.sessionGeneration : null,
       promptAt,
+      // Wall clock of the same instant: pairs this turn with Voice Insights'
+      // prompt_sent (relay-insights.joinTurnStats). Never used for spans.
+      promptWallAt: Date.now(),
       callerSpeechStoppedAt: stoppedAt != null && promptAt - stoppedAt <= CALLER_STOP_STALE_MS ? stoppedAt : null,
       loopStartAt: null,
       firstTokenAt: null,
@@ -2348,6 +2351,7 @@ class RelayConversation {
       modelMs: 0,
       toolMs: 0,
       toolCount: 0,
+      tools: [], // { name, ms, ok } per call, in order — names only, never input
       rounds: 0,
       effort: this._stampedEffort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
@@ -3149,7 +3153,8 @@ class RelayConversation {
       const outcome = { name: block.name, ok: false };
       invocationCtx.toolOutcome = outcome;
       const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
-      stat.toolMs += now() - toolStartAt;
+      const toolMs = now() - toolStartAt;
+      stat.toolMs += toolMs;
       stat.toolCount += 1;
       // ok = the tool answered without failing (a timeout / in-flight
       // refusal / caught failure is not a success — the handoff card
@@ -3159,6 +3164,7 @@ class RelayConversation {
       if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
       this._toolOutcomes.push(outcome);
       if (!sentinel) outcome.ok = toolOk; // a timeout must not overwrite a later confirmed result
+      if (Array.isArray(stat.tools)) stat.tools.push({ name: block.name, ms: Math.round(toolMs), ok: toolOk });
       this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
       this._clearedFailures.tool ||= toolOk;
       results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
@@ -3933,7 +3939,7 @@ class RelayConversation {
         // there was nothing said worth recording.
         // Turns still waiting on a speaker event log now (firstAudio=n/a).
         for (const s of this._turnStats) this._finishTurn(s);
-        const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats, composeRelayTranscriptSql } = require('./relay-transcript');
+        const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats, storedTurnStats, composeRelayTranscriptSql } = require('./relay-transcript');
         const capturedLead = this.leadCaptured && !this._noLeadCreated;
         const transcriptUpdate = deferTranscript ? null : buildTranscriptUpdate({
           turns: this._transcript,
@@ -3946,6 +3952,7 @@ class RelayConversation {
           startedAt: this._startedAt,
           latency: summarizeTurnStats(this._turnStats, this._eventsTelemetry()),
           versions: this._versionStamps(),
+          turnStats: storedTurnStats(this._turnStats),
         });
         // PR 2B (codex r3 P2): on a reconnected call the summary covers the
         // WHOLE call — the earlier legs' caller lines ahead of this leg's —

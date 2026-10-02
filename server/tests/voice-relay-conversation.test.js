@@ -489,11 +489,14 @@ describe('RelayConversation — explicit end after capture', () => {
       IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
     });
     const convo = new IsolatedConvo({ callSid: 'CA-model-time', from: '+19415551234', send: jest.fn() });
-    stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, timedOut: false, agentEntries: [] };
+    stat = { turn: 1, promptAt: 0, firstTokenAt: null, firstSendAt: null, modelMs: 0, toolMs: 0, toolCount: 0, tools: [], rounds: 0, timedOut: false, agentEntries: [] };
     convo._currentTurn = stat;
     await convo._runLoop('when can you come').catch(() => {});
     expect(stat.rounds).toBe(2);
     expect(stat.toolCount).toBe(1);
+    // PR 0a: each tool call is timed on its own (name + ms + ok), so the turn
+    // timing report can say WHICH lookup was slow, not just the total.
+    expect(stat.tools).toEqual([{ name: 'get_availability', ms: expect.any(Number), ok: true }]);
     expect(firstStamp).not.toBeNull();
     expect(stat.firstTokenAt).toBe(firstStamp); // round 2's first token did not overwrite it
     expect(stampRound).toBe(1); // stamped by round 1's tool_use block, not deferred to the text round

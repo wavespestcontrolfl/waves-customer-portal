@@ -272,7 +272,7 @@ function buildCallSummary({ modelSummary, turns = [], reason, leadCaptured } = {
  * Never throws: a composition failure returns null and the reconcile proceeds
  * with the original outcome/duration columns.
  */
-function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCaptured = false, reserviceFiled = false, callSid, model, startedAt = null, latency, versions } = {}) {
+function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCaptured = false, reserviceFiled = false, callSid, model, startedAt = null, latency, versions, turnStats = null } = {}) {
   try {
     const transcription = buildTranscriptText(turns);
     if (!transcription && !clean(modelSummary, MAX_SUMMARY_CHARS)) return null;
@@ -306,6 +306,9 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCa
         // attributable to the exact model / prompt / profile that spoke.
         latency: latency || null,
         versions: versions || null,
+        // Per-turn timings (no text), joined later with Voice Insights'
+        // per-turn timeline by server/scripts/voice-relay-turn-timing.js.
+        turn_stats: turnStats,
       }),
       call_summary: buildCallSummary({ modelSummary, turns, reason, leadCaptured }),
       // ⚠️ `processing_status` IS DELIBERATELY NOT WRITTEN HERE.
@@ -435,8 +438,10 @@ function countBy(values) {
 const STORED_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 /** Numeric timing observations only; live stats also contain raw utterance objects. */
+const MAX_STORED_TOOLS_PER_TURN = 8;
+
 function storedTurnStats(stats = []) {
-  const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
+  const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'promptWallAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
     'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount', 'segmentGeneration'];
   const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut', 'modelSwitched'];
   return stats.map((turn) => ({
@@ -445,6 +450,10 @@ function storedTurnStats(stats = []) {
     effort: STORED_EFFORTS.has(turn.effort) ? turn.effort : null,
     renderer: ['block', 'stream-v1'].includes(turn.renderer) ? turn.renderer : null,
     playedSource: ['assumed', 'interrupt_truncation', 'twilio_event'].includes(turn.playedSource) ? turn.playedSource : null,
+    // Per-call tool timing (Sandy PR 0a): name, duration, ok — never input.
+    tools: (Array.isArray(turn.tools) ? turn.tools : []).slice(0, MAX_STORED_TOOLS_PER_TURN)
+      .filter((t) => t && typeof t.name === 'string' && Number.isFinite(t.ms))
+      .map((t) => ({ name: t.name.slice(0, 64), ms: Math.round(t.ms), ok: t.ok === true })),
   }));
 }
 
