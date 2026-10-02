@@ -119,8 +119,11 @@ function scrub(value, max = 240) {
 // THE egress scrubber: every string that leaves either tool (any free-text column, a reason built from row data, a
 // payer or customer name) passes through it once, at the single exit (executeBillingReaderTool), so a field added
 // later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
+const UUID_IN_TEXT_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
 function scrubEgress(value) {
-  if (typeof value === 'string') return value.replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]');
+  // Record ids (UUIDs) pass through untouched, so a digit-heavy id still works in the follow-up read; the text
+  // around them is masked.
+  if (typeof value === 'string') return value.split(UUID_IN_TEXT_RE).map((part, at) => (at % 2 ? part : part.replace(EMAIL_RE, '[email]').replace(LONG_DIGITS_RE, '[number]'))).join('');
   if (Array.isArray(value)) return value.map(scrubEgress);
   if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner)]));
   return value;

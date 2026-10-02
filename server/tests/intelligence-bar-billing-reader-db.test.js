@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let L; let M; let N;
   const inv = {};
   const tokens = [];
 
@@ -144,6 +144,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await db('payments').insert({ customer_id: L, payer_id: leakPayer.id || leakPayer, payment_method_id: leakMethod.id || leakMethod, payment_date: day(0), amount: 5, status: 'paid', processor: TINY, card_brand: MID,
       payment_method_type: MID, refund_status: MID, metadata: json({ invoice_id: leakInvoice.id, payment_method: LEAK }) });
     await db('payment_plans').insert({ customer_id: L, invoice_id: leakInvoice.id, total_balance: 20, payment_amount: 5, payment_frequency: MID, status: MID, plan_start_date: day(0), next_payment_date: day(7) });
+    // Digit-heavy record ids must survive the egress scrubber (it would read 16 digits as a card number).
+    N = '98765432-9876-4987-8987-987654321098';
+    await db('customers').insert({ id: N, first_name: `Numeric${run}`, last_name: `Ids${run}`, phone: `+1555${digits()}1`.slice(0, 12), address_line1: '100 Example Court' });
+    await invoice('n_numeric', N, { id: '12345678-1234-4123-8123-123456789012', total: 12 });
     // More payment plans than the history shows.
     M = await customer(`Plans${run}`, `Many${run}`);
     const manyPlans = await invoice('m_plans', M, { total: 70 });
@@ -469,6 +473,16 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.recorded_payments[0].funded_by_payer.name).toContain('[email]');
     expect(detail.payment_plan.active).toBeNull();
     expect(detail.payment_plan.history[0].payment_frequency).toContain('[email]');
+  });
+
+  test('egress keeps digit-heavy record ids intact, so a listed id works in the follow-up read', async () => {
+    const list = await read('get_customer_invoices', { customer_id: N });
+    expect(list.customer.id).toBe(N);
+    expect(list.invoices[0].id).toBe('12345678-1234-4123-8123-123456789012');
+    const detail = await read('get_invoice_detail', { invoice_id: list.invoices[0].id });
+    expect(detail.error).toBeUndefined();
+    expect(detail.invoice.id).toBe('12345678-1234-4123-8123-123456789012');
+    expect(detail.customer.id).toBe(N);
   });
 
   test('payment-plan history is bounded with a truncation flag and an unknown warning', async () => {
