@@ -315,7 +315,7 @@ function shoutedSentence(sentence) {
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
-const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|into|inside|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?|house|home|unit|apartment|condo|building))\b/i;
 // So is a sentence about working a gate, door or lock ("blue works at the
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
@@ -324,8 +324,19 @@ const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|usi
 // Judged on the whole sentence, never per clause: a fronted or pronoun-linked
 // access point ("For the side gate, use blue…", "The side gate is on the left
 // and blue opens it") must still drop it.
+// "combination of …" passes ACCESS_SENTENCE_RE as pest talk ("a combination
+// of ants and roaches"), but beside any access point in the same sentence
+// ("blue is the combination of the side gate") it is a credential (Codex r11).
+// combo / combination is an access word except as "a combination of <pest>"
+// (context-aggregator.js COMBINATION_NOUN, Codex r13); beside any access
+// point in the same sentence it is one regardless (Codex r11).
+const COMBINATION_CREDENTIAL_RE = new RegExp(`\\b${ContextAggregator.COMBINATION_NOUN}\\b`, 'i');
+const COMBINATION_WORD_RE = /\b(?:combo|combination)s?\b/i;
+const COMBINATION_LOCK_RE = /\b(?:padlocks?|lock\s*box(?:es)?|sheds?)\b/i;
 const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
-  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence));
+  || COMBINATION_CREDENTIAL_RE.test(sentence)
+  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence))
+  || (COMBINATION_WORD_RE.test(sentence) && (ACCESS_POINT_RE.test(sentence) || COMBINATION_LOCK_RE.test(sentence)));
 // And a sentence reaches the writer only when it talks about pests or the
 // signs they leave: scheduling, thanks, a bare reply, and any other way of
 // phrasing an access detail ("blue works at the side gate") never do.
@@ -346,9 +357,16 @@ const CANONICAL_PEST_RE = new RegExp(`\\b(?:${[...new Set(PEST_TARGET_SUGGESTION
 // termites, and what draws pests in.
 const CONDITION_TALK_RE = /\b(?:standing\s+water|pool(?:s|ing)?\s+(?:of\s+)?water|water\s+(?:is\s+)?(?:pooling|collecting|standing)|puddles?|buckets?|saucers?|containers?|gutters?|downspouts?|breed(?:ing|s)?|soffits?|vents?|eaves?|attic|crawl\s*space|roof(?:line)?|rafters?|screens?|loose|torn|ripped|broken|rott?(?:ed|ing|en)?|wood\s+damage|soft\s+wood|leak(?:s|ing)?|moisture|damp|mulch|overgrown|debris|clutter|trash|garbage|compost|pet\s+food|bird\s*seed)\b/i;
 const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.test(sentence) || CONDITION_TALK_RE.test(sentence);
-function scrub(text) {
+// Lawn talk, for a caller that opts in with { lane: 'lawn' } (the re-service
+// report card on a lawn callback). Same access-detail and credential
+// protections; only the relevance test widens. Default callers are unchanged.
+const LAWN_TALK_RE = /\b(?:lawn|grass|turf|sod|yard|weeds?|weedy|crabgrass|dollarweed|clover|sedge|nutsedge|brown(?:ing)?|yellow(?:ing)?|dead|dying|patch(?:es|y)?|spots?|thin(?:ning)?|bare|fungus|fungal|mushrooms?|disease|chinch|grubs?|armyworms?|webworms?|mole\s*crickets?|fertiliz\w*|sprinklers?|irrigation|watering)\b/i;
+function scrub(text, { lane } = {}) {
+  const relevant = lane === 'lawn'
+    ? (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence)
+    : pestTalk;
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !accessSentence(sentence) && pestTalk(sentence))
+    .filter((sentence) => !accessSentence(sentence) && relevant(sentence))
     .map((sentence) => {
       const shouted = shoutedSentence(sentence);
       return sentence.replace(/\S+/g, (word) => {
