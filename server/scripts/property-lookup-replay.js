@@ -36,6 +36,7 @@
 //   county_unknown               no county on the row or from the audit, and none of the serviced
 //                                counties has a parcel at the point (or no coordinates)
 //   no_parcel_at_point           county known, no parcel at the stored point
+//   point_lookup_unsupported     county has no point layer (Hillsborough): inconclusive
 //
 // The stored lat/lng is the geocode point but its location_type is not
 // stored; the replay assumes ROOFTOP (`--precision=interpolated` replays the
@@ -170,7 +171,14 @@ function buildSelectionQuery(args) {
   if (args.status === 'no_parcel') {
     where.push(`last_attempt_status = ${bind('no_parcel')}`);
   } else if (args.status === 'all-failed') {
-    where.push('parcel_id IS NULL');
+    // parcel_id is filled only from a GIS parcel; a lookup the PAO address
+    // search resolved keeps it null but carries the parcel on the record —
+    // that is a success, not a failure.
+    where.push(
+      'parcel_id IS NULL',
+      "COALESCE(property_record->'_raw'->>'parcelId', '') = ''",
+      "COALESCE(last_attempt_status, '') <> 'resolved'",
+    );
   } else if (args.status === 'sample-clean') {
     // Resolved = a parcel on the row AND a stored record (stub rows have none).
     where.push('parcel_id IS NOT NULL', 'property_record IS NOT NULL');
@@ -197,7 +205,7 @@ function buildSelectionQuery(args) {
   ) AS snapshot
 FROM property_lookups
 WHERE ${where.join('\n  AND ')}
-ORDER BY ${sample ? 'random()' : 'created_at DESC'}
+ORDER BY ${sample ? 'random()' : 'COALESCE(last_attempt_at, created_at) DESC'}
 LIMIT ${bind(limit)}`;
   return { text, values };
 }
@@ -323,6 +331,11 @@ async function replayRow(row, deps, opts = {}) {
   out.countyUsed = countyHint;
   if (geo.lat === null || geo.lng === null) {
     out.point = { status: 'skipped', reason: 'no_coordinates', errors: [] };
+  } else if (countyHint && deps.pointLookupCounties && !deps.pointLookupCounties.has(countyHint)) {
+    // The county module answers situs searches only for this county (no
+    // point layer): no point query is made, so it is inconclusive — never a
+    // "no parcel at the point" miss.
+    out.point = { status: 'skipped', reason: 'point_lookup_unsupported_county', errors: [] };
   } else {
     const pointDiag = { errors: [] };
     let parcel = null;
@@ -381,8 +394,13 @@ function classifyReplay(r) {
   if (audit.status === 'ran' && audit.streetExists === false) return 'address_text_miss';
   if (audit.status === 'ran' && audit.streetExists === true && audit.hasExactMatch === false) return 'number_not_on_roll';
   if (point.status === 'dropped') return `point_parcel_dropped:${point.dropReason || 'unknown'}`;
+  if (point.status === 'skipped' && point.reason === 'point_lookup_unsupported_county') return 'point_lookup_unsupported';
   if (!r.countyUsed) return 'county_unknown';
   return 'no_parcel_at_point';
+}
+
+function normalizeParcelId(id) {
+  return String(id ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
 function finalizeResult(r) {
@@ -398,7 +416,11 @@ function finalizeResult(r) {
     parcelRecovered,
     // A row the live lookup resolved that the replay can no longer match: the
     // no-regression signal for sample-clean runs.
-    regression: storedResolved && !matched,
+    // Same parcel, not just "some match": a guard or geometry change that
+    // keeps a DIFFERENT parcel, or an audit hit with no point parcel, is a
+    // regression on the clean side.
+    regression: storedResolved && !(matched && r.point?.status === 'kept'
+      && normalizeParcelId(r.point.parcelId) === normalizeParcelId(r.storedParcelId)),
     expectOk,
   };
 }
@@ -589,6 +611,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     lookupCountyParcelByPoint: countyGis.lookupCountyParcelByPoint,
     parcelGisPrecision: aiLookup._private.parcelGisPrecision,
     applyGisParcelGuards: aiLookup._private.applyGisParcelGuards,
+    pointLookupCounties: new Set(Object.keys(countyGis._private.COUNTY_LAYERS)),
   };
 
   const results = await runReplay(rows, deps, {

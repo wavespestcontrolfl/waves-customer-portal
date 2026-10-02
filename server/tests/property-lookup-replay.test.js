@@ -50,7 +50,7 @@ describe('buildSelectionQuery', () => {
     expect(text).toMatch(/FROM property_lookups/);
     expect(text).toMatch(/COALESCE\(last_attempt_at, created_at\) >= NOW\(\) - \$1::interval/);
     expect(text).toMatch(/last_attempt_status = \$2/);
-    expect(text).toMatch(/ORDER BY created_at DESC/);
+    expect(text).toMatch(/ORDER BY COALESCE\(last_attempt_at, created_at\) DESC/);
     expect(text).toMatch(/LIMIT \$3/);
     expect(values).toEqual(['90 days', 'no_parcel', 500]);
   });
@@ -66,6 +66,9 @@ describe('buildSelectionQuery', () => {
   test('all-failed filters on a missing parcel_id', () => {
     const { text, values } = replay.buildSelectionQuery(replay.parseArgs(['--status=all-failed', '--limit=7']));
     expect(text).toMatch(/parcel_id IS NULL/);
+    // Address-search successes carry the parcel on the record, not the column.
+    expect(text).toMatch(/property_record->'_raw'->>'parcelId'/);
+    expect(text).toMatch(/<> 'resolved'/);
     expect(text).not.toMatch(/last_attempt_status =/);
     expect(values).toEqual(['90 days', 7]);
   });
@@ -182,6 +185,23 @@ describe('classifyReplay', () => {
   });
 });
 
+describe('unsupported point-lookup county', () => {
+  test('a Hillsborough row is skipped, not a parcel miss', async () => {
+    const deps = {
+      auditAddressHouseNumber: jest.fn().mockResolvedValue(null),
+      lookupCountyParcelByPoint: jest.fn(),
+      parcelGisPrecision: () => 'rooftop',
+      applyGisParcelGuards: jest.fn(),
+      pointLookupCounties: new Set(['Manatee', 'Sarasota', 'Charlotte']),
+    };
+    const row = { normalized_address: '100 EXAMPLE ST, TAMPA, FL 33610', lat: '27.9', lng: '-82.4', county: 'Hillsborough', parcel_id: null, last_attempt_status: 'no_parcel', snapshot: {} };
+    const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
+    expect(deps.lookupCountyParcelByPoint).not.toHaveBeenCalled();
+    expect(r.point).toMatchObject({ status: 'skipped', reason: 'point_lookup_unsupported_county' });
+    expect(r.stop).toBe('point_lookup_unsupported');
+  });
+});
+
 describe('finalizeResult', () => {
   test('flags recovered parcels, regressions and expectation results', () => {
     const matchedPoint = { status: 'kept', errors: [] };
@@ -191,6 +211,12 @@ describe('finalizeResult', () => {
     expect(recovered).toMatchObject({ stop: 'matched_now', parcelRecovered: true, regression: false, expectOk: true });
     const regressed = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: none });
     expect(regressed).toMatchObject({ stop: 'no_parcel_at_point', regression: true, expectOk: null });
+    const sameParcel = replay.finalizeResult({ storedParcelId: '12-345', countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '12345', errors: [] } });
+    expect(sameParcel.regression).toBe(false);
+    const otherParcel = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '999', errors: [] } });
+    expect(otherParcel.regression).toBe(true);
+    const auditOnly = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit: { status: 'ran', streetExists: true, hasExactMatch: true, errors: [] }, point: none });
+    expect(auditOnly).toMatchObject({ stop: 'matched_now', regression: true });
     const prefix = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'dropped', dropReason: 'x', errors: [] }, expect: 'point_parcel_dropped' });
     expect(prefix.expectOk).toBe(true);
     const wrong = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: none, expect: 'matched_now' });
