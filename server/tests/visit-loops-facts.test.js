@@ -172,7 +172,7 @@ describe('lateAlert', () => {
     await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: seen });
     const q = seen.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'whereIn', (a) => a[0] === 'scheduled_date'));
     const got = [];
-    const stub = { whereIn: (...a) => { got.push(a); return stub; }, orWhereIn: (...a) => { got.push(a); return stub; } };
+    const stub = { whereIn: (...a) => { got.push(a); return stub; }, orWhereIn: (...a) => { got.push(a); return stub; }, orWhereExists: () => stub };
     q.ops.filter((o) => o.op === 'where' && typeof o.args[0] === 'function').forEach((o) => o.args[0](stub));
     expect(got).toEqual([['status', ['on_site', 'completed']], ['track_state', ['on_property', 'complete']]]);
   });
@@ -219,12 +219,26 @@ describe('lateAlert', () => {
     const live = todayRow({ id: 'visit-2', visit_id: 'g1', status: 'confirmed', service_type: 'Lawn Care' });
     const conn = fakeConn({
       dispatch_alerts: () => [alertRow({ payload }, { visit_id: 'g1', status: 'cancelled' })],
-      scheduled_services: (ops) => (hasOp(ops, 'whereIn', (x) => x[0] === 'status' && x[1].includes('pending')) && hasOp(ops, 'whereIn', (x) => x[0] === 'visit_id') ? [live] : []),
+      scheduled_services: (ops) => (hasOp(ops, 'whereIn', (x) => x[0] === 'ss.status' && x[1].includes('pending')) && hasOp(ops, 'whereIn', (x) => x[0] === 'ss.visit_id') ? [live] : []),
     });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn })).lateAlert).toMatchObject({ visitId: 'visit-2', visitType: 'Lawn Care' });
     // no live member left: no delay
     const none = fakeConn({ dispatch_alerts: () => [alertRow({ payload }, { visit_id: 'g1', status: 'cancelled' })], scheduled_services: () => [] });
     expect((await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn: none })).lateAlert).toBeNull();
+  });
+
+  test('the live-member hand-off excludes uncleared street-level holds; a started stop counts a service record', async () => {
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 2, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
+    const conn = fakeConn({ dispatch_alerts: () => [alertRow({ payload }, { visit_id: 'g1', status: 'cancelled' })], scheduled_services: () => [] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    const handOff = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'whereIn', (x) => x[0] === 'ss.visit_id'));
+    expect(hasOp(handOff.ops, 'whereNotExists')).toBe(true);
+    // the started-stop read: status, tracker OR a service record
+    const started = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'whereIn', (x) => x[0] === 'scheduled_date'));
+    const inner = [];
+    const b = new Proxy({}, { get: (_t, prop) => (...args) => { inner.push(prop); return b; } });
+    started.ops.find((o) => o.op === 'where' && typeof o.args[0] === 'function').args[0](b);
+    expect(inner).toEqual(expect.arrayContaining(['whereIn', 'orWhereIn', 'orWhereExists']));
   });
 
   test('an alert on an uncleared street-level hold is excluded in the query', async () => {

@@ -159,8 +159,11 @@ async function liveRepresentatives(conn, alerts) {
   const gone = (r) => !LIVE_STATUSES.includes(r.status) && !ATTENDED_STATUSES.includes(r.status);
   const visitIds = [...new Set(alerts.filter((r) => gone(r) && r.visit_id).map((r) => String(r.visit_id)))];
   if (!visitIds.length) return alerts;
-  const members = ((await conn('scheduled_services').whereIn('visit_id', visitIds)
-    .whereIn('status', PRE_ARRIVAL_STATUSES).select(...VISIT_COLUMNS)) || [])
+  // never an uncleared street-level hold (never dispatched — the alert query's rule)
+  const members = ((await conn('scheduled_services as ss').whereIn('ss.visit_id', visitIds)
+    .whereIn('ss.status', PRE_ARRIVAL_STATUSES)
+    .whereNotExists(function unclearedAddressHold() { require('./street-level-hold').heldVisitSubquery(this, 'ss'); })
+    .select(...VISIT_COLUMNS.map((c) => `ss.${c}`))) || [])
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
   return alerts.map((alert) => {
     if (!gone(alert) || !alert.visit_id) return alert;
@@ -253,7 +256,9 @@ async function startedStopKeys(conn, customerId, rows, { arrivedOnly = false } =
   const trackStates = arrivedOnly ? ['on_property', 'complete'] : ['en_route', 'on_property', 'complete'];
   const advanced = await conn('scheduled_services').where({ customer_id: customerId })
     .whereIn('scheduled_date', dates)
-    .where((b) => b.whereIn('status', statuses).orWhereIn('track_state', trackStates))
+    // a service record is definitive completion, whatever the lagging status says
+    .where((b) => b.whereIn('status', statuses).orWhereIn('track_state', trackStates)
+      .orWhereExists(function recorded() { this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id'); }))
     .select('visit_id', 'technician_id', 'scheduled_date', 'window_start');
   return new Set((advanced || []).map(stopKey).filter(Boolean));
 }

@@ -236,6 +236,9 @@ describe('live-webhook gratitude drafter boundary', () => {
     // routed to a person whatever the classified intent's rung, carrying the commitment it was grounded on
     expect(result.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ intent: 'general_customer_sms_needs_review', requireReview: true }));
     expect(result.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ visitLoopCommitmentIds: ['cc-1'] }));
+    // the context is reloaded WITH live ETA, so a status line has its snapshot evidence
+    const { getContextForCustomer } = require('../services/context-aggregator');
+    expect(getContextForCustomer.mock.calls.map((c) => c[1].includeLiveEta)).toEqual([false, true]);
   });
 
   test('gate on + an open loop + an empty model reply: revised, never passed as "no reply warranted"', async () => {

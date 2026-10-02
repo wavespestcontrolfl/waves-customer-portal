@@ -5776,19 +5776,22 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Codex round-16 P2: gate-off must be byte-identical — the live-row query
     // changes the upcoming list, so the opt-in also requires the release gate.
     const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
-    const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta, includeVisitLoops: true })
-      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta, includeVisitLoops: true });
+    const loadContext = (liveEta) => (customer
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: liveEta, includeVisitLoops: true })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: liveEta, includeVisitLoops: true }));
+    let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
     // pure thank-you — the gate-on rules require the reply to address it, which the
     // gratitude lane's fixed reply cannot. It takes the ordinary operational path
-    // under its classified intent (context stays without LIVE ETA, so the reply
-    // cannot make a live-status claim).
+    // under its classified intent, with the context RELOADED with LIVE ETA: the
+    // upcoming list can still show a LIVE STATUS, and a status line drafted from it
+    // needs the live snapshot evidence the send-time guard checks.
     let openLoopThanks = false;
     if (gratitudeCandidate && visitLoopsNeedAnswer(context)) {
       gratitudeCandidate = false;
       intent = classifiedIntent;
+      context = await loadContext(gateEnvValue('GATE_SMS_REAL_ANSWERS'));
       // A plain "Thanks!" classifies no_reply_needed (a shadow rung): route it to a
       // person explicitly so the open loop is never answered with silence.
       openLoopThanks = true;
