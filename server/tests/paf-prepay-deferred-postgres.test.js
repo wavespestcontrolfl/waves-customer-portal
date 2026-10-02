@@ -504,6 +504,17 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await release()).toMatchObject({ released: 1 });
     });
 
+    it('a crashed closeout that already stamped its visit still reaches the office when the year dies (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      const attemptId = randomUUID();
+      await trx('service_completion_attempts').insert({ id: attemptId, service_id: f.parentId, idempotency_key: `k-${attemptId}`, status: 'side_effects_running',
+        updated_at: new Date(Date.now() - 30 * 60 * 1000) });
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
     it('an abandoned closeout attempt past the stale window never blocks the release (Codex r15)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);

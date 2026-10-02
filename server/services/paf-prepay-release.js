@@ -101,10 +101,15 @@ async function performedVisitCandidates(estimateId, customerId) {
     // Completion's own billing must have finished first: a completion still
     // resuming its side effects decides the visit's bill from the deferred
     // hold, which a release (then an active term) would pull out from under it.
+    // An attempt abandoned past the stale window (a crash) no longer hides its
+    // visit: the same window planHasUnfinishedCompletion uses, so a held visit
+    // a crashed closeout already stamped still releases the year or reaches
+    // the office (pre-push audit P1).
     .whereNotExists(function unfinishedCompletion() {
       this.select(db.raw('1')).from('service_completion_attempts as a')
         .whereRaw('a.service_id = s.id')
-        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES);
+        .whereIn('a.status', UNFINISHED_COMPLETION_STATUSES)
+        .where('a.updated_at', '>=', new Date(Date.now() - require('./completion-attempts').STALE_SIDE_EFFECTS_MS));
     })
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*');
