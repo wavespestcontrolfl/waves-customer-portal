@@ -1583,7 +1583,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     for (const product of Object.values(currentProcedure.fieldGuide.products)) {
       if (!product.mix) continue;
       const name = product.name.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : product.name;
-      const row = resolveCatalogProductForName(name, catalog, { exactOnly: true });
+      const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
+        || fieldGuideLineProduct(name, products);
       const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
       if (blocks.length || !row?.label_verified_at || !verdict || verdict.verdict !== 'ok') {
         product.mix = null;
@@ -1877,6 +1878,24 @@ function buildPerGallonAmount(rate, gallons) {
   return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', reason: null };
 }
 
+// The month guide names products by their short label ("Mainspring GNL",
+// "Floramite SC") while the catalog carries the full name ("Mainspring GNL
+// Insecticide", "Floramite SC/LS 8 oz"). When the exact lookup misses, reuse
+// the row this visit's protocol lines already resolved, but only when exactly
+// one of them begins with the guide label. Anything else stays withheld.
+function fieldGuideLineProduct(name, products) {
+  const label = String(name || '').trim().toLowerCase();
+  if (!label) return null;
+  const byId = new Map();
+  for (const product of products || []) {
+    const full = String(product?.name || '').toLowerCase();
+    if (product?.id == null || !full.startsWith(label)) continue;
+    if (full.length > label.length && !/[\s/(,-]/.test(full[label.length])) continue;
+    byId.set(product.id, product);
+  }
+  return byId.size === 1 ? [...byId.values()][0] : null;
+}
+
 module.exports = {
   jobCardEnabled,
   buildJobCard,
@@ -1893,5 +1912,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
+  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
 };

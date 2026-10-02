@@ -3,7 +3,7 @@ import { Select } from '../ui';
 import { formatMeasuredAmount, formatMeasuredRange } from '../../lib/mix-amount';
 
 const TANKS = [{ id: 'bg', gallons: 1 }, { id: 'flowzone', gallons: 4 }, { id: 'rig', gallons: 110 }];
-const heading = 'text-14 md:text-11 font-medium text-ink-tertiary';
+const heading = 'text-14 font-medium text-ink-tertiary';
 
 function ProductDetails({ product, equipment, mode, tank, onTankChange }) {
   const [localChosen, setLocalChosen] = useState(product.equipment?.[0] || '');
@@ -59,7 +59,7 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
     {guide.decision && <p className="mb-5 text-ink-secondary">{guide.decision}</p>}
     {[['routine', 'Routine when due'], ['conditional', 'If you find']].map(([section, title]) => guide[section].length > 0 && <section key={section} className="mb-6">
       <h3 className={`${labelClass} mb-2`}>{title}</h3>
-      {!tech && <div className="hidden md:grid grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] gap-3 py-2 border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 text-11 text-ink-tertiary">
+      {!tech && <div className="hidden md:grid grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] gap-3 py-2 border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 text-14 text-ink-tertiary">
         <span>Product</span><span>B&amp;G 1 gal</span><span>FlowZone 4 gal</span><span>Rig 110 gal</span>
       </div>}
       {guide[section].map((row, i) => {

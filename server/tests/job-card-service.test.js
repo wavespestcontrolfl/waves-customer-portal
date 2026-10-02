@@ -2035,3 +2035,24 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
   });
 });
+
+describe('field guide mix check reuses the visit line product', () => {
+  const { fieldGuideLineProduct } = require('../services/job-card')._test;
+  const mainspring = { id: 'ms', name: 'Mainspring GNL Insecticide' };
+  const floramite = { id: 'fl', name: 'Floramite SC/LS 8 oz' };
+
+  test('a short guide label resolves to the one visit line that begins with it', () => {
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, floramite])).toBe(mainspring);
+    expect(fieldGuideLineProduct('Floramite SC', [mainspring, floramite])).toBe(floramite);
+  });
+
+  test('no match, a mid-word prefix, or two candidates stays unresolved', () => {
+    expect(fieldGuideLineProduct('Kontos', [mainspring])).toBeNull();
+    expect(fieldGuideLineProduct('Mainspring G', [mainspring])).toBeNull();
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, { id: 'ms2', name: 'Mainspring GNL 1 qt' }])).toBeNull();
+  });
+
+  test('the same row listed on two lines still counts once', () => {
+    expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, mainspring])).toBe(mainspring);
+  });
+});
