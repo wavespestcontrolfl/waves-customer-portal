@@ -852,6 +852,8 @@ describe('on-site contact opt-in ask', () => {
     // Only a phone the V2 extraction itself captured, on the SAME V2 party that
     // carries the on-site flags, may be asked.
     expect(src).toContain('.filter((c) => c && onSiteOptinAskTrigger(c))');
+    // The rail read runs only when the secondary-contact pass can run (kill switch respected).
+    expect(src).toMatch(/const optinRailLive = \(process\.env\.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId\s*&& callSecondaryContacts\.some\(onSiteOptinAskTrigger\)\)/);
     expect(src).toContain('const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));');
     expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry });');
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");

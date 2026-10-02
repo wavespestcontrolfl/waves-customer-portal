@@ -13748,7 +13748,11 @@ const CallRecordingProcessor = {
     };
     // The opt-in ask needs a LIVE rail (gate on + request template active);
     // dark = nobody can be asked. Read once per call, only when it can matter.
-    const optinRailLive = callSecondaryContacts.some(onSiteOptinAskTrigger)
+    // Read only when the secondary-contact pass can run at all (same gate,
+    // customer and contacts as the persistence block): with the kill switch
+    // off, a template-read failure must not fail the call.
+    const optinRailLive = (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId
+      && callSecondaryContacts.some(onSiteOptinAskTrigger))
       ? await require('./recipient-optin').isOptinRailLive()
       : false;
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {

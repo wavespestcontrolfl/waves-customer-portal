@@ -284,6 +284,9 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     const dispatchSrc = src.slice(src.indexOf('async function dispatchRecipientOptins'));
     expect(dispatchSrc.indexOf("const asked = await visitAskState(claim.visitId, claim.customerId)")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
     expect(dispatchSrc).toContain("if (asked.state !== 'live') continue;");
+    // ...only while the row is still this claim's undispatched ask (a newer booking that rebound it owns the send).
+    expect(dispatchSrc).toContain(".where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending', visit_id: claim.visitId })");
+    expect(dispatchSrc.indexOf("if (!(await ownRow().first('phone_key'))) continue;")).toBeLessThan(dispatchSrc.indexOf('const result = await sendCustomerMessage({'));
     // A newer booked visit supersedes an undispatched ask still waiting on an earlier visit.
     expect(src).toContain('.whereNot({ visit_id: visitId });');
     // The visit is stored on the row (fresh claim and re-claim alike).
@@ -298,6 +301,8 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     // An office-review hold keeps the row pending (touched for rotation); a dead visit releases it.
     expect(sweepSrc).toContain("if (asked.state === 'wait') {");
     expect(sweepSrc).toContain("if (asked.state === 'dead') {");
+    // The sweep's wait / release writes are bound to its snapshot (same visit, undispatched).
+    expect(sweepSrc).toContain(".where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending', visit_id: row.visit_id })");
     expect(sweepSrc).toContain('visitId: row.visit_id || null }],');
     // An unreadable reconcile leaves the row pending (never released or re-sent on a guess).
     expect(sweepSrc).toContain('if (priorSendRow && priorSendRow.readFailed) continue;');

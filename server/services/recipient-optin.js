@@ -464,10 +464,15 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // visit cancelled / moved / under way since the claim releases the ask;
       // a hold or an unreadable check leaves it pending for the recovery sweep.
       if (claim.visitId) {
+        // The row must still be THIS claim's undispatched ask: a newer booking
+        // that superseded it (rebinding visit_id) owns the send now.
+        const ownRow = () => db('recipient_optin')
+          .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending', visit_id: claim.visitId })
+          .whereNull('dispatched_at');
+        if (!(await ownRow().first('phone_key'))) continue;
         const asked = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
         if (asked.state === 'dead') {
-          await db('recipient_optin').where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
-            .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+          await ownRow().update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         }
         if (asked.state !== 'live') continue;
       }
@@ -674,16 +679,18 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // address), kept waiting while the hold is under review, and released
       // to ask_failed once the visit is gone — never sent for a dead visit.
       const asked = row.visit_id ? await visitAskState(row.visit_id, row.customer_id) : { state: 'live', visit: null };
+      // Bound to the snapshot: the same visit, still undispatched — a
+      // concurrent booking that rebound the row to another visit (and may
+      // have sent its ask) is never touched.
+      const snapshotRow = () => db('recipient_optin')
+        .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending', visit_id: row.visit_id })
+        .whereNull('dispatched_at');
       if (asked.state === 'wait') {
-        await db('recipient_optin')
-          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
-          .update({ updated_at: new Date() }).catch(() => {});
+        await snapshotRow().update({ updated_at: new Date() }).catch(() => {});
         continue;
       }
       if (asked.state === 'dead') {
-        await db('recipient_optin')
-          .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
-          .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
+        await snapshotRow().update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         continue;
       }
       const { visit } = asked;
