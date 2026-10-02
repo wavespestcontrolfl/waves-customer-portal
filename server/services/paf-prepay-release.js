@@ -157,6 +157,20 @@ async function visitStillPerformed(visitId, heldTermId = null) {
   return !NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) && String(notes.backfill || '') !== 'true';
 }
 
+// The released / failed-charge visit, if it is still work the dead year held:
+// performed by its current closeout and still stamped with that year's term.
+// Any other performed visit the year still holds counts too: after a decline
+// later visits stay held, so the released one being paid another way does not
+// mean no work is owed (pre-push audit P1).
+async function stillHeldVisit(estimateId, invoiceId, visitId) {
+  const term = await db('annual_prepay_terms')
+    .where(invoiceId ? { prepay_invoice_id: invoiceId } : { source_estimate_id: estimateId }).first('id', 'customer_id')
+    || await db('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('id', 'customer_id');
+  if (!term) return null;
+  if (visitId && await visitStillPerformed(visitId, term.id)) return visitId;
+  return (await firstPerformedVisit(estimateId, term.customer_id, term.id))?.id || null;
+}
+
 async function releaseOne(row, now) {
   const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.status !== AWAITING || !job.invoice_id) return null;
@@ -316,13 +330,16 @@ async function reconcileJobAlerts(estimateId) {
       await close(chargeAlertKey(estimateId, round), 'The annual prepay invoice was closed unpaid.');
       // The customer comes from the held visit when the invoice row is gone,
       // so the office alert links to the customer (GitHub Codex #5567 r16).
-      const heldVisitId = job.performed_visit_id || job.released_for_visit_id || null;
+      // Only a visit still performed and still stamped by this year is work to
+      // bill: one re-closed paid another way, payer-billed or outside the
+      // coverage is not (GitHub Codex #5567 r18).
+      const heldVisitId = await stillHeldVisit(estimateId, job.invoice_id, job.performed_visit_id || job.released_for_visit_id || null);
       const heldCustomerId = job.customer_id
         || (heldVisitId ? (await db('scheduled_services').where({ id: heldVisitId }).first('customer_id'))?.customer_id : null)
         || null;
       await patchJob(estimateId, {
         charge_alert_closed_at: nowIso,
-        status: 'cancelled_after_visit',
+        status: heldVisitId ? 'cancelled_after_visit' : 'cancelled_before_visit',
         reason: `invoice_${invStatus || 'missing'}_after_failed_charge`,
         performed_visit_id: heldVisitId,
         ...(heldCustomerId ? { customer_id: heldCustomerId } : {}),
@@ -368,12 +385,13 @@ async function reconcileJobAlerts(estimateId) {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first('status');
     const invStatus = String(invoice?.status || '').toLowerCase();
     if (!invoice || DEAD_INVOICE_STATUSES.includes(invStatus)) {
+      const releasedHeldId = await stillHeldVisit(estimateId, job.invoice_id, job.released_for_visit_id);
       const releasedCustomerId = job.customer_id
         || (await db('scheduled_services').where({ id: job.released_for_visit_id }).first('customer_id'))?.customer_id || null;
       await patchJob(estimateId, {
-        status: 'cancelled_after_visit',
+        status: releasedHeldId ? 'cancelled_after_visit' : 'cancelled_before_visit',
         reason: `invoice_${invStatus || 'missing'}_after_release`,
-        performed_visit_id: job.released_for_visit_id,
+        performed_visit_id: releasedHeldId,
         ...(releasedCustomerId ? { customer_id: releasedCustomerId } : {}),
       }, (q) => q.whereRaw(`${JOB} ->> 'status' = ?`, [job.status]));
       return;
