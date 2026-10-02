@@ -213,18 +213,22 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // window only: status is deliberately NOT part of this gate, because the
 // status route's own terminal-transition logic must still see a same-status
 // retry on a cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1);
-// every handler keeps its stricter live-visit predicate for writes. 404 so an
-// id seen elsewhere confirms nothing. Admins pass.
+// every handler keeps its stricter live-visit predicate for writes. Admins pass.
 router.param('serviceId', async (req, res, next, serviceId) => {
   try {
     if (!isTechnicianRequest(req)) return next();
     const { techAccessCutoff } = require('../services/technician-visit-scope');
-    const owned = await db('scheduled_services')
+    const { dateOnly } = require('../services/visit-groups');
+    const row = await db('scheduled_services')
       .where('scheduled_services.id', serviceId)
-      .where('scheduled_services.technician_id', req.technicianId)
-      .where('scheduled_services.scheduled_date', '>=', techAccessCutoff())
-      .first('scheduled_services.id');
-    if (!owned) return res.status(404).json({ error: 'Service not found' });
+      .first('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date');
+    if (!row) return res.status(404).json({ error: 'Service not found' });
+    // This router's documented answer for a visit that exists but is not the
+    // caller's (lockOwnedLiveVisit, the rain-out/reschedule ownership tests):
+    // 403 service_not_assigned.
+    const assigned = String(row.technician_id || '') === String(req.technicianId || '')
+      && dateOnly(row.scheduled_date) >= techAccessCutoff();
+    if (!assigned) return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     return next();
   } catch (err) { return next(err); }
 });

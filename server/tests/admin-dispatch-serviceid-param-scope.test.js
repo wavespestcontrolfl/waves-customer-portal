@@ -44,7 +44,7 @@ function withServer(fn) {
 
 beforeEach(() => { jest.clearAllMocks(); mockRole = 'technician'; mockOwnedRow = null; });
 
-test('a technician reading /:serviceId/card-hold for a visit not assigned to them gets 404 before the handler', async () => {
+test('a technician reading /:serviceId/card-hold for a visit that does not exist gets 404 before the handler', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
     expect(res.status).toBe(404);
@@ -53,8 +53,18 @@ test('a technician reading /:serviceId/card-hold for a visit not assigned to the
   expect(mockCancelPreview).not.toHaveBeenCalled();
 });
 
+test("a technician reading another technician's visit gets the router's 403 service_not_assigned before the handler", async () => {
+  mockOwnedRow = { id: SERVICE, technician_id: 'tech-B', scheduled_date: new Date().toISOString().slice(0, 10) };
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/${SERVICE}/card-hold`);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+  });
+  expect(mockCancelPreview).not.toHaveBeenCalled();
+});
+
 test('a technician whose route includes the visit reaches the handler', async () => {
-  mockOwnedRow = { id: SERVICE };
+  mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10) };
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
     expect(res.status).not.toBe(404);
