@@ -42,8 +42,8 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import {
   STATION_TYPE_PROGRAM, TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas,
-  trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedFormTakesPlaces,
-  typedTreatmentAreaField, typedZeroStateRefusesBody,
+  termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
@@ -9511,6 +9511,12 @@ export function TypedFindingsSection({
   // whether the notes left it unclear (step 4). Null off.
   heardScore = null,
   scoreUnclear = false,
+  // Step 5: whether Generate fills this form from the notes (a notice
+  // question then says it is always a tap), and the record fields the visit
+  // itself filled ({ key: { value, source } }, a termite treatment's products,
+  // EPA numbers, gallons and traced feet). Off by default.
+  voiceFill = false,
+  sources = null,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9568,6 +9574,9 @@ export function TypedFindingsSection({
   const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f) || leftUnclear(f);
   // The words a field was filled from, while it still holds that value.
   const heardQuotes = (f) => (heard?.[f.key] && heard[f.key].value === values?.[f.key] ? heard[f.key].quotes : null);
+  // Where the visit filled a field from (its products or its trace), while it
+  // still holds that value.
+  const sourceOf = (f) => (sources?.[f.key]?.value && sources[f.key].value === values?.[f.key] ? sources[f.key].source : null);
   const primaryFields = visibleFields.filter(staysPrimary);
   const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
@@ -9612,8 +9621,14 @@ export function TypedFindingsSection({
         quotes={heardQuotes(field)}
         unclear={leftUnclear(field)}
         color={mutedColor}
-        ask={({ chips: "Pick what applies.", count: "Enter the number." })[field.type] || "Pick one."}
+        ask={({ chips: "Pick what applies.", count: "Enter the number.", text: "Type it in." })[field.type] || "Pick one."}
       />
+      {sourceOf(field) && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>{sourceOf(field)}</div>
+      )}
+      {voiceFill && field.tapOnly && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>Always a tap: never filled from the notes.</div>
+      )}
     </div>
   );
   return (
@@ -13094,6 +13109,9 @@ export function CompletionPanel({
   // count into findings/companion state; consumed by the invalidation
   // effect below the state declarations (codex r70).
   const stationAutoWroteRef = useRef(false);
+  // Set when the termite record fill (step 5, below) actually writes a field;
+  // consumed by the same invalidation effect.
+  const termiteRecordWroteRef = useRef(false);
   useEffect(() => {
     if (!stationFeatureOn) return;
     // While an AI report request is in flight, the payload snapshot must stay
@@ -13254,8 +13272,9 @@ export function CompletionPanel({
   // Runs on the commit that applied the write, so the invalidation sees the
   // same findings state the next generation payload would submit.
   useEffect(() => {
-    if (!stationAutoWroteRef.current) return;
+    if (!stationAutoWroteRef.current && !termiteRecordWroteRef.current) return;
     stationAutoWroteRef.current = false;
+    termiteRecordWroteRef.current = false;
     invalidateGeneratedReportOnTypedEdit();
   }, [findingsValues, companionState]);
   // The trapping section — primary OR companion, `trap_visit_type` can
@@ -14257,6 +14276,41 @@ export function CompletionPanel({
   // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
   // notes for a typed visit's own findings (the schedule row's flag).
   const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
+  // Fast Complete step 5: a termite treatment's state record fills from the
+  // visit's own products and trace (lib termiteRecordFromVisit), each field
+  // only while it is empty or still holds what was last filled this way, so
+  // a hand edit always wins (the station counts' rule). Never while an AI
+  // report is generating (its payload stays what the model saw); a write
+  // invalidates an untouched report like a typed edit.
+  const termiteRecord = useMemo(() => (
+    typedVoiceFill && service.completionProfile?.findingsType === "termite_treatment"
+      ? termiteRecordFromVisit({ products: selectedProducts, catalog: products, tracedFeet: tracedLinearFt })
+      : null
+  ), [typedVoiceFill, service.completionProfile?.findingsType, selectedProducts, products, tracedLinearFt]);
+  const termiteRecordAutoRef = useRef({});
+  useEffect(() => {
+    if (!termiteRecord || generating) return;
+    const lastAuto = { ...termiteRecordAutoRef.current };
+    const filled = Object.fromEntries(Object.entries(termiteRecord).map(([key, entry]) => [key, entry.value]));
+    // A field whose source went away (a product removed) clears while the
+    // fill still owns it.
+    const keys = [...new Set([...Object.keys(filled), ...Object.keys(lastAuto)])];
+    setFindingsValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of keys) {
+        const current = String(next[key] ?? "");
+        const value = filled[key] ?? "";
+        if ((current === "" || current === String(lastAuto[key] ?? "")) && current !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      if (changed) termiteRecordWroteRef.current = true;
+      return changed ? next : prev;
+    });
+    termiteRecordAutoRef.current = filled;
+  }, [termiteRecord, generating]);
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -20873,6 +20927,8 @@ export function CompletionPanel({
                 unclear={typedVoiceFill ? typedHeard?.unclear : null}
                 heardScore={typedVoiceFill ? typedHeard?.score : null}
                 scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+                voiceFill={typedVoiceFill}
+                sources={termiteRecord}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -23329,6 +23385,8 @@ export function CompletionPanel({
               unclear={typedVoiceFill ? typedHeard?.unclear : null}
               heardScore={typedVoiceFill ? typedHeard?.score : null}
               scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+              voiceFill={typedVoiceFill}
+              sources={termiteRecord}
             />
           )}
           {/* Companion sections — one typed form per companion schema,

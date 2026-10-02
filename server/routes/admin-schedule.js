@@ -5154,14 +5154,15 @@ async function loadProjectCompletionContextByServiceId(services) {
       typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
       // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
-      // opens a typed visit the reader reads in the Fast Complete sheet's
-      // report flow, its record read from the note, in place of the typed
-      // form (fastCompleteReportEnabled above stays off for typed forms). Not
-      // a combined service: its companion sections are required at
-      // completion and the sheet has none.
+      // opens a typed visit the sheet reads (visit-typed-facts.js
+      // sheetTypeFor) in the Fast Complete sheet's report flow, its record
+      // read from the note, in place of the typed form
+      // (fastCompleteReportEnabled above stays off for typed forms). Not a
+      // combined service: its companion sections are required at completion
+      // and the sheet has none.
       typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
         && require('../config/feature-gates').typedVoiceFillLive()
-        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null
+        && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
         && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.

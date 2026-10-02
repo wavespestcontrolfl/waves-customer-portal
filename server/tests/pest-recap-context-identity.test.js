@@ -210,6 +210,8 @@ describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)',
     ['is project-backed', { ...ROACH, projectBacked: true }],
     ['is a combined visit, whose companion sections the sheet has none of', { ...ROACH, companions: [{ type: 'rodent_bait_station' }] }],
     ['is a form the reader does not read', { category: 'tree_shrub', serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' }],
+    ['is a termite treatment, read on the office form only for now (step 5)', { category: 'termite', serviceKey: 'termite_trenching', findingsType: 'termite_treatment' }],
+    ['is a termite inspection, read on the office form only for now (step 5)', { category: 'inspection', serviceKey: 'termite_inspection', findingsType: 'termite_inspection' }],
     ['is untyped', { category: 'pest_control', serviceKey: 'pest_general_quarterly' }],
   ])('never for a visit that %s', async (_label, profile) => {
     process.env.GATE_TYPED_VOICE_FILL = 'true';
