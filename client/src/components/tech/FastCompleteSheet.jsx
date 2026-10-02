@@ -389,8 +389,11 @@ const SHEET_TITLES = {
   service: ['Complete service', 'Service complete'],
 };
 const INERT = { 'aria-hidden': true, inert: '' };
+// A re-service: the pest re-service itself, or a free callback booked under
+// a regular service key. Neither gets a pay link or a review ask.
+const isReserviceVisit = (visit) => visit?.serviceKey === 'pest_re_service' || visit?.isCallback === true;
 function sheetTitle(reportFlow, visit, done) {
-  return SHEET_TITLES[reportFlow && visit?.serviceKey !== 'pest_re_service' ? 'service' : 'reservice'][done ? 1 : 0];
+  return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
@@ -883,7 +886,7 @@ function ReportFlowForm({
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
-  const isReservice = ctx.visit?.serviceKey === 'pest_re_service';
+  const isReservice = isReserviceVisit(ctx.visit);
   const [form, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,

@@ -471,6 +471,16 @@ describe('complete and send', () => {
     expect(body).not.toHaveProperty('customerRecapMode');
   });
 
+  test('a callback booked under a regular service key is a re-service: no pay link, no review ask', async () => {
+    const request = makeRequest({ service: { ...REGULAR, isCallback: true } });
+    await openSheet(request);
+    expect(screen.getByRole('heading', { name: 'Complete re-service' })).toBeTruthy();
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0]).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
+  });
+
   test('a perimeter heard in the note waits for the trace, which gives the sprays their length', async () => {
     const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
     await openSheet(request);

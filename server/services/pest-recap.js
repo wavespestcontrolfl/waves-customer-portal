@@ -251,6 +251,10 @@ function recapServiceIdentity(svc, profile) {
     // schedule row (the tech Fast Complete sheet) can confirm this is
     // still the visit type it was opened for.
     serviceKey: profile?.serviceKey || null,
+    // A free callback booked under a regular service key: the Fast Complete
+    // report flow treats it as the re-service it is (no pay link, no review
+    // ask). Not part of the echoed visit identity.
+    isCallback: svc.is_callback === true,
   };
 }
 

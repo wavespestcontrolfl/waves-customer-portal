@@ -77,3 +77,11 @@ test('a visit stamp with an inline unit does not inherit the primary unit', asyn
   expect(result.service.address.line1).toBe('100 Example Court Unit 5');
   expect(result.service.address.line2).toBeNull();
 });
+
+// The Fast Complete report flow treats a free callback booked under a regular
+// service key as a re-service (no pay link, no review ask): the context says
+// so, and the flag never joins the visit identity the client echoes back.
+test('the context says whether the visit is a free callback', async () => {
+  expect((await buildRecapContext(visit.id, contextDb({ ...visit, is_callback: true }))).service.isCallback).toBe(true);
+  expect((await buildRecapContext(visit.id, contextDb(visit))).service.isCallback).toBe(false);
+});
