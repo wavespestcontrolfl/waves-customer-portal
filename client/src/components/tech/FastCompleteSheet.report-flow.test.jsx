@@ -498,8 +498,17 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
-    expect(screen.getByText('Bill: $95.00, sent to the payer on file.')).toBeTruthy();
+    expect(screen.getByText('Bill: $95.00, billed to the payer on file.')).toBeTruthy();
     expect(screen.queryByText('Bill: $95.00 due.')).toBeNull();
+  });
+
+  test('a visit the annual prepay covers is settled: never shown as due, never offered for payment (codex r11)', async () => {
+    await openSheet(makeRequest({ complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceToken: 'tok-1', invoiceTotal: 95, invoiceStatus: 'prepaid' }] }));
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByText('Bill: covered by the annual prepay.')).toBeTruthy();
+    expect(screen.queryByText(/Take payment now/)).toBeNull();
   });
 
   test('a text the server held back says so, with its reason', async () => {

@@ -468,16 +468,20 @@ function smsLine(result) {
   return SMS_RESULT[status]?.(reason) || `No text or app message went to the customer${reason ? `: ${reason}` : ''}.`;
 }
 
+// An invoice settled by the annual prepay keeps its total (status
+// 'prepaid'), so it is settled, never shown as due or collected.
+const SETTLED_BILL = { paid: 'Bill: paid.', prepaid: 'Bill: covered by the annual prepay.', processing: 'Bill: payment processing.' };
+
 function billLine(result) {
   if (!result?.invoiceId) return null;
-  if (result.invoiceStatus === 'paid') return 'Bill: paid.';
-  if (result.invoiceStatus === 'processing') return 'Bill: payment processing.';
+  if (SETTLED_BILL[result.invoiceStatus]) return SETTLED_BILL[result.invoiceStatus];
   // invoiceTotal is the amount still due, so a paid bill names no amount.
   const due = Number(result.invoiceTotal);
   if (!(result.invoiceTotal != null && Number.isFinite(due) && due > 0)) return null;
   // A third-party Bill-To invoice is the payer's to pay, never collected from
-  // the customer at the door.
-  return result.invoicePayerBilled === true ? `Bill: ${money(due)}, sent to the payer on file.` : `Bill: ${money(due)} due.`;
+  // the customer at the door. Who owes it, not whether it went: an AP email
+  // can fail and statement payers get it on their statement.
+  return result.invoicePayerBilled === true ? `Bill: ${money(due)}, billed to the payer on file.` : `Bill: ${money(due)} due.`;
 }
 
 // Which promises marked Done the completion closed: marks are applied before
@@ -528,7 +532,7 @@ export function collectibleBill(result) {
   const amount = Number(result?.invoiceTotal || 0);
   const linkWent = INVOICE_TEXT_TYPES.has(result?.completionSmsType) && result?.completionSmsStatus === 'sent';
   const owed = result?.invoiceId && result?.invoiceToken && amount > 0
-    && result?.invoicePaymentActionRequired !== false && result?.invoiceStatus !== 'paid';
+    && result?.invoicePaymentActionRequired !== false && !SETTLED_BILL[result?.invoiceStatus];
   return owed && !linkWent ? { invoiceId: result.invoiceId, invoiceToken: result.invoiceToken, amount } : null;
 }
 
