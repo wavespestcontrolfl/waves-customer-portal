@@ -456,12 +456,16 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(mockRaise).toHaveBeenCalledTimes(1);
     expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers/gate-codes?neighborhood=${n}` });
     expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
-    // An open (or person-dismissed) bell for it is left alone.
+    // An open (or person-dismissed) bell is refreshed QUIETLY: its link and
+    // wording follow the current code, it never re-rings, a read stands.
     mockRaise.mockClear();
     mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
     await sweepSavedGateCodes();
     mockOpenKeys.mockResolvedValue([]);
-    expect(mockRaise).not.toHaveBeenCalled();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const refresh = mockRaise.mock.calls[0][3];
+    expect(refresh).toMatchObject({ refreshOnDedupe: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(refresh.ringOnRefresh()).toBe(false);
   });
 
   test('a county lookup that failed is retried on the next pass', async () => {

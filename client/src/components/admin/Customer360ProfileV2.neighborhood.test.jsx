@@ -126,7 +126,7 @@ describe('CustomerNeighborhoodBlock', () => {
     expect(await screen.findByText('Set by office')).toBeInTheDocument();
     expect(screen.getByText('Sample Pines')).toBeInTheDocument();
     expect(screen.getByText('No gate entry on file.')).toBeInTheDocument();
-    expect(calls.find((c) => c.path.startsWith(`${BASE}?q=`)).path).toBe(`${BASE}?q=pines&limit=8`);
+    expect(calls.find((c) => c.path.startsWith(`${BASE}?q=`)).path).toBe(`${BASE}?q=pines&limit=8&picker=1`);
     const put = calls.find((c) => c.method === 'PUT');
     expect(put.path).toBe(`${BASE}/properties/p1/neighborhood`);
     expect(put.body).toEqual({ neighborhoodId: 'n7' });
@@ -135,7 +135,7 @@ describe('CustomerNeighborhoodBlock', () => {
   it('a failed search never leaves the previous query\'s choices clickable', async () => {
     stubFetch((path) => {
       if (path === PROPS_URL) return response({ properties: [unlinked()] });
-      if (path === `${BASE}?q=pines&limit=8`) return response({ neighborhoods: [{ id: 'n7', name: 'Sample Pines', county: 'Sarasota' }], total: 1 });
+      if (path === `${BASE}?q=pines&limit=8&picker=1`) return response({ neighborhoods: [{ id: 'n7', name: 'Sample Pines', county: 'Sarasota' }], total: 1 });
       if (path.startsWith(`${BASE}?q=`)) return response({ error: 'Could not load gate codes' }, 500);
       return response({});
     });
@@ -144,7 +144,7 @@ describe('CustomerNeighborhoodBlock', () => {
     fireEvent.change(screen.getByLabelText('Find a neighborhood'), { target: { value: 'pines' } });
     expect(await screen.findByRole('button', { name: 'Sample Pines · Sarasota' })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Find a neighborhood'), { target: { value: 'oaks' } });
-    await waitFor(() => expect(calls.some((c) => c.path === `${BASE}?q=oaks&limit=8`)).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.path === `${BASE}?q=oaks&limit=8&picker=1`)).toBe(true));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Sample Pines · Sarasota' })).toBeNull());
     expect(calls.some((c) => c.method === 'PUT')).toBe(false);
   });

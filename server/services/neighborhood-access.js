@@ -567,8 +567,12 @@ async function reconcileConflictBells(alreadyRaised) {
   const open = new Set(await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX));
   let raised = 0;
   for (const neighborhoodId of await conflictedNeighborhoods(db)) {
-    if (alreadyRaised.has(neighborhoodId) || open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`)) continue;
-    if (await ringForConflict(neighborhoodId)) raised += 1;
+    if (alreadyRaised.has(neighborhoodId)) continue;
+    // A standing bell is refreshed quietly (refreshOnDedupe, ringOnRefresh
+    // false), so its link and wording follow the current code and a
+    // person's read stands; a missing one is raised.
+    const standing = open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`);
+    if (await ringForConflict(neighborhoodId) && !standing) raised += 1;
   }
   return raised;
 }

@@ -362,6 +362,13 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await list()).body.neighborhoods.map((n) => n.name)).toEqual(['Palmetto Cove', 'Quail Run']);
   });
 
+  test('list ?picker=1 finds every active neighborhood, empty ones included (the directory view does not)', async () => {
+    const empty = await neighborhood('Hollow Empty');
+    await neighborhood('Hollow Parked', { active: false });
+    expect((await list('?q=hollow')).body.neighborhoods.map((x) => x.name)).toEqual([]);
+    expect((await list('?q=hollow&picker=1')).body.neighborhoods.map((x) => x.id)).toEqual([empty]);
+  });
+
   test('customer properties: active only, with the neighborhood and its live entries; 404 for a missing or deleted customer', async () => {
     const n = await neighborhood('Tupelo Bend');
     await entry(n, { code: '4545' });

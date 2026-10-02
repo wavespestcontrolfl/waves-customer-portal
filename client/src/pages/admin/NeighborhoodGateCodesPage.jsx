@@ -192,9 +192,13 @@ export default function NeighborhoodGateCodesPage() {
     setReadError("");
     try {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-      if (query) params.set("q", query);
-      if (filter === "needs_confirm") params.set("filter", "needs_confirm");
+      // A linked single neighborhood (the conflict bell) opens on its own: a
+      // search or filter left from before must never hide it.
       if (onlyNeighborhood) params.set("neighborhood", onlyNeighborhood);
+      else {
+        if (query) params.set("q", query);
+        if (filter === "needs_confirm") params.set("filter", "needs_confirm");
+      }
       const data = await api(`/admin/neighborhood-access?${params.toString()}`);
       if (seq !== readSeq.current) return;
       setDisabled(false);

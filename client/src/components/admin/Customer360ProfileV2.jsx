@@ -7274,7 +7274,7 @@ function NeighborhoodPicker({ property, onSaved, onCancel }) {
     setSearched(false);
     const timer = setTimeout(async () => {
       try {
-        const data = await adminFetch(`/admin/neighborhood-access?q=${encodeURIComponent(q)}&limit=8`);
+        const data = await adminFetch(`/admin/neighborhood-access?q=${encodeURIComponent(q)}&limit=8&picker=1`);
         if (seq !== searchSeq.current) return;
         setResults(Array.isArray(data?.neighborhoods) ? data.neighborhoods : []);
         setSearched(true);

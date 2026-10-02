@@ -136,6 +136,19 @@ it("?neighborhood= asks for just that neighborhood and Show all clears it", asyn
   expect(rawAdminFetch.mock.calls.at(-1)[0]).not.toContain("neighborhood=");
 });
 
+it("a linked neighborhood opens on its own: a filter set before never narrows it away", async () => {
+  rawAdminFetch.mockImplementation((path) => response(path.includes("neighborhood=") ? { total: 1, neighborhoods: [ALL.neighborhoods[0]] } : ALL));
+  renderPage(`/?neighborhood=${ONE_ID}`);
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  const toggle = screen.queryByRole("button", { name: "Needs confirm" });
+  if (toggle) fireEvent.click(toggle);
+  await waitFor(() => expect(rawAdminFetch.mock.calls.at(-1)[0]).toContain(`neighborhood=${ONE_ID}`));
+  for (const [url] of rawAdminFetch.mock.calls.filter(([u]) => u.includes("neighborhood="))) {
+    expect(url).not.toContain("filter=");
+    expect(url).not.toContain("q=");
+  }
+});
+
 it("a malformed ?neighborhood= is ignored: everything lists, no control", async () => {
   rawAdminFetch.mockImplementation(() => response(ALL));
   renderPage("/?neighborhood=not-an-id");

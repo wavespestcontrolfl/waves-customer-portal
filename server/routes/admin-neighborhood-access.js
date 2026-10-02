@@ -175,7 +175,10 @@ router.get('/', async (req, res) => {
     const cutoff = staleCutoff();
 
     const bindings = [cutoff];
-    let where = 'n.active AND (COALESCE(f.live, 0) > 0 OR COALESCE(p.cnt, 0) > 0)';
+    // ?picker=1 (Customer 360's neighborhood picker): every active
+    // neighborhood, so an empty one can be reused instead of created again.
+    const picker = req.query.picker === '1';
+    let where = picker ? 'n.active' : 'n.active AND (COALESCE(f.live, 0) > 0 OR COALESCE(p.cnt, 0) > 0)';
     if (onlyId) {
       where += ' AND n.id = ?';
       bindings.push(onlyId);
