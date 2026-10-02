@@ -260,6 +260,44 @@ describe('loadReplayRows', () => {
     }]);
   });
 
+  it('a visit that froze its memory replays the frozen entry, not the live products or live prior', async () => {
+    const row = (id, date, rec) => ({
+      id, customer_id: 'c1', property_id: 'p1', date, season: 'peak', is_baseline: false, service_record_id: rec, divergence_flags: null,
+      turf_density: 70, weed_suppression: 70, color_health: 70, fungus_control: 70, thatch_level: 70, stress_damage: 70, overall_score: 70, confirmed_order: '',
+    });
+    const FROZEN_SINCE = { v: 1, priorAssessmentId: 'v1', priorDate: '2026-05-01', applied: [{ name: 'Celsius WG', targets: [] }], checks: [] };
+    const trx = {
+      raw: jest.fn(async (sql) => {
+        if (/FROM lawn_assessments/.test(sql)) return { rows: [row('v1', '2026-05-01', 'r1'), row('vb', '2026-05-20', 'rb'), row('v2', '2026-06-01', 'r2')] };
+        if (/FROM service_records/.test(sql)) {
+          return {
+            rows: [
+              { id: 'r1', structured_notes: { lawnVisitMemory: { v1: { v: 1, assessmentId: 'v1', serviceDate: '2026-05-01', applied: [{ name: 'Celsius WG', targets: [] }], checks: [] } } } },
+              { id: 'r2', structured_notes: { lawnVisitMemory: { v2: { v: 1, assessmentId: 'v2', serviceDate: '2026-06-01', applied: [], checks: [], sinceLast: FROZEN_SINCE } } } },
+            ],
+          };
+        }
+        // Live products were edited after the freeze: never read for a frozen visit.
+        if (/FROM service_products/.test(sql)) return { rows: [{ service_record_id: 'r1', product_name: 'Atticus Talak', targets: [] }] };
+        return { rows: [] };
+      }),
+    };
+    const db = { transaction: jest.fn(async (fn, opts) => fn(trx, opts)) };
+    historyForAssessment.mockReset();
+    // A backfilled visit (vb) now sits between v1 and v2 in live history.
+    const H = { v1: { id: 'v1', visit_date: '2026-05-01', service_record_id: 'r1' }, vb: { id: 'vb', visit_date: '2026-05-20', service_record_id: 'rb' }, v2: { id: 'v2', visit_date: '2026-06-01', service_record_id: 'r2' } };
+    historyForAssessment.mockImplementation(async ({ id }) => ({ current: H[id], rows: Object.values(H), previous: null, isBaseline: id === 'v1' }));
+    const rows = await loadReplayRows(db);
+    const by = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(by.v1.applied).toEqual([{ name: 'Celsius WG', targets: [] }]);
+    expect(by.v2).toMatchObject({ priorId: 'v1', frozenSinceLast: FROZEN_SINCE });
+    expect(by.vb).not.toHaveProperty('frozenSinceLast');
+    const result = replayLawnProgress(rows);
+    const pair = result.pairs.find((p) => p.assessment === 'v2');
+    expect(pair.prior).toBe('v1');
+    expect(pair.days).toBe(31);
+  });
+
   it('takes the prior, visit date and baseline from canonical history, and marks re-done attempts superseded', async () => {
     const row = (id, date) => ({
       id, customer_id: 'c1', property_id: 'p1', date, season: 'peak', is_baseline: false, service_record_id: null, divergence_flags: null,

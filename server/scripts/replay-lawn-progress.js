@@ -36,7 +36,7 @@ const {
   divergentMetricsFrom, photoQualityForConfidence,
 } = require('../services/service-report/lawn-progress');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { selectPriorVisit, appliedFromProducts } = require('../services/service-report/lawn-visit-memory');
+const { selectPriorVisit, appliedFromProducts, storedVisitMemoryFor } = require('../services/service-report/lawn-visit-memory');
 const { createAuditKnex } = require('./audit-lawn-expectation-products');
 
 const BEHIND_WARN_SHARE = 0.25; // W5: re-check calibration above about 25 percent
@@ -67,6 +67,7 @@ const bump = (map, key, by = 1) => { map[key] = (map[key] || 0) + by; };
  * @property {string} [order]  tie-break within one day (confirmation time)
  * @property {string|null} [priorId]  canonical prior (lawn-assessment-history), set by the DB loader
  * @property {boolean} [superseded]  a re-done attempt of a visit whose installed row is another assessment
+ * @property {object|null} [frozenSinceLast]  present only when the visit froze its memory (P12): replayed as is
  */
 
 /**
@@ -128,7 +129,12 @@ function progressFor({ current, prior }, { band, overallBand }) {
   return buildLawnProgress({
     current: cur,
     prior: pri,
-    sinceLast: prior ? { priorDate: prior.date, applied: prior.applied || [], checks: [] } : null,
+    // A frozen visit replays its own frozen sinceLast (applied, checks, prior
+    // date) exactly as the report does; a pre-memory visit builds one from
+    // the prior row.
+    sinceLast: Object.prototype.hasOwnProperty.call(current, 'frozenSinceLast')
+      ? current.frozenSinceLast
+      : (prior ? { priorDate: prior.date, applied: prior.applied || [], checks: [] } : null),
     band,
     overallBand,
   });
@@ -346,6 +352,17 @@ async function loadReplayRows(db) {
       if (list.length < TOP_PHOTOS) list.push(photoQualityForConfidence(p));
       photosBy.set(p.assessment_id, list);
     }
+    // Visits whose report already froze its memory (P12): production judges
+    // THAT entry (frozen applied, frozen prior identity and date), never the
+    // mutable service_products, so the replay must too.
+    const recordRows = recordIds.length ? (await trx.raw(
+      `SELECT id, structured_notes
+         FROM service_records
+        WHERE id = ANY(?::uuid[])`,
+      [recordIds],
+    )).rows : [];
+    const notesBy = new Map(recordRows.map((r) => [String(r.id), r.structured_notes]));
+
     const productsBy = new Map();
     for (const p of productRows) {
       const list = productsBy.get(p.service_record_id) || [];
@@ -361,7 +378,6 @@ async function loadReplayRows(db) {
     // Canonical history, the same resolver the report uses, through THIS
     // read-only transaction (required lazily so loading the script never
     // loads models/db.js; every call passes knex: trx, so it is never queried).
-     
     const { historyForAssessment } = require('../services/lawn-assessment-history');
     const canonicalBy = new Map();
     for (const a of assessments) {
@@ -383,16 +399,19 @@ async function loadReplayRows(db) {
     return assessments
       .map((a) => {
         const canonical = canonicalBy.get(a.id);
+        const stored = a.service_record_id ? storedVisitMemoryFor(notesBy.get(String(a.service_record_id)), a.id) : null;
         let flags = a.divergence_flags;
         if (typeof flags === 'string') { try { flags = JSON.parse(flags); } catch { flags = []; } }
         return {
           id: a.id,
           customerId: a.customer_id,
           propertyId: a.property_id || null,
-          date: canonical.date,
+          date: stored?.serviceDate || canonical.date,
           season: a.season || null,
           isBaseline: canonical.isBaseline,
-          priorId: canonical.priorId,
+          // A frozen entry pins its prior (or none); pre-memory visits use the
+          // report's live selector, the only reading available for them.
+          priorId: stored ? (stored.sinceLast?.priorAssessmentId ?? null) : canonical.priorId,
           superseded: canonical.superseded,
           scores: scoresFromAssessmentRow(a),
           photos: photosBy.get(a.id) || [],
@@ -400,7 +419,10 @@ async function loadReplayRows(db) {
           // Shaped exactly as visit memory freezes it (support products out,
           // at most 8 products and 3 targets each), so the replay judges what
           // the deployed engine would see.
-          applied: a.service_record_id ? appliedFromProducts(productsBy.get(a.service_record_id) || []) : [],
+          applied: stored
+            ? (Array.isArray(stored.applied) ? stored.applied : [])
+            : (a.service_record_id ? appliedFromProducts(productsBy.get(a.service_record_id) || []) : []),
+          ...(stored ? { frozenSinceLast: stored.sinceLast || null } : {}),
           order: a.confirmed_order || '',
         };
       });
