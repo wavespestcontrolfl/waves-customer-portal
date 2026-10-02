@@ -19,6 +19,7 @@ const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
+const { techFindingsPromptLines, PALM_CROWN_PROMPT_RULE } = require('./tree-shrub-tech-findings');
 const { redactAccessCodes } = require('../context-aggregator');
 const { buildWriterRecords } = require('./report-writer-records');
 const {
@@ -722,6 +723,16 @@ async function buildReportCopyContext({
         + `${scoreLine}.`
         + (observation ? ` Reviewed photo-model visual summary: ${observation}` : '')
         + ' These are reviewed photo signals, never a confirmed pest, disease, deficiency, cause, or diagnosis, and never proof of completed work. Do not infer or repeat a cause from these signals unless a separate technician-recorded finding names it. Hidden signals and any aggregate observation affected by a hidden signal are omitted.',
+      );
+    }
+    // GATE_TS_TECH_FINDINGS_COPY: the technician's own confirmed / edited
+    // findings and the ground-level-photo rule (grounding.techFindings exists
+    // only while the gate is on).
+    if (Array.isArray(treeShrubReviewGrounding.techFindings)) {
+      const techLines = techFindingsPromptLines(treeShrubReviewGrounding.techFindings);
+      sections.push(
+        'TECHNICIAN FINDINGS FOR THIS VISIT (these override the photo signals above; technician-recorded):'
+        + `${techLines ? `\n${techLines}` : ' none beyond the photo signals.'}\n${PALM_CROWN_PROMPT_RULE}`,
       );
     }
   }

@@ -20,6 +20,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender } = require('./lawn-visit-memory');
 const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
+const { techFindingsCopyLive, normalizeTechFindings } = require('./tree-shrub-tech-findings');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
@@ -5593,6 +5594,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
           customerConcern: structuredCustomerConcern(structured),
           waterSnapshot: null, // Phase 3: landscape water calibration
+          // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen keep / confirm /
+          // hide / edit decisions override the photo read in customer copy
+          // (undefined while dark: the builder output is unchanged).
+          ...(techFindingsCopyLive()
+            ? { techFindings: normalizeTechFindings(structured?.treeShrubTechFindings) }
+            : {}),
         });
         // AI "What we applied today" narrative (owner 2026-07-21): why each
         // product, what it does, the benefit — cached per input hash; the

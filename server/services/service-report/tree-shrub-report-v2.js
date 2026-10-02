@@ -20,6 +20,9 @@
 const { buildTreeShrubVisualCategories, scoreStatus } = require('./tree-shrub-visual-categories');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { buildTreeShrubInsightCards } = require('./tree-shrub-report-insights');
+const {
+  applyTechFindingsToAssessment, diagnosisOverride, stripCrownHealthClaims,
+} = require('./tree-shrub-tech-findings');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
 // approved report summary; falls back to category/active-ingredient heuristics. `kind`
@@ -256,16 +259,24 @@ function buildSmsSummary(snapshot) {
  * @param {Array}  [input.actions]
  * @param {string} [input.customerConcern]
  * @param {object} [input.waterSnapshot]  landscape water snapshot (Phase 3) | null
+ * @param {Array|null} [input.techFindings]  GATE_TS_TECH_FINDINGS_COPY: the technician's frozen
+ *   decisions [{ key, action, detail }] (structured_notes.treeShrubTechFindings). null/undefined =
+ *   gate off, output byte-identical to before. An array (even empty) turns on the tech overlay
+ *   (hidden never shown, confirmed phrased as the technician's, edit uses the technician's text)
+ *   and the palm-crown rule (no crown / spear / new-growth health claim from the photo read).
  * @returns {object|null}
  */
 function buildTreeShrubReportV2({
-  treeShrubAssessment,
+  treeShrubAssessment: rawAssessment,
   applications = [],
   actions = [],
   customerConcern = '',
   waterSnapshot = null,
+  techFindings = null,
 } = {}) {
-  if (!treeShrubAssessment) return null;
+  if (!rawAssessment) return null;
+  const techCopy = Array.isArray(techFindings);
+  const treeShrubAssessment = techCopy ? applyTechFindingsToAssessment(rawAssessment, techFindings) : rawAssessment;
   const scores = treeShrubAssessment.scores || {};
 
   // Treatment is computed BEFORE the categories so the pest diagnosis row
@@ -277,6 +288,7 @@ function buildTreeShrubReportV2({
     scores,
     techConfirmedPest: !!treeShrubAssessment.techConfirmedPest,
     techConfirmedDisease: !!treeShrubAssessment.techConfirmedDisease,
+    palmCrownRule: techCopy,
     // 'systemic' is classifyProduct's insect-family systemics bucket
     // (imidacloprid/dinotefuran/Merit/Safari) — an insect treatment for this
     // gate's purposes.
@@ -284,6 +296,17 @@ function buildTreeShrubReportV2({
   });
   // Client cards read `explanation`; keep customerExplanation too.
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
+  if (techCopy) {
+    // The technician's confirmed / edited finding speaks for its category; the
+    // photo read stays on the assessment row for the office.
+    for (const row of diagnosis) {
+      const said = diagnosisOverride(techFindings.find((f) => f && f.key === row.key), row.customerExplanation);
+      if (said) {
+        row.customerExplanation = said;
+        row.explanation = said;
+      }
+    }
+  }
 
   const water = mapWater(waterSnapshot);
 
@@ -314,6 +337,7 @@ function buildTreeShrubReportV2({
     plantGroups,
     customerConcern,
     treatmentKinds,
+    techFindings: techCopy ? techFindings : null,
   });
 
   // Photos for the strip (best first) + ONE consolidated summary (never the
@@ -327,10 +351,9 @@ function buildTreeShrubReportV2({
     // a caption like "confirmed scale infestation" can't bypass the signals guardrail.
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
-    .map((p) => ({ url: p.url, label: p.zone || p.label || null, caption: scrubObservations(p.caption) }));
-  const photoSummary = scrubObservations(
-    treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '',
-  );
+    .map((p) => ({ url: p.url, label: p.zone || p.label || null, caption: scrubObservations(techCopy ? stripCrownHealthClaims(p.caption) : p.caption) }));
+  const photoSummaryRaw = treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '';
+  const photoSummary = scrubObservations(techCopy ? stripCrownHealthClaims(photoSummaryRaw) : photoSummaryRaw);
   const heroPhoto = photos[0] || null;
 
   const overallScore = num(scores.overallScore);

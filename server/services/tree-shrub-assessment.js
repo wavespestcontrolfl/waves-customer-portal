@@ -24,6 +24,9 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
+const {
+  TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
+} = require('./service-report/tree-shrub-tech-findings');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -128,20 +131,31 @@ function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
     : TREE_SHRUB_REVIEW_SCORE_KEYS;
   for (const key of includedKeys) includedScores[key] = scores[key];
 
-  return {
-    ok: true,
-    grounding: {
-      source: 'reviewed_photo_signals',
-      scores: includedScores,
-      scoredCount,
-      photoCount,
-      photosHash: review.photosHash,
-      // Any hidden signal can make the aggregate prose contradict the
-      // technician's review, so drop it whole.
-      observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
-      hasHidden: hiddenScoreKeys.size > 0,
-    },
+  const grounding = {
+    source: 'reviewed_photo_signals',
+    scores: includedScores,
+    scoredCount,
+    photoCount,
+    photosHash: review.photosHash,
+    // Any hidden signal can make the aggregate prose contradict the
+    // technician's review, so drop it whole.
+    observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
+    hasHidden: hiddenScoreKeys.size > 0,
   };
+  if (techFindingsCopyLive()) {
+    // GATE_TS_TECH_FINDINGS_COPY: the writer also hears the technician's own
+    // confirmed / edited findings. An edited category's photo-read score and the
+    // aggregate prose (written from the read the edit replaces) stay out.
+    const techFindings = normalizeTechFindings(decisions);
+    const edited = techFindings.filter((f) => editText(f));
+    for (const f of edited) delete grounding.scores[TREE_SHRUB_REVIEW_DECISION_KEYS[f.key]];
+    if (edited.length) {
+      delete grounding.scores.overallScore;
+      grounding.observations = '';
+    }
+    grounding.techFindings = techFindings;
+  }
+  return { ok: true, grounding };
 }
 
 let Anthropic;
@@ -332,6 +346,16 @@ function suggestLandscapeCondition(overallScore) {
 }
 
 // ── Vision API calls (mirror lawn-assessment.js) ────────────────────────────────
+
+// GATE_TS_TECH_FINDINGS_COPY (owner 2026-10-01): photos are ground level, so the
+// read may only describe what a whole-palm or oldest-fronds shot shows. Gate off
+// = VISION_PROMPT exactly as before.
+function visionPromptText() {
+  if (!techFindingsCopyLive()) return VISION_PROMPT;
+  const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
+  const marker = 'Return this exact JSON structure';
+  return VISION_PROMPT.replace(marker, `${rule}\n\n${marker}`);
+}
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
@@ -344,7 +368,7 @@ async function callClaudeVision(base64Image, mimeType) {
         role: 'user',
         content: [
           { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: VISION_PROMPT },
+          { type: 'text', text: visionPromptText() },
         ],
       }],
     });
@@ -369,7 +393,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: VISION_PROMPT }] }],
+      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText() }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
@@ -491,12 +515,13 @@ const { buildTreeShrubVisualCategories, scoreStatus } = require('./service-repor
 
 // Per-category tech-facing copy for a FLAGGED (watch/attention) signal. Stays in
 // "signals" language — the tech confirms before we ever assert a pest/disease.
+// Labels live with the frozen tech decisions (one name per finding).
 const FINDING_META = {
-  pest_activity: { label: 'Pest-pressure signals', flagged: 'Possible pest-pressure signals on foliage.' },
-  disease_leaf_spot: { label: 'Leaf-spot / disease signals', flagged: 'Possible leaf-spot or disease-like signals.' },
-  water_heat_mechanical_stress: { label: 'Water / heat / pruning stress', flagged: 'Visible water, heat, or pruning stress.' },
-  leaf_color_vigor: { label: 'Leaf color & vigor', flagged: 'Some off-color, pale, or yellowing foliage.' },
-  foliage_fullness: { label: 'Foliage fullness', flagged: 'Some thin, sparse, or bare areas.' },
+  pest_activity: { label: TECH_FINDING_LABELS.pest_activity, flagged: 'Possible pest-pressure signals on foliage.' },
+  disease_leaf_spot: { label: TECH_FINDING_LABELS.disease_leaf_spot, flagged: 'Possible leaf-spot or disease-like signals.' },
+  water_heat_mechanical_stress: { label: TECH_FINDING_LABELS.water_heat_mechanical_stress, flagged: 'Visible water, heat, or pruning stress.' },
+  leaf_color_vigor: { label: TECH_FINDING_LABELS.leaf_color_vigor, flagged: 'Some off-color, pale, or yellowing foliage.' },
+  foliage_fullness: { label: TECH_FINDING_LABELS.foliage_fullness, flagged: 'Some thin, sparse, or bare areas.' },
 };
 
 /**

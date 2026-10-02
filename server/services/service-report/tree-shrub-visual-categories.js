@@ -36,7 +36,7 @@ function scoreStatus(value) {
 
 // Plain-language explanation per (category, band). Deterministic — no LLM — so the
 // customer copy can't drift or overclaim. The pest and disease rows say SIGNALS only.
-function explain(categoryKey, band, { pestTreatedToday = false } = {}) {
+function explain(categoryKey, band, { pestTreatedToday = false, palmCrownRule = false } = {}) {
   const T = {
     foliage_fullness: {
       strong: 'Full, dense canopy with healthy growth and no bare areas.',
@@ -76,6 +76,11 @@ function explain(categoryKey, band, { pestTreatedToday = false } = {}) {
       needs_attention: 'Visible stress — dry margins, scorch, or over-pruning to address.',
     },
   };
+  // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY): photos are ground level, so the
+  // strong color row may not vouch for new growth (a palm's newest fronds).
+  if (palmCrownRule && categoryKey === 'leaf_color_vigor') {
+    T.leaf_color_vigor.strong = 'Vibrant, even leaf color across the plants.';
+  }
   const byBand = T[categoryKey] || {};
   const key = band === 'strong' ? 'strong' : band === 'healthy' ? 'healthy' : band === 'watch' ? 'watch' : 'needs_attention';
   if (categoryKey === 'pest_activity' && key === 'needs_attention' && pestTreatedToday) {
@@ -96,6 +101,7 @@ function bandOf(status) {
  *                                Each is a 0-100 "health" reading (higher = healthier).
  * @param {boolean} [input.techConfirmedPest]     a tech confirmed a pest finding (raises confidence)
  * @param {boolean} [input.techConfirmedDisease]  a tech confirmed a disease finding (raises confidence)
+ * @param {boolean} [input.palmCrownRule]  GATE_TS_TECH_FINDINGS_COPY: no new-growth health claim
  * @returns {Array} five TreeShrubVisualCategory
  */
 function buildTreeShrubVisualCategories({
@@ -103,6 +109,7 @@ function buildTreeShrubVisualCategories({
   techConfirmedPest = false,
   techConfirmedDisease = false,
   pestTreatedToday = false,
+  palmCrownRule = false,
 } = {}) {
   const s = scores || {};
   const foliage = toScore(s.foliageFullness);
@@ -122,7 +129,7 @@ function buildTreeShrubVisualCategories({
       // A tracking (null/unscored) category must read neutral — never the
       // worst-case "needs attention" copy bandOf() would otherwise return for it.
       // The client falls back to "Not clearly visible in today’s photos."
-      customerExplanation: status === 'tracking' ? '' : explain(key, bandOf(status), { pestTreatedToday }),
+      customerExplanation: status === 'tracking' ? '' : explain(key, bandOf(status), { pestTreatedToday, palmCrownRule }),
       evidence,
     };
   };

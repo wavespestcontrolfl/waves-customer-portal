@@ -71,6 +71,7 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
+const { techFindingsCopyLive, stripCrownHealthClaims } = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -25575,7 +25576,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
+      const safeFallback = techFindingsCopyLive() ? stripCrownHealthClaims(report) : report;
+      const fallbackReport = safeFallback && (screenTradeNames(safeFallback) || writerRulesScreen(safeFallback)) ? null : safeFallback;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -25598,7 +25600,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       return res.json({ report: fallbackReport, fallback: true, deterministic: true });
     }
 
-    const { report } = generated;
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY): photos are ground level, so
+    // a sentence vouching for a palm's crown, spear leaf or newest fronds never
+    // ships, whatever the writer produced. Stripped before the cache write.
+    const report = techFindingsCopyLive() ? stripCrownHealthClaims(generated.report) : generated.report;
     reportCopyCacheSet(cacheKey, report);
     logger.info('[generate-report] generated', {
       provider: generated.provider,

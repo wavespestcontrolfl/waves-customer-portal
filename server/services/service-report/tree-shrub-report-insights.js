@@ -17,6 +17,8 @@
  *    watering change off one shrub group — point to coverage in that area.
  */
 
+const { insightOverride, insightHidden } = require('./tree-shrub-tech-findings');
+
 // Worst first. Card statuses use the tree-shrub spec vocabulary.
 const STATUS_RANK = { urgent: 0, needs_attention: 1, watch: 2, stable: 3, good: 4 };
 
@@ -38,6 +40,10 @@ function cardStatusFor(catStatus) {
  * @param {Array}  input.plantGroups      [{ key, label, status, finding }] (Phase 2; [] for now)
  * @param {string} input.customerConcern
  * @param {Array}  input.treatmentKinds   ['fungicide','insecticide','miticide','systemic','fertilizer','supplement']
+ * @param {Array|null} [input.techFindings] GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions
+ *   [{ key, action, detail }]; null/undefined = gate off, cards exactly as before. A card built on a
+ *   hidden finding is dropped; a confirmed one says the technician confirmed it; an edit uses the
+ *   technician's text.
  * @returns {Array} prioritized TreeShrubInsightCard[]
  */
 function buildTreeShrubInsightCards({
@@ -46,6 +52,7 @@ function buildTreeShrubInsightCards({
   plantGroups = [],
   customerConcern = '',
   treatmentKinds = [],
+  techFindings = null,
 } = {}) {
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
@@ -212,6 +219,19 @@ function buildTreeShrubInsightCards({
         : 'Completed a full inspection today and documented the visit.',
       nextVisitPlan: 'Keep the program steady and keep monitoring each visit.',
     });
+  }
+
+  // Technician decisions (gate on): drop a card built on a hidden finding, and
+  // let a confirmed / edited finding speak in the technician's voice.
+  if (Array.isArray(techFindings) && techFindings.length) {
+    for (let i = cards.length - 1; i >= 0; i -= 1) {
+      if (insightHidden(cards[i].category, techFindings)) { cards.splice(i, 1); continue; }
+      const said = insightOverride(cards[i].category, techFindings);
+      if (said) {
+        cards[i].whatWeSaw = said;
+        cards[i].confidence = 'tech_confirmed';
+      }
+    }
   }
 
   // Priority: worst status first, then a stable category order.

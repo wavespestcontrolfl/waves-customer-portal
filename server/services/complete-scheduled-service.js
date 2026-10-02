@@ -110,6 +110,7 @@ const {
   lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
+const { freezeTechFindings } = require('./service-report/tree-shrub-tech-findings');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -3916,6 +3917,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const techTipsFreeze = techTipsGateOn()
       ? freezeTechTips(completionInput.body?.techTips)
       : { tips: [], dropped: [] };
+    // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
+    // keep / confirm / hide / edit decisions on the service record whether or
+    // not the signed preview is accepted below (a failed signature re-scores
+    // and drops them). Gate off or no decisions = null = nothing written.
+    const treeShrubTechFindingsFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezeTechFindings(completionInput.body?.treeShrubReview)
+      : null;
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -6150,6 +6158,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treeShrubCloseout: treeShrubCloseoutSummary,
               treeShrubCloseoutWarnings,
             } : {}),
+            ...(treeShrubTechFindingsFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
