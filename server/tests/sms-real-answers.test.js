@@ -1027,6 +1027,42 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(dispatchWithFallback.mock.calls.some(([, payload]) => payload?.laneId === 'sms_service_identity')).toBe(false);
   });
 
+  test('gate on: "when can you come?" beside a missed visit AND an unrelated upcoming visit is about the miss (pre-push audit P1, #5610 r2)', async () => {
+    process.env[GATE] = 'true';
+    const missedContext = {
+      summary: 'Test customer', customer: { id: 'cust-1' },
+      upcomingServices: [{ type: 'Lawn Care', date: '2026-10-20', scheduledServiceId: 'visit-lawn' }],
+      visitLoops: { missedVisit: { logId: 'rl-1', type: 'Mosquito Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' } },
+    };
+    for (const answer of [{ about: 'missed', visit: null, service: null }, { about: 'none', visit: null, service: null }]) {
+      const getAvailableSlots = jest.fn(async () => ({
+        zone: 'Venice Zone',
+        days: [{ date: '2026-10-05', fullDate: 'Monday, October 5', slots: [{ startTime24: '09:00' }] }],
+      }));
+      jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+      jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+      jest.doMock('../services/llm/call', () => ({
+        dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? { ok: true, json: answer } : {
+          ok: true, text: JSON.stringify({ reply: 'Sorry we missed you.', intended_actions: [], missing_info: null }), model: 'fixture-model',
+        })),
+      }));
+      jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+      jest.resetModules();
+      const drafter = require('../services/sms-shadow-drafter');
+      const { dispatchWithFallback } = require('../services/llm/call');
+      await drafter.generateGroundedDraft({
+        client: {}, context: missedContext, inboundMessage: 'You never showed up. When can you come?',
+        intent: { intent: 'service_scheduling_window_reply' }, schedulingIntent: true, city: 'Venice', voiceProfile: null,
+      });
+      // the identity step is offered the miss as its own option
+      const identityCall = dispatchWithFallback.mock.calls.find(([, payload]) => payload?.laneId === 'sms_service_identity');
+      expect(identityCall[1].text).toContain('Their missed visit (not yet rebooked): Mosquito Control');
+      expect(identityCall[1].jsonSchema.properties.about.enum).toContain('missed');
+      // either answer sizes the times for the missed service, never the upcoming lawn visit
+      expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Mosquito Control' });
+    }
+  });
+
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn();

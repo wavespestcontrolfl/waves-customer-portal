@@ -3471,7 +3471,7 @@ function serviceIdentityVisits(context) {
   return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
 }
 
-function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, missed = null) {
   const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
   return [
     'A customer of Waves Pest Control texted:',
@@ -3480,6 +3480,7 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     'Their visits:',
     ...(visitLines.length ? visitLines : ['none on file']),
     ...(openEstimate ? ['', `Their open estimate: ${openEstimate.service || 'service not stated'}`] : []),
+    ...(missed ? ['', `Their missed visit (not yet rebooked): ${missed.type}${missed.date ? ` on ${formatEtDate(missed.date)}` : ''}`] : []),
     '',
     'Services Waves books (key: name):',
     ...services.map((s) => `${s.service_key}: ${s.name}`),
@@ -3487,6 +3488,7 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     'A reply may offer open appointment times, sized for one job. Which job is this text about?',
     ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
+    ...(missed ? ['- "missed": the missed visit above (we did not show, rebooking it, when we will come back for it).'] : []),
     ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
@@ -3498,10 +3500,10 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
 // to offer (a brand-new customer has no visit; a catalog load that failed
 // open has no service) is left out of the answer entirely rather than sent
 // as a bare null-typed property.
-function serviceIdentitySchema(visits, openEstimate, services) {
+function serviceIdentitySchema(visits, openEstimate, services, missed = null) {
   const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
   const properties = {
-    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(missed ? ['missed'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
     ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
     ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
   };
@@ -3539,12 +3541,13 @@ function missedVisitIdentity(missed) {
 }
 
 function unnamedServiceIdentity(visits, openEstimate, missed = null) {
+  // an unrebooked miss is the job still owed: it outranks every other fallback
+  // (a "when can you come?" beside it is about the miss, not a future visit)
+  if (missed) return missedVisitIdentity(missed);
   const upcoming = visits.filter((v) => v.upcoming);
   if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
   if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
-  // an unrebooked miss outranks the last completed visit: it is the job still owed
-  if (missed) return missedVisitIdentity(missed);
   const completed = visits.find((v) => !v.upcoming);
   if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
   return { serviceType: null, certain: true, reason: 'engine_default' };
@@ -3557,6 +3560,7 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services, misse
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  if (answer?.about === 'missed' && missed) return missedVisitIdentity(missed);
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
   if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate, missed);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
@@ -3566,18 +3570,19 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services, misse
 // estimate is the job.
 async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
   const visits = serviceIdentityVisits(context);
+  const missed = openMissedVisit(context);
   try {
     const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
     const { dispatchWithFallback } = require('./llm/call');
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       laneId: 'sms_service_identity',
-      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, missed),
       jsonMode: true,
-      jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
+      jsonSchema: serviceIdentitySchema(visits, openEstimate, services, missed),
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, openMissedVisit(context));
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, missed);
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
