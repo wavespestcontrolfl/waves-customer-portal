@@ -5128,9 +5128,12 @@ async function loadProjectCompletionContextByServiceId(services) {
       // Complete report flow (talk, generate the report, trace, send). Not a
       // combined service (pest + rodent bait, pest + termite bait): its
       // typed companion sections are required at completion and the report
-      // flow has none, so it keeps the full form (Codex #5538).
+      // flow has none, so it keeps the full form (Codex #5538). Nor a
+      // service with its own typed findings (cockroach, German roach
+      // knockdowns): /complete requires them and the report flow has none.
       fastCompleteReportEnabled: require('../config/feature-gates').fastCompleteReportLive()
-        && !(completionProfile?.companions || []).length,
+        && !(completionProfile?.companions || []).length
+        && !completionProfile?.findingsType,
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.

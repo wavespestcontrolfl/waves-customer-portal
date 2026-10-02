@@ -56,6 +56,19 @@ describe('fastCompleteReportEnabled', () => {
     }
   });
 
+  test('a service with its own typed findings (cockroach) keeps the full form (Codex #5538)', async () => {
+    process.env.GATE_FAST_COMPLETE_REPORT = 'true';
+    const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+    resolveCompletionProfileForScheduledService.mockImplementation(async (svc) => (svc.id === 'svc-1'
+      ? { serviceKey: 'cockroach_control', findingsType: 'cockroach', companions: [] }
+      : { serviceKey: 'pest_general_quarterly', findingsType: null, companions: [] }));
+    try {
+      expect(await flags()).toEqual([false, true]);
+    } finally {
+      resolveCompletionProfileForScheduledService.mockImplementation(async () => null);
+    }
+  });
+
   test('read at call time: a flip needs no reload', async () => {
     delete process.env.GATE_FAST_COMPLETE_REPORT;
     expect(await flags()).toEqual([false, false]);
