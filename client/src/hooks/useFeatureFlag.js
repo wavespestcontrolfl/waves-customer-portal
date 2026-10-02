@@ -98,8 +98,8 @@ async function loadFlags() {
 // still fails closed: every flag is off until a read succeeds (flagValue).
 // refreshKey (optional): the verified staff account a long-lived shell reads
 // for. A value resolved for another key/account, or read while the cache is
-// unloaded (refetched for a new account), is never returned: the default is,
-// derived in render, until this read answers (Codex #5573 r10, r12).
+// unloaded (refetched for a new account), is never returned: off is, derived
+// in render, until this read answers (Codex #5573 r10, r12).
 export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined) {
   const [state, setState] = useState(() => ({ key, refreshKey, enabled: defaultValue, resolved: false }));
   useEffect(() => {
@@ -114,7 +114,9 @@ export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined
       unsubscribe();
     };
   }, [key, defaultValue, refreshKey]);
-  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || cache === null) return defaultValue;
+  // Unresolved for this key/account, or refetching: closed, default-on flags
+  // included (AGENTS.md: flags fail closed; pre-push P1).
+  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || cache === null) return false;
   return state.enabled;
 }
 
@@ -142,7 +144,7 @@ export function useFeatureFlagReady(key, defaultValue = false, refreshKey = unde
   // Derived in render, like useFeatureFlag: never another key/account's value,
   // never a value while the cache is unloaded (Codex #5573 r12).
   if (state.key !== key || state.refreshKey !== refreshKey || cache === null) {
-    return { enabled: defaultValue, ready: false };
+    return { enabled: false, ready: false };
   }
   return { enabled: state.enabled, ready: state.ready };
 }
