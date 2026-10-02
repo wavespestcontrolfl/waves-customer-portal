@@ -6,7 +6,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
@@ -116,6 +116,37 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
       </TechNavigationLock>,
     );
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
+  });
+
+  it("an account switch in another tab while on another admin page reaches Today as the new login (pre-push P1)", async () => {
+    const NEW_TOKEN = staffJwt(undefined, "newer-signature");
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async (_url, options = {}) => {
+      const auth = options.headers?.Authorization || "";
+      return response(200, auth.endsWith(NEW_TOKEN)
+        ? { id: "tech-2", name: "Newer Tech", role: "technician" }
+        : { id: "tech-1", name: "River Tech", role: "technician" });
+    }));
+    function Dashboard() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/today")}>to today</button>; }
+    function Today() { const { user } = useOutletContext() || {}; return <div>{`Today as ${user?.name}`}</div>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/schedule"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/schedule" element={<Dashboard />} />
+              <Route path="/admin/today" element={<Today />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByRole("button", { name: "to today" });
+    localStorage.setItem("waves_admin_token", NEW_TOKEN);
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+    await screen.findByRole("button", { name: "to today" });
+    await act(async () => { screen.getByRole("button", { name: "to today" }).click(); });
+    expect(await screen.findByText("Today as Newer Tech")).toBeInTheDocument();
   });
 
   it("treats a 2xx whose body cannot be read as weak signal", async () => {

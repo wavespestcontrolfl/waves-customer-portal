@@ -164,7 +164,7 @@ export default function AdminLayoutV2() {
 
   // Bumped when the staff check answers for a token that is no longer the
   // stored one (another tab signed in): the check reruns for the new login
-  // instead of applying the old login's answer. Field workspace only.
+  // instead of applying the old login's answer.
   const [verifyRun, setVerifyRun] = useState(0);
   const locationRef = useRef(location);
   locationRef.current = location;
@@ -193,7 +193,7 @@ export default function AdminLayoutV2() {
     verify
       .then((profile) => {
         if (cancelled) return;
-        if (field && getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (!profile) {
           setAuthStatus("error");
           return;
@@ -223,7 +223,7 @@ export default function AdminLayoutV2() {
       })
       .catch((err) => {
         if (cancelled) return;
-        if (field && getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
+        if (getAdminAuthToken() !== token) { setVerifyRun((n) => n + 1); return; }
         if (err?.status === 401) {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
@@ -247,12 +247,12 @@ export default function AdminLayoutV2() {
     };
   }, [navigate, verifyRun]);
 
-  // Field workspace only: another tab signing in or out changes the stored
-  // token under this shell. Drop the identity verified for the old token at
+  // The whole shell (it stays mounted across admin pages, so a switch made
+  // while on another page must not reach Today later; pre-push P1): another
+  // tab signing in or out changes the stored token under this shell. Drop the identity verified for the old token at
   // once (the outlet unmounts while "checking") and verify the new one.
   useEffect(() => {
     const onStorage = (event) => {
-      if (!isFieldPath(locationRef.current.pathname)) return;
       if (event.key !== null && event.key !== "waves_admin_token") return;
       setUser(null);
       setAuthStatus(getAdminAuthToken() ? "checking" : "error");
