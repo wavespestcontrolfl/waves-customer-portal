@@ -114,6 +114,9 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(await call('GET', '/')).toEqual({ status: 404, body: { enabled: false } });
     expect(await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '5555' })).toEqual({ status: 404, body: { enabled: false } });
     expect(await call('PATCH', `/entries/${id}`, { action: 'confirm' })).toEqual({ status: 404, body: { enabled: false } });
+    // The disabled answer is never cached past a gate flip.
+    const res = await fetch(`${baseUrl}/`);
+    expect(res.headers.get('cache-control')).toBe('no-store');
   });
 
   test('list: neighborhoods with a live entry or a linked active property, retired hidden unless asked', async () => {
@@ -255,20 +258,24 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await trx('neighborhood_access').where({ id: added.body.id }).first()).status).toBe('active');
   });
 
-  test('edit: a new value counts as confirmed; a label-only edit keeps the status and date', async () => {
+  test('edit: a new value counts as confirmed and becomes the office\'s; a label-only edit keeps status, date and source', async () => {
     const n = await neighborhood('Yaupon Glen');
     const stale = MONTHS_AGO(9);
-    const a = await entry(n, { code: '3141', status: 'needs_confirm', last_confirmed_at: stale });
+    const filer = randomUUID();
+    await trx('customers').insert({ id: filer, first_name: 'Sample', last_name: 'Filer', phone: '+12025550179', email: `${filer}@example.invalid` });
+    const a = await entry(n, { code: '3141', status: 'needs_confirm', last_confirmed_at: stale, source: 'profile', source_customer_id: filer });
     const relabeled = await call('PATCH', `/entries/${a}`, { gate_label: 'Front gate' });
     expect(relabeled).toMatchObject({ status: 200, body: { status: 'needs_confirm' } });
     const kept = await trx('neighborhood_access').where({ id: a }).first();
     expect(kept.status).toBe('needs_confirm');
     expect(new Date(kept.last_confirmed_at).getTime()).toBe(stale.getTime());
+    expect(kept).toMatchObject({ source: 'profile', source_customer_id: filer });
     const recoded = await call('PATCH', `/entries/${a}`, { code: '3142' });
     expect(recoded).toMatchObject({ status: 200, body: { status: 'active' } });
     const row = await trx('neighborhood_access').where({ id: a }).first();
     expect(row.status).toBe('active');
     expect(Date.now() - new Date(row.last_confirmed_at).getTime()).toBeLessThan(60000);
+    expect(row).toMatchObject({ source: 'office', source_customer_id: null });
   });
 
   test('confirm: active again, confirmed now, bell helper called; retire hides it', async () => {

@@ -63,6 +63,9 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/customers",
     label: "Customers",
     icon: Users,
+    // The neighborhood gate-code directory: admin only on its own (server is
+    // requireAdmin; the path is in OWNER_ONLY_NESTED_PATHS).
+    views: [{ id: "gateCodes", label: "Gate codes", path: "/admin/customers/gate-codes", adminOnly: true, keywords: ["gate", "gate code", "neighborhood", "community", "access"] }],
   },
   pipeline: {
     id: "pipeline",
@@ -400,7 +403,7 @@ export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)
 const WORKSPACE_GROUPS = [
   { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily" },
   { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["schedule"], section: "Daily" },
-  { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts"], section: "Daily" },
+  { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts", "gateCodes"], section: "Daily" },
   { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate"], section: "Daily" },
   { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily" },
   { id: "billing", label: "Billing", target: "invoices", itemIds: ["invoices", "recovery", "payers"], section: "Daily" },

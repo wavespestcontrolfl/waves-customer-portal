@@ -29,7 +29,7 @@ describe("grouped workspaces", () => {
     const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));
     expect(groups).toHaveLength(12);
     expect(ids).toHaveLength(new Set(ids).size);
-    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates']));
+    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates', 'gateCodes']));
   });
 
   it("applies leaf roles and gates even beneath accessible parents", () => {
@@ -39,6 +39,9 @@ describe("grouped workspaces", () => {
     const adminIds = getAdminWorkspaceGroups('admin').flatMap(({ items }) => items.map(({ id }) => id));
     expect(adminIds).not.toContain('agentEstimate');
     expect(techIds).not.toEqual(expect.arrayContaining(['contracts', 'toolHealth', 'estimates']));
+    // The gate-code directory is a view of Customers but admin only on its own.
+    expect(techIds).not.toContain('gateCodes');
+    expect(adminIds).toContain('gateCodes');
   });
 
   it("resolves actual rendered tabs, proposal links, and redirected Schedule", () => {

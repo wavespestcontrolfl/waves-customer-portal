@@ -28,8 +28,9 @@ const { isKeypadCode } = require('../services/neighborhood-access');
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
 router.use((req, res, next) => {
-  if (!neighborhoodAccessLive()) return res.status(404).json({ enabled: false });
+  // no-store first, so the disabled answer is never cached past a gate flip.
   res.set('Cache-Control', 'no-store');
+  if (!neighborhoodAccessLive()) return res.status(404).json({ enabled: false });
   return next();
 });
 
@@ -314,7 +315,11 @@ router.patch('/entries/:id', async (req, res) => {
       const valueChanged = next.access_type !== row.access_type
         || (next.code || null) !== (row.code || null)
         || (next.instructions || null) !== (row.instructions || null);
-      const confirmation = valueChanged ? { status: 'active', last_confirmed_at: trx.fn.now() } : {};
+      // The value is now the office's: it no longer comes from the customer
+      // who filed it (a later conflict bell must never open that customer).
+      const confirmation = valueChanged
+        ? { status: 'active', last_confirmed_at: trx.fn.now(), source: 'office', source_customer_id: null }
+        : {};
       await trx('neighborhood_access').where({ id }).update({ ...next, ...confirmation, updated_at: trx.fn.now() });
       return { status: 200, body: { id, status: valueChanged ? 'active' : row.status } };
     });

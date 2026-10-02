@@ -196,6 +196,10 @@ export default function NeighborhoodGateCodesPage() {
   }, [query, filter]);
 
   useEffect(() => { load(); }, [load]);
+  // A save that finishes after the search or filter changed reloads the
+  // CURRENT view, never the one it started under.
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   const closeForms = () => { setEditingId(""); setAddingTo(""); setFormError(""); };
 
@@ -206,7 +210,7 @@ export default function NeighborhoodGateCodesPage() {
     try {
       await api(path, { method, body: JSON.stringify(body) });
       closeForms();
-      await load();
+      await loadRef.current();
       setToast(successText);
     } catch (err) {
       if (onError) onError(err.message || "Action failed");
@@ -250,9 +254,10 @@ export default function NeighborhoodGateCodesPage() {
       <AdminCommandHeader variant="workspace" title="Neighborhood gate codes" icon={KeyRound} />
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
-        One gate code per neighborhood, shared by every stop in it. Staff only: customers never see
-        these. Confirm a code after you have seen it work; an entry nobody has confirmed in 6 months
-        shows as Stale.
+        Shared access for each neighborhood: gate codes and gate instructions every stop there can
+        use. A neighborhood with more than one gate can have a confirmed entry for each. Staff only:
+        customers never see these. Confirm an entry after you have seen it work; one nobody has
+        confirmed in 6 months shows as Stale.
       </div>
 
       {disabled ? (
