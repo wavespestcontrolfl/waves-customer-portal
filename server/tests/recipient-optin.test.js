@@ -433,6 +433,46 @@ describe('dispatchRecipientOptins: on-site (visit-bound) asks (#5467)', () => {
     expect(returned[0].patch).not.toHaveProperty('status');
   });
 
+  test('the provider-boundary visit re-check refuses a dead visit: released to ask_failed', async () => {
+    const { optin, writes, send } = load();
+    send.mockImplementation(async (input) => {
+      expect(typeof input.preProviderCheck).toBe('function');
+      // The visit dies between the lease check and the provider handoff.
+      require('../services/appointment-reminders').scheduledServiceApptTime.mockResolvedValue(new Date(Date.now() - 60000));
+      const verdict = await input.preProviderCheck({ channel: 'sms' });
+      expect(verdict.ok).toBe(false);
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(0);
+    const released = writes.find((w) => w.patch && w.patch.status === 'ask_failed');
+    expect(released.filter).toMatchObject({ visit_id: 'v1' });
+    expect(released.patch.dispatch_lease_at).toBeNull();
+  });
+
+  test('a sender error AFTER the provider accepted marks the ask dispatched (never ask_failed)', async () => {
+    const { optin, writes, send } = load();
+    send.mockImplementation(async () => {
+      const err = new Error('audit insert failed');
+      err.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM9' };
+      throw err;
+    });
+    expect((await optin.dispatchRecipientOptins([claim], { id: 'c1' })).requested).toBe(1);
+    expect(writes.some((w) => w.patch && w.patch.status === 'ask_failed')).toBe(false);
+    const done = writes.find((w) => w.patch && w.patch.provider_sid === 'SM9');
+    expect(done.patch.dispatched_at).toBeInstanceOf(Date);
+  });
+
+  test('an uncertain sender error leaves the ask pending under its lease for reconcile', async () => {
+    const { optin, writes, send } = load();
+    send.mockImplementation(async () => {
+      const err = new Error('provider timeout');
+      err.providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+      throw err;
+    });
+    await optin.dispatchRecipientOptins([claim], { id: 'c1' });
+    expect(writes.some((w) => w.patch && (w.patch.status === 'ask_failed' || w.patch.dispatch_lease_at === null))).toBe(false);
+  });
+
   test('an office-review hold returns the lease (pending, for the sweep); nothing sent', async () => {
     const { optin, writes, send } = load({ visitState: 'wait' });
     await optin.dispatchRecipientOptins([claim], { id: 'c1' });

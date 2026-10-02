@@ -502,7 +502,20 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         }
       }
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      // An on-site ask re-checks its visit once more at the provider boundary
+      // (after the sender's own consent / audit awaits), so a visit cancelled,
+      // moved or under way meanwhile never gets an address-bearing ask.
+      let boundaryState = null;
       const result = await sendCustomerMessage({
+        ...(claim.visitId ? {
+          preProviderCheck: async () => {
+            const s = await visitAskState(claim.visitId, claim.customerId).catch(() => ({ state: 'unknown' }));
+            boundaryState = s.state;
+            return s.state === 'live'
+              ? { ok: true }
+              : { ok: false, code: 'ONSITE_VISIT_NOT_LIVE', reason: `visit ${s.state}` };
+          },
+        } : {}),
         to: claim.phone,
         body: claim.body,
         channel: 'sms',
@@ -524,6 +537,15 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
       // 8:00 AM instead — the queued row owns the ask, the row stays
       // pending (dispatched), and the recipient's YES reply flips it
       // through the normal inbound path.
+      // The boundary visit check refused: dead releases the ask; a hold or an
+      // unreadable check returns the lease for the recovery sweep.
+      if (claim.visitId && result.blocked && boundaryState && boundaryState !== 'live') {
+        await claimRow().update({
+          ...(boundaryState === 'dead' ? { status: 'ask_failed' } : {}),
+          dispatch_lease_at: null, updated_at: new Date(),
+        }).catch(() => {});
+        continue;
+      }
       // An on-site visit ask never rides the deferred queue (owner 10-02): its
       // lease is returned and the row stays pending, so the recovery sweep
       // sends it for its visit once the window opens.
@@ -603,6 +625,27 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         .catch(() => {});
       requested += 1;
     } catch (err) {
+      // The sender attaches its provider outcome to a post-handoff error: an
+      // ACCEPTED ask is dispatched (a YES must confirm it, a reclaim must not
+      // re-send it); an UNCERTAIN one stays pending — an on-site ask keeps its
+      // lease until it goes stale — for the sweep's sms_log reconcile. Only a
+      // send that never reached the provider is released to ask_failed.
+      const outcome = err?.providerOutcome;
+      if (outcome?.deliveryOutcome === 'accepted') {
+        await claimRow().update({
+          dispatched_at: new Date(),
+          dispatch_lease_at: null,
+          provider_sid: String(outcome.providerMessageId || outcome.sid || '').slice(0, 64) || null,
+          updated_at: new Date(),
+        }).catch(() => {});
+        requested += 1;
+        logger.warn(`[recipient-optin] ask accepted for ***${claim.key.slice(-4)} but the sender failed after: ${err.message}`);
+        continue;
+      }
+      if (outcome?.deliveryOutcome === 'uncertain') {
+        logger.warn(`[recipient-optin] ask for ***${claim.key.slice(-4)} has an uncertain outcome; left pending for reconcile: ${err.message}`);
+        continue;
+      }
       await claimRow().update({ status: 'ask_failed', dispatch_lease_at: null, updated_at: new Date() }).catch(() => {});
       logger.warn(`[recipient-optin] request failed for ***${claim.key.slice(-4)}: ${err.message}`);
     }

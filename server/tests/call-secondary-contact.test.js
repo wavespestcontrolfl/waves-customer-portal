@@ -184,6 +184,15 @@ describe('secondary_contact V2 mapping', () => {
     expect(resolveCallSecondaryContact({}, null)).toBeNull();
   });
 
+  test('resolveCallSecondaryContact: V2 on-site flags carry V2\'s role for the ask decision (V1 role differs)', () => {
+    const v1Other = { first_name: 'Joseph', last_name: 'Haught', phone: '+19542901693', email: null, role: 'other', wants_notifications: false, notes: null };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1Other }, { secondary_contact: { ...v2Contact, role: 'spouse_partner', on_site: true } });
+    expect(merged.role).toBe('other');
+    expect(merged.on_site).toBe(true);
+    expect(merged.on_site_role).toBe('spouse_partner');
+    expect(onSiteOptinAskTrigger(merged)).toBe(true);
+  });
+
   test('resolveCallSecondaryContact: conflicting identities never merge — V1 wins unmerged', () => {
     const v1Matt = { first_name: 'Matt', last_name: null, phone: '+19415551111', email: null, role: 'real_estate_agent', wants_notifications: false, notes: null };
     const out = resolveCallSecondaryContact({ secondary_contact: v1Matt }, { secondary_contact: v2Contact });

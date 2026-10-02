@@ -3146,6 +3146,9 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // never arrive here.
     wants_appointment_texts: v2Flag('wants_appointment_texts'),
     on_site: v2Flag('on_site'),
+    // The role those V2 flags were judged under: the ask decision reads it, so
+    // a different non-unknown V1 role never vetoes a V2 on-site contact.
+    ...((v2Flag('wants_appointment_texts') || v2Flag('on_site')) ? { on_site_role: v2.role } : {}),
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -3736,7 +3739,7 @@ const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_sell
 // caller and the opt-in service.
 function onSiteOptinAskTrigger(contact) {
   if (!contact || !String(contact.phone || '').trim()) return false;
-  if (!ON_SITE_NOTIFY_ROLES.has(String(contact.role || '').trim().toLowerCase())) return false;
+  if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
   return contact.wants_appointment_texts === true || contact.on_site === true;
 }
 // The pre-claim gates on the on-site opt-in ask, in one pure place: not an
@@ -18760,6 +18763,16 @@ const CallRecordingProcessor = {
                   const phoneKey = tenOf(entry.phone);
                   try {
                     const custRow = await db('customers').where({ id: customerId }).first();
+                    // The phone must still occupy a service-contact slot on the
+                    // fresh row: a contact removed or replaced since the save is
+                    // no longer an appointment recipient and is never asked.
+                    const slotPhones = custRow
+                      ? [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                      : [];
+                    if (custRow && !slotPhones.some((ph) => tenOf(ph) === phoneKey)) {
+                      await markOptinAsk(entry, 'not_sent:not_in_slot');
+                      continue;
+                    }
                     const claims = custRow ? await claimRecipientOptins({
                       customer: custRow,
                       contacts: [{
