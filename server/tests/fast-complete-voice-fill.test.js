@@ -1293,3 +1293,10 @@ describe('Codex #5580 round 7', () => {
     expect(validateFill(answer({ products: [row('p-taurus', 4, 'Taurus four ounces')] }), ctx, t).products[0].amount).toBe(4);
   });
 });
+
+test('"four ounces per gallon and sprayed two gallons": neither number is the Taurus amount', () => {
+  const t = 'Mixed Taurus at four ounces per gallon and sprayed two gallons outside.';
+  const run = (amount, unit) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard: t.replace(/\.$/, '') }] }), ctx, t).products[0].amount;
+  expect(run(2, 'gal')).toBeNull();
+  expect(run(4, 'fl_oz')).toBeNull();
+});

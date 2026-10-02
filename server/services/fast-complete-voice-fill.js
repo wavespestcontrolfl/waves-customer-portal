@@ -476,8 +476,11 @@ function readUnitAfter(tokens, i) {
 // Taurus solution", "a gallon of mix", "in a gallon", "gallons of water".
 const CARRIER_WORDS = new Set(['solution', 'mix', 'mixture', 'tank', 'water', 'finished', 'sprayer', 'diluted']);
 const CARRIER_STOPS = new Set(['in', 'into', 'to', 'with', 'for', 'on', 'and']);
+// "sprayed two gallons", "put out three gallons": gallons sprayed are finished mix.
+const SPRAYED_WORDS = new Set(['sprayed', 'spraying', 'spray', 'applied', 'out', 'ran', 'went', 'through']);
 function isCarrierVolume(tokens, start, end, unit) {
   if (unit === 'gal' && (tokens[start - 1] === 'in' || tokens[start - 1] === 'into')) return true;
+  if (unit === 'gal' && (SPRAYED_WORDS.has(tokens[start - 1]) || (isArticle(tokens[start - 1]) && SPRAYED_WORDS.has(tokens[start - 2])))) return true;
   if (tokens[end] !== 'of' && unit !== 'gal') return false;
   const from = tokens[end] === 'of' ? end + 1 : end;
   for (let k = 0; k < 3 && !CARRIER_STOPS.has(tokens[from + k]); k += 1) if (CARRIER_WORDS.has(tokens[from + k])) return true;
