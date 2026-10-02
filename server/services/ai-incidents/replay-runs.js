@@ -21,6 +21,7 @@
  */
 
 const { transitionProposal, TransitionError, OPEN_STATUSES } = require('./fix-proposals');
+const { GRATITUDE_INTENT, buildGratitudeReply } = require('../sms-gratitude');
 
 const SPLITS = Object.freeze(['dev', 'holdout']);
 const METHODS = Object.freeze(['subagent', 'code']);
@@ -56,6 +57,28 @@ function splitKeys(proposal, split) {
   return split === 'dev' ? (proposal.dev_incident_keys || []) : (proposal.holdout_incident_keys || []);
 }
 
+// Exported cases leave the database for the lane's scratchpad, so they
+// carry no customer identifiers (ops/agents artifact rule): the customer's
+// own names, then the shared corpus redactors (emails, phones, addresses,
+// cards, links, access codes), then invoice and order references.
+function scrubCaseText(text, customer) {
+  const { redactText } = require('../agent-decision-training');
+  const { redact: redactPii } = require('../content/pii-redactor');
+  const { redactAccessCodes } = require('../context-aggregator');
+  let out = String(text || '');
+  for (const value of [customer?.first_name, customer?.last_name]) {
+    const name = String(value || '').trim();
+    if (!name) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'giu'), '[name]');
+  }
+  out = redactAccessCodes(redactPii(redactText(out, { customer })).text);
+  return out
+    .replace(/\b(invoice|receipt|order|inv)\b(\s*(?:#|no\.?|number)?\s*:?\s*)[A-Z]*-?\d[A-Z0-9-]*/gi, '$1$2[ref]')
+    .replace(/\b[A-Z]{2,5}-\d[\d-]*\b/g, '[ref]')
+    .replace(/#\s?\d{3,}\b/g, '#[ref]');
+}
+
 /**
  * One case per incident in the split: the draft as produced, the facts it was
  * given, the customer's text, the person's reply and what the two readers
@@ -73,6 +96,7 @@ async function exportCases({ dbi, proposalId, split }) {
   if (!keys.length) return { proposal, cases: [], missing: [] };
   const rows = await dbi({ i: 'ai_incidents' })
     .join({ md: 'message_drafts' }, dbi.raw('md.id::text'), 'i.incident_key')
+    .leftJoin({ c: 'customers' }, 'c.id', 'md.customer_id')
     .leftJoin({ j: 'shadow_draft_judgments' }, function judgmentJoin() {
       this.on(dbi.raw('j.id::text'), '=', 'i.evidence_id').andOn('i.evidence_type', '=', dbi.raw('?', ['judgment']));
     })
@@ -82,6 +106,7 @@ async function exportCases({ dbi, proposalId, split }) {
     .select(
       'i.incident_key', 'i.prompt_version', 'i.produced_at', 'i.summary', 'i.adjudication',
       'md.inbound_message', 'md.draft_response', 'md.facts_block', 'md.intent', 'md.scheduling_intent',
+      'c.first_name', 'c.last_name',
       dbi.raw("md.intended_actions::jsonb ->> 'voice_profile_version' as voice_profile_version"),
       'j.human_reply_text', 'j.intent as judge_intent'
     );
@@ -90,7 +115,14 @@ async function exportCases({ dbi, proposalId, split }) {
   for (const r of rows) {
     if (seen.has(r.incident_key)) continue;
     seen.add(r.incident_key);
-    const quotes = (r.adjudication?.readers || []).map((rd) => rd?.answer?.quote).filter(Boolean);
+    const customer = { first_name: r.first_name, last_name: r.last_name };
+    const scrub = (t) => (t == null ? null : scrubCaseText(t, customer));
+    const quotes = (r.adjudication?.readers || []).map((rd) => rd?.answer?.quote).filter(Boolean).map(scrub);
+    // A gratitude draft was prompted with the reply production approved for
+    // this customer by name: rebuilt the same way, then scrubbed like the rest.
+    const intentName = r.intent || r.judge_intent || null;
+    const approvedReply = intentName === GRATITUDE_INTENT
+      ? scrub(buildGratitudeReply(r.first_name)) : null;
     cases.push({
       incident_key: r.incident_key,
       split,
@@ -98,17 +130,18 @@ async function exportCases({ dbi, proposalId, split }) {
       prompt_version: r.prompt_version,
       produced_at: r.produced_at,
       // The drafter's own classification, as the production prompt saw it.
-      intent: r.intent || r.judge_intent || null,
+      intent: intentName,
+      approved_reply: approvedReply,
       scheduling_intent: r.scheduling_intent === true,
       // The owner-approved voice profile that shaped the draft (null = base).
       voice_profile_version: r.voice_profile_version == null ? null : Number(r.voice_profile_version),
       replay_omits: [...REPLAY_OMITS],
-      inbound_message: r.inbound_message,
-      facts_block: r.facts_block,
-      draft_as_produced: r.draft_response,
-      human_reply: r.human_reply_text || null,
+      inbound_message: scrub(r.inbound_message),
+      facts_block: scrub(r.facts_block),
+      draft_as_produced: scrub(r.draft_response),
+      human_reply: scrub(r.human_reply_text),
       unsupported_quotes: quotes,
-      summary: r.summary,
+      summary: scrub(r.summary),
     });
   }
   return { proposal, cases, missing: keys.filter((k) => !seen.has(k)) };
@@ -275,6 +308,7 @@ module.exports = {
   REPLAYABLE_SURFACES,
   REPLAY_OMITS,
   runStatus,
+  scrubCaseText,
   exportCases,
   recordReplayRun,
   carryForward,

@@ -49,11 +49,17 @@ async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = nul
     .countDistinct('incident_key as n')
     .orderBy([{ column: 'disposition' }, { column: 'n', order: 'desc' }]);
 
-  const proposals = await dbi('ai_fix_proposals')
+  // Every open proposal, always (active work is never cut by a cap), then
+  // up to 20 recently closed ones for history.
+  const OPEN = ['pending', 'accepted', 'pr_open'];
+  const open = await dbi('ai_fix_proposals').where({ area: AREA }).whereIn('status', OPEN).orderBy('created_at', 'desc');
+  const recentClosed = await dbi('ai_fix_proposals')
     .where({ area: AREA })
-    .where((q) => q.whereIn('status', ['pending', 'accepted', 'pr_open']).orWhere('updated_at', '>=', since))
-    .orderBy('created_at', 'desc')
+    .whereNotIn('status', OPEN)
+    .where('updated_at', '>=', since)
+    .orderBy('updated_at', 'desc')
     .limit(20);
+  const proposals = [...open, ...recentClosed];
   const runIds = proposals.flatMap((p) => [p.dev_run_id, p.holdout_run_id]).filter(Boolean);
   const runs = runIds.length
     ? await dbi('ai_replay_runs').whereIn('id', runIds).select('id', 'split', 'status', 'case_count', 'reproduces_count', 'method')

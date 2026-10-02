@@ -5,8 +5,9 @@
 // call (owner ruling 2026-10-02). Three subcommands:
 //
 //   export --proposal=<id|8-char> --split=dev|holdout --out=<dir outside the repo>
-//       Writes <dir>/cases.jsonl (one frozen case per incident: the customer's
-//       text, the facts the drafter was given, the draft, the person's reply,
+//       Writes <dir>/cases.jsonl (one frozen case per incident, customer
+//       identifiers redacted: the customer's text, the facts the drafter was
+//       given, the draft, the person's reply,
 //       the quotes both readers verified, what the replay leaves out),
 //       <dir>/system-prompt-<v|base>.txt (the drafter's system prompt as THIS
 //       checkout renders it under the process's gates with the voice profile
@@ -133,7 +134,11 @@ async function runExport({ dbi, args, log, drafter }) {
       ...c,
       system_prompt_file: promptFileFor(lost ? null : c.voice_profile_version),
       replay_omits: lost ? [...c.replay_omits, 'voice_profile'] : c.replay_omits,
-      user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, { intent: String(c.intent || 'GENERAL').toUpperCase() }, c.scheduling_intent),
+      user_prompt: d.buildUserPromptFromFacts(c.facts_block, c.inbound_message, {
+        // Exactly as stored: the prompt compares it to the drafter's own names.
+        intent: c.intent || 'GENERAL',
+        ...(c.approved_reply ? { approvedReply: c.approved_reply } : {}),
+      }, c.scheduling_intent),
     });
   });
   fs.writeFileSync(path.join(dir, 'cases.jsonl'), lines.length ? `${lines.join('\n')}\n` : '');

@@ -30,6 +30,8 @@ const V13 = 'house_voice_v13';
 // A prompt-wording cell: the only kind a frozen replay can reproduce.
 const CELL = { surface: 'prompt_discipline', failure_mode: 'invented_schedule_eta' };
 const SHA = 'e25e9cfabc';
+// Synthetic customer (no real names in the repo).
+const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
 // Distinct 8-character prefixes; the hash split of these 12 is 10 dev / 2 holdout.
 const KEYS = Array.from({ length: 12 }, (_, i) => `${String(i + 1).padStart(8, '0')}-0000-4000-8000-000000000000`);
 
@@ -80,8 +82,10 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await proposalsMigration.up(database);
     await migration.up(database);
     await database.raw(`CREATE TABLE ??.message_drafts (id uuid PRIMARY KEY, inbound_message text, draft_response text,
-      facts_block text, prompt_version varchar(40), created_at timestamptz, campaign_type varchar(30), intent varchar(50),
+      facts_block text, prompt_version varchar(40), created_at timestamptz, campaign_type varchar(30), intent varchar(50), customer_id uuid,
       scheduling_intent boolean, intended_actions text)`, [schema]);
+    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, first_name text, last_name text)', [schema]);
+    await database('customers').insert({ id: CUSTOMER_ID, first_name: 'Quentavious', last_name: 'Brightwater' });
     await database.raw('CREATE TABLE ??.voice_profiles (version integer PRIMARY KEY, profile_text text)', [schema]);
     await database('voice_profiles').insert({ version: 7, profile_text: 'PROFILE SEVEN' });
     await database.raw(`CREATE TABLE ??.shadow_draft_judgments (id uuid PRIMARY KEY, draft_id uuid UNIQUE, verdict varchar(20),
@@ -103,9 +107,12 @@ test('export refuses a directory inside the repository, however it is spelled', 
     for (const [i, key] of KEYS.entries()) {
       const judgmentId = randomUUID();
       await database('message_drafts').insert({
-        id: key, inbound_message: 'when are you coming?', draft_response: `See you Wednesday at ${i + 1}pm!`,
-        facts_block: 'UPCOMING: Quarterly Pest 2026-10-06 (Tue) window 14:00-16:00', prompt_version: V12, created_at: new Date('2026-10-01T15:00:00Z'),
-        intent: 'SCHEDULING', scheduling_intent: i % 2 === 0,
+        id: key, customer_id: CUSTOMER_ID,
+        inbound_message: i === 0 ? 'thanks so much!' : 'when are you coming? text me at 941-555-0100',
+        draft_response: `See you Wednesday at ${i + 1}pm, Quentavious!`,
+        facts_block: 'CUSTOMER: Quentavious Brightwater, 412 Palm Ave\nOPEN INVOICE: invoice #48213\nUPCOMING: Quarterly Pest 2026-10-06 (Tue) window 14:00-16:00',
+        prompt_version: V12, created_at: new Date('2026-10-01T15:00:00Z'),
+        intent: i === 0 ? 'gratitude_reply' : 'SCHEDULING', scheduling_intent: i % 2 === 0,
         // Drafts under profile 7, one under a profile no longer stored, the rest profile-free.
         intended_actions: JSON.stringify({ voice_profile_version: i < 6 ? 7 : i === 6 ? 99 : null }),
       });
@@ -213,7 +220,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
   test('export writes the frozen dev cases, the system prompt and a results template outside the repo; record dry-runs by default', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-'));
     const drafter = {
-      buildUserPromptFromFacts: (facts, inbound, intent, scheduling) => `${facts}\n\nCUSTOMER: ${inbound}\nINTENT: ${intent.intent}${scheduling ? ' (scheduling)' : ''}`,
+      buildUserPromptFromFacts: (facts, inbound, intent, scheduling) => `${facts}\n\nCUSTOMER: ${inbound}\nINTENT: ${intent.intent}${intent.approvedReply ? ` APPROVED: ${intent.approvedReply}` : ''}${scheduling ? ' (scheduling)' : ''}`,
       buildSystemPromptWithProfile: (text) => ({ system: `SYSTEM PROMPT${text ? ` + ${text}` : ''}` }),
       currentPromptVersion: () => V12,
     };
@@ -222,12 +229,25 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const cases = fs.readFileSync(path.join(dir, 'cases.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(cases).toHaveLength(10);
     expect(cases.map((c) => c.incident_key).sort()).toEqual([...proposal.dev_incident_keys].sort());
-    expect(cases[0]).toMatchObject({ split: 'dev', human_reply: 'Tuesday 2-4.', intent: 'SCHEDULING', cell: CELL });
+    const sched = cases.find((c) => c.intent === 'SCHEDULING');
+    expect(sched).toMatchObject({ split: 'dev', human_reply: 'Tuesday 2-4.', cell: CELL, approved_reply: null });
+    // Nothing identifying leaves the database: names, phone, address, invoice number.
+    const written = fs.readFileSync(path.join(dir, 'cases.jsonl'), 'utf8');
+    expect(written).not.toMatch(/Quentavious|Brightwater|941-555-0100|412 Palm|48213/);
+    expect(sched.facts_block).toContain('[name]');
+    expect(sched.draft_as_produced).toMatch(/Wednesday at \d+pm, \[name\]!/);
+    // The gratitude case carries the reply production approved by name, scrubbed.
+    const thanks = cases.find((c) => c.intent === 'gratitude_reply');
+    if (thanks) {
+      expect(thanks.approved_reply).toBe('Our pleasure, [name]!');
+      expect(thanks.user_prompt).toContain('INTENT: gratitude_reply APPROVED: Our pleasure, [name]!');
+    }
     // The stored scheduling-intent flag reaches the replayed prompt, case by case.
     for (const c of cases) expect(c.user_prompt.endsWith('(scheduling)')).toBe(c.scheduling_intent);
     expect(new Set(cases.map((c) => c.scheduling_intent)).size).toBe(2);
-    expect(cases[0].unsupported_quotes).toHaveLength(2);
-    expect(cases[0].user_prompt).toContain('CUSTOMER: when are you coming?');
+    expect(sched.unsupported_quotes).toHaveLength(2);
+    // (The shared phone redactor takes the space before the number with it.)
+    expect(sched.user_prompt).toMatch(/\n\nCUSTOMER: when are you coming\? text me at ?\[phone\]/);
     // Each case points at the system prompt for the voice profile it was drafted under.
     expect(fs.readFileSync(path.join(dir, 'system-prompt-v7.txt'), 'utf8')).toBe('SYSTEM PROMPT + PROFILE SEVEN');
     expect(fs.readFileSync(path.join(dir, 'system-prompt-base.txt'), 'utf8')).toBe('SYSTEM PROMPT');
@@ -240,7 +260,7 @@ test('export refuses a directory inside the repository, however it is spelled', 
       else expect(c.system_prompt_file).toBe('system-prompt-base.txt');
     }
     // No line the CLI prints carries customer text.
-    expect(lines.join('\n')).not.toMatch(/when are you coming|Wednesday/);
+    expect(lines.join('\n')).not.toMatch(/when are you coming|Wednesday|Quentavious/);
 
     const template = JSON.parse(fs.readFileSync(path.join(dir, 'results-template.json'), 'utf8'));
     template.code_ref = SHA;
@@ -292,6 +312,18 @@ test('export refuses a directory inside the repository, however it is spelled', 
     const text = report.formatReport(r);
     expect(text).toContain('never the exact production model');
     expect(text).not.toMatch(/when are you coming|Wednesday|summary-/);
+  });
+
+  test('the brief lists every open proposal however many closed ones are recent', async () => {
+    const base = await database('ai_fix_proposals').where({ id: proposal.id }).first();
+    const closed = Array.from({ length: 25 }, (_, i) => ({
+      ...base, id: randomUUID(), status: 'dismissed', failure_mode: `other_${i}`, supersedes: null, history: '[]',
+      incident_keys: '[]', dev_incident_keys: '[]', holdout_incident_keys: '[]', created_at: new Date('2026-10-04T10:00:00Z'), updated_at: new Date('2026-10-04T10:00:00Z'),
+    }));
+    await database('ai_fix_proposals').insert(closed);
+    const r = await report.buildReport({ dbi: database, now: new Date('2026-10-05T12:00:00Z'), days: 30, liveVersion: V12 });
+    expect(r.proposals.filter((p) => p.status === 'pending').map((p) => p.id)).toEqual([String(proposal.id).slice(0, 8)]);
+    expect(r.proposals).toHaveLength(21);
   });
 
   test('down drops both tables and up restores them', async () => {
