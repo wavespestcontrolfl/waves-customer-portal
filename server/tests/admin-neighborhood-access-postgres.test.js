@@ -388,6 +388,13 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(linked.entries.find((e) => e.gateLabel === 'Guard house')).toMatchObject({ accessType: 'guard', instructions: 'Check in at the booth' });
     expect(r.body.properties.find((p) => p.id === unlinked.propertyId)).toMatchObject({ neighborhood: null, neighborhoodSource: null, entries: [] });
 
+    // A switched-off neighborhood is not shown: the property reads as not linked, no codes.
+    const off = await neighborhood('Switched Off Grove', { active: false });
+    await entry(off, { code: '7878' });
+    const parked = await property(off);
+    const offView = await call('GET', `/customers/${parked.customerId}/properties`);
+    expect(offView.body.properties[0]).toMatchObject({ neighborhood: null, neighborhoodSource: null, entries: [] });
+
     const gone = await property(n, { deleted: true });
     expect((await call('GET', `/customers/${gone.customerId}/properties`)).status).toBe(404);
     expect((await call('GET', `/customers/${randomUUID()}/properties`)).status).toBe(404);

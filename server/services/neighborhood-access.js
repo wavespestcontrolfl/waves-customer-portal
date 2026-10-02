@@ -704,6 +704,8 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
   if (!visitNeighborhood.size) return out;
   const entries = await conn('neighborhood_access')
     .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    // A switched-off neighborhood's codes are not shown anywhere.
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])

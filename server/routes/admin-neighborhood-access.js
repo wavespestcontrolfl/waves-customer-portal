@@ -246,7 +246,9 @@ router.get('/', async (req, res) => {
 // Each property with its neighborhood and that neighborhood's live entries.
 async function propertyViews(conn, props) {
   const ids = [...new Set(props.map((p) => p.neighborhood_id).filter(Boolean))];
-  const hoods = ids.length ? await conn('neighborhoods').whereIn('id', ids).select('id', 'name', 'county') : [];
+  // A switched-off neighborhood is not shown (the directory hides it and the
+  // picker refuses it): the property reads as not linked, with no codes.
+  const hoods = ids.length ? await conn('neighborhoods').whereIn('id', ids).where({ active: true }).select('id', 'name', 'county') : [];
   const entryRows = ids.length
     ? await conn('neighborhood_access').whereIn('neighborhood_id', ids).whereNot('status', 'retired')
       .orderBy([{ column: 'gate_label' }, { column: 'created_at' }, { column: 'id' }])
