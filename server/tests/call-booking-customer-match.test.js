@@ -77,6 +77,13 @@ describe('FIX 1: validatePhoneCallAppointmentCustomer with a last name only', ()
     expect(noPhone.missing).toContain('phone');
   });
 
+  test('gate on: a caller with neither name is still held (the waiver needs a surname)', () => {
+    process.env[FIRST_NAME_GATE] = 'true';
+    const v = validatePhoneCallAppointmentCustomer({ ...customerRow, last_name: '' }, { ...extracted, last_name: null }, '+19415550142');
+    expect(v.ok).toBe(false);
+    expect(v.missing).toContain('first_name');
+  });
+
   test('gate on: a named caller files no first-name advisory', () => {
     process.env[FIRST_NAME_GATE] = 'true';
     const v = validatePhoneCallAppointmentCustomer({ ...customerRow, first_name: 'Sam' }, extracted, '+19415550142');
@@ -113,6 +120,8 @@ describe('FIX 1: the address a first-name-less customer is created at must be th
     expect(firstNameAdvisoryAddressOk(AV, stored)).toBe(true);
     expect(firstNameAdvisoryAddressOk({ ...AV, granularity: undefined }, stored)).toBe(false);
     expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'ROUTE' }, stored)).toBe(false);
+    // A validated unit (SUB_PREMISE) is premise-level too, as in the canonical validator.
+    expect(firstNameAdvisoryAddressOk({ ...AV, granularity: 'SUB_PREMISE' }, stored)).toBe(true);
     expect(firstNameAdvisoryAddressOk({ ...AV, status: 'ambiguous' }, stored)).toBe(false);
     expect(firstNameAdvisoryAddressOk({ ...AV, inServiceArea: false }, stored)).toBe(false);
     expect(firstNameAdvisoryAddressOk(null, stored)).toBe(false);

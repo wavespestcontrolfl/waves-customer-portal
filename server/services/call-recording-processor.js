@@ -3746,10 +3746,14 @@ function addressRenderingsAgree(a = {}, b = {}, { strict = false } = {}) {
 }
 
 // An accepted Address Validation verdict for an in-area address; `requirePremise`
-// demands an explicit PREMISE granularity (a missing one then fails).
+// demands an explicit premise-level granularity (a missing one then fails).
+// PREMISE and SUB_PREMISE (a validated unit) are both premise-level, as in the
+// canonical validator (address-validation/index.js); the unit itself is checked
+// by storedAddressMatchesVerdict.
+const PREMISE_LEVEL_GRANULARITIES = new Set(['PREMISE', 'SUB_PREMISE']);
 function verdictAcceptsAddress(av, { requirePremise = false } = {}) {
   if (!['validated_accept', 'corrected'].includes(av?.status) || av.inServiceArea !== true) return false;
-  return requirePremise ? av.granularity === 'PREMISE' : !av.granularity || av.granularity === 'PREMISE';
+  return requirePremise ? PREMISE_LEVEL_GRANULARITIES.has(av.granularity) : !av.granularity || PREMISE_LEVEL_GRANULARITIES.has(av.granularity);
 }
 
 // ONE normalized agreement predicate for the address a call STORES / BOOKS against the
@@ -6741,7 +6745,8 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // (the missing_first_name card asks the office for it), like the last name.
   // Gate off: first_name stays required, byte-identical to before.
   const firstNameAdvisory = require('../config/feature-gates').callFirstNameAdvisoryLive();
-  if (!String(merged.firstName || '').trim() && !firstNameAdvisory) missing.push('first_name');
+  // The waiver needs a surname: a caller with neither name never auto-books.
+  if (!String(merged.firstName || '').trim() && !(firstNameAdvisory && String(merged.lastName || '').trim())) missing.push('first_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
