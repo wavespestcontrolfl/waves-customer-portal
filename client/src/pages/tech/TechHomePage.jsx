@@ -63,8 +63,9 @@ import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
+import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
@@ -166,6 +167,29 @@ function openTypedCompletion(service) {
 // /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
 // ServiceRecapModal use the same `request(path, options)` contract as the
 // admin surface (which passes adminFetch).
+// One outcome per route read, so the page decides once:
+//   live     — a usable route payload;
+//   offline  — no usable answer reached the phone: fetch rejected (dead
+//              zone, timeout abort), or a 2xx whose body stalled, dropped or
+//              is not a route (captive portal HTML) — never an empty route;
+//   refused  — the server said no to this login (401/403);
+//   failed   — any other server answer (5xx...), with its message.
+async function readRoute(date, token, signal) {
+  let res;
+  try {
+    res = await fetch(`${API}/api/admin/schedule?date=${date}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    return { kind: 'offline' };
+  }
+  const data = await res.json().catch(() => null);
+  if (res.ok) return isSchedulePayload(data) ? { kind: 'live', data } : { kind: 'offline' };
+  const message = data?.error || `Route failed to load (${res.status})`;
+  return { kind: res.status === 401 || res.status === 403 ? 'refused' : 'failed', message };
+}
+
 async function techRequest(path, options = {}) {
   const token = getAdminAuthToken();
   const res = await fetch(`${API}/api${path}`, {
@@ -207,11 +231,33 @@ function getGreeting() {
   return 'Good evening';
 }
 
+// Only a payload that actually carries a route may be rendered as one or
+// saved over the last good snapshot.
+function isSchedulePayload(data) {
+  return Array.isArray(data) || Array.isArray(data?.services) || Array.isArray(data?.schedule);
+}
+
 function scheduleRowsFromResponse(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.services)) return data.services;
   if (Array.isArray(data?.schedule)) return data.schedule;
   return [];
+}
+
+// One shape for the live payload and the saved snapshot of it, so the
+// offline fallback renders exactly what the last good load rendered.
+function scheduleStateFromResponse(data) {
+  return {
+    rows: scheduleRowsFromResponse(data).map((service) => ({
+      ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
+    })),
+    rainChance: typeof data.rainChance === 'number' ? data.rainChance : null,
+  };
+}
+
+function refreshingRouteNotice(savedAt) {
+  const time = formatSnapshotTime(savedAt);
+  return `Refreshing your route — showing the copy saved${time ? ` at ${time}` : ''}.`;
 }
 
 function serviceTechnicianId(service) {
@@ -243,14 +289,26 @@ const QUICK_ACTIONS = [
 
 export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
-  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy, staffProfile = null } = useOutletContext() || {};
+  // Identity comes from the profile the shell verified; the stored copy is
+  // only a fallback (a failed cache write can leave it missing or stale).
+  const staff = staffProfile?.id ? staffProfile : getAdminUser();
+  const staffRef = useRef(staff);
+  staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
   const notifyRecapRecoveryChange = useCallback(() => setRecapRecoveryRevision((revision) => revision + 1), []);
-  const [schedule, setSchedule] = useState([]);
+  // Last good route this device saw for this tech today (routeSnapshot.js).
+  // Hydrated before the first fetch so a reopen in a dead zone shows the
+  // saved stops at once instead of a spinner that ends in a red banner.
+  const [initialSnapshot] = useState(() => loadRouteSnapshot({ techId: staff?.id, date: etDateString() }));
+  const [schedule, setSchedule] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rows : []));
+  // '' while the route on screen is live; otherwise the sentence that tells
+  // the tech they are looking at a saved copy (refreshing, or offline).
+  const [routeNotice, setRouteNotice] = useState(() => (initialSnapshot ? refreshingRouteNotice(initialSnapshot.savedAt) : ''));
   // The tech's own Twilio line, if they hold one (GET /api/tech/line):
   // the brief panel's Call/Text then go through the line. Null = personal
   // phone links as before. Re-read with every schedule refresh (mount,
@@ -281,7 +339,11 @@ export default function TechHomePage({ section = 'today' }) {
       setTechLine((prev) => (prev?.line ? prev : { unknown: true }));
     }
   }, []);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialSnapshot);
+  // A route read is in flight. Separate from `loading` (which hides the
+  // route): saved stops stay on screen while the retry controls are held,
+  // so taps on a weak connection cannot stack schedule reads.
+  const [refreshing, setRefreshing] = useState(false);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
@@ -302,7 +364,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
-  const [rainChance, setRainChance] = useState(null);
+  const [rainChance, setRainChance] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rainChance : null));
   // Visit Brief accordion: one stop expanded at a time (keyed by the
   // stop's primary service id) + a per-stop session cache of the two
   // detail fetches (estimate-source + visit-brief).
@@ -311,53 +373,96 @@ export default function TechHomePage({ section = 'today' }) {
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
-  const techName = getAdminDisplayName('Tech');
+  // The verified profile's name first: the greeting and the timecard
+  // signature pre-fill must not fall back to a stale or missing stored copy.
+  const techName = staff?.name || getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
   // Use it to scope `schedule` to this tech's own jobs — /api/admin/schedule
   // returns the whole route board (not tech-filtered), so without this
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
-  const currentTechId = getAdminUser()?.id || null;
+  const currentTechId = staff?.id || null;
   // TechLayout refreshes this from /admin/auth/me on every load, so the
   // stored role tracks the server; hiding is UX only — the estimate APIs
   // enforce owner-only server-side regardless.
-  const currentRole = getAdminUser()?.role || null;
+  const currentRole = staff?.role || null;
 
   const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
     const seq = ++scheduleSeq.current;
+    setRefreshing(true);
     // Runs alongside the schedule read but never gates it: the route must
     // render even when the line lookup hangs on a poor connection (codex
     // #4072 r8 P2). The first render cannot show the personal-phone links
     // while the answer is in flight — the initial `{ unknown: true }` hides
     // every contact link until the lookup succeeds (r4 / r5 P2s).
     fetchTechLine();
+    const today = etDateString();
+    const techId = staffRef.current?.id || null;
+    // A request that hangs in a dead zone must not hold the page: cut it
+    // off and fall back to the saved route (below) instead.
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), ROUTE_FETCH_TIMEOUT_MS) : null;
+    const token = getAdminAuthToken();
+    // A reply that lands after this login ended (logout here or in another
+    // tab, a different login since) must not write the route back to the
+    // device or onto the screen.
+    const sessionEnded = () => getAdminAuthToken() !== token;
     try {
-      const token = getAdminAuthToken();
-      const today = etDateString();
-      const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json().catch(() => ({}));
-      if (seq !== scheduleSeq.current) return;
-      if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
-      setScheduleError('');
-      setSchedule(scheduleRowsFromResponse(data).map((service) => ({
-        ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
-      })));
-      setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
-    } catch (err) {
-      if (seq !== scheduleSeq.current) return;
-      console.error('Failed to fetch schedule:', err);
-      setScheduleError(err.message || 'Your route could not be loaded.');
+      const result = await readRoute(today, token, abort?.signal);
+      // The server refused this login's route: the saved copy and offline
+      // pass go now (the session guard ends a 401'd session). Skipped when
+      // another login has taken over since the request left.
+      if (result.kind === 'refused' && !sessionEnded()) clearStaffDeviceData();
+      if (seq !== scheduleSeq.current || sessionEnded()) return;
+      if (result.kind === 'live') {
+        const next = scheduleStateFromResponse(result.data);
+        setScheduleError('');
+        setRouteNotice('');
+        setSchedule(next.rows);
+        setRainChance(next.rainChance);
+        // Keep only this tech's own stops on the device: the board payload
+        // carries every tech's route, and the saved copy needs just the rows
+        // this page would render for this login.
+        saveRouteSnapshot({ techId, date: today, data: {
+          visitCloseout: result.data?.visitCloseout === true,
+          rainChance: next.rainChance,
+          services: scheduleRowsFromResponse(result.data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
+        } });
+        return;
+      }
+      console.error('Failed to fetch schedule:', result.kind, result.message || '');
+      // Offline fallback: the last good route this tech loaded today, read
+      // fresh each time (another tab or a later login may have replaced it).
+      // A server answer of any kind keeps the saved copy hidden behind the
+      // real error.
+      const snapshot = result.kind === 'offline' ? loadRouteSnapshot({ techId, date: today }) : null;
+      if (snapshot) {
+        const saved = scheduleStateFromResponse(snapshot.data);
+        setSchedule(saved.rows);
+        setRainChance(saved.rainChance);
+        setScheduleError('');
+        setRouteNotice(savedRouteNotice(snapshot.savedAt));
+      } else {
+        // The server answered (or there is nothing saved): drop any copy
+        // hydrated at mount so stale stops never sit under a real error.
+        setSchedule([]);
+        setRainChance(null);
+        setRouteNotice('');
+        setScheduleError(result.kind === 'offline' ? 'Your route could not be loaded (no connection).' : result.message);
+      }
     } finally {
-      if (seq === scheduleSeq.current) setLoading(false);
+      if (timer) clearTimeout(timer);
+      if (seq === scheduleSeq.current) { setLoading(false); setRefreshing(false); }
     }
   }, [fetchTechLine]);
 
   useEffect(() => {
     fetchSchedule();
+    // Unmount (logout navigates away) orphans any read still in flight so
+    // it can neither set state nor save the route afterwards.
+    return () => { scheduleSeq.current += 1; };
   }, [fetchSchedule]);
 
   // Mark En Route — POST /api/tech/services/:id/en-route. The server
@@ -734,7 +839,7 @@ export default function TechHomePage({ section = 'today' }) {
       {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} error={scheduleError} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
@@ -811,6 +916,18 @@ export default function TechHomePage({ section = 'today' }) {
       <TechTimeTrackingCard nextStop={nextStop} />
       <TechFollowThroughCards />
 
+      {routeNotice && !scheduleError && (
+        <div role="status" style={{
+          background: '#f59e0b22', border: '1px solid #f59e0b', color: '#fbbf24',
+          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
+        }}>
+          <div style={{ marginBottom: 8 }}>{routeNotice}</div>
+          <button type="button" onClick={fetchSchedule} disabled={refreshing} style={{
+            border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
+            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.6 : 1,
+          }}>Try again</button>
+        </div>
+      )}
       {scheduleError && (
         <div role="alert" style={{
           background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
@@ -1117,7 +1234,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onDirtyChange={setProjectEditorDirty}
                 onClose={closeProjectEditor}
                 onChanged={() => fetchSchedule()}
-                canAdminActions={getAdminUser()?.role === 'admin'}
+                canAdminActions={staff?.role === 'admin'}
               />
             </Suspense>
           </div>

@@ -1,3 +1,4 @@
+import { clearStaffDeviceData } from '../lib/adminAuth';
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
@@ -51,6 +52,7 @@ export default function AdminLoginPage() {
       if (data.user?.mustChangePassword) {
         localStorage.removeItem('waves_admin_token');
         localStorage.removeItem('waves_admin_user');
+        clearStaffDeviceData();
         try {
           await refetchFlags();
         } catch {
