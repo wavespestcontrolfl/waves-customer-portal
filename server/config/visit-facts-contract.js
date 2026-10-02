@@ -193,6 +193,7 @@ const FAST_COMPLETE_SHEET = 'client/src/components/tech/FastCompleteSheet.jsx';
 const FAST_COMPLETE_TYPED_FORMS = Object.freeze([
   'cockroach', 'german_roach_knockdown', 'palmetto_roach_knockdown', 'flea', 'pest_inspection',
   'mosquito_event', 'wildlife_trapping', 'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection',
+  'rodent_trapping', 'rodent_bait_station', 'termite_bait_station',
 ]);
 const SERVICE_PHOTOS = 'server/services/service-photos.js';
 const TURF_HEIGHT_SERVICE = 'server/services/turf-height-service.js';

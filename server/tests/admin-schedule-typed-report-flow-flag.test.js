@@ -17,6 +17,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const PROFILES = {
   roach: { serviceKey: 'cockroach_control', findingsType: 'cockroach' },
   rodent_inspection: { serviceKey: 'rodent_inspection', findingsType: 'rodent_inspection' },
+  rodent_trapping: { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' },
   combined: { serviceKey: 'cockroach_control', findingsType: 'cockroach', companions: [{ type: 'rodent_bait_station' }] },
   tree_shrub: { serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' },
   pest: { serviceKey: 'pest_general_quarterly' },
@@ -34,6 +35,7 @@ const { loadProjectCompletionContextByServiceId } = require('../routes/admin-sch
 const services = [
   { id: 'roach', service_type: 'Cockroach Control' },
   { id: 'rodent_inspection', service_type: 'Rodent Inspection' },
+  { id: 'rodent_trapping', service_type: 'Rodent Trapping Follow-up' },
   { id: 'combined', service_type: 'Cockroach Control' },
   { id: 'tree_shrub', service_type: 'Tree & Shrub Care' },
   { id: 'pest', service_type: 'Quarterly Pest Control' },
@@ -55,7 +57,7 @@ describe('typedReportFlowEnabled', () => {
     process.env.GATE_FAST_COMPLETE_REPORT = 'true';
     process.env.GATE_TYPED_VOICE_FILL = 'true';
     expect(await flags()).toEqual({
-      roach: true, rodent_inspection: true, combined: false, tree_shrub: false, pest: false, no_profile: false,
+      roach: true, rodent_inspection: true, rodent_trapping: true, combined: false, tree_shrub: false, pest: false, no_profile: false,
     });
   });
 

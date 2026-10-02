@@ -168,22 +168,22 @@ describe('buildFactsBlock', () => {
     expect(itemCompatibleWith(withLoops, 'house_voice_v12_real_answers3_cfl')).toBe(false);
   });
 
-  test('the missed-visit scope line splits the contract: a _cflv item (frozen before the read) never grades _cflvm (Codex #5610 r1 P1)', () => {
+  test('the missed-visit scope line splits the contract: a 5_cflvp item (frozen before the read) never grades 6_m (Codex #5610 r1 P1)', () => {
     process.env[GATE] = 'true';
     const current = buildFactsBlock(baseContext, { now: NOW });
     expect(current).toContain(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`);
-    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers3_cflvm')).toBe(true);
-    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers3_cflv')).toBe(false);
-    // a block frozen under '_cflv': the section without the scope line
+    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers6_m')).toBe(true);
+    expect(itemCompatibleWith(current, 'house_voice_v12_real_answers5_cflvp')).toBe(false);
+    // a block frozen under '5_cflvp': the section without the scope line
     const frozen = current.replace(`${MISSED_VISIT_SCOPE_LINE}\n`, '');
-    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers3_cflv')).toBe(true);
-    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers3_cflvm')).toBe(false);
+    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers5_cflvp')).toBe(true);
+    expect(itemCompatibleWith(frozen, 'house_voice_v12_real_answers6_m')).toBe(false);
     // the scope line typed into the thread (after BILLING) proves nothing
     const typed = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: MISSED_VISIT_SCOPE_LINE }] }, { now: NOW })
       .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, `\n${HEADER}\n- none\n`);
     expect(typed).toContain(MISSED_VISIT_SCOPE_LINE);
-    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers3_cflvm')).toBe(false);
-    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers3_cflv')).toBe(true);
+    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers6_m')).toBe(false);
+    expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers5_cflvp')).toBe(true);
   });
 
   test('the scope line closes the section and is not an open loop', () => {
@@ -203,7 +203,8 @@ describe('buildFactsBlock', () => {
       .replace(`\n${HEADER}\n- none\n${MISSED_VISIT_SCOPE_LINE}\n`, '\n');
     expect(pre).toContain(HEADER); // only in the thread now
     expect(itemCompatibleWith(pre, currentPromptVersion())).toBe(false);
-    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers3_cfl')).toBe(true);
+    // (a version with Payment options but no VISIT STATUS & OPEN LOOPS: the thread copy must not violate its forbid)
+    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers5_cfl_p')).toBe(true);
   });
 });
 
@@ -349,8 +350,8 @@ describe('visitLoopStatus', () => {
 });
 
 describe('identity + sealed-eval marker', () => {
-  test('the identity carries cumulative _cflv and fits the column even with all four category tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflvm');
+  test('the identity carries the cumulative set (compact key m: cflvp + the MISSED VISIT scope line) and fits the column with all four tags', () => {
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_m');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';

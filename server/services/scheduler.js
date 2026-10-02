@@ -6,6 +6,117 @@ const db = require('../models/db');
 const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+
+// Reviewer-facing note for a scheduled reply retired by the fire-time amount /
+// payment recheck (Codex round-11 P1): name the SPECIFIC reason instead of a
+// generic price block. Zelle and credit reasons say what actually changed.
+const AMOUNT_BLOCK_NOTES = {
+  zelle_recipient_stale: 'The Zelle recipient in this scheduled reply is no longer the current one (or Zelle is disabled)',
+  zelle_invoice_unresolved: 'The invoice this scheduled reply\u2019s Zelle instructions were written for no longer resolves (paid off, reassigned, or none open)',
+  zelle_invoice_ineligible: 'This scheduled reply offers Zelle for an invoice that can no longer be paid that way',
+  zelle_recheck_failed: 'The Zelle eligibility recheck could not be completed for this scheduled reply',
+  zelle_target_ambiguous: 'This scheduled reply says Zelle is not available, but the customer has several open invoices and the reply does not say which one it is about',
+  zelle_now_available: 'This scheduled reply says Zelle is not available, but Zelle can now be used for this account',
+  credit_unverifiable: 'The account-credit state for this scheduled reply\u2019s Zelle instructions could not be verified',
+  payer_owned: 'The invoice in this scheduled reply\u2019s Zelle instructions is now billed to a third-party payer',
+  payer_unverifiable: 'Who owns the invoice in this scheduled reply\u2019s Zelle instructions could not be verified',
+  amount_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_failed: 'The payment/amount recheck for this scheduled reply could not be completed',
+  amount_unverifiable: 'This scheduled reply states an amount that cannot be verified',
+  amount_no_longer_authorized: 'This scheduled reply states an amount or payment status that no longer matches the account',
+  payment_status_unauthorized: 'This scheduled reply states a payment, invoice, refund or balance status that is not a word-for-word copy of the account sentence the draft was written from',
+  payment_status_changed: 'The payment status this scheduled reply states no longer matches the account',
+  payment_status_recheck_no_customer: 'This scheduled reply states a payment status but the customer could not be loaded',
+  payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
+};
+// The fire-time amount / Zelle / payment-status recheck for one claimed
+// scheduled reply (extracted from the send loop so the pre-screen and the
+// reason surfacing are unit-testable). { stale, reason }; reason is the
+// SPECIFIC outgoingAmountsStale reason. Fails closed on any read error.
+async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
+  const recheck = require('./sms-amount-recheck');
+  const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
+  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  const pre = await prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision });
+  if (pre.failed) return { stale: true, reason: 'amount_recheck_failed' };
+  if (!pre.needs) return { stale: false, reason: null };
+  try {
+    const decision = pre.decisionLoaded ? pre.decision : await loadDecision();
+    const staffEdited = pre.staffEdited || isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
+    const args = scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited });
+    // Codex round-50 P1: the billing fingerprint BEFORE the recheck, so the provider-boundary check refuses if anything changes after it.
+    // Only for a body the boundary judges - a staff edit's own status wording is exempt (owner ruling), and with no customer there is
+    // nothing to fingerprint (the recheck itself fails closed for anything it must verify) - local review pass 2.
+    const boundaryJudged = !!args.customerId && recheck.bodyNeedsBillingBoundaryCheck(args.body, {
+      inboundMessage: args.inboundMessage, promptVersion: args.promptVersion, statusVocabulary: !staffEdited,
+    });
+    const fingerprint = boundaryJudged ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
+    const verdict = await recheck.outgoingAmountsStale(args);
+    if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
+    if (!boundaryJudged) return { stale: false, reason: null };
+    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelle: verdict.zelle || null } };
+  } catch (err) {
+    logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
+}
+// Owner ruling 2026-10-01: a staff-edited body (human_authored AND different from the decision's stored AI draft) is the staff member's own
+// wording: the payment-status contract does not judge it. Amounts and Zelle are rechecked as before. Unknown => strict.
+function isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited) {
+  return claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
+}
+// Main's read-free pre-screen: amounts, Zelle claims, price grammar - plus status vocabulary while real answers is live. The
+// conditional decision load (and its fail-closed read) happens only for a decision-linked row whose body reads as a payment status.
+// { failed: true } when that read fails; else { needs, staffEdited, decision, decisionLoaded }.
+async function prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision }) {
+  let decision;
+  let decisionLoaded = false;
+  let staffEdited = false;
+  let needs = recheck.bodyNeedsPaymentRecheck(msg.message_body);
+  if (!needs && claimMeta.agent_decision_id && recheck.bodyHasPaymentStatusVocabulary(msg.message_body)) {
+    // A DECISION-LINKED row whose body reads as a payment status: the decision's own prompt version decides (one indexed read), whatever
+    // the live gate says - a v12 reply queued before GATE_SMS_REAL_ANSWERS was rolled back is still rechecked as one. An unreadable
+    // decision fails closed. (Gate off, this is the only divergence from main: decision-linked rows with status vocabulary.)
+    try {
+      decision = await loadDecision();
+      decisionLoaded = true;
+    } catch (err) {
+      logger.warn(`[scheduler] decision read failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+      return { failed: true };
+    }
+    staffEdited = isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
+    needs = !staffEdited && recheck.bodyNeedsPaymentRecheck(msg.message_body, { promptVersion: decision?.prompt_version ?? null });
+  }
+  return { needs, staffEdited, decision, decisionLoaded };
+}
+// The outgoingAmountsStale argument object (key order and values unchanged from the inline call).
+function scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot, staffEdited }) {
+  // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
+  // not skip the recheck — fall back to the linked decision's customer. With none
+  // at all, outgoingAmountsStale fails closed for a Zelle offer, a figure or a
+  // payment-status claim (amount_recheck_no_customer / zelle_invoice_unresolved).
+  return {
+    customerId: msg.customer_id || decision?.customer_id || null,
+    body: msg.message_body,
+    promptVersion: decision?.prompt_version ?? null,
+    // The invoice the drafter's Zelle fact was built for (null for a human-
+    // authored reply with no snapshot — the recheck resolves the CURRENT
+    // open invoice itself).
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+    // The customer's own inbound (draft-time snapshot): scopes the payment-status detector and names the Zelle invoice.
+    inboundMessage: snapshot?.sms?.body || null,
+    // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
+    trustOwedAmounts: claimMeta.human_authored === true,
+    humanEditedBody: staffEdited,
+  };
+}
+function amountsStaleNote(reason) {
+  const what = AMOUNT_BLOCK_NOTES[reason] || 'This scheduled reply states an amount, payment status or payment instruction that is no longer accurate';
+  return `${what} (${reason || 'amount_recheck'}) — review the thread.`;
+}
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -4625,6 +4736,9 @@ function initScheduledJobs() {
               } catch { /* leave undefined — the consent validator fails closed */ }
             }
           }
+          // the billing state the decision-linked amount recheck judged (fingerprint + Zelle invoice), re-checked at the provider boundary
+          // (Codex round-50 P1); null = nothing billing-bearing was rechecked
+          let billingBoundary = null;
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -4648,22 +4762,50 @@ function initScheduledJobs() {
               && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
-            // anchor check can't see it). Non-human-authored agent text
-            // carrying numeric amounts must still match the CURRENT
-            // authoritative billing values; unverifiable or mismatched →
-            // block + retire, same path as a stale anchor. Fail CLOSED on
-            // any error — an unknowable account state must not send figures.
+            // anchor check can't see it). Agent text carrying numeric amounts
+            // must still match the CURRENT authoritative billing values;
+            // unverifiable or mismatched → block + retire, same path as a
+            // stale anchor. Fail CLOSED on any error — an unknowable account
+            // state must not send figures.
+            //
+            // Independent-review P1 (round 4, PR #5331, finding 3): this used
+            // to run ONLY for `human_authored !== true`, so an operator who
+            // edited so much as a word of the drafted reply skipped it
+            // entirely at fire time — including the Zelle recipient/
+            // eligibility recheck bundled inside it, which has nothing to do
+            // with the wording the operator reviewed (ZELLE_RECIPIENT is a
+            // live env var, and the invoice it was eligible against can
+            // settle or start a saved-card charge between review and fire).
+            // It now runs for EVERY agent-decision-linked scheduled reply,
+            // human-edited or not; only the OWED-amount half of the shared
+            // binder (a price/balance figure) is excused for a human edit,
+            // via trustOwedAmounts — the owner's 2026-07-30 ruling was about
+            // trusting a REVIEWED PRICE, never a Zelle offer or a payment-
+            // receipt claim, both of which assert a fact that can go stale
+            // regardless of who wrote the words.
             let amountsStale = false;
-            if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
-              // Shared with the immediate Agent Review send since PR #5119
-              // follow-up #2 (sms-amount-recheck): fresh context, current
-              // obligations only, payment history only for an ack, fail
-              // closed on any error.
-              const { outgoingAmountsStale } = require('./sms-amount-recheck');
-              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
-              amountsStale = (await outgoingAmountsStale({
-                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
-              })).stale;
+            // The SPECIFIC reason (zelle_invoice_unresolved, zelle_recipient_stale,
+            // credit_unverifiable, amount_no_longer_authorized, …) — recorded on the
+            // blocked row and shown to the reviewer on the retired card (round-11).
+            let amountsReason = null;
+            // Codex round-11 P1: only read anything when the body actually carries a
+            // figure, a Zelle offer or a payment-status claim (pre-screen inside
+            // recheckScheduledSmsAmounts) — a human reply about scheduling costs no
+            // agent_decisions/customer/billing reads.
+            if (!anchorStale) {
+              const amountsVerdict = await recheckScheduledSmsAmounts({ msg, claimMeta });
+              amountsStale = amountsVerdict.stale;
+              amountsReason = amountsVerdict.reason;
+              billingBoundary = amountsVerdict.boundary || null;
+              // Codex round-65 P2: a billing READ failure says nothing about the message - for a decision-linked reply, do NOT retire it.
+              // The provider-boundary billing check is armed with no fingerprint, so it refuses RETRYABLY onto the bounded retry rail
+              // (each retry reruns this full recheck) - never sent unverified, never permanently stale. Other rows keep the block.
+              if (amountsStale && claimMeta.agent_decision_id
+                && require('./agent-decision-send-checks').blockReasonIsBillingInfrastructure(`amount no longer authorized (${amountsReason})`)) {
+                logger.warn(`[scheduled-sms] ${msg.id} billing recheck unreadable (${amountsReason}); deferring to the provider-boundary check`);
+                amountsStale = false;
+                billingBoundary = { customerId: msg.customer_id || null, fingerprint: null, zelle: null };
+              }
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4877,7 +5019,10 @@ function initScheduledJobs() {
                 await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                  // blocked_detail carries the SPECIFIC recheck reason (round-11).
+                  metadata: amountsStale && amountsReason && !anchorStale
+                    ? trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text, 'blocked_detail', ?::text)", [blockedReason, amountsReason])
+                    : trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
                 });
                 await suggest.supersedeStaleDecision({
                   decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
@@ -4887,7 +5032,7 @@ function initScheduledJobs() {
                     : schedulingGated
                       ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
                       : amountsStale
-                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      ? amountsStaleNote(amountsReason)
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
@@ -5175,6 +5320,11 @@ function initScheduledJobs() {
               labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // open-loop facts (PR #5499) at the same boundary
               openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
+              // BILLING at the same boundary (Codex round-50 P1): the rows the amount recheck judged are unchanged, and a Zelle offer's
+              // invoice has no card / bank payment in flight
+              billingBoundary
+                ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck(billingBoundary)
+                : undefined,
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -8514,6 +8664,8 @@ async function runSmsRecoveryTick({ now = Date.now() } = {}) {
 }
 
 module.exports = {
+  recheckScheduledSmsAmounts,
+  amountsStaleNote,
   initScheduledJobs,
   runSmsRecoveryTick,
   initBankingSync,

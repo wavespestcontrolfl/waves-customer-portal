@@ -170,6 +170,15 @@ function setupSeamAbort(payerBilled) {
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
  *
+ * `onPayerResolved(payerId)` (independent-review P1, round 5, finding 3):
+ * fired ONLY when the LIVE resolution below finds a payer for the anchor
+ * (never for the plain "no siblings"/incomplete-read/over-cap null cases) —
+ * a null return alone conflates "genuinely nothing to add" with "this
+ * invoice is payer-owned as of right now," and a caller like pay-v2.js's
+ * isZelleTransferEligible, which reads null as "no previous balance,
+ * continue," must be able to tell the two apart instead of silently
+ * offering Zelle on a payer-owned invoice.
+ *
  * `onDegrade(reason)` (optional, observer only) is called once for each null
  * return with one of DEGRADE_REASONS: gate_off | payer_anchor |
  * payer_unresolved | incomplete | over_cap | none. It is not called when the
@@ -177,7 +186,7 @@ function setupSeamAbort(payerBilled) {
  * an unexpected selection failure reports 'incomplete'. `database` is
  * threaded into the payer resolve as well as every read below it.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId, throwOnPayerAnchor, releaseAbandonedPaymentIntents, onAbandonedReleased, onDegrade, readOnly } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId, throwOnPayerAnchor, releaseAbandonedPaymentIntents, onAbandonedReleased, onDegrade, readOnly, onPayerResolved } = {}) {
   // The option flags are only ever truth-tested (an absent flag is falsy), so
   // they carry no defaults; `database` is the one option with a real default.
   const degrade = makeDegrade(onDegrade);
@@ -226,6 +235,9 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       throw resolveErr; // outer catch degrades (GET / non-seam callers)
     }
     if (payerBilled) {
+      // independent-review P1 (PR #5331, round 5, finding 3): tell a caller that reads null as "no
+      // previous balance" (pay-v2.js's isZelleTransferEligible) that this null means PAYER-OWNED.
+      if (typeof onPayerResolved === 'function') onPayerResolved(resolved.payerId);
       logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
       return degrade('payer_anchor');
     }

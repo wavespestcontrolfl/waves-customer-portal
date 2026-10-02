@@ -597,7 +597,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, paymentStatusSnapshot, labelFactsSnapshot, factsGeneratedAt, factsBlock, reserviceBooked, zelleInvoiceId } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -649,7 +649,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // passes.
     if (parsed.reply) {
       if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
-        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context)) {
+        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage: body })) {
           logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
           return null;
         }
@@ -681,9 +681,14 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       context,
     }).promisedLanes || null;
     return {
-      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null, labelFactsSnapshot: labelFactsSnapshot ?? null,
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null, paymentStatusSnapshot: paymentStatusSnapshot ?? null, labelFactsSnapshot: labelFactsSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      // Pre-push audit P1 (finding 2) — see draftShadowReply's identical
+      // field (sms-shadow-drafter.js): the invoice this draft's Zelle fact
+      // was built for, persisted onto the decision so the same send-time
+      // recheck applies here.
+      zelleInvoiceId: zelleInvoiceId ?? null,
       // Independent review finding (PR #5334): same send-time freshness
       // snapshot draftShadowReply persists — this lane shares the same
       // agentDecisionSendBlockReason choke point at send time.
@@ -823,6 +828,13 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
           ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
+        // Pre-push audit P1 (finding 2) — see publishSuggestion's identical
+        // field (sms-suggest-mode.js): the invoice the drafter's Zelle fact
+        // was built for, read back by agentDecisionSendBlockReason at send
+        // time.
+        ...(llmDraft?.zelleInvoiceId ? { zelle_invoice_id: llmDraft.zelleInvoiceId } : {}),
+        // payment-status sentences the reply copies, re-rendered and rechecked at send (agent-decision-send-checks)
+        ...(llmDraft?.paymentStatusSnapshot ? { payment_status_snapshot: llmDraft.paymentStatusSnapshot } : {}),
         // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
         ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
         ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),

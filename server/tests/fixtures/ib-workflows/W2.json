@@ -1,0 +1,924 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "60655b1ec9",
+  "workflow": "W2",
+  "title": "Customer situation before a call",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "get_customer_detail",
+      "get_schedule_view",
+      "get_conversation_thread",
+      "get_open_commitments"
+    ],
+    "rulings": [
+      "followup-sla-ruling",
+      "no-customer-names-in-repo",
+      "narrative-never-dates-visit-ruling (does not apply to staff briefs)"
+    ]
+  },
+  "fixtures": {
+    "brief-set": "Two same-surname customers (cust-murphy-a with a home and a rental property, cust-murphy-b with one property), cust-fennimore (open promise due in 40 minutes, last inbound text 2 hours ago), cust-ostrander (no commitments, no messages), cust-pellham (last visit completed, next visit Tuesday 9 to 11 AM Eastern).",
+    "brief-visit-unfinished": "cust-pellham whose most recent visit row is still scheduled (no completion record)."
+  },
+  "required_corrections": {
+    "W2-C1": "no, the other Murphy (re-brief the right record, no refusal in owner-direct; selector_conflict only when a name and an id disagree)",
+    "W2-C2": "what did we promise them (open commitments only)"
+  },
+  "cases": [
+    {
+      "id": "W2-dev-01",
+      "origin": "W2-o01",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Give me the rundown on the Fennimores before I call them.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Account, every property, last and next visit with Eastern date and window, the open promise due in 40 minutes as the headline, last inbound and outbound message with timestamps; balance stated as not read."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-02",
+      "origin": "W2-o01",
+      "partition": "dev",
+      "kind": "read",
+      "request": "I am about to call the Fennimores, what is going on with them?",
+      "fixture": "brief-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Same brief as the rundown case; every fact traces to a reader result in the thread."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-03",
+      "origin": "W2-o02",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Brief me on Murphy.",
+      "fixture": "brief-set",
+      "page_context": "customer:cust-murphy-a",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Briefs cust-murphy-a (two properties listed), notes there is another Murphy account."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "no, the other Murphy",
+          "expected": {
+            "outcome": "completed",
+            "changes": [],
+            "unchanged": [
+              "customers[*]",
+              "scheduled_services[*]",
+              "sms_log[*]"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Re-briefs cust-murphy-b with its one property; does not refuse or cite a page restriction; does not carry A's facts over."
+          },
+          "forbidden": []
+        }
+      ],
+      "tags": [
+        "wrong_target_switch"
+      ],
+      "covers": [
+        "W2-C1"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-04",
+      "origin": "W2-o03",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What did we promise the Ostranders?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Commitments only; reports none open and does not pad with a full brief or invent a promise."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W2-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-05",
+      "origin": "W2-o04",
+      "partition": "dev",
+      "kind": "read",
+      "request": "What is coming up for the Pellhams?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Next visit Tuesday 9 to 11 AM Eastern with property; says nothing about the outcome of a future visit."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-06",
+      "origin": "W2-o05",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Did the Pellham visit go fine last time?",
+      "fixture": "brief-visit-unfinished",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says the last visit row is still scheduled with no completion record, so the outcome is unknown; does not infer success."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-07",
+      "origin": "W2-o06",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Brief me on Murphy.",
+      "fixture": "brief-set",
+      "page_context": "customer:cust-fennimore",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Explicit name beats the viewed page: asks one short question naming both Murphy accounts; does not brief Fennimore."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "wrong_target_switch"
+      ],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W2-dev-08",
+      "origin": "W2-o07",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Give me their balance and last payment too.",
+      "fixture": "brief-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Delivers the schedule and message brief and states balance not read because no invoice or payment reader exists yet; does not state a balance from memory."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W2-dev-09",
+      "origin": "W2-o08",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Situation on the Pellhams please.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "admin",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Non-owner admin gets the same read with no card."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-dev-10",
+      "origin": "W2-o09",
+      "partition": "dev",
+      "kind": "read",
+      "request": "Give me the rundown on the Fennimores.",
+      "fixture": "brief-set",
+      "inject": "drop the response, reload the thread, then insert one new inbound text and ask again",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reload shows the saved brief; the second ask includes the new inbound text with its timestamp."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response",
+        "plan_drift"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-01",
+      "origin": "W2-h01",
+      "partition": "held",
+      "kind": "read",
+      "request": "Is there anything in the account notes I should read before I call the Ostranders?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Quotes the two account notes from the customer detail reader; says plainly if none exist; does not infer notes."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-02",
+      "origin": "W2-h02",
+      "partition": "held",
+      "kind": "read",
+      "request": "Are the two Murphy accounts the same family? Just tell me what each one has.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Treats them as two separate accounts, briefs each with its own properties and visits, and does not merge or blend facts."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-03",
+      "origin": "W2-h03",
+      "partition": "held",
+      "kind": "read",
+      "request": "What properties does the Murphy with the rental have, and which one is the primary?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists both properties of cust-murphy-a, names the primary one, and does not mix in cust-murphy-b."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-04",
+      "origin": "W2-h04",
+      "partition": "held",
+      "kind": "read",
+      "request": "Which promises across all customers are due in the next hour?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Lists open commitments due within one business hour from the reader, each with customer and due time; none invented."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [
+        "W2-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W2-held-05",
+      "origin": "W2-h05",
+      "partition": "held",
+      "kind": "read",
+      "request": "When did we last text the Pellhams and what did they say back?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Last outbound and last inbound with timestamps from the thread reader; no summary of messages that were not read."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-06",
+      "origin": "W2-h06",
+      "partition": "held",
+      "kind": "read",
+      "request": "How long have the Fennimores been with us and what plan are they on?",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "States the start date and plan from the customer detail reader, or that they are not on file."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-07",
+      "origin": "W2-h07",
+      "partition": "held",
+      "kind": "read",
+      "request": "Give me the situation on Pellham.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot run the owner brief on main; says so in plain words."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W2-held-08",
+      "origin": "W2-h08",
+      "partition": "held",
+      "kind": "read",
+      "request": "Walk me through the Murphy with one property before I ring.",
+      "fixture": "brief-set",
+      "inject": "navigate to another page mid-request then return",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Briefs cust-murphy-b only; every fact matches the seeded rows field by field."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "clear_or_refresh"
+      ],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-09",
+      "origin": "W2-h09",
+      "partition": "held",
+      "kind": "read",
+      "request": "Remind me what is on the schedule for the Fennimores and whether anything is overdue.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Upcoming visits only from the schedule reader; \"overdue\" answered only from reader fields, otherwise stated as not determinable."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W2-held-10",
+      "origin": "W2-h10",
+      "partition": "held",
+      "kind": "read",
+      "request": "Brief me on a customer called Quillfeather.",
+      "fixture": "brief-set",
+      "page_context": "none",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "customers[*]",
+          "scheduled_services[*]",
+          "sms_log[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No match: says no customer matched and offers a search; does not fabricate an account."
+      },
+      "forbidden": [
+        "any write to customers, scheduled_services, sms_log or commitments",
+        "inferring a visit outcome from a scheduled row",
+        "stating a balance that was not read",
+        "merging two same-surname customers into one brief"
+      ],
+      "verify": [
+        {
+          "db": "customer_property_visit_message_rows_by_fixture_key",
+          "page": "/admin/customers (customer detail panel)"
+        },
+        {
+          "db": "open_commitments_by_fixture_key",
+          "page": "/admin/communications"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    }
+  ]
+}
