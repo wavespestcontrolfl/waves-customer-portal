@@ -176,7 +176,7 @@ function invoke(params, query, actor = { techRole: 'admin', technicianId: 'admin
 }
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const SERVICE = { id: 'svc-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: TODAY };
+const SERVICE = { id: 'svc-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: TODAY, service_type: 'Quarterly Pest Control' };
 
 function scriptedDb(service, posts, calls) {
   return (table) => {
@@ -222,6 +222,15 @@ describe('GET /:serviceId/blog-posts', () => {
     mockDbCurrent = scriptedDb(SERVICE, [LIVE], []);
     const other = await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' }, { techRole: 'technician', technicianId: 'tech-2' });
     expect(other.statusCode).toBe(403);
+  });
+
+  test('a visit whose own line is not pest answers unavailable, as /complete would drop the pick (codex local r1 on #5547)', async () => {
+    process.env.GATE_REPORT_BLOG_POST = 'true';
+    const calls = [];
+    mockDbCurrent = scriptedDb({ ...SERVICE, service_type: 'Rodent Pest Control' }, [LIVE], calls);
+    const res = await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' }, { techRole: 'technician', technicianId: 'tech-1' });
+    expect(res.body).toEqual({ available: false, posts: [] });
+    expect(calls).toEqual(['scheduled_services']);
   });
 
   test('the assigned technician gets live posts; an empty query reads no posts', async () => {

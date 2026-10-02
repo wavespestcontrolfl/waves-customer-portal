@@ -14879,8 +14879,10 @@ export function CompletionPanel({
   }, [techTips, selectedTipIds]);
 
   // The blog search is offered on pest visits while it answers available
-  // (an empty query reads nothing but the visit). Never lawn or tree, shrub
-  // & palm: another lane owns those completions.
+  // (an empty query reads nothing but the visit). The server answers
+  // available only where /complete keeps the pick (the visit's own service
+  // line is pest, so never a rodent visit). Never lawn or tree, shrub & palm:
+  // another lane owns those completions.
   useEffect(() => {
     let cancelled = false;
     setBlogPostAvailable(false);
@@ -15369,6 +15371,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A picked blog post is tech input on its own.
+      blogPost ||
       // A promise mark is tech input on its own (a mark-only draft saves).
       promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
@@ -15515,6 +15519,9 @@ export function CompletionPanel({
         recommendationsText,
         selectedTipIds,
         customTip,
+        // The picked blog post comes back with the draft, or the completion
+        // after a reload or billing detour would silently leave it off.
+        blogPost,
         parkedFound,
         parkedNext,
         // Which deselect model the label arrays were saved under — a restored
@@ -15662,6 +15669,8 @@ export function CompletionPanel({
     service.propertyAddress,
     // A mark is operator input: a mark-only change must save the draft.
     promiseMarks,
+    // So is a picked blog post.
+    blogPost,
   ]);
 
   function restoreDraft() {
@@ -15933,6 +15942,13 @@ export function CompletionPanel({
         : [],
     );
     setCustomTip(restoredCustom);
+    // The pick as the search answered it; /complete re-checks it is still a
+    // live post. Older drafts have none.
+    const draftBlogPost = savedDraft.blogPost;
+    setBlogPost(draftBlogPost && typeof draftBlogPost === "object"
+      && ["id", "title", "url"].every((key) => typeof draftBlogPost[key] === "string" && draftBlogPost[key])
+      ? { id: draftBlogPost.id, title: draftBlogPost.title, url: draftBlogPost.url }
+      : null);
     setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
     setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
