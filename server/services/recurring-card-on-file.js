@@ -1455,6 +1455,14 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         logger.warn(`[recurring-cof] prepay sweep stamp update failed for estimate ${row.id}: ${stampErr.message}`);
       }
     };
+    // A deferred job whose first visit no longer stands goes back to wait for
+    // the next release pass (GitHub Codex #5567 r13): release cleared, no
+    // charge, no pay link.
+    const requeueDeferred = () => resolve('awaiting_first_visit', {
+      resolved_at: null, resolved_by: null, claim_token: null, claimed_at: null,
+      released_at: null, released_for_visit_id: null,
+      payer_scope_scheduled_service_id: job.scheduled_service_id || null,
+    });
     const alertUncollected = async (title, body) => require('./notification-service').notifyAdmin(
       'billing', title, body,
       { link: job.invoice_id ? `/admin/invoices?invoice=${job.invoice_id}` : '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
@@ -1739,11 +1747,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         const visitStands = !job.released_for_visit_id || String(releasedVisit?.status || '') === 'completed';
         const PafRelease = require('./paf-prepay-release');
         if (!visitStands || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
-          await resolve(PafRelease.AWAITING, {
-            resolved_at: null, resolved_by: null, claim_token: null, claimed_at: null,
-            released_at: null, released_for_visit_id: null,
-            payer_scope_scheduled_service_id: job.scheduled_service_id || null,
-          });
+          await requeueDeferred();
           continue;
         }
       }
@@ -1952,6 +1956,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // invoice after the attempt/reconciliation resolves.
       if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code) || err.reconciliationRequired) {
         logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${err.code || 'reconciliation pending'}`);
+        continue;
+      }
+      // The released first visit stopped standing between the preflight and
+      // the charge's own lock: back to waiting, never a pay link.
+      if (deferredToFirstVisit && err.code === 'VISIT_NOT_COMPLETED') {
+        logger.warn(`[recurring-cof] prepay sweep requeueing estimate ${row.id}: the released first visit is no longer completed`);
+        await requeueDeferred();
         continue;
       }
       // In-lock payer-guard refusal (Codex r10 P0): a payer was assigned

@@ -726,6 +726,19 @@ postgres('annual prepay charged after the first visit', () => {
       expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
     });
 
+    it('a first visit reopened between the preflight and the charge lock requeues the job, never a pay link (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(
+        Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }));
+      await sweep();
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ requireCompletedVisit: true }));
+      expect(await jobOf(f)).toMatchObject({ status: 'awaiting_first_visit', released_for_visit_id: null });
+      expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);

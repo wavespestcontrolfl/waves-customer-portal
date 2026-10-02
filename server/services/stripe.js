@@ -2388,7 +2388,7 @@ const StripeService = {
           // concurrent reopen, cancel or reschedule of the visit; any
           // lineage, recurring included. Opt-in.
           if (requireCompletedVisit && String(lockedSvc.status || '') !== 'completed') {
-            throw new Error('The visit is no longer completed. Review before charging.');
+            throw Object.assign(new Error('The visit is no longer completed. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
           }
           // Cross-lane exclusion at the money move (hold-rail pre-push r13
           // P0): a /secure appointment-card row appearing on the visit —
