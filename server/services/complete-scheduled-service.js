@@ -13270,6 +13270,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let sentSmsBody = null;
         let completionSmsWasTruncated = false;
         let sentSmsType = null;
+        // The regular annual-prepay body, kept beside a first-charge body so a
+        // quiet-hours hold queues text that is still true in the morning.
+        let firstChargeFallbackBody = null;
         // includePayLink === false omits the pay link from the completion SMS
         // (e.g. customer paid in person) — report-only. This is scoped to the
         // SMS body only; the mobile in-person payment sheet
@@ -13539,6 +13542,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 body = await renderTemplate(sentSmsType, {
                   ...paidTemplateVars, amount: firstCharge.amount, method_line: firstCharge.methodLine,
                 }, paidTemplateContext);
+                const fallback = body ? await renderTemplate('service_complete_annual_prepay', paidTemplateVars, paidTemplateContext) : null;
+                firstChargeFallbackBody = fallback ? `${fallback}${reviewSuffix}`.trim() : null;
               }
             }
             if (!body && annualPrepayCovered) {
@@ -13792,6 +13797,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // matches what the precheck-suppressed path would have
               // rendered. The pay link stays (its target renders live paid
               // state); only the static balance sentence is removed.
+              // A held "being charged now" text would land after an overnight
+              // charge: the queued replay is the regular annual-prepay body
+              // instead (GitHub Codex #5640 r2).
+              if (sentSmsType === 'service_complete_annual_prepay_first_charge' && firstChargeFallbackBody) {
+                sentSmsType = 'service_complete_annual_prepay';
+                sentSmsBody = firstChargeFallbackBody;
+              }
               const deferredReplayBody = require('../services/open-balance')
                 .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {

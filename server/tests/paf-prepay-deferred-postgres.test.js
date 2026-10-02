@@ -418,6 +418,29 @@ postgres('annual prepay charged after the first visit', () => {
       expect([a, b].filter(Boolean)).toHaveLength(1);
     });
 
+    it('a first-charge text held for quiet hours is queued as the regular annual-prepay text (GitHub Codex #5640 r2)', async () => {
+      const f = await deferredAccept();
+      const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
+      const techId = randomUUID();
+      const catalogId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Synthetic Technician', role: 'technician', active: true });
+      await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
+      await trx('scheduled_services').where({ id: f.parentId })
+        .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60 });
+      send.mockClear();
+      send.mockResolvedValue({ sent: false, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: new Date(Date.now() + 12 * 3600 * 1000).toISOString() });
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: techId, technician: null },
+        body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: true, requestReview: false } });
+      expect(send.mock.calls.map((c) => c[0]?.body || '').join('\n')).toMatch(/being charged/);
+      const queued = await trx('sms_log').where({ customer_id: f.customerId }).select('message_body', 'message_type');
+      expect(queued.length).toBeGreaterThan(0);
+      expect(queued.map((r) => r.message_body).join('\n')).not.toMatch(/being charged/);
+      expect(queued.map((r) => r.message_body).join('\n')).toMatch(/nothing (is )?due today/);
+      send.mockResolvedValue({ sent: true, sid: 'SM_synthetic' });
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
