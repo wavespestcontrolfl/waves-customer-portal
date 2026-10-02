@@ -651,9 +651,21 @@ describe('complete and send', () => {
     await generate();
     expect(screen.queryByText('Perimeter traced · 140 ft')).toBeNull();
     expect(screen.queryByText('With the trace.')).toBeNull();
-    expect(screen.getByText('Your saved trace shows a spray around the house, but your note says spots only. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
+    expect(screen.getByText('Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     expect(request.bodies('/complete')).toEqual([]);
+  });
+
+  test.each([
+    ['a trace with no length', { linear_ft: 0, capture_mode: 'perimeter' }],
+    ['a yard outline', { linear_ft: null, capture_mode: 'yard' }],
+  ])('%s on a visit the note sprays no perimeter for still holds the send, with Remove the trace (Codex #5538)', async (_label, zone) => {
+    const request = makeRequest({ trace: { enabled: true, treatmentZone: zone } });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByText('Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
   test('Remove the trace takes a trace the note no longer backs off, bound to the loaded property, and the send goes (codex local r12)', async () => {

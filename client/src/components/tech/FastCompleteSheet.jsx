@@ -842,9 +842,10 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
   // house mix starts on) would be recorded as applied when it wasn't.
   const sprayedAnyway = draft?.facts?.noSpray
     && active.find((row) => ['spot_treatment', 'perimeter_spray'].includes(rowMethod(row, reportSprayMethod(draft.facts))));
-  // A trace saved while the note now records no spray around the house would
-  // show on the customer's report as a sprayed perimeter.
-  const unusedTrace = draft && perimeterFeet && !perimeterRow;
+  // A saved trace shows on the customer's report whatever its length or
+  // kind (a perimeter, an outline), so one the record has no spray around
+  // the house for would claim a spray it never records (Codex #5538).
+  const unusedTrace = draft && traceRead.zone && !perimeterRow;
   // An "Interior spray too" trace (saved now or earlier) claims inside on the
   // customer's map; the record and the re-entry wait only say inside when the
   // note does.
@@ -863,7 +864,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, trac
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
     // A trace the note doesn't back can also come off ("Remove the trace").
-    [unusedTrace, 'Your saved trace shows a spray around the house, but your note says spots only. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
+    [unusedTrace, 'Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
     [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.', null, 'remove_trace'],
   ];
 }
