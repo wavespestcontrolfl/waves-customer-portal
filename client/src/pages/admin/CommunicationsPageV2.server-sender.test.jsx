@@ -22,6 +22,11 @@ describe("composerAcceptsServerSender", () => {
     expect(composerAcceptsServerSender({ ...fresh, attachmentCount: 1 }, "+19412975749")).toBe(false);
   });
 
+  it("the automatic customer-sender line set meanwhile is initialization, not a staff pick", () => {
+    expect(composerAcceptsServerSender({ ...fresh, line: "+19415550199", autoLine: "+19415550199" }, "")).toBe(true);
+    expect(composerAcceptsServerSender({ ...fresh, line: "+19412972606", autoLine: "+19415550199" }, "")).toBe(false);
+  });
+
   it("a loaded draft keeps its own line", () => {
     expect(composerAcceptsServerSender({ ...fresh, loadedDraft: true }, "+19412975749")).toBe(false);
   });

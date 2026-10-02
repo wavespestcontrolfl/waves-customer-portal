@@ -253,3 +253,34 @@ it("clears a stale reply context when the compose target diverges, and always on
   // The conversation-scoped draft now owns both body and reply context.
   expect(src).toContain("clearDraft(draftRevision)");
 });
+
+it("GATE_HOME_LINE: a late /sender answer replaces the automatic history line, then the send uses it (home-line PR 3)", async () => {
+  const homeLine = "+19412972817";
+  let answer;
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => (String(url).includes("/admin/communications/sender?")
+    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: homeLine, label: "Parrish (Pest)", reason: "home_line" })); })
+    : base(url, options)));
+  const { field } = setup();
+  // The automatic effect has already put the customer's last thread line in place…
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+  // …and the server's answer lands afterwards: it still applies.
+  await act(async () => { answer(); });
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(homeLine));
+  fireEvent.change(field, { target: { value: "Hi from your local office" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(bodyOf("/admin/communications/sms")).toMatchObject({ fromNumber: homeLine, body: "Hi from your local office" });
+  await act(async () => {});
+});
+
+it("GATE_HOME_LINE: a /sender answer landing after staff started typing leaves the line alone", async () => {
+  let answer;
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => (String(url).includes("/admin/communications/sender?")
+    ? new Promise((resolve) => { answer = () => resolve(response({ fromNumber: "+19412972817", reason: "home_line" })); })
+    : base(url, options)));
+  const { field } = setup();
+  fireEvent.change(field, { target: { value: "Already typing" } });
+  await act(async () => { answer(); });
+  expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(line);
+});

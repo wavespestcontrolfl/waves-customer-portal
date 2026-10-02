@@ -128,11 +128,14 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // Home-line PR 3: whether the composer may take the server's sender for a
 // fresh text — no draft in progress (body, attachments, or a loaded draft)
-// and the line still the one the request was made with.
+// and no staff pick since the request: the line is still the one the
+// request was made with, or the one the automatic customer-sender effect set
+// (state.autoLine), which is initialization, not a staff choice.
 export function composerAcceptsServerSender(state, requestedLine) {
   if (!state) return false;
+  const line = state.line || "";
   return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
-    && (state.line || "") === (requestedLine || "");
+    && (line === (requestedLine || "") || (!!state.autoLine && line === state.autoLine));
 }
 
 function adminFetch(path, options = {}) {
@@ -1326,7 +1329,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // non-customer line (recruiting, tech), leaving the thread-line choice
   // above untouched. Never overrides a draft in progress.
   const composerStateRef = useRef(null);
-  composerStateRef.current = { line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft };
+  composerStateRef.current = {
+    line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft,
+    autoLine: automaticCustomerSenderRef.current?.number || "",
+  };
   useEffect(() => {
     const phone = toNumber.trim();
     const requested = composerStateRef.current;
