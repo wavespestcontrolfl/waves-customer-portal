@@ -128,7 +128,7 @@ postgres('annual prepay charged after the first visit', () => {
     await trx('customers').insert({ id: f.customerId, first_name: 'Synthetic', last_name: 'Deferred', phone: '+12025550188',
       email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: true });
     await trx('payment_methods').insert({ id: f.pmId, customer_id: f.customerId, stripe_payment_method_id: f.pmStripeId,
-      method_type: 'card', last_four: '4242', is_default: true });
+      method_type: 'card', last_four: '4242', is_default: true, processor: 'stripe', autopay_enabled: true, exp_month: 12, exp_year: 2099 });
     await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`,
       token: randomUUID().replace(/-/g, ''), status: invoiceStatus, total: TOTAL_CENTS / 100, subtotal: TOTAL_CENTS / 100,
       due_date: day(-acceptedDaysAgo), line_items: JSON.stringify([{ description: 'Annual prepay', amount: TOTAL_CENTS / 100, quantity: 1 }]) });
@@ -365,6 +365,10 @@ postgres('annual prepay charged after the first visit', () => {
   });
 
   describe('the first visit\'s completion text (owner ruling 2026-10-02)', () => {
+    // Inside the 8 AM–8 PM send window unless a test says otherwise.
+    let windowSpy;
+    beforeEach(() => { windowSpy = jest.spyOn(require('../services/messaging/send-window'), 'isWithinSendWindowET').mockReturnValue(true); });
+    afterEach(() => windowSpy.mockRestore());
     async function completeWithText(f, visitId, visitOutcome = 'completed') {
       const techId = randomUUID();
       const catalogId = randomUUID();
@@ -404,14 +408,36 @@ postgres('annual prepay charged after the first visit', () => {
       expect(text).toMatch(/nothing (is )?due today/);
     });
 
-    it('a second held visit done before the release pass keeps the regular text', async () => {
+    it('two held visits done before the release pass: exactly one announces (GitHub Codex #5640 r1)', async () => {
       const f = await deferredAccept();
       const facts = async (id) => require('../services/paf-prepay-release')
         .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
-      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
-      expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
       await perform(f.parentId, f.customerId);
-      expect(await facts(f.childId)).toBeNull();
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      const [a, b] = [await facts(f.childId), await facts(f.parentId)];
+      expect([a, b].filter(Boolean)).toHaveLength(1);
+    });
+
+    it('outside the send window the text never says "being charged now" (GitHub Codex #5640 r1)', async () => {
+      windowSpy.mockReturnValue(false);
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const facts = await require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id: f.parentId }).first(), trx);
+      expect(facts).toBeNull();
+    });
+
+    it('an Auto Pay pause through today, or an expired bound card, keeps the regular text (GitHub Codex #5640 r1)', async () => {
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      const paused = await deferredAccept();
+      await trx('scheduled_services').where({ id: paused.parentId }).update({ paf_held_term_id: paused.termId });
+      await trx('customers').where({ id: paused.customerId }).update({ autopay_paused_until: day(0) });
+      expect(await facts(paused.parentId)).toBeNull();
+      const expired = await deferredAccept();
+      await trx('scheduled_services').where({ id: expired.parentId }).update({ paf_held_term_id: expired.termId });
+      await trx('payment_methods').where({ id: expired.pmId }).update({ exp_month: 1, exp_year: 2020 });
+      expect(await facts(expired.parentId)).toBeNull();
     });
 
     it('the announcement is reserved for one visit, and a year already paid gets none (Codex r9)', async () => {
@@ -453,7 +479,8 @@ postgres('annual prepay charged after the first visit', () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
       const otherPm = randomUUID();
-      await trx('payment_methods').insert({ id: otherPm, customer_id: f.customerId, stripe_payment_method_id: `pm_${otherPm.slice(0, 8)}`, method_type: 'card', last_four: '1111' });
+      await trx('payment_methods').insert({ id: otherPm, customer_id: f.customerId, stripe_payment_method_id: `pm_${otherPm.slice(0, 8)}`, method_type: 'card', last_four: '1111',
+        processor: 'stripe', is_default: true, autopay_enabled: true, exp_month: 12, exp_year: 2099 });
       await trx('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: otherPm });
       expect(await facts(f.parentId)).toBeNull();
     });

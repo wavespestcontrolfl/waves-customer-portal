@@ -513,97 +513,93 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
+// The deferred job a visit belongs to (its own or its series parent's
+// estimate), while that job still waits for the first visit.
+async function awaitingDeferredJobForVisit(svc, conn) {
+  let estimateId = svc.source_estimate_id || null;
+  if (!estimateId && svc.recurring_parent_id) {
+    const parent = await conn('scheduled_services')
+      .where({ id: svc.recurring_parent_id, customer_id: svc.customer_id }).first('source_estimate_id');
+    estimateId = parent?.source_estimate_id || null;
+  }
+  if (!estimateId) return null;
+  const row = await conn('estimates').where({ id: estimateId }).first('estimate_data');
+  const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
+  if (!job || job.deferred_to_first_visit !== true || job.status !== AWAITING) return null;
+  if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
+  return { estimateId, job };
+}
+
+// The bound method the sweep's automatic charge will really take, or null:
+// charging on, not parked on the pay link, the account live, Auto Pay not
+// paused (the canonical ET pause) or turned off since the approval, no
+// collections hold, and the customer's chargeable Auto Pay method (the
+// canonical walk: expiry, bank verification) IS the bound row. Anything else
+// and the customer hears about the pay link instead (GitHub Codex #5640 r1).
+async function autoChargeMethod(job, customerId, conn) {
+  if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
+  if (job.authentication_required === true || job.charge_returned === true || !job.payment_method_row_id) return null;
+  const Eligibility = require('./autopay-eligibility');
+  const customer = await conn('customers').where({ id: customerId }).first();
+  if (!customer || customer.deleted_at || Eligibility.isPaused(customer)) return null;
+  const authorizedAt = job.authorized_at || job.created_at;
+  const optedOut = await conn('autopay_log')
+    .where({ customer_id: customerId, event_type: 'autopay_disabled' })
+    .modify((q) => { if (authorizedAt) q.where('created_at', '>', new Date(authorizedAt)); })
+    .first('id');
+  if (optedOut) return null;
+  if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(customerId, conn)) return null;
+  const method = await Eligibility.getChargeableAutopayMethod(customer, conn, { rethrow: true });
+  return method && String(method.id) === String(job.payment_method_row_id) ? method : null;
+}
+
+// The amount to announce: the acknowledged total, a CEILING (owner R1), so
+// "up to" it when account credit has been or will be applied; null when the
+// year is not still owed (paid, processing, dead) or credit covers it all.
+async function announcedAmount(job, conn) {
+  const invoice = job.invoice_id
+    ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
+    : null;
+  const invStatus = String(invoice?.status || '').toLowerCase();
+  if (!invoice || ['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
+  const credit = require('./customer-credit');
+  let creditLowers = Number(invoice.credit_applied) > 0;
+  if (await credit.autoApplyWouldApply(invoice, conn)) {
+    const balance = await credit.getBalance(invoice.customer_id, conn);
+    if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
+    creditLowers = true;
+  } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
+    return null;
+  }
+  const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return creditLowers ? `up to ${ceiling}` : ceiling;
+}
+
 // Completion text for the first visit of a deferred year (owner ruling
-// 2026-10-02): when THIS visit is the one that releases the year's charge —
-// held by the deferred year, and the job still waiting for its first visit —
-// the text says the year is being charged now. Returns { amount, methodLine }
-// or null (any other visit, or anything unreadable: the regular annual-prepay
-// text is the safe fallback).
+// 2026-10-02, "change for the first visit only"): the visit completion stamped
+// as held by the waiting year, while the automatic charge will really run, the
+// year is still owed, and the text goes out now (inside the send window: a
+// queued "being charged now" would arrive after the fact). One announcement
+// per year: the first closeout to reserve it on the job wins, a retry of the
+// same closeout re-wins its own. Returns { amount, methodLine } or null (the
+// regular annual-prepay text is the safe fallback).
 async function firstChargeCompletionFacts(svc, conn = db) {
   try {
     if (!svc || svc.prepaid_method || !svc.customer_id) return null;
-    let estimateId = svc.source_estimate_id || null;
-    if (!estimateId && svc.recurring_parent_id) {
-      const parent = await conn('scheduled_services')
-        .where({ id: svc.recurring_parent_id, customer_id: svc.customer_id }).first('source_estimate_id');
-      estimateId = parent?.source_estimate_id || null;
-    }
-    if (!estimateId) return null;
-    const row = await conn('estimates').where({ id: estimateId }).first('estimate_data');
-    const job = parseData(row?.estimate_data)?.prepayAutoChargeJob;
-    if (!job || job.deferred_to_first_visit !== true || job.status !== AWAITING) return null;
-    if (!Number.isInteger(job.authorized_total_cents) || job.authorized_total_cents <= 0) return null;
-    // Held by THIS year: completion stamped the visit with the job's term just
-    // before the text (paf_held_term_id).
+    if (!require('./messaging/send-window').isWithinSendWindowET(new Date())) return null;
+    const found = await awaitingDeferredJobForVisit(svc, conn);
+    if (!found) return null;
+    const { estimateId, job } = found;
     const term = await conn('annual_prepay_terms').where({ prepay_invoice_id: job.invoice_id || null }).first('id');
     if (!term || String(svc.paf_held_term_id || '') !== String(term.id)) return null;
-    // First visit only: another held visit already performed (two visits done
-    // before a release pass) already carried the announcement.
-    const performedHeld = (await performedVisitCandidates(estimateId, svc.customer_id))
-      .filter((v) => String(v.paf_held_term_id || '') === String(term.id));
-    if (performedHeld.some((v) => String(v.id) !== String(svc.id))) return null;
-    // "Being charged now" only when the sweep's automatic charge will really
-    // run (Codex r8): charging is switched on, the bound method is still saved, nothing already parked
-    // it on the pay link, Auto Pay was not turned off or paused since the
-    // approval, and no collections hold stops off-session charges. Otherwise
-    // the regular text — the customer hears about the pay link separately.
-    if (!require('./recurring-card-on-file').isPrepayCardAndChargeEnabled()) return null;
-    if (job.authentication_required === true || job.charge_returned === true) return null;
-    const method = job.payment_method_row_id
-      ? await conn('payment_methods').where({ id: job.payment_method_row_id }).first('customer_id', 'stripe_payment_method_id', 'method_type')
-      : await conn('payment_methods').where({ stripe_payment_method_id: job.stripe_payment_method_id || '' }).first('customer_id', 'stripe_payment_method_id', 'method_type');
-    if (!method || String(method.customer_id) !== String(svc.customer_id)) return null;
-    if (job.stripe_payment_method_id && method.stripe_payment_method_id !== job.stripe_payment_method_id) return null;
-    const customer = await conn('customers').where({ id: svc.customer_id }).first('autopay_paused_until', 'deleted_at');
-    if (!customer || customer.deleted_at) return null;
-    if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) > new Date()) return null;
-    const authorizedAt = job.authorized_at || job.created_at;
-    const optedOut = await conn('autopay_log')
-      .where({ customer_id: svc.customer_id, event_type: 'autopay_disabled' })
-      .modify((q) => { if (authorizedAt) q.where('created_at', '>', new Date(authorizedAt)); })
-      .first('id');
-    if (optedOut) return null;
-    if (await require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(svc.customer_id, conn)) return null;
-    // The bound method must still be the customer's Auto Pay method (or none
-    // is set yet, which recovery enrollment fills): a different default means
-    // the charge refuses the bound row and falls to the pay link (GitHub
-    // Codex #5567 r15).
-    const autopayRow = await conn('customers').where({ id: svc.customer_id }).first('autopay_payment_method_id');
-    if (autopayRow?.autopay_payment_method_id && job.payment_method_row_id
-      && String(autopayRow.autopay_payment_method_id) !== String(job.payment_method_row_id)) return null;
-    const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
-    // The acknowledged total is a CEILING (owner R1): account credit the
-    // charge will draw lowers it. Credit that covers the year means nothing
-    // is charged, so the regular "nothing due today" text is the true one;
-    // credit that only lowers it makes the amount "up to" the ceiling.
-    const invoice = job.invoice_id
-      ? await conn('invoices').where({ id: job.invoice_id }).first('id', 'customer_id', 'status', 'total', 'credit_applied')
-      : null;
-    if (!invoice) return null;
-    // Still owed and not already moving (GitHub Codex #5567 r9): a year paid,
-    // processing, or dead before the release pass gets no new charge.
-    const invStatus = String(invoice.status || '').toLowerCase();
-    if (['paid', 'prepaid', 'processing'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return null;
-    const credit = require('./customer-credit');
-    // Credit already applied to the year bill lowers the charge too, even
-    // with no balance left to apply (GitHub Codex #5567 r12).
-    let creditLowers = Number(invoice.credit_applied) > 0;
-    if (await credit.autoApplyWouldApply(invoice, conn)) {
-      const balance = await credit.getBalance(invoice.customer_id, conn);
-      if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).fullyCovered) return null;
-      creditLowers = true;
-    } else if (credit.computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied }).skipReason === 'already_covered') {
-      return null;
-    }
-    // One announcement per year (GitHub Codex #5567 r9): reserve it on the
-    // job for THIS visit while it still waits. Two completions racing before
-    // a release pass both pass the reads above; only one wins the reservation.
-    // A retry of the same visit's closeout re-wins its own.
+    const method = await autoChargeMethod(job, svc.customer_id, conn);
+    const amount = method ? await announcedAmount(job, conn) : null;
+    if (!amount) return null;
     const reserved = await patchJob(estimateId, { first_charge_text_visit_id: String(svc.id) }, (q) => whileAwaiting(q)
       .whereRaw(`COALESCE(${JOB} ->> 'first_charge_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)]), conn);
     if (!reserved) return null;
-    const ceiling = `$${(job.authorized_total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    return { amount: creditLowers ? `up to ${ceiling}` : ceiling, methodLine: bank ? 'saved bank account' : 'card on file' };
+    const bank = require('./autopay-eligibility').isBankMethodType(method.method_type);
+    return { amount, methodLine: bank ? 'saved bank account' : 'card on file' };
   } catch (err) {
     logger.warn(`[paf-prepay] first-charge completion facts unavailable for visit ${svc?.id}: ${err.message}`);
     return null;
