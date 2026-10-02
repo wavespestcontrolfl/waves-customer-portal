@@ -735,3 +735,15 @@ describe('palm-crown rule = the instruction (owner 2026-10-02)', () => {
     expect(out.photoSummary).toContain('The palm crown looks healthy.');
   });
 });
+
+describe('the technician\'s wording outlasts the dry-signal correction (pre-push P1 on d7d3f19de7)', () => {
+  test('a confirmed stress finding keeps its confirmation when the photo prose mentions dry margins', () => {
+    gateOn();
+    const out = build(
+      assessment({ scores: { ...SCORES, waterHeatStress: 90 }, observations: 'Dry margins on a few leaves.' }),
+      [decide('water_heat_mechanical_stress', 'confirmed')],
+    );
+    // Before the fix the correction replaced the confirmation outright.
+    expect(diagOf(out, 'water_heat_mechanical_stress').customerExplanation).toMatch(/^Confirmed by your technician during the visit\./);
+  });
+});

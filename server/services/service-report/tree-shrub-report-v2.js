@@ -296,17 +296,6 @@ function buildTreeShrubReportV2({
   });
   // Client cards read `explanation`; keep customerExplanation too.
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
-  if (techCopy) {
-    // The technician's confirmed / edited finding speaks for its category; the
-    // photo read stays on the assessment row for the office.
-    for (const row of diagnosis) {
-      const said = diagnosisOverride(techFindings.find((f) => f && f.key === row.key), row.customerExplanation, row.status);
-      if (said) {
-        row.customerExplanation = said;
-        row.explanation = said;
-      }
-    }
-  }
 
   const water = mapWater(waterSnapshot);
 
@@ -328,6 +317,19 @@ function buildTreeShrubReportV2({
     stressCat.explanation = stressCat.customerExplanation;
   }
   if (water) water.localizedDry = localizedDry;
+
+  if (techCopy) {
+    // The technician's confirmed / edited finding speaks for its category, and
+    // last, so no photo-signal correction above overwrites it; the photo read
+    // stays on the assessment row for the office.
+    for (const row of diagnosis) {
+      const said = diagnosisOverride(techFindings.find((f) => f && f.key === row.key), row.customerExplanation, row.status);
+      if (said) {
+        row.customerExplanation = said;
+        row.explanation = said;
+      }
+    }
+  }
 
   const plantGroups = buildPlantGroups(treeShrubAssessment.plantGroups);
 
