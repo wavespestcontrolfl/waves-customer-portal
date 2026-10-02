@@ -524,6 +524,10 @@ function withoutMlLabelRate(content) {
   )).join('\n');
 }
 
+// Long enough to carry every non-lawn program page whole (the longest,
+// termite, renders about 2,000 characters).
+const PROTOCOL_SNIPPET_CHARS = 2500;
+
 async function searchKnowledgeBase(query, { forTech = false } = {}) {
   // Trusted knowledge only — same gate the admin field-intelligence tool
   // uses, so red wiki pages awaiting review never reach a tech answer.
@@ -532,14 +536,19 @@ async function searchKnowledgeBase(query, { forTech = false } = {}) {
     const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, { limit: 5, trustedOnly: true });
 
     // unifiedSearch returns metadata only — attach snippets: each page's first
-    // 300 characters, once an mL label rate is out of it for a technician.
+    // 300 characters, once an mL label rate is out of it for a technician. A
+    // protocol page gets PROTOCOL_SNIPPET_CHARS instead: its first 300
+    // characters are the program title and notes, so the visit steps a tech
+    // asks about never reached the answer (owner 2026-10-01).
     const kbIds = (claudeopedia || []).map((r) => r.id).filter(Boolean);
+    const kbCategoryById = Object.fromEntries((claudeopedia || []).map((r) => [r.id, r.category]));
     const kbRows = kbIds.length
       ? await db('knowledge_base').whereIn('id', kbIds).select('id', 'content')
       : [];
     const kbSnippetById = Object.fromEntries(kbRows.map((r) => [
       r.id,
-      r.content == null ? null : Array.from(forTech ? withoutMlLabelRate(r.content) : r.content).slice(0, 300).join(''),
+      r.content == null ? null : Array.from(forTech ? withoutMlLabelRate(r.content) : r.content)
+        .slice(0, kbCategoryById[r.id] === 'protocols' ? PROTOCOL_SNIPPET_CHARS : 300).join(''),
     ]));
 
     const wikiIds = (wiki || []).map((r) => r.id).filter(Boolean);
