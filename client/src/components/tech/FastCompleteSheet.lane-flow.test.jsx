@@ -16,7 +16,7 @@ vi.mock('./TechTreatmentZoneModal', () => ({ default: () => <div role="dialog" a
 vi.mock('./TechServicePhotosModal', () => ({ default: () => <div role="dialog" aria-label="Photo manager" /> }));
 
 import FastCompleteSheet from './FastCompleteSheet';
-import { EMPTY_LANE_RECORD, changeLaneRecord, mergeLaneRecord } from './FastCompleteReport';
+import { EMPTY_LANE_RECORD, changeLaneRecord, laneRecordNeedsAction, mergeLaneRecord } from './FastCompleteReport';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
@@ -384,6 +384,25 @@ describe('a saved trace the report never shows (codex local r5 on #5629)', () =>
   });
 });
 
+describe('a record the completion takes only beside the work (review of record on #5629)', () => {
+  test('a lane with a work state holds a completed-work finding for the Full form', async () => {
+    const visit = { ...VISIT, serviceType: 'Dethatching', serviceKey: 'dethatching' };
+    const request = makeRequest({
+      visit, lane: 'dethatching',
+      laneFacts: {
+        available: true, status: 'read', lane: 'dethatching', unclearGroups: [],
+        areas: [{ area: SERVICE_COMPLETION_PRESETS.dethatching.areas[0], quote: 'the lawn' }],
+        findings: [{ group: 'dethatching_scope', value: 'Full quoted area completed', quote: 'did the whole quoted area' }],
+      },
+    });
+    await openSheet(request, { ...SERVICE, serviceType: 'Dethatching', laneKey: 'dethatching' });
+    addProduct('Temprid FX', '1');
+    await generate('Dethatched the lawn, did the whole quoted area.');
+    expect(await screen.findByText('A finding on this record needs the work you did recorded beside it, and only the Full form records that. Use the Full form.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
+});
+
 describe('the visit the tech tapped', () => {
   test('a visit that no longer reads as the lane it was routed as needs the full form', async () => {
     const request = makeRequest({ lane: null });
@@ -492,6 +511,20 @@ describe('the record\'s rules', () => {
     }), bedBug);
     expect(merged.areas).toEqual([]);
     expect(merged.values).toEqual({});
+  });
+
+  test('a completed-work finding needs the work recorded beside it, on a lane that defines a work state; no voice lane does today (review of record on #5629)', () => {
+    const dethatching = SERVICE_COMPLETION_PRESETS.dethatching;
+    expect(laneRecordNeedsAction(dethatching, { ...EMPTY_LANE_RECORD, values: { dethatching_scope: 'Full quoted area completed' } })).toBe(true);
+    expect(laneRecordNeedsAction(dethatching, { ...EMPTY_LANE_RECORD, values: { dethatching_scope: 'Inspection only' } })).toBe(false);
+    for (const lane of ['bed_bug_treatment', 'fire_ant', 'tick_control', 'bee_wasp_removal', 'mud_dauber_removal', 'mosquito']) {
+      const preset = SERVICE_COMPLETION_PRESETS[lane];
+      for (const group of preset.findingGroups) {
+        for (const option of group.options) {
+          expect(laneRecordNeedsAction(preset, { ...EMPTY_LANE_RECORD, values: { [group.key]: option.value } })).toBe(false);
+        }
+      }
+    }
   });
 
   test('a read that failed changes nothing', () => {

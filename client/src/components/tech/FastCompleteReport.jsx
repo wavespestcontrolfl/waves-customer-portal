@@ -15,7 +15,7 @@ import { Chip, ChoiceSection } from './FastCompleteParts';
 import { blogPostPath, useBlogPostSearch } from '../schedule/BlogPostPicker';
 import { ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
 import NoteBoxPhotos from '../schedule/NoteBoxPhotos';
-import { reconcileDependentFindingSelections } from '../../lib/service-completion-presets';
+import { reconcileDependentFindingSelections, specialtyCompletedWorkWithoutAction } from '../../lib/service-completion-presets';
 import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
@@ -635,6 +635,13 @@ export function changeLaneRecord(record, key, value, preset) {
     .filter(([, chosen]) => chosen));
   return { ...record, values, picked };
 }
+
+// Whether the completion would refuse this record without an action beside
+// it: a lane whose closeout defines its work state takes a completed-work
+// finding only with the work performed (specialtyCompletedWorkWithoutAction,
+// the client mirror of the server's rule), and the sheet records no actions.
+// None of the six voice lanes defines a work state today.
+export const laneRecordNeedsAction = (preset, record) => !!specialtyCompletedWorkWithoutAction(preset, Object.values(record.values), []);
 
 // "<Lane> record heard from you": each field with what was heard and a
 // Change; a group the note left unclear asks to be picked.

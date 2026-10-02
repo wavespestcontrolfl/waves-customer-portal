@@ -80,7 +80,7 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
-  BlogPostSection, EMPTY_LANE_RECORD, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, TechNoteBoxPhotos, TraceSection,
+  BlogPostSection, EMPTY_LANE_RECORD, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, TechNoteBoxPhotos, TraceSection, laneRecordNeedsAction,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
   useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
@@ -895,7 +895,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
-    ...(stage === 'complete' ? (lane ? laneSendHolds : sendHolds)({ active, ...sendInputs }) : []),
+    ...(stage === 'complete' ? (lane ? laneSendHolds : sendHolds)({ active, lane, ...sendInputs }) : []),
   ].find(([missing]) => missing) || [];
   return { reason, stockRow, fix };
 }
@@ -939,7 +939,7 @@ const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv'
 // confirm. A product picked as a perimeter spray needs a traced length, and
 // a saved trace shows on the customer's report only with such a spray to
 // back it (as on a pest visit).
-function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneRecord, traceOnReport = true }) {
+function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane, laneRecord, traceOnReport = true }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const laneAreas = laneRecord.areas;
   const perimeterRow = perimeterSprayRow(active, draft);
@@ -968,6 +968,9 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, laneR
     // never sends without one (codex local r3 on #5629). A read that heard
     // none leaves them for the tech to pick.
     [!laneAreas.length, 'Pick where you treated: tap Change beside Where.'],
+    // A finding the completion takes only beside the work performed (a lane
+    // with a work state) goes on the full form, which records the work.
+    [laneRecordNeedsAction(SERVICE_COMPLETION_PRESETS[lane], laneRecord), 'A finding on this record needs the work you did recorded beside it, and only the Full form records that. Use the Full form.'],
     ...ready.trace,
     [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
     [unusedTrace, areaTrace
