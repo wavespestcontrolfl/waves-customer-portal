@@ -84,10 +84,13 @@ const span = (from, to) => (from != null && to != null && to >= from ? to - from
  * reconnected call runs a second session on the same CallSid).
  */
 function parseTimeline(events = []) {
-  const out = { prompts: [], tokens: [], audioStarts: [], interrupts: 0 };
+  const out = { prompts: [], tokens: [], interrupts: 0 };
   let st = null;
   let sessionId = null;
-  const fresh = () => ({ customerSpeaking: false, agentSpeaking: false, lastEnd: null, lastStt: null, pendingTts: null });
+  // awaiting: texts sent while nothing was playing, whose audio has not
+  // started yet. unclearLeft: audio starts still owed to texts already
+  // marked unclear (they may play later and must not be credited onward).
+  const fresh = () => ({ customerSpeaking: false, agentSpeaking: false, lastEnd: null, lastStt: null, pendingTts: null, awaiting: [], unclearLeft: 0 });
   for (const e of relayEvents(events)) {
     if (!st || (e.sessionId && sessionId && e.sessionId !== sessionId)) st = fresh();
     if (e.sessionId) sessionId = e.sessionId;
@@ -120,16 +123,32 @@ const PARSE_HANDLERS = {
     st.lastStt = null;
   },
   first_token_received: (st, e, out, sessionId) => {
-    out.tokens.push({ at: e.at, sessionId, agentPlaying: st.agentSpeaking });
+    const token = { at: e.at, sessionId, agentPlaying: st.agentSpeaking, audio: null };
+    out.tokens.push(token);
+    if (st.agentSpeaking) return; // queued behind playing audio: no start of its own
+    // Owed audio from unclear texts may still play: this text is unclear too.
+    if (st.unclearLeft > 0) { token.audio = 'unclear'; st.unclearLeft += 1; return; }
+    st.awaiting.push(token);
   },
-  start_of_agent_speech: (st, e, out, sessionId) => {
-    out.audioStarts.push({ at: e.at, sessionId, customerSpeaking: st.customerSpeaking, ttsMs: st.pendingTts });
+  start_of_agent_speech: (st, e) => {
+    const audio = { at: e.at, customerSpeaking: st.customerSpeaking, ttsMs: st.pendingTts };
     st.pendingTts = null;
     st.agentSpeaking = true;
+    // Credited only when exactly one text is waiting for its audio; with two
+    // or more, any of them could own this start, so all become unclear.
+    if (st.unclearLeft > 0) { st.unclearLeft -= 1; return; }
+    if (st.awaiting.length === 1) st.awaiting[0].audio = audio;
+    else if (st.awaiting.length > 1) {
+      for (const t of st.awaiting) t.audio = 'unclear';
+      st.unclearLeft = st.awaiting.length - 1;
+    }
+    st.awaiting = [];
   },
   end_of_agent_speech: (st) => { st.agentSpeaking = false; },
-  preempted: (st) => { st.agentSpeaking = false; },
-  interrupt: (st, e, out) => { out.interrupts += 1; st.agentSpeaking = false; },
+  // A barge-in or preemption drops whatever was queued to play: nothing is
+  // owed any more.
+  preempted: (st) => { st.agentSpeaking = false; st.awaiting = []; st.unclearLeft = 0; },
+  interrupt: (st, e, out) => { out.interrupts += 1; st.agentSpeaking = false; st.awaiting = []; st.unclearLeft = 0; },
 };
 
 /**
@@ -188,16 +207,19 @@ function oursView(s) {
  *   3. each turn's first send (promptWallAt + firstSendAt − promptAt, offset
  *      applied) ↔ Twilio's first_token_received — the reply that answers
  *      that prompt, whatever else was in flight;
- *   4. the first agent audio start after that text, in the same session and
- *      before the next text Twilio received, is that reply's audio.
+ *   4. an agent audio start is that reply's audio only when its text is the
+ *      ONLY one waiting to be heard (parseTimeline); a barge-in, preemption
+ *      or new relay session drops everything still waiting.
  * Outcomes:
  *   spoke          — the reply's audio start is known: a latency sample
  *   queued         — the reply landed while earlier audio was still playing,
  *                    so Twilio logged no start of its own (not a sample)
  *   no_reply       — we sent nothing for this prompt (caller kept talking,
  *                    or the turn was cut off)
- *   no_audio_event — our reply reached Twilio but no attributable audio
- *                    start followed it
+ *   audio_unclear  — two or more replies were waiting when audio started,
+ *                    so which one played is unknown (not a sample)
+ *   no_audio_event — our reply reached Twilio but no audio start followed
+ *                    (cut off, or the call ended)
  *   unattributed   — no stats of ours for this prompt, or our send matched
  *                    no Twilio text: never guessed, never a sample
  */
@@ -231,9 +253,9 @@ function attributeReply(row, parsed, tokenIndex, stat) {
   if (tokenIndex == null) return { outcome: 'unattributed' };
   const token = parsed.tokens[tokenIndex];
   if (token.agentPlaying) return { outcome: 'queued', firstTokenAt: token.at };
-  const nextToken = parsed.tokens[tokenIndex + 1];
-  const audio = parsed.audioStarts.find((a) => a.at >= token.at && a.sessionId === token.sessionId && (!nextToken || a.at < nextToken.at));
-  if (!audio) return { outcome: 'no_audio_event', firstTokenAt: token.at };
+  if (token.audio === 'unclear') return { outcome: 'audio_unclear', firstTokenAt: token.at };
+  if (!token.audio) return { outcome: 'no_audio_event', firstTokenAt: token.at };
+  const { audio } = token;
   return { outcome: 'spoke', firstTokenAt: token.at, agentSpeechStartAt: audio.at, ttsMs: audio.ttsMs, agentOverCaller: audio.customerSpeaking };
 }
 

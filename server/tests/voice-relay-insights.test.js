@@ -70,18 +70,42 @@ describe('buildCallTimeline — reply attribution comes from our stats only', ()
     expect(rows.map((t) => [t.outcome, t.heardGapMs])).toEqual([['spoke', 700], ['spoke', 2400]]);
   });
 
-  test('audio still being synthesized for an earlier reply is not the newer reply\'s audio', () => {
+  test('two replies waiting when audio starts: both unclear, never a sample', () => {
     const rows = buildCallTimeline([
       ev(1000, 'prompt_sent'),
       ev(1400, 'first_token_received'), // A's text
       ev(1500, 'end_of_customer_speech'), ev(1500, 'prompt_sent'), // B
       ev(1600, 'first_token_received'), // B's text
       ev(1650, 'start_of_agent_speech'), // A's audio (after B's text, before any later text)
-    ], [ours(1, 1000, 400), ours(2, 1500, 100)]);
-    // A's audio starts after the NEXT text Twilio got, so A has no attributable start;
-    // the start belongs to the text it follows (B's).
-    expect(rows[0].outcome).toBe('no_audio_event');
-    expect(rows[1]).toMatchObject({ outcome: 'spoke', heardGapMs: 150 });
+      ev(1900, 'start_of_agent_speech'), ev(2400, 'end_of_agent_speech'), // the other one
+      ev(2600, 'end_of_customer_speech'), ev(2600, 'prompt_sent'), // C
+      ev(3000, 'first_token_received'), ev(3100, 'start_of_agent_speech'), // C's — nothing else owed
+    ], [ours(1, 1000, 400), ours(2, 1500, 100), ours(3, 2600, 400)]);
+    // Two texts were waiting when audio started: either could own it.
+    expect(rows.map((t) => t.outcome)).toEqual(['audio_unclear', 'audio_unclear', 'spoke']);
+    expect(rows[2].heardGapMs).toBe(500);
+    expect(summarizeTimeline(rows).all.heard_gap.n).toBe(1);
+  });
+
+  test('audio still owed to an unclear reply is never credited to a later one', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'prompt_sent'), ev(1400, 'first_token_received'),
+      ev(1500, 'prompt_sent'), ev(1600, 'first_token_received'),
+      ev(1650, 'start_of_agent_speech'), ev(2000, 'end_of_agent_speech'), // one of A/B
+      ev(2100, 'prompt_sent'), ev(2200, 'first_token_received'), // C, while the other A/B audio is still owed
+      ev(2300, 'start_of_agent_speech'), // could be the owed one
+    ], [ours(1, 1000, 400), ours(2, 1500, 100), ours(3, 2100, 100)]);
+    expect(rows.map((t) => t.outcome)).toEqual(['audio_unclear', 'audio_unclear', 'audio_unclear']);
+  });
+
+  test('a barge-in drops what was waiting, so measurement resumes cleanly', () => {
+    const rows = buildCallTimeline([
+      ev(1000, 'prompt_sent'), ev(1400, 'first_token_received'), // A, never plays
+      ev(1450, 'interrupt'),
+      ev(3000, 'end_of_customer_speech'), ev(3000, 'prompt_sent'),
+      ev(3800, 'first_token_received'), ev(3900, 'start_of_agent_speech'),
+    ], [ours(1, 1000, 400), ours(2, 3000, 800)]);
+    expect(rows.map((t) => [t.outcome, t.heardGapMs])).toEqual([['no_audio_event', null], ['spoke', 900]]);
   });
 
   test('a multi-part reply (acknowledgement, then the answer) is measured from its FIRST text', () => {
