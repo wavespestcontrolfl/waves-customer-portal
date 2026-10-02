@@ -2979,6 +2979,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
                 if (!committed?.claimed) await PendingActions.cancelPendingAction(proposed.clientPayload.id, getAdminActorId(req)).catch(() => {});
               }
               result = OwnerDirect.directModelResult(committed);
+              // An unknown outcome or an unsaved receipt closes the write
+              // frontier for the rest of this response, exactly as a card
+              // does: later writes in the same model turn would otherwise
+              // run before the model has seen the uncertainty (pre-push
+              // P1). Reads stay open so the model can re-check the record.
+              if (result.executed === null || result.receiptPersisted === false) writeFrontierBlocked = true;
               if (!result.executed) {
                 failed = true;
                 errorMessage = result.error;

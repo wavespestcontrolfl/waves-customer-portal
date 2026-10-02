@@ -745,6 +745,53 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
+  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; two direct edits in one turn both commit', async () => {
+    // A second admin whose email is on the full-access list for this run only.
+    const owner = crypto.randomUUID();
+    const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
+    await db('technicians').insert({ id: owner, name: 'Synthetic IB owner', email: ownerEmail, role: 'admin', active: true, auth_token_version: 1 });
+    const ownerToken = require('jsonwebtoken').sign({ type: 'access', tokenVersion: 1, technicianId: owner }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    process.env.IB_FULL_ACCESS_EMAILS = ownerEmail;
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
+    try {
+      const note = `Owner-direct fixture ${owner.slice(0, 8)}`;
+      proposeNote(customerA, note);
+      const direct = await api('/query', request(`Add a note for ${nameA}: ${note}`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(direct.status).toBe(200);
+      expect(direct.body.pendingActions).toEqual([]);
+      expect(direct.body.taskState).toBe('responded');
+      // The row went through the pending-action store and was consumed by the commit.
+      const rows = await db('ib_pending_actions').where('task_id', direct.body.taskId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'confirmed', requested_by: owner });
+      expect(rows[0].consumed_at).not.toBeNull();
+      expect(JSON.parse(rows[0].result)).toMatchObject({ success: true });
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
+      expect(JSON.stringify(mockModel.mock.calls)).toContain('"executed":true');
+
+      // The same edit by the non-owner admin, gate still on, keeps its card.
+      proposeNote(customerA, 'Non-owner fixture');
+      const carded = await api('/query', request(`Add a note for ${nameA}: Non-owner fixture`, { session_id: crypto.randomUUID() }));
+      expect(carded.body.pendingActions).toHaveLength(1);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
+      await db('ib_pending_actions').where('id', carded.body.pendingActions[0].id).update({ status: 'cancelled' });
+
+      // Two direct writes in one model turn: each commits with its own
+      // receipt (the frontier closes only after an unknown outcome).
+      const first = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 2` } }, id: 'first' };
+      const second = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 3` } }, id: 'second' };
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+        .mockResolvedValueOnce({ content: [first, second], usage: {} })
+        .mockResolvedValueOnce(answer('Done.'));
+      const pair = await api('/query', request(`Add two notes for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(pair.body.pendingActions).toEqual([]);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(`${note} 3`);
+    } finally {
+      delete process.env.IB_FULL_ACCESS_EMAILS;
+      delete process.env.GATE_IB_OWNER_DIRECT;
+    }
+  }, 30000);
+
   test('a stale customer approval cannot overwrite a newer edit', async () => {
     proposeNote(customerA, 'Old approved note');
     const proposed = await api('/query', request(`Add a note for ${nameA}: Old approved note`));
