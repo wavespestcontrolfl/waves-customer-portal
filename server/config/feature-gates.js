@@ -4440,6 +4440,17 @@ function adminBodyGuardAllLive() {
   return !['off', 'false', '0'].includes(String(process.env.ADMIN_BODY_GUARD_ALL ?? '').trim().toLowerCase());
 }
 
+// PORTAL_CHAT_SELF_SERVE read at CALL time — DEFAULT ON; off only when set to
+// 'off', 'false' or '0' (case-insensitive), a pure kill switch (rule 14). The
+// canonical reader for the portal chat assistant (services/ai-assistant): on,
+// portal chat hands the customer a Reschedule button or the portal page that
+// holds the answer instead of handing off, and a hand-off rings the admin
+// bell and tells the customer only what happened; off, portal chat is
+// byte-identical to before (hand-off on every reschedule, queue row only).
+function portalChatSelfServeLive() {
+  return !['off', 'false', '0'].includes(String(process.env.PORTAL_CHAT_SELF_SERVE ?? '').trim().toLowerCase());
+}
+
 // PROMISE_EVIDENCE_CLOSE read at CALL time — DEFAULT ON (owner ruling
 // 2026-09-28, "close it, show proof"); off only when set to 'off', 'false'
 // or '0' (case-insensitive). On, call-commitments' fulfillment refresh closes
@@ -4716,6 +4727,8 @@ module.exports.pafSetupFeeLive = pafSetupFeeLive;
 module.exports.pafPrepayLive = pafPrepayLive;
 module.exports.pafTermiteLive = pafTermiteLive;
 module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
+// PORTAL_CHAT_SELF_SERVE reader, on its own line so gate PRs never conflict.
+module.exports.portalChatSelfServeLive = portalChatSelfServeLive;
 // gates 1775330914
 // GATE_SERIES_MOVE_CARRIES_VISIT reader, on its own line mid-block (not the
 // shared list, not the file's last line) so other gate PRs never conflict.
