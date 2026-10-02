@@ -1870,20 +1870,34 @@ async function batchHasSentRows(dbh, batchKey) {
   return Number(row && row.n) > 0;
 }
 
+// A row whose notice row exists (the apply lane's scheduleNoticeRows wrote
+// notice_id) is never deleted by a rebuild either: the FK would orphan its
+// draft (SET NULL) and the rebuilt row could never be re-linked
+// (notice_event_collision). Retire the drafts first
+// (DELETE /api/admin/rate-review/batches/:key/schedule).
+async function batchHasScheduledRows(dbh, batchKey) {
+  const row = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).whereNotNull('notice_id').count({ n: '*' }).first();
+  return Number(row && row.n) > 0;
+}
+
 // Every writer on a batch (a build — for its whole recompute —, a row edit,
-// an approval) takes this transaction-scoped advisory lock first, so they
-// serialize even before the batch row exists (a FOR UPDATE on a row that is
-// not there locks nothing — two first builds could both pass the refusal
-// check).
+// an approval, and the apply lane's scheduleNoticeRows / retireDraftNotices
+// in services/rate-review-apply.js) takes this transaction-scoped advisory
+// lock first, so they serialize even before the batch row exists (a FOR
+// UPDATE on a row that is not there locks nothing — two first builds could
+// both pass the refusal check), and a draft cannot land between the
+// rebuild's refusal check and its DELETE.
 async function lockBatch(conn, batchKey) {
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`rate_review_batch:${batchKey}`]);
 }
 
 // A rebuild discards every undecided row. Once the owner approved rows (or
-// the comms lane sent them) the batch is a decision, not a draft — refused,
-// with the reason the route and the screen can name.
+// the comms lane sent them, or the apply lane drafted their notices) the
+// batch is a decision, not a draft — refused, with the reason the route and
+// the screen can name.
 async function batchRebuildRefusal(dbh, batchKey) {
   if (await batchHasSentRows(dbh, batchKey)) return 'batch_has_sent_rows';
+  if (await batchHasScheduledRows(dbh, batchKey)) return 'batch_has_scheduled_rows';
   const row = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).whereIn('status', ['approved']).count({ n: '*' }).first();
   return Number(row && row.n) > 0 ? 'batch_has_approved_rows' : null;
 }
@@ -3039,6 +3053,17 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
 module.exports = {
   DEFAULT_CONFIG,
   EXCEPTION_FLAGS,
+  // The plan-line classification (line, cadence, recurring) and the
+  // anniversary / coverage helpers, shared with the apply lane
+  // (services/rate-review-apply.js) so a notice targets exactly the visits
+  // this ranking priced.
+  PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL },
+  lockBatch,
+  LEDGER_FAMILIES_FOR_LINE,
+  anniversaryInWindow,
+  familyOfCoverage,
+  matchPrepayTerm,
+  visitsPerYearFor,
   buildBatch,
   summarizeBatch,
   getBatch,

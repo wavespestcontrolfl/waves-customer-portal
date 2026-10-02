@@ -137,6 +137,46 @@ describe('rankCitedPages', () => {
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });
   });
 
+  // owner 2026-10-01 "loosen the rule": a known editorial site's provider page
+  // qualifies without a best/top word in its address
+  test('a known editorial site\'s provider page is a list without best/top in the URL; how-to and unknown service pages are not', () => {
+    const urls = [
+      'https://www.smarfle.com/fl/bradenton/pest-control', // known editorial, no best word → list
+      'https://www.bobvila.com/articles/how-to-choose-a-pest-control-company/', // how-to article → not
+      'https://localsite.example/pest-control-parrish', // unknown site, no best word → not (looks like a company page)
+      'https://localsite.example/best-pest-control-companies-parrish', // unknown site WITH best word → list
+      'https://todayshomeowner.com/articles/pest-control-identification/', // identification article → not
+      'https://patch.com/florida/sarasota/business/listing/123/acme-pest-control-services', // directory route on an editorial host → not
+      'https://patch.com/florida/sarasota/news/local-pest-control-company-owner-retires', // a news story → not
+      'https://floridist.com/what-are-the-best-pest-control-companies-in-sarasota', // explicit roundup despite "what" → list
+      'https://localsite.example/best-pest-control-businesses-in-sarasota', // explicit roundup despite "businesses" → list
+      'https://localsite.example/best-pest-control-services-cost', // a cost article even with best + services → not
+      'https://floridist.com/pest-control-company-identifies-common-pests', // identifies → not
+      'https://floridist.com/pest-control-tip', // tip → not
+      'https://floridist.com/early-sign-of-termites-pest-control', // sign → not
+      'https://todayshomeowner.com/pest-control/guides/types-of-pest-control', // a mixed-content publisher's guide → not
+      'https://todayshomeowner.com/near-me/florida/venice/pest-control/', // its near-me roundup → list
+    ];
+    const byKey = Object.fromEntries(rankCitedPages([row({ query: Q1, urls })], []).map((p) => [p.key, p.listPage]));
+    expect(byKey).toEqual({
+      'smarfle.com/fl/bradenton/pest-control': true,
+      'bobvila.com/articles/how-to-choose-a-pest-control-company': false,
+      'localsite.example/pest-control-parrish': false,
+      'localsite.example/best-pest-control-companies-parrish': true,
+      'todayshomeowner.com/articles/pest-control-identification': false,
+      'patch.com/florida/sarasota/business/listing/123/acme-pest-control-services': false,
+      'patch.com/florida/sarasota/news/local-pest-control-company-owner-retires': false,
+      'floridist.com/what-are-the-best-pest-control-companies-in-sarasota': true,
+      'localsite.example/best-pest-control-businesses-in-sarasota': true,
+      'localsite.example/best-pest-control-services-cost': false,
+      'floridist.com/pest-control-company-identifies-common-pests': false,
+      'floridist.com/pest-control-tip': false,
+      'floridist.com/early-sign-of-termites-pest-control': false,
+      'todayshomeowner.com/pest-control/guides/types-of-pest-control': false,
+      'todayshomeowner.com/near-me/florida/venice/pest-control': true,
+    });
+  });
+
   test('once eligible, a page counts every citation — a current cost answer citing it is current', () => {
     const LIST = 'https://localpicks.example/best-pest-control-companies-sarasota';
     const rows = [
