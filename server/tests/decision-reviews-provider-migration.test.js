@@ -213,3 +213,42 @@ describe('decision_reviews provider rollback order (20261002040000; owns only th
     }
   });
 });
+
+describe('decision_reviews keeps the old unique key for this deployment (20261002050000; expand first, contract with the second writer)', () => {
+  const keep = require('../models/migrations/20261002050000_decision_reviews_keep_old_unique');
+
+  test('up puts the five-column unique back so a pre-provider process can still upsert on it', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await keep.up(knex);
+    expect(state.raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_uniq',
+      'ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_subject_question_uniq UNIQUE (capability, package_id, subject_type, subject_id, question_id)',
+    ]);
+    expect(state.wheres).toEqual([['whereNot', { provider: 'typesafe' }]]);
+    expect(state.ops).toEqual([]);
+  });
+
+  test('up restores nothing when another provider already has rows: the old key cannot hold them', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const { knex, state } = buildKnex({ column: true, otherProviderRow: { id: 'r1' } });
+    await keep.up(knex);
+    expect(state.raw).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/old unique key is not restored/));
+    warn.mockRestore();
+  });
+
+  test('down drops the constraint again; both directions no-op without the table, up without the column', async () => {
+    const { knex, state } = buildKnex({ column: true });
+    await keep.down(knex);
+    expect(state.raw).toEqual(['ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_question_uniq']);
+    for (const opts of [{ table: false }, { column: false }]) {
+      const fresh = buildKnex(opts);
+      await keep.up(fresh.knex);
+      expect(fresh.state.raw).toEqual([]);
+    }
+    const noTable = buildKnex({ table: false });
+    await keep.down(noTable.knex);
+    expect(noTable.state.raw).toEqual([]);
+  });
+});
+
