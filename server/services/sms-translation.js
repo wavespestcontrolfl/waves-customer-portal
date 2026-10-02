@@ -69,7 +69,9 @@ function isEnglishText(text) {
   if (current) chunks.push(current);
   // the English guard itself, without needsTranslation's short-text discovery rule (a name or product is fine here)
   const { isEnglishInbound } = require('./sms-label-facts');
-  return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && isEnglishInbound(c));
+  // and no lowercase word left untranslated in a short one ("Please come kesho"); a name or product stays fine
+  return chunks.length > 0 && chunks.every((c) => c.length <= 1000 && isEnglishInbound(c))
+    && !require('./sms-label-facts').hasUnknownShortWord(text, { namesExempt: true });
 }
 
 const INBOUND_SCHEMA = {
@@ -138,7 +140,10 @@ async function translateInbound(inbound) {
   const english = typeof j.english === 'string' ? j.english.trim() : '';
   const language = typeof j.language === 'string' ? j.language.trim().slice(0, 60) : '';
   const languageCode = typeof j.language_code === 'string' ? j.language_code.trim().toLowerCase().slice(0, 12) : '';
-  if (j.is_english === true || languageCode === 'en' || /^english$/i.test(language)) return { ok: true, isEnglish: true, model: out.model };
+  // English only when all three fields say so; a mix ("is_english" true but "es") is held, never dropped as English
+  const englishVotes = [j.is_english === true, /^en(?:-|$)/.test(languageCode), /^english$/i.test(language)].filter(Boolean).length;
+  if (englishVotes === 3) return { ok: true, isEnglish: true, model: out.model };
+  if (englishVotes > 0) return { ok: false, reason: 'language_fields_disagree' };
   if (!english) return { ok: false, reason: 'inbound_translation_empty' };
   // the "translation" must itself be English, or no English check would read it (an echoed original)
   if (!isEnglishText(english)) return { ok: false, reason: 'translation_not_english' };
@@ -247,7 +252,8 @@ async function inboundMeaningCheck({ original, english, language }) {
 // message: links and emails exactly, phone numbers and other numbers whole
 // (see numberValues).
 // our own bare domain counts too: the drafter writes the portal without a scheme (portal.wavespestcontrol.com)
-const LINK_RE = /https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+|(?<![@\w.-])(?:[a-z0-9-]+\.)*wavespestcontrol\.com(?:\/[^\s<>"')]*)?/gi;
+// (a link also ends at CJK sentence punctuation, which has no space after it: "…/pay。付款")
+const LINK_RE = /https?:\/\/[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]+|www\.[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]+|(?<![@\w.-])(?:[a-z0-9-]+\.)*wavespestcontrol\.com(?:\/[^\s<>"')\u3001\u3002\uFF01\uFF0C\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]*)?/gi;
 const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.[a-z]{2,}/gi;
 // A number is compared WHOLE ("45.50" is one value, never "45" + "50", so
 // "$50.45" cannot stand in for "$45.50"). Spelling is normalised so a faithful
@@ -264,6 +270,9 @@ const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
 const LOCAL_PM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:tarde|noche)|da\s+(?:tarde|noite)|de\s+l['\u2019]apr[eè]s-midi|du\s+soir|in\s+the\s+(?:afternoon|evening)|at\s+night)\b/i;
 const LOCAL_AM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:ma[nñ]ana|madrugada)|da\s+manh[aã]|du\s+matin|in\s+the\s+morning)\b/i;
+// languages that name the half of the day BEFORE the number: Chinese 下午2点, Japanese 午後2時, Korean 오후 2시
+const PREFIX_PM_RE = /(?:下午|晚上|傍晚|中午|午後|夜|오후|저녁)\s*$/u;
+const PREFIX_AM_RE = /(?:上午|早上|凌晨|清晨|午前|朝|오전|새벽)\s*$/u;
 
 // strictTimes: every clock time compares as a 24-hour value ("2 PM", "14:00",
 // "14 h" are all t:14; "2 AM" is t:2), so AM/PM cannot flip or drop. Our own
@@ -330,9 +339,10 @@ function numberValues(text, { strictTimes = false } = {}) {
   for (const m of str.matchAll(NUMBER_RE)) {
     const raw = m[0];
     const after = str.slice(m.index + raw.length);
+    const before = str.slice(0, m.index);
     const flags = {
       pm: PM_RE.test(after),
-      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) ? 'am' : null),
+      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : null),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
     };
     // "2 PM", "2 a. m.", "2 in the afternoon", "2 de la tarde" all carry their half of the day
@@ -384,7 +394,8 @@ function asciiDigits(text) {
 
 function protectedTokens(text, opts = {}) {
   const str = asciiDigits(text);
-  const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?]+$/, ''));
+  // sentence punctuation after a link is not part of it, in any script ("…/x。", "…/x！")
+  const links = (str.match(LINK_RE) || []).map((l) => l.replace(/[.,;:!?\u3001\u3002\uFF01\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\u300D\u300F\uFF09]+$/u, ''));
   const emails = (str.replace(LINK_RE, ' ').match(EMAIL_RE) || []).map((e) => e.replace(/[.,;:!?]+$/, '').replace(/@.*$/, (d) => d.toLowerCase()));
   const numbers = numberValues(str.replace(LINK_RE, ' ').replace(EMAIL_RE, ' '), opts);
   return { links, emails, numbers, digits: numbers.map((n) => n.value) };
@@ -604,14 +615,33 @@ function translationAddedFault(englishReply, backTranslation, context) {
 }
 
 // Steps 1-2: the customer's text in English, then the English draft.
-async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
+// The thread as it stood when the triggering text arrived: a later row (a second
+// text saved while the webhook was still answering the first) is dropped, the
+// account state kept as read. null when the triggering row cannot be read.
+async function threadAsOfTrigger(context, smsLogId) {
+  let at;
+  try {
+    at = (await db('sms_log').where({ id: smsLogId }).first('created_at'))?.created_at;
+  } catch (err) {
+    logger.warn(`[sms-translation] triggering row not read: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+  const cutoff = at ? new Date(at).getTime() : NaN;
+  if (!Number.isFinite(cutoff)) return null;
+  const rows = Array.isArray(context?.smsHistory) ? context.smsHistory : [];
+  return { ...context, smsHistory: rows.filter((m) => !(m?.date && new Date(m.date).getTime() > cutoff)) };
+}
+
+async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId }) {
   if (inboundMessage.length > MAX_TEXT) return { stop: 'inbound_too_long' };
   // the customer's thread and account, snapshotted the moment the trial starts (after any consuming
   // branch committed): a staff reply or newer text landing during the model calls below never reaches
   // the draft. Same live-ETA opt-in as the live drafter (draftShadowReply): the real-answers gate.
   const ContextAggregator = require('./context-aggregator');
   const liveEtaFetchedAt = new Date();
-  const liveContext = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
+  // visit loops too, as the live drafter loads them: a "thanks" with something still open is not a pure thank-you
+  const liveContext = await threadAsOfTrigger(await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS'), includeVisitLoops: true }), smsLogId);
+  if (!liveContext) return { stop: 'trigger_row_unread' };
   const inbound = await translateInbound(inboundMessage);
   if (!inbound.ok) return { stop: `inbound_translation_failed:${inbound.reason}` };
   // the model reads it as English: today's English path already answers it
@@ -630,9 +660,11 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer }) {
   // both read off the English: the webhook's own reads ran on the foreign text
   let intent = classifyCustomerSmsTriageIntent(inbound.english, { customer });
   const schedulingIntent = require('./sms-intent').hasSchedulingIntent(inbound.english);
-  // a thank-you-only text gets the approved gratitude reply, as draftShadowReply does for a live one
+  // a thank-you-only text gets the approved gratitude reply, as draftShadowReply does for a live one; with a
+  // visit loop open (a delay, a passed window, a promise or ask) the live drafter routes it to a person instead
   const gratitude = require('./sms-gratitude');
   if (!schedulingIntent && gratitude.isGratitudeOnly(inbound.english)) {
+    if (require('./sms-shadow-drafter').visitLoopsNeedAnswer(liveContext)) return { stop: 'open_loop_thanks_to_person', fields };
     intent = { intent: gratitude.GRATITUDE_INTENT, confidence: 1, approvedReply: gratitude.buildGratitudeReply(customer.first_name) };
   }
   const Anthropic = require('@anthropic-ai/sdk');
@@ -714,7 +746,7 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
     return { ...row, saved };
   };
   try {
-    const en = await draftInEnglish({ inboundMessage, fromPhone, customer });
+    const en = await draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId });
     if (en.english) return null;
     if (en.skip) return await save('skipped', en.skip, en.fields, en.checks);
     if (en.stop) return await save('held', en.stop, en.fields, en.checks);

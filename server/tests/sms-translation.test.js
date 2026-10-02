@@ -9,10 +9,12 @@ const mockDraft = jest.fn();
 let mockGateOn = true;
 
 const mockPrior = jest.fn(async () => []);
+const mockTrigger = jest.fn(async () => ({ created_at: new Date('2026-10-02T12:00:00Z') }));
+const mockLoopsOpen = jest.fn(() => false);
 jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
-    where: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q, select: () => mockPrior(),
+    where: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q, select: () => mockPrior(), first: () => mockTrigger(),
   };
   return q;
 }));
@@ -31,6 +33,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   hasBannedCustomerCopy: (t) => /pet[- ]safe/i.test(t),
   SMS_COMPLIANCE_CLAIM_RE: jest.requireActual('../services/sms-shadow-drafter').SMS_COMPLIANCE_CLAIM_RE,
   normalizeNumberWords: jest.requireActual('../services/sms-shadow-drafter').normalizeNumberWords,
+  visitLoopsNeedAnswer: (...a) => mockLoopsOpen(...a),
 }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: (t) => /\[(name|phone)\]/i.test(t) }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -64,6 +67,8 @@ beforeEach(() => {
   mockDraft.mockReset();
   mockUngrounded.mockReset();
   mockUngrounded.mockReturnValue(false);
+  mockLoopsOpen.mockReset();
+  mockLoopsOpen.mockReturnValue(false);
   mockDraft.mockResolvedValue({ parsed: { reply: REPLY, intended_actions: [] }, converged: true, passes: 1, model: 'm', factsBlock: 'FACTS', promptVersion: 'house_voice_v12' });
 });
 
@@ -163,6 +168,15 @@ describe('tokenParity', () => {
     expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontrol.com.')).toMatchObject({ ok: true });
     expect(tokenParity('Pay at portal.wavespestcontrol.com.', 'Pague en portal.wavespestcontol.com.')).toMatchObject({ ok: false });
     expect(protectedTokens('Email contact@wavespestcontrol.com').links).toEqual([]);
+  });
+
+  test('a half of the day named before the number counts: 下午2点 is 2 PM, never 2 AM', () => {
+    expect(tokenParity('Can you come at 2 AM?', '下午2点可以来吗？', { strictTimes: false })).toMatchObject({ ok: false });
+    expect(tokenParity('Can you come at 2 PM?', '下午2点可以来吗？', { strictTimes: false })).toMatchObject({ ok: true });
+  });
+
+  test('native sentence punctuation after a link is not part of it', () => {
+    expect(tokenParity('Pay at https://portal.wavespestcontrol.com/pay.', '请在 https://portal.wavespestcontrol.com/pay。付款')).toMatchObject({ ok: true });
   });
 
   test('a signed rate keeps its sign: -10% is not 10%', () => {
@@ -293,6 +307,42 @@ describe('runTranslationTrial', () => {
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     expect(order[0]).toBe('context');
     expect(ctx.getContextForCustomer).toHaveBeenCalledTimes(1);
+  });
+
+  test('a thank-you with a visit loop open goes to a person, as the live drafter routes it', async () => {
+    mockLoopsOpen.mockReturnValue(true);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you!' } });
+    const row = await runTranslationTrial({ inboundMessage: '¡Muchas gracias!', customer, smsLogId: 's1' });
+    expect(row).toMatchObject({ verdict: 'held', hold_reason: 'open_loop_thanks_to_person' });
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(require('../services/context-aggregator').getContextForCustomer.mock.calls.at(-1)[1]).toMatchObject({ includeVisitLoops: true });
+  });
+
+  test('the thread stops at the triggering text: a later text is not drafted from', async () => {
+    const ctx = require('../services/context-aggregator');
+    ctx.getContextForCustomer.mockResolvedValueOnce({ customer: { id: 'c1' }, smsHistory: [
+      { direction: 'inbound', body: 'Can you also look at the garage?', date: new Date('2026-10-02T12:00:30Z') },
+      { direction: 'inbound', body: SPANISH, date: new Date('2026-10-02T12:00:00Z') },
+    ] });
+    scriptModels({ inbound: SPANISH_INBOUND });
+    await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
+    expect(mockDraft.mock.calls[0][0].context.smsHistory.map((m) => m.body)).not.toContain('Can you also look at the garage?');
+  });
+
+  test('an unreadable triggering row holds the trial', async () => {
+    mockTrigger.mockResolvedValueOnce(undefined);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'trigger_row_unread' });
+  });
+
+  test('language fields that disagree are held, not dropped as English', async () => {
+    scriptModels({ inbound: { is_english: true, language: 'Spanish', language_code: 'es', english: 'Can you come tomorrow?' } });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:language_fields_disagree' });
+  });
+
+  test('a short translation with a word left untranslated is not English', async () => {
+    scriptModels({ inbound: { ...SPANISH_INBOUND, language: 'Swahili', language_code: 'sw', english: 'Please come kesho' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Tafadhali njoo kesho', customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'inbound_translation_failed:translation_not_english' });
   });
 
   test('a thank-you-only text gets the approved gratitude intent, as the live drafter gives it', async () => {

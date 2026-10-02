@@ -1035,13 +1035,19 @@ const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|q
 // ("Ndiyo", "service kesho", "Да"): the language checks above judge two or
 // three words by a majority, so a short code-switched reply can read as
 // English to them. Used by the any-language trial to ask a model; never by the
-// reply guards (a one-word "yes" stays English there).
-function hasUnknownShortWord(text) {
+// reply guards (a one-word "yes" stays English there). namesExempt (a model's
+// English output): a capitalized word is a name or product ("Use Termidor"),
+// so only a lowercase unknown word counts ("Please come kesho").
+function hasUnknownShortWord(text, { namesExempt = false } = {}) {
   const c = canonText(text);
   if (isPureReaction(c)) return false;
-  const words = [...stripMarks(c).toLowerCase().matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
   if (!words.length || words.length > 4) return false;
-  return words.some((w) => !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w)));
+  return words.some((raw) => {
+    if (namesExempt && /^\p{Lu}/u.test(raw)) return false;
+    const w = raw.toLowerCase();
+    return !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w));
+  });
 }
 
 function isPureReaction(text) {
