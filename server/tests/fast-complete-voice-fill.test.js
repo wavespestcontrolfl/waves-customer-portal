@@ -1380,3 +1380,32 @@ describe('Codex #5580 round 10', () => {
     expect(out.unclear).not.toContainEqual({ heard: 'Gate was locked.', reason: 'office_said_not_filled' });
   });
 });
+
+describe('Codex #5580 round 11', () => {
+  const row = (amount, unit, heard) => ({ productId: 'p-taurus', amount, unit, sameAsLast: false, method: '', heard });
+
+  test('a spray verb in the sentence before does not make this sentence\'s gallons finished mix', () => {
+    const t = 'I sprayed outside. I used Taurus, two gallons.';
+    expect(validateFill(answer({ products: [row(2, 'gal', 'I used Taurus, two gallons')] }), ctx, t).products[0].amount).toBe(2);
+  });
+
+  test('"Treated the dog bed for fleas" stays customer copy; a loose dog goes to the office', () => {
+    const t = 'Treated the dog bed for fleas. Dog was loose in the yard.';
+    const out = validateFill(answer({ customerNote: t }), ctx, t);
+    expect(out.customerNote).toBe('Treated the dog bed for fleas.');
+    expect(out.officeNote).toBe('Dog was loose in the yard.');
+  });
+
+  test('an office line is carried only by one kept clause holding all its words', () => {
+    const t = 'Treated outside. Gate was locked. Lockbox code 1234. Gate code 1234.';
+    const out = validateFill(answer({ officeNote: 'Gate was locked. Lockbox code 1234.' }), ctx, t);
+    expect(out.unclear).toContainEqual({ heard: 'Gate code 1234.', reason: 'office_said_not_filled' });
+  });
+
+  test('a dose said for the product but left blank by the model is a Check', () => {
+    const t = 'Used four ounces of Taurus.';
+    const out = validateFill(answer({ products: [row(0, 'not_said', 'four ounces of Taurus')] }), ctx, t);
+    expect(out.products[0].amount).toBeNull();
+    expect(out.unclear).toContainEqual({ heard: 'four ounces of Taurus', reason: 'amount_said_not_filled' });
+  });
+});

@@ -499,11 +499,17 @@ const CARRIER_WORDS = new Set(['solution', 'mix', 'mixture', 'tank', 'water', 'f
 const CARRIER_STOPS = new Set(['in', 'into', 'to', 'with', 'for', 'on', 'and']);
 // "sprayed two gallons", "put out three gallons": gallons sprayed are finished mix.
 const SPRAYED_WORDS = new Set(['sprayed', 'spraying', 'spray', 'applied', 'out', 'ran', 'went', 'through']);
-function isCarrierVolume(tokens, start, end, unit) {
+function isCarrierVolume(tokens, start, end, unit, stops = []) {
   if (unit === 'gal' && (tokens[start - 1] === 'in' || tokens[start - 1] === 'into')) return true;
   // "sprayed two gallons", "Sprayed Taurus, two gallons": a spray verb a few words
   // back (past a product name and a comma) makes the gallons the finished mix
-  if (unit === 'gal') for (let j = start - 1; j >= 0 && start - j <= 4; j -= 1) if (SPRAYED_WORDS.has(tokens[j])) return true;
+  // (never past a sentence stop: "I sprayed outside. I used Taurus, two gallons.")
+  if (unit === 'gal') {
+    for (let j = start - 1; j >= 0 && start - j <= 4; j -= 1) {
+      if (SPRAYED_WORDS.has(tokens[j])) return true;
+      if (stops[j]) break;
+    }
+  }
   if (tokens[end] !== 'of' && unit !== 'gal') return false;
   const from = tokens[end] === 'of' ? end + 1 : end;
   for (let k = 0; k < 3 && !CARRIER_STOPS.has(tokens[from + k]); k += 1) if (CARRIER_WORDS.has(tokens[from + k])) return true;
@@ -545,7 +551,7 @@ const isRate = (tokens, end) => tokens[end] === 'per'
   || (['for', 'to'].includes(tokens[end]) && ['every', 'each', 'the', 'a', 'an'].includes(tokens[end + 1]) && RATE_BASES.has(tokens[end + 2]));
 
 function quantitiesIn(text) {
-  const { tokens, breaks } = tokenize(text);
+  const { tokens, breaks, stops } = tokenize(text);
   const found = [];
   for (let i = 0; i < tokens.length;) {
     const number = readSpokenNumber(tokens, i);
@@ -556,7 +562,7 @@ function quantitiesIn(text) {
     // "three or four", "three to four", "between three and four": a range, so
     // neither number is the one that was meant.
     const joiner = tokens[end] === 'or' || tokens[end] === 'to' || (tokens[end] === 'and' && tokens[i - 1] === 'between');
-    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit), retracted: isRetracted(tokens, breaks, i, end) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
+    found.push({ value: number.value, unit, start: i, end, nameAt, carrier: isCarrierVolume(tokens, i, end, unit, stops), retracted: isRetracted(tokens, breaks, i, end) || isRate(tokens, end), orNext: joiner && readSpokenNumber(tokens, end + 1) !== null });
     i = Math.max(end, i + 1);
   }
   // "three or four": neither number is the one that was meant. "four ounces of
@@ -924,7 +930,15 @@ function productAmount(raw, product, heard, unclear, world) {
   const none = { amount: null, unit: '' };
   const parsed = amountValue(raw.amount);
   if (parsed.reason) pushUnclear(unclear, heard, parsed.reason);
-  if (parsed.value === undefined) return none;
+  if (parsed.value === undefined) {
+    // a dose the tech said for this product that the model left blank is a Check
+    // (in a unit the sheet offers; a bad or odd-unit amount already has its Check)
+    const offered = (q) => product.units.includes(q.unit === 'oz' && product.measure === 'liquid' ? 'fl_oz' : q.unit);
+    const said = productMentions(product, heard, world).flatMap((m) => mentionQuantities(m, world))
+      .some((q) => !q.ambiguous && !q.retracted && !q.carrier && offered(q));
+    if (said && !parsed.reason && !raw.sameAsLast) pushUnclear(unclear, heard, 'amount_said_not_filled');
+    return none;
+  }
   const unit = sheetUnit(raw.unit, product.measure);
   if (!unit) {
     pushUnclear(unclear, heard, 'bad_unit');
@@ -1235,7 +1249,7 @@ function validateFill(raw, ctx, transcript) {
 const OFFICE_ADDRESSED_RE = /\b(office|dispatch)\s*:|^\W*(office|dispatch)\s*,|\b(note|tell|let|ask)\s+(for\s+)?(the\s+)?(office|dispatch)\b|\bfor\s+(the\s+)?(office|dispatch)(\s+only)?\b/i;
 // Internal matters the prompt keeps out of the customer note (billing, access,
 // dogs and locks) are office-only even when the tech did not label them.
-const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|dogs?|access|could(?:n'?t| not) get in)\b/i;
+const INTERNAL_MATTER_RE = /\b(invoices?|invoiced|bill|billed|billing|payments?|paid (?:the|their|his|her|my|in full|by|with|cash)|(?:didn'?t|did not|won'?t|will not|refused to|wants to|wanted to) pay|pay (?:the|their|his|her|by|with|later)|charged?|refunds?|disput\w*|balance|card on file|gate|codes?|lockbox|codebox|locked|lock|keys?|(?:loose|aggressive|barking|mean|unfriendly) dogs?|dogs? (?:was|were|is|got) (?:loose|out|aggressive|barking|in the (?:yard|back))|access|could(?:n'?t| not) get in)\b/i;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence) || accessCodeRe.test(sentence);
 
@@ -1309,13 +1323,13 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   const officeText = [...officeSaid, ...office].join(' ');
   // An office line the tech said that neither note carries is a Check, so access or
   // billing words never vanish from an apparently complete fill.
-  const kept = ` ${norm(officeText)} `;
+  const keptClauses = [...officeSaid, ...office].map((clause) => ` ${norm(clause)} `);
   for (const sentence of String(transcript).split(SENTENCE_SPLIT_RE)) {
     const text = sentence.trim();
     if (!text || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) continue;
     // kept only when the notes carry ALL of its words (a shared "gate" is not "gate code 1234")
     const words = norm(text).split(' ').filter((w) => (w.length >= 4 || /\d/.test(w)) && !/^(office|dispatch|note|tell|that|this|with|from)$/.test(w));
-    if (words.length && !words.every((w) => kept.includes(` ${w} `))) pushUnclear(unclear, text, 'office_said_not_filled');
+    if (words.length && !keptClauses.some((kept) => words.every((w) => kept.includes(` ${w} `)))) pushUnclear(unclear, text, 'office_said_not_filled');
   }
   return {
     customerNote: cleanNote(customer.join(' '), CAPS.customerNote),
