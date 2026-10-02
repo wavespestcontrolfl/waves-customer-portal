@@ -20,7 +20,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H;
+  let A; let B; let H; let C;
   const inv = {}; // seeded invoices by key
   const tokens = [];
 
@@ -48,12 +48,12 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const json = (value) => JSON.stringify(value);
 
   async function snapshot() {
-    const q = (table) => db(table).whereIn('customer_id', [A, B, H]).count('* as n').first();
+    const q = (table) => db(table).whereIn('customer_id', [A, B, H, C]).count('* as n').first();
     return {
-      invoices: await db('invoices').whereIn('customer_id', [A, B, H]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
+      invoices: await db('invoices').whereIn('customer_id', [A, B, H, C]).select('id', 'status', 'total', 'credit_applied', 'updated_at').orderBy('id'),
       payments: await q('payments'), attempts: await db('stripe_invoice_charge_attempts').count('* as n').first(),
       ledger: await q('customer_credit_ledger'), notifications: await db('notifications').count('* as n').first(),
-      credits: await db('customers').whereIn('id', [A, B, H]).select('id', 'account_credits').orderBy('id'),
+      credits: await db('customers').whereIn('id', [A, B, H, C]).select('id', 'account_credits').orderBy('id'),
     };
   }
 
@@ -109,6 +109,19 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     // Same-surname neighbour with loud sentinels, and a dispute-hold customer.
     await invoice('b_open', B, { total: 999.99, title: `SENTINEL-B-${run}`, status: 'overdue', due_date: day(-40) });
     await invoice('b_paid', B, { total: 55.55, status: 'paid', title: `SENTINEL-B-PAID-${run}` });
+    // A combined payment: one PaymentIntent, one payments row per invoice, each with its own metadata.invoice_id.
+    C = await customer(`Combined${run}`, `Settler${run}`);
+    const pi = `pi_comb_${run}`;
+    await invoice('c1', C, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: pi });
+    await invoice('c2', C, { total: 30, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: pi });
+    for (const [key, amount] of [['c1', 70], ['c2', 30]]) {
+      await db('payments').insert({ customer_id: C, payment_date: day(-1), amount, status: 'paid', processor: 'stripe', stripe_payment_intent_id: pi,
+        description: `Invoice ${inv[key].invoice_number} (combined balance payment)`, metadata: JSON.stringify({ invoice_id: inv[key].id, combined_payment: true }) });
+    }
+    // A provisional ACH residual (cash not arrived yet) on a third invoice, keyed "<pi>:<invoice id>".
+    await invoice('c3', C, { total: 45, status: 'processing' });
+    await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_ach_${run}:${inv.c3.id}`, customer_id: C, invoice_id: inv.c3.id, amount: 45,
+      source: 'combined_pay_processing', original_db_error: 'synthetic provisional residual' });
     await invoice('h_open', H, { total: 80 });
     await db('collections_flags').insert({ customer_id: H, flag: 'collection_hold', reason: 'dispute on call: synthetic' });
   }, 60000);
@@ -229,6 +242,33 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(orphan).toMatchObject({ received: true, ledger_recorded: false, amount: 60 });
     expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: 0, stripe_succeeded_not_in_ledger: 1, unreconciled_stripe_charges: 1 });
     expect(detail.payment_summary.statement).toMatch(/needs reconciling/);
+  });
+
+  test('a combined payment counts each invoice\'s own share, never a sibling\'s (shared PaymentIntent)', async () => {
+    for (const [key, share] of [['c1', 70], ['c2', 30]]) {
+      const detail = await read('get_invoice_detail', { invoice_id: inv[key].id });
+      const recorded = detail.payments_timeline.filter((e) => e.type === 'recorded_payment');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({ amount: share, net_received: share, linked_by: 'metadata.invoice_id' });
+      expect(detail.payment_summary).toMatchObject({ received: true, recorded_payments_net: share });
+    }
+    const list = await read('get_customer_invoices', { customer_id: C, limit: 50 });
+    expect(list.invoices.find((i) => i.id === inv.c1.id).amount_paid).toBe(70);
+    expect(list.invoices.find((i) => i.id === inv.c2.id).amount_paid).toBe(30);
+    expect(list.invoices.find((i) => i.id === inv.c1.id).unknown).toBeUndefined();
+  });
+
+  test('a provisional ACH residual is a processing attempt, not received; processing invoices owe nothing yet', async () => {
+    const detail = await read('get_invoice_detail', { invoice_id: inv.c3.id });
+    const provisional = detail.payments_timeline.find((e) => e.type === 'stripe_unreconciled_charge');
+    expect(provisional).toMatchObject({ received: false, provisional: true, source: 'combined_pay_processing' });
+    expect(provisional.state).toMatch(/processing/);
+    expect(provisional.stripe_payment_intent_id).toBe(`pi_ach_${run}`);
+    expect(detail.payment_summary).toMatchObject({ received: false, unreconciled_stripe_charges: 0, stripe_succeeded_not_in_ledger: 0, attempts_in_flight_or_unknown: 1 });
+    expect(detail.payment_summary.statement).toMatch(/^No payment has been received/);
+    expect(detail.invoice).toMatchObject({ status: 'processing', balance_due: 0 });
+    const { account_summary: summary } = await read('get_customer_invoices', { customer_id: C });
+    expect(summary).toMatchObject({ total_due: 0, outstanding_count: 0, processing: { count: 1, amount: 45 } });
   });
 
   test('applied credit: lines, discounts and the credit movement stay separate from payments', async () => {

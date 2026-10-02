@@ -236,8 +236,14 @@ async function loadLinkedPayments(customerId, invoices) {
     const metadata = parseJson(row.metadata) || {};
     for (const invoice of invoices) {
       let by = null;
-      if (metadata.invoice_id && String(metadata.invoice_id) === String(invoice.id)) by = 'metadata.invoice_id';
-      else if (invoice.stripe_payment_intent_id && row.stripe_payment_intent_id === invoice.stripe_payment_intent_id) by = 'payment_intent';
+      // An explicit metadata.invoice_id is authoritative: a combined payment
+      // writes one row per invoice, each with its own invoice_id but a shared
+      // PaymentIntent and charge, so the PaymentIntent link below must never
+      // attach a sibling's row. The legacy linkage applies only to rows that
+      // carry no invoice_id at all.
+      if (metadata.invoice_id) {
+        if (String(metadata.invoice_id) === String(invoice.id)) by = 'metadata.invoice_id';
+      } else if (invoice.stripe_payment_intent_id && row.stripe_payment_intent_id === invoice.stripe_payment_intent_id) by = 'payment_intent';
       else if (invoice.stripe_charge_id && row.stripe_charge_id === invoice.stripe_charge_id) by = 'charge';
       else if (invoice.invoice_number && String(row.description || '').startsWith(`Invoice ${invoice.invoice_number} — `)) by = 'description';
       if (by) linked.get(String(invoice.id)).push({ ...row, linked_by: by });
@@ -556,14 +562,39 @@ function paymentPlanDetail(rows) {
   };
 }
 
+// A residual the combined pay page could not settle onto its invoice. Source
+// combined_pay_processing is PROVISIONAL: it is written at the processing
+// stage of an ACH payment, before the bank cash has arrived, so it is an
+// attempt in flight and never received. Every other source is a charge Stripe
+// accepted that the portal failed to record.
+const PROVISIONAL_ORPHAN_SOURCES = ['combined_pay_processing'];
+function orphanEntry(row) {
+  const provisional = PROVISIONAL_ORPHAN_SOURCES.includes(row.source);
+  return {
+    type: 'stripe_unreconciled_charge',
+    id: row.id,
+    at: iso(row.created_at),
+    state: provisional ? 'processing (bank payment pending, funds not settled)' : 'succeeded in Stripe, not recorded in the portal ledger',
+    state_note: provisional
+      ? 'A bank (ACH) payment is still pending: the cash has not arrived. Not received.'
+      : 'Stripe charged the customer but the portal failed to record it. Received per Stripe; the ledger needs reconciling. Do not retry the charge.',
+    received: !provisional,
+    ...(provisional ? { provisional: true } : { received_basis: 'Stripe state succeeded', ledger_recorded: false }),
+    amount: money(row.amount),
+    source: row.source || null,
+    // Combined-payment residuals key the PaymentIntent as "<pi>:<invoice id>".
+    stripe_payment_intent_id: row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id).split(':')[0] : null,
+  };
+}
+
 function summarizePayments(entries, invoice) {
   const recorded = entries.filter((entry) => entry.type === 'recorded_payment' && entry.received);
   const stripeConfirmed = entries.filter((entry) => ['stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && entry.received && entry.ledger_recorded !== true);
-  const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt'].includes(entry.type) && !entry.received);
+  const notReceived = entries.filter((entry) => ['payment_attempt', 'stripe_charge_attempt', 'stripe_unreconciled_charge'].includes(entry.type) && !entry.received);
   const disputed = entries.filter((entry) => entry.status === 'disputed');
-  const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous');
+  const inFlight = notReceived.filter((entry) => entry.status === 'processing' || entry.state === 'claimed' || entry.state === 'ambiguous' || entry.provisional === true);
   const failed = notReceived.filter((entry) => entry.status === 'failed' || entry.status === 'canceled' || entry.state === 'failed');
-  const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge');
+  const unreconciled = entries.filter((entry) => entry.type === 'stripe_unreconciled_charge' && entry.received);
   const netRecorded = fromCents(recorded.reduce((total, entry) => total + cents(entry.net_received), 0));
   const receivedAny = recorded.length > 0 || stripeConfirmed.length > 0;
 
@@ -635,19 +666,7 @@ async function getInvoiceDetail(input, actionContext) {
   const entries = [
     ...linked.map((row) => paymentEntry(row, invoice)),
     ...attempts.map((row) => attemptEntry(row, ledgerIntents)),
-    ...orphans.map((row) => ({
-      type: 'stripe_unreconciled_charge',
-      id: row.id,
-      at: iso(row.created_at),
-      state: 'succeeded in Stripe, not recorded in the portal ledger',
-      state_note: 'Stripe charged the customer but the portal failed to record it. Received per Stripe; the ledger needs reconciling. Do not retry the charge.',
-      received: true,
-      received_basis: 'Stripe state succeeded',
-      ledger_recorded: false,
-      amount: money(row.amount),
-      source: row.source || null,
-      stripe_payment_intent_id: row.stripe_payment_intent_id || null,
-    })),
+    ...orphans.map(orphanEntry),
     ...credits.map((row) => ({
       type: 'credit_movement',
       id: row.id,
