@@ -1448,6 +1448,14 @@ creates a placeholder first name. The explicitly linked profile
 (`estimates.customer_id`) with a blank first name takes the collected first
 name through `propagateCustomerNameChange`; phone-matched or sibling profiles
 never do.
+
+Greeting name (2026-10-02, precursor to #5559). GET `/api/estimates/:token/data`
+`estimate.customerFirstName` is the greeting token, not blindly the first word of
+`customer_name`: when the linked customer (`estimates.customer_id`) has a blank first
+name and the estimate name begins with that customer's surname (or is a single word
+and the surname is unknown), it is `null`, and the page greets "there". Unlinked
+estimates, a linked customer with a first name, or a failed lookup keep the first word
+of `customer_name` as before. The linked customer's name fields are never returned.
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400

@@ -15,7 +15,7 @@ const DELIVERY_HISTORY_MAX = 25;
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
-const { estimateGreetingFirstName } = require('../utils/greeting-first-name');
+const { estimateGreetingFirstName, estimateGreetingFirstToken } = require('../utils/greeting-first-name');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
@@ -3519,14 +3519,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (estimate.customer_email) {
     try {
       const AutomationRunner = require('../services/automation-runner');
-      const parts = (estimate.customer_name || '').trim().split(/\s+/);
+      const parts = (estimate.customer_name || '').trim().split(/\s+/).filter(Boolean);
+      // The enrollment's first_name is only the automation's {{first_name}} merge value: a
+      // linked customer with no first name gets the same 'there' greeting as the delivery,
+      // never their surname, and the whole estimate name stays the last name.
+      const greetingToken = await estimateGreetingFirstToken(db, estimate);
       await AutomationRunner.enrollCustomer({
         templateKey: 'estimate_sent',
         customer: {
           id: estimate.customer_id || null,
           email: estimate.customer_email,
-          first_name: parts[0] || '',
-          last_name: parts.slice(1).join(' ') || '',
+          first_name: greetingToken || (parts.length ? 'there' : ''),
+          last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',
         },
       });
     } catch (e) {

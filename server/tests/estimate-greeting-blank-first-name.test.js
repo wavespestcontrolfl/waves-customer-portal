@@ -72,6 +72,20 @@ describe('greeting sites route through the shared helper', () => {
     expect(src).not.toMatch(SPLIT_ON_NAME);
   });
 
+  test('the estimate_sent automation enrollment takes the greeting token, never the surname (codex #5612 r1)', () => {
+    const src = read('routes/admin-estimates.js');
+    const start = src.indexOf("templateKey: 'estimate_sent',");
+    const block = src.slice(src.lastIndexOf('const parts =', start), start + 400);
+    expect(block).toContain('const greetingToken = await estimateGreetingFirstToken(db, estimate);');
+    expect(block).toContain("first_name: greetingToken || (parts.length ? 'there' : ''),");
+    expect(block).toContain("last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',");
+  });
+
+  test('the public payload change is documented (codex #5612 r1)', () => {
+    const doc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'public-route-contracts.md'), 'utf8');
+    expect(doc).toContain('`estimate.customerFirstName` is the greeting token');
+  });
+
   test('estimate-public renderers read the resolved greeting, not customerName.split', () => {
     const src = read('routes/estimate-public.js');
     expect(src).not.toMatch(/\(est\.customerName \|\| ''\)\.split/);
