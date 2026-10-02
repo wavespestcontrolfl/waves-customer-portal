@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const Seeder = require('../services/recurring-appointment-seeder');
+const Preview = require('../services/rider-series-preview');
 const { riderHostKind, riderPairingEnabled } = require('../services/rider-series-preview');
 const RiderAccept = require('../services/rider-accept-seeding');
 const { pestRidesLawnAtAcceptLive } = require('../config/feature-gates');
@@ -134,6 +135,7 @@ describe('rider context fall-backs', () => {
   });
   // After maybeGroupRow ran and succeeded, both first visits read visit v1.
   const conn = Object.assign((table) => ({
+    columnInfo: async () => ({}),
     whereIn: () => ({
       select: async () => (groupSpy.mock.calls.length && grouped
         ? [{ id: 'pest', visit_id: 'v1' }, { id: 'lawn', visit_id: 'v1' }] : []),
@@ -156,7 +158,17 @@ describe('rider context fall-backs', () => {
     await RiderAccept.afterSeed(ctx, conn, lawn, null, { insertedRows: [] });
   }
   const pest = (over) => parent({ id: 'pest', service_type: 'Quarterly Pest Control', ...over });
-  beforeEach(() => { conn.updates = []; conn.persisted = []; });
+  let readerSpy;
+  beforeEach(() => {
+    conn.updates = []; conn.persisted = [];
+    // The shared live plan-row reader serves the saved rows, applying the real
+    // plan-row classifier (boosters etc. drop out).
+    const { isPlanSeriesRow } = require('../services/recurring-series-cancel-reseed');
+    readerSpy = jest.spyOn(Preview, 'livePlanSeriesRows')
+      .mockImplementation(async (_c, ids) => conn.persisted.filter((r) => (ids.includes(r.id) || ids.includes(r.recurring_parent_id))
+        && isPlanSeriesRow({ is_recurring: r.is_recurring ?? true, ...r })));
+  });
+  afterEach(() => { readerSpy.mockRestore(); });
 
   test.each([
     ['a different first date', { scheduled_date: '2098-01-06' }],

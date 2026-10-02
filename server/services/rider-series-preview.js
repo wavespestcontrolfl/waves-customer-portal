@@ -661,25 +661,37 @@ async function hostReschedulePending(conn, hostParent, cols) {
   return rows.some(isPlanSeriesRow);
 }
 
-async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
-  const addressCols = [
-    'service_address_line1', 'service_address_line2', 'service_address_city',
-    'service_address_state', 'service_address_zip',
-  ].filter((c) => cols[c]);
-  const hostRowsRaw = await conn('scheduled_services')
-    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+// THE live plan-row read for one or more series (roots and their cadence
+// children): status outside JOIN_INELIGIBLE_STATUSES (NULL counts as live),
+// tracker state not terminal, isPlanSeriesRow (no boosters, callbacks or
+// included follow-ups), optionally from a date on. Shared by this preview's
+// host dates and by accept-time rider seeding (rider-accept-seeding.js), so
+// "which rows of a series are live" has one answer.
+function livePlanSeriesRows(conn, parentIds, cols, { fromDate = null, extraColumns = [] } = {}) {
+  return conn('scheduled_services')
+    .where((q) => { q.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .modify((q) => {
       if (cols.track_state) q.where((t) => { t.whereNull('track_state').orWhereNotIn('track_state', TERMINAL_TRACK_STATES); });
+      if (fromDate) q.where('scheduled_date', '>=', fromDate);
     })
-    .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
     .select(
       'id', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
       ...['is_callback', 'followup_included'].filter((c) => cols[c]),
-      ...(cols.property_id ? ['property_id'] : []), ...addressCols,
+      ...extraColumns.filter((c) => cols[c]),
     )
     .then((rows) => rows.filter(isPlanSeriesRow));
+}
+
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+  const addressCols = [
+    'service_address_line1', 'service_address_line2', 'service_address_city',
+    'service_address_state', 'service_address_zip',
+  ];
+  const hostRowsRaw = await livePlanSeriesRows(conn, [hostParent.id], cols, {
+    fromDate: todayStr, extraColumns: ['property_id', ...addressCols],
+  });
   let filtered = hostRowsRaw;
   if (cols.property_id && hostScope?.resolved) {
     // One batched key lookup for the whole host series (withComparableKeys):
@@ -938,6 +950,7 @@ module.exports = {
   computeRiderHorizon,
   riderHostKind,
   riderPairingEnabled,
+  livePlanSeriesRows,
   previewRiderPair,
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,

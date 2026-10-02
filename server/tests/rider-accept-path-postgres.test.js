@@ -348,6 +348,47 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('a lawn row whose TRACKER is terminal (status still pending) is not a ride date', async () => {
+    process.env[GATE] = 'true';
+    const RiderAcceptSeeding = require('../services/rider-accept-seeding');
+    const { TERMINAL_TRACK_STATES } = require('../services/customer-lifecycle-guard');
+    const trx = await mockPg.transaction();
+    try {
+      const base = await customerFixture(trx);
+      const first = weekdayAhead(10);
+      const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
+      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
+      const row = (over) => ({
+        customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
+        window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
+      });
+      const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: first })).returning('*');
+      const lawnChildren = [];
+      for (let i = 1; i <= 8; i++) {
+        const [c] = await trx('scheduled_services').insert(row({
+          service_type: 'Lawn Care', service_id: lawnId, scheduled_date: addDays(first, 42 * i), recurring_parent_id: lawn.id,
+        })).returning('*');
+        lawnChildren.push(c);
+      }
+      const [pest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
+      const plan = { family: 'pest_control', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
+      const lawnPlan = { family: 'lawn_care', pattern: 'every_6_weeks', seedOpts: { pattern: 'every_6_weeks', visitsPerYear: 9, skipWeekends: false } };
+      const ctxFor = async () => {
+        const ctx = RiderAcceptSeeding.createContext();
+        expect(await RiderAcceptSeeding.beforeSeed(ctx, trx, lawn, lawnPlan)).toBeNull();
+        await RiderAcceptSeeding.afterSeed(ctx, trx, lawn, null, { insertedRows: [] });
+        return ctx;
+      };
+      // Control: every lawn row live -> the rider rides +84.
+      const rides = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, pest, plan);
+      expect(rides && rides.overrideDates[0]).toBe(addDays(first, 84));
+      // The +84 lawn row's tracker says it is finished; its status sync lags.
+      await trx('scheduled_services').where({ id: lawnChildren[1].id }).update({ track_state: TERMINAL_TRACK_STATES[0] });
+      const after = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, pest, plan);
+      expect(after === null || !after.overrideDates.includes(addDays(first, 84))).toBe(true);
+    } finally { await trx.rollback(); }
+  });
+
   test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
     const trx = await mockPg.transaction();

@@ -200,18 +200,13 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   await linkRider(conn, parentRow.id, rider.hostParentId);
 }
 
-// Live PLAN rows of the given series (parents and their cadence children):
-// the canonical null-inclusive JOIN_INELIGIBLE_STATUSES exclusion and the
-// isPlanSeriesRow classifier (no boosters, callbacks or included follow-ups) —
-// the same reads rider-series-preview.js uses.
-async function liveSeriesRows(conn, parentIds) {
-  const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
-  const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
-  const rows = await inSavepoint(conn, (sp) => sp('scheduled_services')
-    .where((q) => q.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds))
-    .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
-    .select('*'));
-  return rows.filter((r) => parentIds.some((id) => String(id) === String(r.id)) || isPlanSeriesRow(r));
+// Live plan rows of the given series — the one shared reader
+// (rider-series-preview.livePlanSeriesRows), in a savepoint.
+function liveSeriesRows(conn, parentIds) {
+  return inSavepoint(conn, async (sp) => {
+    const cols = await sp('scheduled_services').columnInfo();
+    return require('./rider-series-preview').livePlanSeriesRows(sp, parentIds, cols, { extraColumns: ['visit_id'] });
+  });
 }
 
 // Every saved rider follow-up sits on a saved lawn date AND is in that lawn
