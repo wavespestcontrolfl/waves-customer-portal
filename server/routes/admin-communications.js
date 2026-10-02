@@ -222,6 +222,18 @@ async function customerOfSourceCall(callId, to) {
   return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
 }
 
+// The customer `customerId` when `to` is one of their known-caller numbers;
+// null otherwise (deleted, unknown, or a number they are not known by).
+async function customerKnownByNumber(customerId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first()
+    .catch((e) => { logger.warn(`[admin-call] hinted customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
 async function findSingleCustomerForPhone(phone) {
   // Full-digit match on every stored format the number could plausibly be
   // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
@@ -1781,7 +1793,7 @@ router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    const { to, fromNumber, customerId, customerIdHint, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
     if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
       return res.status(400).json({ error: 'Invalid callback id' });
     }
@@ -1802,11 +1814,10 @@ router.post('/call', async (req, res, next) => {
     // below); it also owns the call_log row, the Twilio call, and the
     // touchpoint. This handler keeps the admin-only validations.
 
-    // All outbound calls present the main company line, regardless of which
-    // endpoint the UI picker selected (fromNumber is still validated above so
-    // garbage input fails loudly rather than silently dialing as main).
-    const from = TWILIO_NUMBERS.mainLine.number;
-    attemptedFrom = from;
+    // The caller ID is server-chosen, regardless of which endpoint the UI
+    // picker selected (fromNumber is still validated above so garbage input
+    // fails loudly): the linked customer's home line under GATE_HOME_LINE,
+    // else the main company line — set below once the customer is resolved.
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     // A callback attempt placed while the card policy is on is stamped so
     // rollback keeps its strict customer-leg proof and completion action,
@@ -1864,6 +1875,12 @@ router.post('/call', async (req, res, next) => {
       // number is one they are known by. Otherwise the phone-only lookup
       // below decides, as for any click-to-call.
       if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      // A soft link (the client's customerIdHint — the customer whose page,
+      // thread, estimate or lead the number came from): used only when the
+      // dialed number is one that customer is known by (primary, secondary or
+      // a service contact); otherwise the phone-only lookup decides, so a
+      // stale number on an old thread or estimate is never refused.
+      if (!customer && customerIdHint && UUID_RE.test(String(customerIdHint))) customer = await customerKnownByNumber(customerIdHint, to);
       if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;
@@ -1872,6 +1889,8 @@ router.post('/call', async (req, res, next) => {
     const leadName = customer
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
+    const from = require('../services/home-line').homeLineCallerId(customer);
+    attemptedFrom = from;
 
     let bridgeClaimIds = [];
     // Every callback attempt under the card policy takes the customer claim
@@ -1880,8 +1899,8 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the NUMBER being called: every
-      // card dials from the shared main line, so a line-wide key would let
+      // before call_log is inserted, keyed to the NUMBER being called: cards
+      // share caller-ID lines (main or a home line), so a line-wide key would let
       // one ringing callback block every other customer's card; a
       // per-commitment or per-customer key would let a linked and an
       // unlinked attempt ring the same phone twice at once.
@@ -2183,6 +2202,11 @@ router.get('/log', async (req, res, next) => {
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
         customerId: recipientCustomerId, customerName,
+        // The row's linked customer even when the contact is one of their
+        // service-contact numbers (customerId above is the REPLY recipient and
+        // stays null then). Call actions send it as a soft customerIdHint,
+        // which /call re-validates against that customer's known numbers.
+        linkedCustomerId: m.customer_id || fallbackCustomer?.id || null,
         createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,
