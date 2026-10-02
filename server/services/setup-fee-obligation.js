@@ -137,6 +137,285 @@ function isPlanApplicationRow(row) {
   return !!(row && row.is_recurring);
 }
 
+// Lanes whose first visit is covered without a per-visit completion invoice
+// (the 8AM dues cron / the prepaid term pay for it). The completion mint never
+// runs there, so a setup-fee stamp on such a customer's series can never be
+// consumed — it is not a deferral, it is a stranded claim.
+const DUES_COVERED_LANES = new Set(['monthly_membership', 'annual_prepay']);
+
+// The dispatch alert that is the durable owed-fee record of a setup fee parked
+// for the office to bill by hand.
+const SETUP_FEE_OFFICE_BILLING_ALERT = 'setup_fee_office_billing';
+
+// True when this estimate's own series carries the setup fee as a durable
+// per-series claim: ANY live stamp on a series root of this estimate (the
+// stamp IS the fee — a stamp at another amount is still the figure the
+// completion mint bills, so calling the obligation "owed" on a cents mismatch
+// would park the visit for a manual bill AND let the stamp auto-bill on top of
+// it later). A NEGATIVE stamp is a completion's in-progress marker and always
+// counts (resume mints or heals it); a positive stamp counts when its series
+// can still consume it AND the customer's lane runs completion mints. The
+// immutable setup_fee_claims record of a non-dead invoice on such a series
+// (the claim consumed by the first performed completion; a stamp never
+// outlives the mint, the record does) counts at whatever amount it billed. Query
+// failures propagate: the caller fails CLOSED exactly as it does for the
+// invoice reads below.
+//
+// A setup_fee_office_billing alert (open OR resolved) naming one of this
+// estimate's series also counts: the fee was PARKED for the office to bill by
+// hand (parkSetupFeeStampForOffice) and the stamp is cleared, so the office
+// owns the fee and nothing may park a second manual bill or auto-bill it.
+//
+// Returns { covers, unconsumableStamps }: live positive stamps this estimate's
+// series carries that NO completion can ever consume (dues-covered lane / a
+// series with no live consumer). When the obligation is then owed the
+// completion parks these for the office (never clears them to nothing), so the
+// fee is billed once, by hand.
+const rows = (value) => (Array.isArray(value) ? value : []);
+// An invoice in these states collected nothing, so its claim proves nothing.
+const UNCOLLECTED_INVOICE_STATUSES = new Set(['void', 'canceled', 'cancelled']);
+
+// TRUE when the office already owns the setup fee of any of these series: a
+// setup_fee_office_billing alert (open OR resolved: a resolved alert means the
+// office billed or dismissed it) names one of them. The stamp is cleared when
+// a fee is parked, so every reader that would otherwise re-derive the fee (the
+// first-visit detector, the direct rodent obligation, a second series booked
+// from the same estimate) must ask this first.
+async function officeParkedSetupFeeSeries(conn, seriesIds) {
+  const ids = rows(seriesIds).filter((id) => id != null).map(String);
+  if (!ids.length) return false;
+  const parked = await conn('dispatch_alerts')
+    .where({ type: SETUP_FEE_OFFICE_BILLING_ALERT })
+    .whereRaw(`payload->>'seriesId' IN (${ids.map(() => '?').join(', ')})`, ids)
+    .first('id');
+  return !!parked;
+}
+
+// Cents an invoice's line items bill for a one-time setup fee (the line the
+// completion mint and the office write, "… one-time setup fee"). Unreadable
+// lines count as nothing, so an unclear invoice never retires a fee.
+function setupLineCents(lineItems) {
+  let lines = lineItems;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
+  return rows(lines)
+    .filter((li) => /one-time setup fee/i.test(String(li?.description || '')))
+    .reduce((sum, li) => {
+      const qty = Number(li?.quantity ?? 1);
+      const value = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * (Number.isFinite(qty) ? qty : 1);
+      return sum + (Number.isFinite(value) && value > 0 ? Math.round(value * 100) : 0);
+    }, 0);
+}
+
+// The series an estimate's setup fee can live on: its own roots, plus the
+// series PARENT of any appointment the accept adopted (source_estimate_id
+// stays on that CHILD while the fee is stamped on its parent, which may belong
+// to an older or unlinked series). Shared by the first-visit detector and the
+// annual-prepay switch's waiver so both see the same stamps.
+async function estimateSetupSeries(conn, estimate) {
+  const scope = { source_estimate_id: estimate.id, customer_id: estimate.customer_id };
+  const roots = rows(await conn('scheduled_services').where(scope).whereNull('recurring_parent_id')
+    .select('id', 'status', 'pending_setup_fee'));
+  const knownRootIds = new Set(roots.map((r) => String(r.id)));
+  const adoptedParentIds = [...new Set(rows(await conn('scheduled_services').where(scope)
+    .whereNotNull('recurring_parent_id').select('recurring_parent_id'))
+    .map((c) => c.recurring_parent_id).filter((id) => id != null && !knownRootIds.has(String(id))))];
+  const adoptedParents = adoptedParentIds.length
+    ? rows(await conn('scheduled_services').whereIn('id', adoptedParentIds)
+      .where({ customer_id: estimate.customer_id }).select('id', 'status', 'pending_setup_fee'))
+    : [];
+  return [...roots, ...adoptedParents].filter((r) => r && r.id != null);
+}
+
+// Owner ruling 2026-10-01 ("decide at the visit"): annual prepay waives the
+// WaveGuard setup fee. A setup fee a pay-after-first-visit accept DEFERRED to
+// the first visit (its estimate carries setupFeeDeferredToFirstVisit — on the
+// series root, or on an adopted appointment under it) is neither billed nor
+// parked while a live annual-prepay term covers the visit: the stamp simply
+// waits, and a performed visit bills it once no prepay covers it. No switch,
+// refund or revival bookkeeping, so the prepay lifecycle cannot drift from it.
+// Rodent (bait-station) setup is NOT waived by prepay and never matches here.
+// TRUE when a pay-after-first-visit accept deferred this series' setup fee:
+// the estimate flag setupFeeDeferredToFirstVisit on any estimate tied to the
+// series — the root, any child (an accept that adopted an existing appointment
+// leaves its estimate on that CHILD while the fee sits on the parent), plus
+// any extra estimate ids a caller already holds. One provenance check for
+// every reader (the at-visit prepay waiver, the refund restoration).
+async function seriesSetupFeeDeferredByPaf(conn, seriesIds, extraEstimateIds = []) {
+  const ids = rows(seriesIds).filter((id) => id != null);
+  const estimateIds = new Set(rows(extraEstimateIds).filter(Boolean).map(String));
+  if (ids.length) {
+    for (const row of rows(await conn('scheduled_services').whereIn('id', ids).select('source_estimate_id'))) {
+      if (row.source_estimate_id) estimateIds.add(String(row.source_estimate_id));
+    }
+    for (const row of rows(await conn('scheduled_services').whereIn('recurring_parent_id', ids)
+      .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
+      estimateIds.add(String(row.source_estimate_id));
+    }
+  }
+  for (const id of estimateIds) {
+    const estimate = await conn('estimates').where({ id }).first('estimate_data');
+    if (parseEstimateData(estimate?.estimate_data).setupFeeDeferredToFirstVisit === true) return true;
+  }
+  return false;
+}
+
+async function prepayWaivesDeferredSetupFee(conn, { seriesId, visit } = {}) {
+  if (!seriesId || !visit) return false;
+  if (!(await seriesSetupFeeDeferredByPaf(conn, [seriesId]))) return false;
+  // The ONE coverage authority for a visit (term status, plan scope, termite
+  // grace): judged on the PERFORMED visit itself, strict — an unverifiable
+  // coverage throws, so every caller fails closed (nothing billed, nothing
+  // parked) instead of guessing.
+  return require('./annual-prepay-renewals').annualPrepayCoversVisit(visit, conn, { throwOnError: true });
+}
+
+async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
+  const none = { covers: false, unconsumableStamps: [] };
+  const covered = { covers: true, unconsumableStamps: [] };
+  const rootRows = await estimateSetupSeries(conn, estimate);
+  if (!rootRows.length) return none;
+  const { seriesCanStillConsume } = require('./secure-appointment-plans');
+  const { resolveBillingLane } = require('./billing-lane');
+  const customerRow = await conn('customers').where({ id: estimate.customer_id })
+    .first('billing_mode', 'waveguard_tier', 'monthly_rate');
+  const laneMode = resolveBillingLane(customerRow || {}).mode;
+  // The completing visit is itself a live consumer of its own series: a
+  // parent already completed (a declined first visit) with the claim still
+  // queued is consumed by THIS child, whatever status the row reads mid-
+  // completion.
+  const completingIds = new Set([completingVisitId, completingParentId].filter(Boolean).map(String));
+  const completingVisit = completingVisitId ? await conn('scheduled_services').where({ id: completingVisitId }).first() : null;
+  // An annual-prepay customer's visit is dues-covered only while a live term
+  // covers it (the same canonical, strict coverage read): a performed visit no
+  // term covers (expired/refunded term, a stale billing_mode) bills on its own
+  // completion, so it consumes the stamp like any per-visit lane.
+  const lanePaysAtCompletion = !DUES_COVERED_LANES.has(laneMode)
+    || (laneMode === 'annual_prepay' && !!completingVisit
+      && !(await require('./annual-prepay-renewals').annualPrepayCoversVisit(completingVisit, conn, { throwOnError: true })));
+  const unconsumableStamps = [];
+  for (const root of rootRows) {
+    // No stamp, an unreadable one or a zero carries no fee (Number(null) is 0).
+    const stamp = Number(root.pending_setup_fee);
+    if (!stamp) continue;
+    // A negative stamp is a completion mid-mint: deferred by definition; a
+    // stamp an annual prepay waives right now is not owed either.
+    if (stamp < 0 || await prepayWaivesDeferredSetupFee(conn, { seriesId: root.id, visit: completingVisit })) return covered;
+    if (lanePaysAtCompletion && (completingIds.has(String(root.id)) || await seriesCanStillConsume(conn, root))) return covered;
+    unconsumableStamps.push({ parentId: root.id, rawAmount: root.pending_setup_fee, amount: Math.round(stamp * 100) / 100 });
+  }
+  const rootIds = rootRows.map((r) => r.id);
+  // ANY positive claim amount counts, symmetric with the queued stamp above
+  // (the claim IS the fee the completion mint billed, so a stamp at another
+  // amount reads as billed after collection exactly as it read as deferred
+  // before it). A REFUNDED claim-backed invoice still resolves the obligation
+  // (no re-bill of a deliberately refunded fee); only a voided / canceled
+  // invoice collected nothing.
+  for (const claim of rows(await conn('setup_fee_claims').whereIn('scheduled_service_id', rootIds).select('invoice_id', 'amount'))) {
+    if (!(Math.round(Number(claim.amount) * 100) > 0)) continue;
+    const invoice = await conn('invoices').where({ id: claim.invoice_id }).first('status');
+    if (invoice && !UNCOLLECTED_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) return covered;
+  }
+  if (await officeParkedSetupFeeSeries(conn, rootIds)) return covered;
+  return { covers: false, unconsumableStamps };
+}
+
+// PARKS a live POSITIVE setup-fee stamp for the office, in the caller's
+// transaction (owner ruling 2026-10-01). A setup fee that cannot ride the first
+// visit's own completion invoice (a dues-covered lane, a closeout the packet
+// hands to the office, a first visit that billed nothing) is never turned into
+// a free-standing invoice - that skips the invoice rules (payer lock, NET-terms
+// statements, ...). The stamp is cleared and ONE durable owed-fee record is
+// written: a setup_fee_office_billing dispatch alert (the office bills the fee
+// by hand). No invoice, no setup_fee_claims row. The detector reads that alert
+// as covered (deferredSetupFeeCovers), so no later completion parks a second
+// manual bill or bills the fee again.
+//
+// Compare-and-swap on the exact stamp value (a stamp that moved since the read
+// is left alone and null is returned); a negative stamp is a completion
+// mid-mint that bills the fee itself and is never touched here. Failures
+// propagate so the stamp clear and the alert commit or roll back together.
+async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null, billToScheduledServiceId = null, visit = null } = {}) {
+  if (!parentId || !customerId || !(Number(rawAmount) > 0)) return null;
+  // An annual prepay covering the PERFORMED visit waives this fee: it waits,
+  // it is not the office's.
+  if (await prepayWaivesDeferredSetupFee(trx, { seriesId: parentId, visit })) return null;
+  const amount = Math.round(Number(rawAmount) * 100) / 100;
+  // Lock the series parent FIRST (pre-push audit P1), as the un-void path
+  // does: a completion claim or an office invoice racing this park then lands
+  // before the billed-by-hand scan below, never between it and the clear.
+  await trx('scheduled_services').where({ id: parentId }).forUpdate().first('id');
+  // Already billed by hand: a live (not void / canceled / refunded) invoice on
+  // the series carries a setup-fee line. That invoice owns the fee: record the
+  // claim against it and retire the stamp (exact value), never ask the office
+  // to bill it again — the same healing the completion mint applies to an
+  // orphaned claim.
+  // Only a setup line that actually bills the whole fee counts (pre-push audit
+  // P0): a $0 or partial setup line is not the fee billed — the office gets it.
+  const feeCents = Math.round(amount * 100);
+  // Linked to a series visit directly OR through its service record (the
+  // same direct-or-service-record linkage completion honors).
+  const seriesVisitIds = trx('scheduled_services').select('id').where(function series() {
+    this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+  });
+  const candidates = await trx('invoices')
+    .where((qb) => {
+      qb.whereIn('scheduled_service_id', seriesVisitIds)
+        .orWhereIn('service_record_id', trx('service_records').select('id').whereIn('scheduled_service_id', seriesVisitIds));
+    })
+    .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
+    .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
+    .select('id', 'line_items');
+  const setupCharges = rows(candidates)
+    .map((inv) => ({ invoiceId: String(inv.id), cents: setupLineCents(inv.line_items) }))
+    .filter((c) => c.cents > 0);
+  const billedByHand = setupCharges.find((c) => c.cents >= feeCents) ? { id: setupCharges.find((c) => c.cents >= feeCents).invoiceId } : null;
+  // Partly billed (one $40 line, or several lines that only add up to the
+  // fee): those invoices stay collectible, so the office is handed only the
+  // REMAINDER, with the existing setup charges listed to reconcile.
+  const alreadyBilledCents = setupCharges.reduce((sum, c) => sum + c.cents, 0);
+  if (billedByHand) {
+    const retired = await trx('scheduled_services')
+      .where({ id: parentId, pending_setup_fee: rawAmount })
+      .update({ pending_setup_fee: null, updated_at: new Date() });
+    if (retired === 1) {
+      await require('./secure-appointment-plans').recordSetupFeeClaimForInvoice(trx, {
+        invoiceId: billedByHand.id, anchorId: parentId, amount, estimateId,
+      });
+    }
+    return null;
+  }
+  const updated = await trx('scheduled_services')
+    .where({ id: parentId, pending_setup_fee: rawAmount })
+    .update({ pending_setup_fee: null, updated_at: new Date() });
+  if (updated !== 1) return null;
+  // Provenance for un-void: a stamp a VOID put back (the voided invoice's
+  // claim is kept on this series) carries that invoice id, so reinstating it
+  // reconciles this handoff (retireRodentSetupObligationForReinstatedInvoice).
+  let sourceInvoiceId = alertContext?.sourceInvoiceId || null;
+  if (!sourceInvoiceId) {
+    const voidedSource = await trx('setup_fee_claims as c')
+      .join('invoices as i', 'i.id', 'c.invoice_id')
+      .where('c.scheduled_service_id', parentId)
+      .where('i.status', 'void')
+      .orderBy('i.updated_at', 'desc')
+      .first('c.invoice_id');
+    sourceInvoiceId = voidedSource?.invoice_id ? String(voidedSource.invoice_id) : null;
+  }
+  const owedAmount = Math.max(0, feeCents - alreadyBilledCents) / 100;
+  const alert = await require('./dispatch-alerts').createAlert({
+    type: SETUP_FEE_OFFICE_BILLING_ALERT, severity: 'warn', jobId: parentId, trx,
+    payload: {
+      amount: owedAmount, seriesId: parentId, estimateId, customerId, billToScheduledServiceId, origin, ...(alertContext || {}),
+      ...(sourceInvoiceId ? { sourceInvoiceId } : {}),
+      ...(alreadyBilledCents > 0 ? {
+        feeAmount: amount,
+        existingSetupCharges: setupCharges.map((c) => ({ invoiceId: c.invoiceId, amount: c.cents / 100 })),
+      } : {}),
+    },
+  });
+  return { parentId, amount: owedAmount, alertId: alert?.id || null };
+}
+
 /**
  * @param {object} params
  * @param {string} params.sourceEstimateId  the visit's source_estimate_id
@@ -329,6 +608,25 @@ async function findUnmintedSetupFeeObligation({
   const deadInvoice = stampedRows.find((r) => DEAD_STATUSES.has(String(r.status || '').toLowerCase())
     && invoiceHasPositiveSetupFeeLine(r)) || null;
 
+  // Fee DEFERRED to the first performed visit (pay after first visit,
+  // GATE_PAF_SETUP_FEE): the accept stamped the fee on the series parent
+  // (scheduled_services.pending_setup_fee) instead of minting an invoice
+  // whose notes say "accepted estimate #<id>", so the note-based checks above
+  // would call it "never minted" and park the first visit for manual billing
+  // while completion is about to bill it on the visit's own invoice. ANY live
+  // claim (positive = queued, negative = a completion mid-mint) that a
+  // completion can still consume, or the immutable setup_fee_claims record of a live
+  // series invoice that already carries it, is "deferred / billed", not
+  // "missing". Deliberately NOT behind the sub-gate: it only ever matches a
+  // stamp this estimate's own series carries, and a stamp written while the
+  // gate was on must stay recognised after a flip back off.
+  const deferral = await deferredSetupFeeCovers(conn, estimate, {
+    completingVisitId: excludeScheduledServiceId,
+    completingParentId: visitPlanRow?.recurring_parent_id || null,
+  });
+  if (deferral.covers) {
+    return { owed: false, deferredToFirstVisit: true };
+  }
   // Converter provenance: the accept actually ran the conversion (tier
   // flip, activity row) and still minted nothing. Accepts that never
   // converted (legacy paths, pre-converter rows) are out of scope.
@@ -413,6 +711,10 @@ async function findUnmintedSetupFeeObligation({
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
     billedPriorPlanVisitIds,
+    // Live positive stamps no completion can ever consume (dues-covered lane /
+    // no live consumer): the completion parks them for the office (never clears
+    // them to nothing), so the fee can never bill twice.
+    unconsumableStamps: deferral.unconsumableStamps,
     deadInvoice: deadInvoice
       ? { id: deadInvoice.id, invoiceNumber: deadInvoice.invoice_number || null, status: String(deadInvoice.status || '') }
       : null,
@@ -420,7 +722,14 @@ async function findUnmintedSetupFeeObligation({
 }
 
 module.exports = {
+  seriesSetupFeeDeferredByPaf,
+  prepayWaivesDeferredSetupFee,
+  estimateSetupSeries,
+  officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
+  parkSetupFeeStampForOffice,
+  isPlanApplicationRow,
+  SETUP_FEE_OFFICE_BILLING_ALERT,
   _private: {
     SETUP_FEE_RULE_SAFE_CUTOFF, parseEstimateData, isPlanApplicationRow, snapshotShowsSetupFee,
   },

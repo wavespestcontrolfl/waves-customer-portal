@@ -523,6 +523,204 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  // Any LIVE pending_setup_fee on the series parent (the secure plan-choice
+  // stamp, written with every pay-after-first-visit gate OFF and no estimate
+  // marker) is consumed only by the single-visit completion mint - the packet
+  // mint carries no setup line, so it must route to the office instead of
+  // minting the visit without the fee. A QUEUED stamp is never cleared into
+  // nothing: it is PARKED FOR THE OFFICE (owner ruling 2026-10-01) - the stamp
+  // is cleared and one setup_fee_office_billing alert is the durable owed-fee
+  // record. NO invoice and no setup_fee_claims row are created; the office
+  // bills the fee by hand. Only a PLAN application (is_recurring) can carry it.
+  const setupFeeInvoicesOf = async () => (await mockPg('invoices').where({ customer_id: fixture.customerId }))
+    .filter((inv) => (typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : inv.line_items || [])
+      .some((line) => /one-time setup fee/i.test(String(line.description || ''))));
+  const officeFeeAlertsOf = () => mockPg('dispatch_alerts').where({ type: 'setup_fee_office_billing' }).whereIn('job_id', fixture.serviceIds);
+  const markPlanMembers = () => mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+
+  // A NEGATIVE stamp is another completion mid-claim: the grouped closeout is
+  // a retryable busy (Codex P1 on #5485), never a frozen office hold, and
+  // nothing is minted, parked or cleared.
+  test('a grouped closeout whose series carries a negative in-progress setup-fee marker is retryable busy: nothing minted, parked or cleared', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: -99 });
+    await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({ code: 'visit_busy', statusCode: 409 });
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(-99);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await officeFeeAlertsOf()).toHaveLength(0);
+  });
+
+  test.each([['positive', 99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting the visit without the fee (gates off)', async (kind, stamp) => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: stamp });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    const after = (await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee;
+    if (stamp > 0) {
+      // Parked for the office, never dropped and never invoiced: the stamp is
+      // cleared, ONE owed-fee alert stands, no invoice and no claim row exist.
+      expect(after).toBeNull();
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', fixture.serviceIds)).toHaveLength(0);
+      // The office sees the amount: in the billing result, the
+      // setup_fee_office_billing alert, the packet payload and the closeout review.
+      expect(saved.body.billing.setupFeeParked[0]).toMatchObject({ amount: 99, seriesId: fixture.serviceIds[0] });
+      const alerts = await officeFeeAlertsOf();
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({ job_id: fixture.serviceIds[0], severity: 'warn', resolved_at: null });
+      expect(alerts[0].payload).toMatchObject({
+        amount: 99, seriesId: fixture.serviceIds[0], customerId: fixture.customerId, packetId: saved.body.packetId, visitId: expect.any(String),
+      });
+      const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+      expect((typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload).setupFeeParked[0])
+        .toMatchObject({ amount: 99, seriesId: fixture.serviceIds[0] });
+    } else {
+      // A completion mid-mint bills the fee itself - left alone, nothing minted.
+      expect(Number(after)).toBe(stamp);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await officeFeeAlertsOf()).toHaveLength(0);
+      expect(saved.body.billing.setupFeeParked).toBeUndefined();
+    }
+  });
+
+  // Pre-push audit: a performed $0 plan member is never in the billed or
+  // fee-review scan, so the packet returns a SUCCESSFUL outcome (no_charge);
+  // its series' queued fee must still reach the office, not slide to a later visit.
+  test('a performed $0 plan member\'s queued fee is parked even when the closeout bills nothing (no_charge)', async () => {
+    await markPlanMembers();
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ estimated_price: 0, source_estimate_id: null });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.state).not.toBe('office_required');
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+  });
+
+  test('a secure-plan stamp with NO source estimate (gates off) is not lost: the grouped closeout parks it for the office (no invoice, no claim)', async () => {
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99, source_estimate_id: null });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', fixture.serviceIds)).toHaveLength(0);
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    expect(saved.body.billing.setupFeeParked[0]).toMatchObject({ amount: 99 });
+  });
+
+  test('an EARLIER office-required exit (an existing member invoice) still parks the queued stamp for the office, never leaving it armed or dropped', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const manual = await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect((await mockPg('invoices').where({ customer_id: fixture.customerId })).map((inv) => inv.id)).toEqual([manual.id]);
+    expect(await setupFeeInvoicesOf()).toHaveLength(0);
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    expect(saved.body.billing.setupFeeParked[0]).toMatchObject({ amount: 99 });
+  });
+
+  // Codex #5485 round 4 P1: a non-recurring booster / add-on riding the same
+  // grouped stop is not a plan application, so it must never take the plan's
+  // fee. The plan's stamp stays queued for the plan visit that is performed.
+  test('a grouped closeout whose only performed member is a NON-recurring add-on keeps the plan\'s stamp queued', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    // Member 0 is the plan visit but did not perform (inspection only); member 1
+    // is a non-recurring add-on of the same estimate that did.
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] })
+      .update({ is_recurring: false, recurring_parent_id: fixture.serviceIds[0] });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const input = submission();
+    input.items[0].body.visitOutcome = 'inspection_only';
+    const saved = await saveVisitCompletionPacket(input);
+    // The booster bills its own work normally (pre-push audit: a non-recurring
+    // add-on is not a plan application, so the plan's queued fee no longer
+    // forces the whole closeout to the office); the plan fee keeps waiting.
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready' });
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
+    expect(await officeFeeAlertsOf()).toHaveLength(0);
+    expect(saved.body.billing.setupFeeParked).toBeUndefined();
+  });
+
+  test('an office-required closeout leaves an UNPERFORMED member\'s stamp queued (inspection only): only a performed visit can carry the fee', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ pending_setup_fee: 99, recurring_parent_id: null });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const input = submission();
+    input.items[1].body.visitOutcome = 'inspection_only';
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required' });
+    expect(await officeFeeAlertsOf()).toHaveLength(0);
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
+    expect(saved.body.billing.setupFeeParked).toBeUndefined();
+  });
+
+  test('an INCOMPLETE member keeps its stamp on an office-required closeout (incomplete is not performed)', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ pending_setup_fee: 99, recurring_parent_id: null });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const input = submission();
+    input.items[1].body.visitOutcome = 'incomplete';
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required' });
+    expect(await officeFeeAlertsOf()).toHaveLength(0);
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
+  });
+
+  test('the closeout review alert carries the parked setup fee amount + series', async () => {
+    await linkFixtureEstimate();
+    await markPlanMembers();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    // Drive the packet to its close: the held billing puts it in office review,
+    // and that review carries the parked fee instead of dropping its details.
+    const result = await runVisitCompletionPacketEffects(saved.body.packetId);
+    expect(result.body.state).toBe('office_required');
+    const review = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds);
+    expect(review).toHaveLength(1);
+    expect(review[0].payload.setupFeeParked[0]).toMatchObject({ amount: 99, seriesId: fixture.serviceIds[0] });
+  });
+
+  test('grouped closeout -> parked for the office -> later child completion: the system never bills the setup fee (the office owns it) and the detector does not park a second manual bill', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    expect(await officeFeeAlertsOf()).toHaveLength(1);
+    expect(await setupFeeInvoicesOf()).toHaveLength(0);
+    // A later visit of the same series completes on its own.
+    const childId = randomUUID();
+    try {
+      await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+        service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+        window_start: '14:00', window_end: '15:00', status: 'confirmed', estimated_price: 60, estimated_duration_minutes: 60,
+        source_estimate_id: estimateId, is_recurring: true, recurring_parent_id: fixture.serviceIds[0] });
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(),
+        actor: submission().actor, body: { ...submission().items[0].body, sendCompletionSms: false, requestReview: false } });
+      expect(result.status).toBeLessThan(300);
+      expect(await setupFeeInvoicesOf()).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', fixture.serviceIds)).toHaveLength(0);
+      expect(await officeFeeAlertsOf()).toHaveLength(1);
+    } finally {
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    }
+  });
+
   test.each(['uncovered', 'paid', 'canceled sibling'])('a performed recurring application adjusted to zero still reviews its accepted setup fee (%s)', async (coverage) => {
     const covered = coverage === 'paid';
     const estimateId = await linkFixtureEstimateWithSetupObligation();

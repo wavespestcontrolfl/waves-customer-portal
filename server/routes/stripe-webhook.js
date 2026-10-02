@@ -5140,10 +5140,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
-      // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the accept stamps the consent
-      // variant the capture UI rendered; recovery records that same text
-      // (after_visit_card, v12) rather than the base card consent. Only the
-      // accepted intent carries it, and only a known variant is honored.
+      // The consent variant the accept rendered and recorded (estimate_data
+      // acceptedRecurringCardConsentVariant: the one collection promise's
+      // after_visit_card, PR-B's cohort or PR-C's deferred setup fee):
+      // recovery records that same text rather than the base card consent.
+      // Only the accepted intent carries it, and only that variant is honored.
       ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
         ? { consentVariant: 'after_visit_card' }
         : {}),
