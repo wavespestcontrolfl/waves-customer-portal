@@ -278,7 +278,12 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
 
     await db.transaction(async (trx) => {
       // Locked re-validation of the technician's assignment BEFORE anything
-      // else in the mint (no token row, no rate-limit write on a miss).
+      // else in the mint (no token row, no rate-limit write on a miss), in
+      // the billing lock order invoice → customer → visit (pre-push P1).
+      if (req.techRole === 'technician') {
+        await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
+        if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      }
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
         ownershipLostAtMint = true;
         return;
