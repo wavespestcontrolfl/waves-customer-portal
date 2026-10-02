@@ -2164,10 +2164,13 @@ these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
 assessmentId, frozenAt, fields, expectRows }`, first writer wins per assessment, no
 migration, written at the first healthy render, which the completion write gate
 performs) and replay byte for byte afterwards, so a later product edit or row
-approval never changes a sent report. A degraded read (any input read failed,
-including the next-visit lookup that picks the by-next-visit sentence) or an
-unverifiable treatment creates no freeze and the render is marked uncacheable
-(`weekWeatherUncacheable`). The fields reach the lead through a non-enumerable
+approval never changes a sent report; a stored entry replays even when a later
+read fails. A degraded read (any input read failed, including the next-visit
+lookup that picks the by-next-visit sentence) or an unverifiable treatment
+creates no freeze and the render is marked uncacheable (`weekWeatherUncacheable`).
+A scheduled next visit sets that sentence's gap only when it resolves to this
+visit's property (`visit-property-scope.js`); otherwise no by-next-visit
+sentence is chosen. The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
 key. The lawn PDF prints `whatToExpect` as a "What to expect" line (its headline
