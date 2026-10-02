@@ -139,4 +139,18 @@ describe('short-url legacy code handling', () => {
     expect(q.whereRaw).toHaveBeenCalledWith('char_length(code) > ?', [7]);
     expect(url).toMatch(/\/l\/abcdefghjk$/);
   });
+
+  test('existingShortUrlFor({ includeLegacy: true }) keeps legacy codes visible for send reconciliation', async () => {
+    process.env.GATE_SHORTLINK_LEGACY_EXPIRE = 'true';
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.whereRaw = jest.fn(() => q);
+    q.orderBy = jest.fn(() => q);
+    q.first = jest.fn(() => Promise.resolve({ code: 'abcde' }));
+    db.mockImplementation(() => q);
+    const real = jest.requireActual('../services/short-url');
+    const url = await real.existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: 'rr-1', rethrow: true, includeLegacy: true });
+    expect(q.whereRaw).not.toHaveBeenCalled();
+    expect(url).toMatch(/\/l\/abcde$/);
+  });
 });

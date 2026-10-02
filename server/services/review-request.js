@@ -3204,6 +3204,9 @@ const ReviewService = {
         entityType: "review_requests",
         entityId: row.id,
         rethrow: true,
+        // History, not reuse: the text that went out may carry a legacy
+        // code, which existingShortUrlFor otherwise hides from re-sends.
+        includeLegacy: true,
       });
       if (short) frags.push(short);
     } catch (shortErr) {

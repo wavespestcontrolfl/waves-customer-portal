@@ -240,15 +240,19 @@ async function createTrackedShortLink(longUrl, opts = {}) {
 // not read the short codes" — the stranded-send reconciliation searches the
 // provider for this link, so an unreadable code has to read as unknown
 // rather than as an absent one (local audit).
-// Legacy 1-7 char codes are never reused (always, ungated): a re-send for an
-// entity whose only code is legacy mints a fresh 10-char one instead.
-async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false }) {
+// Legacy 1-7 char codes are never reused for a NEW send (always, ungated): a
+// re-send for an entity whose only code is legacy mints a fresh 10-char one
+// instead. `includeLegacy: true` is for readers of HISTORY — send
+// reconciliation searches past SMS bodies and the provider for the link that
+// actually went out, which may well be a legacy code (pre-push codex P1 on
+// the legacy-expire PR); hiding it there would read a delivered ask as unsent.
+async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false, includeLegacy = false }) {
   if (!kind || !entityType || !entityId) return null;
   try {
     const lookup = db('short_codes')
       .where({ kind, entity_type: entityType, entity_id: String(entityId) });
     if (purpose) lookup.where({ purpose });
-    lookup.whereRaw('char_length(code) > ?', [LEGACY_CODE_MAX_LENGTH]);
+    if (!includeLegacy) lookup.whereRaw('char_length(code) > ?', [LEGACY_CODE_MAX_LENGTH]);
     const row = await lookup
       .orderBy('created_at', 'asc')
       .first('code');
