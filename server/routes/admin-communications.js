@@ -48,6 +48,7 @@ const {
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
 const { gratitudeClaimsPossible } = require('../services/sms-gratitude-context');
+const { unansweredClaimsPossible } = require('../services/sms-unanswered-reply');
 const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
 const {
   excludeUnresolvedSendReservations,
@@ -573,7 +574,7 @@ router.post('/sms', async (req, res, next) => {
     // Coordination follows claim possibility, not the live gate: during a
     // rolling disable an older instance can still claim until the activation
     // stamp is cleared.
-    const providerCoordinationEnabled = gratitudeClaimsPossible();
+    const providerCoordinationEnabled = gratitudeClaimsPossible() || unansweredClaimsPossible();
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {
@@ -666,7 +667,7 @@ router.post('/sms', async (req, res, next) => {
     // be made or retained after its gate is disabled (activation stamp set).
     // The recovery reservation below is also required whenever this send
     // claims or parks a suggestion.
-    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible();
+    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible() || unansweredClaimsPossible();
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
@@ -3907,7 +3908,7 @@ router.post('/schedule-sms', async (req, res, next) => {
         // the marker the auto-send's guard sees, so this check only needs to
         // cover the reverse race (auto claimed first). No-op while both
         // autonomous lanes are dormant and gratitude was never activated.
-        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible())
+        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible() || unansweredClaimsPossible())
           && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
           const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
           conflict.statusCode = 409;

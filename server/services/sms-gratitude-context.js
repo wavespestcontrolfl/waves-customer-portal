@@ -400,6 +400,7 @@ module.exports = {
   GRATITUDE_ROLLOUT_SETTLE_MS,
   validateGratitudeDraftContract,
   mediaCountFromMetadata,
+  threadCustomersQuery,
   pendingGratitudeWork,
   gratitudeThreadAdvanced,
   gratitudeFinalState,

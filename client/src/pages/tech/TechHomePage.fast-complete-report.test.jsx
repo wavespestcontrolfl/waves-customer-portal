@@ -84,6 +84,18 @@ it('opens a regular pest visit in the report flow when the switch rides the row'
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
+it.each([
+  [true, true],
+  [false, false],
+  [undefined, false],
+  ['true', false],
+])('passes noteBoxPhotosEnabled %s to the sheet as %s (codex local r1 on #5624)', async (flag, expected) => {
+  rows = [row('svc-photos', { fastCompleteReportEnabled: true, ...(flag === undefined ? {} : { noteBoxPhotosEnabled: flag }) })];
+  mount();
+  await openFromTools();
+  expect((await sheetService()).noteBoxPhotosEnabled).toBe(expected);
+});
+
 it('opens a re-service in the report flow too, with or without the re-service switch', async () => {
   rows = [row('svc-reservice', {
     fastCompleteReportEnabled: true,
