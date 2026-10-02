@@ -2896,13 +2896,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         let proposedCard = false; // a UI-gated write became a confirmation card
         const toolStartedAt = Date.now();
         let executionInput = toolUse.input;
+        // Owner-direct: a read keeps the task customer's scope unless the
+        // scoped preparation actually fell back to the raw call (Codex r6).
+        let readWidened = false;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
         if (!validationFailure && platformEnabled && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
           });
           if (readTarget.error) validationFailure = readTarget;
-          else executionInput = readTarget.input;
+          else {
+            executionInput = readTarget.input;
+            readWidened = readTarget.widened === true;
+          }
         }
         if (validationFailure) {
           result = validationFailure;
@@ -3021,9 +3027,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             // Recall is actor-bound: the owner id travels from the
             // authenticated request, never from model-supplied input.
             result = await executeToolByName(toolUse.name, executionInput, techContext, {
-              // Owner-direct reads are not narrowed to the task customer:
-              // the owner's request may reach any record.
-              actorId: getAdminActorId(req), readCustomerIds: ownerDirect ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
+              // A read that fits the task keeps the task customer's scope; only
+              // an owner-direct fallback read is unscoped.
+              actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
             if (isToolFailure(result)) {

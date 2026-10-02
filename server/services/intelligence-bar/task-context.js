@@ -837,7 +837,15 @@ async function resolveCustomerSelector(params, input, context, schema) {
   const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
   const permitted = new Set(context.targets.map(target => target.customer_id));
   const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
-  if (named?.complete === false) return { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+  // A capped name lookup beside another selector cannot be reconciled with
+  // it, so it is refused as a conflict the owner-direct fallback never
+  // forwards (Codex r6 P2); alone it stays a scope question.
+  if (named?.complete === false) {
+    const others = [params.customer_id, params.phone].filter(Boolean).length;
+    return others
+      ? { error: 'The customer name matches too many customers to check against the customer id or phone on this lookup', code: 'selector_conflict' }
+      : { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+  }
   const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
     .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [digits(params.phone)])
     .select(CUSTOMER_FIELDS);
@@ -895,7 +903,7 @@ function inheritTaskCustomer(input, context, schema) {
 const OWNER_DIRECT_READ_CODES = new Set(['target_clarification_required', 'customer_scope_required']);
 async function prepareReadInput(params, context, options) {
   const prepared = await prepareScopedReadInput(params, context, options);
-  if (prepared.error && context?.ownerDirect === true && OWNER_DIRECT_READ_CODES.has(prepared.code)) return { input: { ...params } };
+  if (prepared.error && context?.ownerDirect === true && OWNER_DIRECT_READ_CODES.has(prepared.code)) return { input: { ...params }, widened: true };
   return prepared;
 }
 

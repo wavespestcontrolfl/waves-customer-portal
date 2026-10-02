@@ -117,6 +117,12 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
   if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') {
     return Boolean(input?.lead_id) && !input.lead_name;
   }
+  // A property label is customer-visible copy (the portal's property
+  // selector renders it verbatim), so a labelled add/update keeps the card
+  // (Codex r6); relationship and occupancy edits stay direct.
+  if (toolName === 'add_customer_property' || toolName === 'update_customer_property') {
+    return !String(input?.label ?? '').trim();
+  }
   // reschedule_appointment on a grouped visit detaches the service or
   // recomputes the parent visit window (the card discloses it; Codex r4), so
   // the pinned appointment the proposal verified must carry no visit_id.
@@ -193,7 +199,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. A property add or edit executes directly unless it sets a label. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.

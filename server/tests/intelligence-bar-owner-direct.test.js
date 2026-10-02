@@ -83,8 +83,17 @@ describe('which writes skip the card', () => {
   });
 
   test('the lead and schedule edits the owner asked for execute directly', () => {
-    for (const name of ['update_property_access', 'add_customer_property', 'adjust_stock']) {
+    for (const name of ['update_property_access', 'adjust_stock']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, true]);
+    }
+  });
+
+  test('property add/update are direct without a label; a label (customer-visible copy) keeps the card', () => {
+    for (const name of ['add_customer_property', 'update_customer_property']) {
+      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, relationship: 'rental' })).toBe(true);
+      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '' })).toBe(true);
+      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: 'Beach house' })).toBe(false);
+      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '  x ' })).toBe(false);
     }
   });
 
@@ -297,7 +306,10 @@ describe('reads for the owner login', () => {
     const params = { search: 'Fixture' };
     for (const overrides of [{ namesRequested: true }, { ambiguous: true }, { contactRequested: true }]) {
       expect((await Context.prepareReadInput(params, strict(overrides), { toolName: 'query_leads', schema })).error).toBeTruthy();
-      expect(await Context.prepareReadInput(params, direct(overrides), { toolName: 'query_leads', schema })).toEqual({ input: params });
+      // The fallback says so (widened), so the route drops the task scope only
+      // then; an ambiguity the owner context already cleared needs no fallback.
+      expect(await Context.prepareReadInput(params, direct(overrides), { toolName: 'query_leads', schema }))
+        .toEqual(overrides.ambiguous ? { input: params } : { input: params, widened: true });
     }
   });
 
@@ -305,6 +317,7 @@ describe('reads for the owner login', () => {
     const task = { targets: [{ customer_id: A }], target: { customer_id: A } };
     const prepared = await Context.prepareReadInput({}, direct(task), { toolName: 'get_customer_detail', schema: { properties: { customer_id: {} } } });
     expect(prepared.input.customer_id).toBe(A);
+    expect(prepared.widened).toBeUndefined();
   });
 
   test('conflicting selectors on a read refuse for every login and are never forwarded', async () => {
@@ -343,7 +356,7 @@ describe('reads for the owner login', () => {
     // A, who is merely outside the task — a scope refusal, bypassed for the owner.
     const outsideScope = { customer_name: 'Synthetic Person', customer_id: A };
     expect(await Context.prepareReadInput(outsideScope, strict({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'target_clarification_required' });
-    expect(await Context.prepareReadInput(outsideScope, direct({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outsideScope });
+    expect(await Context.prepareReadInput(outsideScope, direct({ targets: [{ customer_id: B }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outsideScope, widened: true });
     rows.customers[1].first_name = 'Other';
     // The same name with its own id is fine.
     const agree = await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: A }, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors });
@@ -352,7 +365,13 @@ describe('reads for the owner login', () => {
     // login bypasses.
     const outside = { customer_name: 'Other Person' };
     expect(await Context.prepareReadInput(outside, strict({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'target_clarification_required' });
-    expect(await Context.prepareReadInput(outside, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outside });
+    expect(await Context.prepareReadInput(outside, direct({ targets: [{ customer_id: A }] }), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toEqual({ input: outside, widened: true });
+    // A name that matches more customers than one lookup lists, beside an id:
+    // unreconcilable, refused as a conflict; alone it is a scope question.
+    for (let i = 0; i < 10; i++) rows.customers.push({ id: `20000000-0000-4000-8000-0000000000${String(i).padStart(2, '0')}`, first_name: 'Synthetic', last_name: 'Person', phone: `+1941555${String(1000 + i)}` });
+    expect(await Context.prepareReadInput({ customer_name: 'Synthetic Person', customer_id: B }, direct(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'selector_conflict' });
+    expect(await Context.prepareReadInput({ customer_name: 'Synthetic Person' }, strict(), { toolName: 'get_conversation_thread', schema: schemaWithSelectors })).toMatchObject({ code: 'target_clarification_required' });
+    rows.customers.length = 2;
   });
 
   test('a bad record id on a read still refuses', async () => {
