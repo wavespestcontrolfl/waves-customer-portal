@@ -74,6 +74,14 @@ test('a refund that has not settled withholds the card', async () => {
   expect(result.instruction).toMatch(/pass the question to the team/);
 });
 
+test('an unreadable payer ownership lookup shows no card', async () => {
+  listPortalPayments.mockResolvedValue({ payments: PAYMENTS, payerLookupFailed: true });
+  const cards = [];
+  const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], cards);
+  expect(cards).toEqual([]);
+  expect(result.shown).toBe(false);
+});
+
 test('no payments on record says so', async () => {
   listPortalPayments.mockResolvedValue({ payments: [] });
   const result = await executeToolCall('show_recent_payments', {}, 'cust-1', [], []);

@@ -29,7 +29,8 @@ router.get('/', async (req, res, next) => {
     if (queryError) {
       return res.status(400).json({ error: 'limit must be 1-100 and cursor must be a non-negative integer' });
     }
-    res.json(await listPortalPayments(req.customerId, { limit: page.limit, cursor: page.cursor }));
+    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, { limit: page.limit, cursor: page.cursor });
+    res.json(body);
   } catch (err) {
     next(err);
   }

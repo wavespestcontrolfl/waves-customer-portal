@@ -314,6 +314,9 @@ async function showRecentPayments(customerId, actions, cards) {
   // skipped the newest (say, disputed) payment would present an older one
   // as the latest, and the model would confirm a payment that did not land.
   const unlabeled = page.payments.some((p) => !paymentStatusLabel(p));
+  // Payer ownership unreadable means a third-party payer's payment may be
+  // in the list: show nothing rather than risk it.
+  if (page.payerLookupFailed) return NOT_SHOWN;
   const rows = unlabeled ? [] : page.payments.map((p) => {
     const statusLabel = paymentStatusLabel(p);
     return {

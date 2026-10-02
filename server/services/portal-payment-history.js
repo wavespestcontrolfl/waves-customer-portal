@@ -277,6 +277,11 @@ async function listPortalPayments(customerId, { limit: requestedLimit = 50, curs
     cursor: requestedCursor,
     hasMore: nextCursor != null,
     nextCursor,
+    // True when third-party-payer ownership could not be read: the rows
+    // above may then include a payer's payments. The Billing tab keeps its
+    // prior behavior (receipt links withheld); a consumer that would show
+    // the figures elsewhere must show nothing.
+    payerLookupFailed,
   };
 }
 

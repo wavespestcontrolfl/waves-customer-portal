@@ -16249,6 +16249,8 @@ function chatCardsOf(cards) {
   }));
 }
 
+const CHAT_RECEIPT_LINK = { display: 'inline-block', marginTop: 4, color: PORTAL_SHELL.text, textDecoration: 'underline', minHeight: 44, lineHeight: '44px' };
+
 function ChatCards({ cards }) {
   if (!cards?.length) return null;
   return cards.map((card, ci) => (
@@ -16263,9 +16265,13 @@ function ChatCards({ cards }) {
           <div style={{ color: PORTAL_SHELL.muted, marginTop: 2 }}>
             {[r.dateLabel, r.methodLabel, r.statusLabel].filter(Boolean).join(' · ')}
           </div>
-          {r.receiptUrl && (
-            <a href={receiptApiUrl(r.receiptUrl)} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 4, color: PORTAL_SHELL.text, textDecoration: 'underline', minHeight: 44, lineHeight: '44px' }}>View receipt</a>
-          )}
+          {/* The native shell cannot open a target=_blank link (F-017): hand
+              the receipt to the OS share sheet there, as the Billing tab does. */}
+          {r.receiptUrl && (isNativeApp() ? (
+            <button type="button" onClick={() => shareLink(receiptApiUrl(r.receiptUrl), 'Waves receipt')} style={{ ...CHAT_RECEIPT_LINK, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit' }}>View receipt</button>
+          ) : (
+            <a href={receiptApiUrl(r.receiptUrl)} target="_blank" rel="noopener noreferrer" style={CHAT_RECEIPT_LINK}>View receipt</a>
+          ))}
         </div>
       ))}
     </div>

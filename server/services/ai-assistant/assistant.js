@@ -89,6 +89,15 @@ const portalSelfServe = (channel) => channel === PORTAL_CHAT
 // own prompt and button tools, plus the payment card under
 // GATE_PORTAL_CHAT_FACTS; every other channel (and the portal with its
 // switch off) keeps the original pair and no extras.
+// The buttons and cards a turn's tools produced, as reply fields (absent
+// when there are none). Shared by the normal reply and the hand-off reply.
+function laneExtras(lane) {
+  return {
+    ...(lane.actions?.length ? { actions: lane.actions } : {}),
+    ...(lane.cards?.length ? { cards: lane.cards } : {}),
+  };
+}
+
 function portalLane(channel) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null };
   if (require('../../config/feature-gates').portalChatFactsLive()) {
@@ -388,7 +397,10 @@ class WavesAssistant {
         if (toolUse.name === 'escalate') {
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
             { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
-          return escResult;
+          // A card or button an earlier tool in this turn produced still shows
+          // under the hand-off reply (a charge question shows the card AND
+          // hands off the "why").
+          return { ...escResult, ...laneExtras(lane) };
         }
 
         const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards);
@@ -439,8 +451,7 @@ class WavesAssistant {
     return {
       reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
       // Buttons the portal tools asked for, shown under the reply.
-      ...(lane.actions?.length ? { actions: lane.actions } : {}),
-      ...(lane.cards?.length ? { cards: lane.cards } : {}),
+      ...laneExtras(lane),
     };
 
   }

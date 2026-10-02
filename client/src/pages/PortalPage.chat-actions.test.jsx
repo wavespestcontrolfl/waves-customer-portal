@@ -7,6 +7,10 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', async (importOriginal) => ({ ...await importOriginal(), isNativeApp: () => native.enabled }));
+vi.mock('../native/nativeFile', () => ({ canSaveNative: () => false, canShareNative: () => true, saveBlobNative: vi.fn(), saveUrlNative: vi.fn(), shareUrlNative: vi.fn(async () => true) }));
+
 vi.mock('../utils/api', () => {
   const target = {};
   const proxy = new Proxy(target, {
@@ -29,6 +33,7 @@ const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)
 
 beforeEach(() => {
   vi.clearAllMocks();
+  native.enabled = false;
   Element.prototype.scrollIntoView = vi.fn();
   window.scrollTo = vi.fn();
   window.matchMedia = window.matchMedia || (() => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -87,6 +92,20 @@ describe('payment card', () => {
     const links = screen.getAllByRole('link', { name: 'View receipt' });
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toMatch(/\/receipt\/tok_abc$/);
+  });
+});
+
+describe('payment card in the native app', () => {
+  it('hands the receipt to the share sheet instead of a blank-target link', async () => {
+    native.enabled = true;
+    const { shareUrlNative } = await import('../native/nativeFile');
+    await ask({ reply: 'Here.', cards: [{ type: 'payments', title: 'Your most recent payment', rows: [
+      { id: 'p1', description: 'Invoice WV-1', dateLabel: 'Sep 28, 2026', amountLabel: '$129.00', statusLabel: 'Paid', methodLabel: '', receiptUrl: '/receipt/tok_abc' },
+    ] }] });
+    expect(screen.queryByRole('link', { name: 'View receipt' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View receipt' }));
+    await settle();
+    expect(shareUrlNative).toHaveBeenCalledWith(expect.stringMatching(/\/receipt\/tok_abc$/), 'Waves receipt');
   });
 });
 

@@ -104,6 +104,23 @@ test('GATE_PORTAL_CHAT_FACTS on: the facts prompt and tools, and the reply carri
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
 });
 
+test('a card shown before a hand-off in the same turn stays on the hand-off reply', async () => {
+  process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+  mockListPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-09-28', amount: 129, status: 'paid', description: 'Pest', cardBrand: 'visa', lastFour: '4242', methodType: 'card', receiptUrl: null }] });
+  wire('portal_chat', 'cust-1');
+  const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent to the team', escalated: true, teamNotified: true });
+  mockCreate
+    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'show_recent_payments', input: {} }] })
+    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't2', name: 'escalate', input: { reason: 'asks why the amount changed', topic: 'billing' } }] });
+
+  const result = await assistant.processMessage({ message: 'Why is my last charge higher?', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+  expect(result.escalated).toBe(true);
+  expect(result.cards).toHaveLength(1);
+  expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
+  escalate.mockRestore();
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
