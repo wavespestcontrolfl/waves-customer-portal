@@ -445,11 +445,17 @@ function problemKeys(problem) {
   return problem.families || [];
 }
 
+// A bell's stored identities as families: bells written before identities
+// became family-only carry `code:family` (e.g. missing_time_tech:lawn_care).
+function storedFamilies(itemKeys) {
+  return new Set((Array.isArray(itemKeys) ? itemKeys : []).map((key) => String(key).split(':').pop()));
+}
+
 // A refresh rings only when a problem is new: an identity the standing row
 // did not already carry.
 function ringOnNewProblem(keys) {
   return (existing, existingMeta) => {
-    const known = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : []);
+    const known = storedFamilies(existingMeta?.itemKeys);
     return keys.some((key) => !known.has(key));
   };
 }
@@ -665,7 +671,7 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     .select(conn.raw("metadata->>'estimateId' as estimate_id"), conn.raw("metadata->'itemKeys' as item_keys"),
       conn.raw("metadata->'problems' as problems")))
     .map((row) => [String(row.estimate_id), {
-      keys: new Set(Array.isArray(row.item_keys) ? row.item_keys : []),
+      keys: storedFamilies(row.item_keys),
       problems: Array.isArray(row.problems) ? row.problems : [],
     }]));
   // No longer a combined booking (the accepted snapshot was corrected to one

@@ -313,6 +313,8 @@ describe('postAlert', () => {
     const meta = { itemKeys: problemKeys(lawn) };
     expect(ringOnNewProblem(problemKeys(lawn))({}, meta)).toBe(false);
     expect(ringOnNewProblem(problemKeys(pest))({}, meta)).toBe(true);
+    // A bell written with the older code:family keys is read as its families: nothing new, no ring.
+    expect(ringOnNewProblem(problemKeys(lawn))({}, { itemKeys: ['missing_time_tech:lawn_care'] })).toBe(false);
     // A second kind of problem on a family the bell already carries does not ring again.
     expect(ringOnNewProblem([...problemKeys(lawn), ...problemKeys(lawnPrice)])({}, meta)).toBe(false);
   });
