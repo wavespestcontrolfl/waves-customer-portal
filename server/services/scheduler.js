@@ -3213,6 +3213,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
+  // cell with enough DISTINCT confirmed ai_incidents on the live prompt
+  // version gets one pending ai_fix_proposals row with its dev/holdout
+  // split. No model call, no bell: the Monday correction-loop lane reads the
+  // rows. Same gate as the ledger; PATHOLOGY_FIX_PROPOSAL_MAX_CELLS=0 stops it.
+  // =========================================================================
+  cron.schedule('45 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS correction-loop fix proposals');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeSmsFixes } = require('./sms-pathology-ledger');
+      await runExclusive('sms-fix-proposals', () => proposeSmsFixes());
+    } catch (err) {
+      logger.error(`SMS correction-loop fix proposals failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
