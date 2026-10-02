@@ -630,3 +630,83 @@ describe('weOwe and customerWaiting', () => {
     expect((await run(conn)).weOwe).toHaveLength(1);
   });
 });
+
+describe('missedVisit (logged customer no-shows)', () => {
+  const { serviceFamilies } = require('../services/visit-loops-facts');
+  const noshow = (over = {}) => ({
+    id: 'rl-1', scheduled_service_id: 'visit-1', original_date: '2026-09-29', original_window: '09:00:00-10:30:00', new_date: null,
+    logged_at: new Date('2026-09-30T06:00:00Z'), occurrence_service_type: 'Pest Control', occurrence_property_id: 'prop-1',
+    ss_scheduled_date: '2026-09-29', window_start: '09:00:00', status: 'confirmed', track_state: null, recorded: false, ...over,
+  });
+  const isFollowUpQuery = (ops) => hasOp(ops, 'where', (a) => a[0] && typeof a[0] === 'object' && 'property_id' in a[0]);
+  const run = (rows, later = []) => {
+    const conn = fakeConn({
+      reschedule_log: (ops) => (hasOp(ops, 'offset', (a) => a[0] === 0) ? [].concat(rows).slice(0, 10) : [].concat(rows).slice(10)),
+      scheduled_services: (ops) => (isFollowUpQuery(ops) ? later : []),
+    });
+    return loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn }).then((out) => ({ out, conn }));
+  };
+
+  test('an open no-show renders its FROZEN scope and the window as promised', async () => {
+    const { out, conn } = await run([noshow({ ss_scheduled_date: '2026-09-29' })]);
+    expect(out.missedVisit).toEqual({ logId: 'rl-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
+    const q = conn.calls.find((c) => c.table === 'reschedule_log');
+    // only logged customer no-shows with a frozen scope (pre-migration rows are unknown, never the live row's values)
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'rl.reason_code' && a[1] === 'customer_noshow')).toBe(true);
+    expect(hasOp(q.ops, 'whereNotNull', (a) => a[0] === 'rl.occurrence_service_type')).toBe(true);
+    // the last 7 ET days
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'rl.original_date' && a[1] === '>=' && a[2] === '2026-09-24')).toBe(true);
+  });
+
+  test('followed up through the logged row itself: rebooked in place, moved off the slot, completed or performed', async () => {
+    for (const over of [{ new_date: '2026-10-03' }, { ss_scheduled_date: '2026-10-06' }, { window_start: '13:00:00' },
+      { status: 'completed' }, { track_state: 'complete' }, { recorded: true }]) {
+      expect((await run([noshow(over)])).out.missedVisit).toBeNull();
+    }
+    // a cancelled row that was not moved is not a follow-up
+    expect((await run([noshow({ status: 'cancelled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+  });
+
+  test('followed up by a visit booked AFTER the miss, at the frozen property, covering every missed family', async () => {
+    const later = (over = {}) => ({ service_type: 'Pest Control', scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
+    expect((await run([noshow()], [later()])).out.missedVisit).toBeNull();
+    // the follow-up read: same property, booked after the log, never the missed row itself
+    const { conn } = await run([noshow()], [later()]);
+    const q = conn.calls.find((c) => c.table === 'scheduled_services' && isFollowUpQuery(c.ops));
+    expect(hasOp(q.ops, 'where', (a) => a[0].property_id === 'prop-1' && a[0].customer_id === 'c1')).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'created_at' && a[1] === '>' && a[2] instanceof Date)).toBe(true);
+    expect(hasOp(q.ops, 'whereNot', (a) => a[0] === 'id' && a[1] === 'visit-1')).toBe(true);
+    // another service does not cover it
+    expect((await run([noshow()], [later({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // a combined miss needs every family covered
+    const combined = noshow({ occurrence_service_type: 'Pest Control & Lawn Care' });
+    expect((await run([combined], [later({ service_type: 'Lawn Care' })])).out.missedVisit).toMatchObject({ type: 'Pest Control & Lawn Care' });
+    expect((await run([combined], [later({ service_type: 'Lawn Care' }), later()])).out.missedVisit).toBeNull();
+    // a same-day visit counts only when it starts after the missed slot
+    expect((await run([noshow()], [later({ scheduled_date: '2026-09-29', window_start: '08:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([noshow()], [later({ scheduled_date: '2026-09-29', window_start: '14:00:00' })])).out.missedVisit).toBeNull();
+    // no frozen property: no other visit can be shown to be at the same address
+    expect((await run([noshow({ occurrence_property_id: null })], [later()])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+  });
+
+  test('a page of followed-up misses never hides an older open one', async () => {
+    const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
+    const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);
+    expect(out.missedVisit).toMatchObject({ logId: 'rl-old', date: '2026-09-25' });
+  });
+
+  test('service families: combined visits are sets; tree & shrub tokens win over fertilization', () => {
+    expect([...serviceFamilies('Pest Control & Lawn Care')].sort()).toEqual(['lawn', 'pest']);
+    expect([...serviceFamilies('Pest & Rodent Control')].sort()).toEqual(['pest', 'rodent']);
+    expect([...serviceFamilies('Tree & Shrub Fertilization')]).toEqual(['tree_shrub']);
+    expect([...serviceFamilies('Lawn Fertilization')]).toEqual(['lawn']);
+    expect(serviceFamilies('').size).toBe(0);
+  });
+
+  test('the signature names the logged occurrence', async () => {
+    const { visitStatusSignature } = require('../services/visit-loops-facts');
+    const m = { logId: 'rl-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00' };
+    expect(visitStatusSignature({ missedVisit: m })).toBe('missed:rl-1:Pest Control:2026-09-29@09:00:00');
+    expect(visitStatusSignature({ missedVisit: { ...m, logId: 'rl-2' } })).not.toBe(visitStatusSignature({ missedVisit: m }));
+  });
+});

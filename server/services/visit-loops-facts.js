@@ -51,6 +51,7 @@ function emptyVisitLoops() {
   return {
     lateAlert: null,
     pastWindow: null,
+    missedVisit: null,
     weOwe: [],
     customerWaiting: [],
   };
@@ -395,6 +396,109 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
   };
 }
 
+// ── missed visit ────────────────────────────────────────────────────────────
+// A logged customer no-show (reschedule_log reason customer_noshow — the nightly
+// missed-appointment sweep, a dispatch "no show", a soft rebook) in the last week
+// that nobody followed up. Only LOGGED misses count: the sweep is the canonical
+// judgment, so a merely lagging status is never called a miss here.
+// What was missed and where come from the occurrence scope frozen at log time
+// (occurrence_service_type / occurrence_property_id): the live row can be corrected
+// or reused since. A row logged before those columns existed has no frozen scope —
+// unknown, so it is skipped, never read from the current row.
+const MISSED_LOOKBACK_DAYS = 7;
+const MISSED_PAGE = 10;
+const MISSED_PAGES_MAX = 20;
+const LIVE_OR_DONE = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
+// Every service family a service type names: a combined visit ("Pest Control &
+// Lawn Care", "Pest & Rodent Control") is a SET, and a follow-up must cover all of it.
+// Explicit tree/shrub tokens win over the generic fertilization token ("Tree &
+// Shrub Fertilization" is not lawn).
+function serviceFamilies(serviceType) {
+  const t = String(serviceType || '').toLowerCase();
+  const out = new Set();
+  const treeShrub = /tree|shrub|ornamental|palm/.test(t);
+  if (treeShrub) out.add('tree_shrub');
+  if ((treeShrub ? /lawn|turf|weed|sod/ : /lawn|turf|fertiliz|weed|sod/).test(t)) out.add('lawn');
+  if (/mosquito/.test(t)) out.add('mosquito');
+  if (/termite|wdo|wood.destroying/.test(t)) out.add('termite');
+  if (/rodent|\brats?\b|mice|mouse/.test(t)) out.add('rodent');
+  if (/pest|roach|\bants?\b|spider|perimeter|general|bug/.test(t)) out.add('pest');
+  if (!out.size && t.trim()) out.add(t.trim());
+  return out;
+}
+// The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
+// internal job block as the end, so only the start is the promised window.
+function missedWindowStart(originalWindow) {
+  const start = /^\s*(\d{1,2}:\d{2})/.exec(String(originalWindow || ''));
+  if (!start) return null;
+  return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
+}
+// Was this logged miss followed up? The logged row itself (rebooked in place —
+// new_date — moved off the missed slot, completed, or performed: tracker complete or
+// a service record), or a visit BOOKED AFTER the miss was logged (a recurring series
+// pre-creates its future children, so a visit that already existed is not one) at
+// the same frozen property, on or after the missed slot, whose services together
+// cover every family that was missed.
+async function noshowFollowedUp(conn, customerId, noshow, families) {
+  const date = calendarDay(noshow.original_date);
+  const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
+  const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
+    || (missedStart != null && hhmmToMinutes(noshow.window_start) !== missedStart);
+  if (noshow.track_state === 'complete' || noshow.recorded === true) return true;
+  if (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved)) return true;
+  // without a frozen property no other visit can be shown to be at the same address
+  if (!noshow.occurrence_property_id || !date) return false;
+  let query = conn('scheduled_services')
+    .where({ customer_id: customerId, property_id: noshow.occurrence_property_id })
+    .where('scheduled_date', '>=', date)
+    .whereIn('status', LIVE_OR_DONE)
+    .where('created_at', '>', noshow.logged_at);
+  if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
+  const later = (await query.select('service_type', 'scheduled_date', 'window_start')) || [];
+  // a same-day visit counts only when it starts AFTER the missed slot; unknown starts do not
+  const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
+    || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
+  const covered = new Set(later.filter(afterMiss).flatMap((r) => [...serviceFamilies(r.service_type)]));
+  return [...families].every((f) => covered.has(f));
+}
+// The newest UNFOLLOWED no-show in the lookback, paged in a stable order so a page
+// of followed-up rows never hides an older open one (the page cap is a backstop).
+async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
+  const today = etDateString(now);
+  // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
+  const since = etDateString(addETDays(now, -MISSED_LOOKBACK_DAYS));
+  for (let p = 0; p < MISSED_PAGES_MAX; p += 1) {
+    const noshows = (await conn('reschedule_log as rl')
+      .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
+      .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
+      .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
+      .whereNotNull('rl.occurrence_service_type')
+      .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
+      .offset(p * MISSED_PAGE).limit(MISSED_PAGE)
+      .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at',
+        'rl.occurrence_service_type', 'rl.occurrence_property_id',
+        'ss.scheduled_date as ss_scheduled_date', 'ss.window_start', 'ss.status', 'ss.track_state',
+        conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'))) || [];
+    for (const noshow of noshows) {
+      const families = serviceFamilies(noshow.occurrence_service_type);
+      if (!families.size) continue;
+      if (await noshowFollowedUp(conn, customerId, noshow, families)) continue;
+      const startHms = missedWindowStart(noshow.original_window);
+      return {
+        logId: String(noshow.id),
+        type: noshow.occurrence_service_type,
+        date: calendarDay(noshow.original_date),
+        windowStart: startHms,
+        // the window that was MISSED, as promised: the logged start through the
+        // arrival-window formatter, never the row's current (possibly moved) window
+        windowDisplay: startHms ? windowLabel({ window_start: startHms }, deriveWindow) : null,
+      };
+    }
+    if (noshows.length < MISSED_PAGE) break;
+  }
+  return null;
+}
+
 // ── open promises / asks ────────────────────────────────────────────────────
 // A short fingerprint of the commitment fields a draft can restate (kind, wording):
 // a staff edit that keeps the row open changes it.
@@ -530,8 +634,9 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 
   const pastWindow = await read('past window', null, () => findPastWindow(ctx));
 
-  const [lateAlert, commitments] = await Promise.all([
+  const [lateAlert, missedVisit, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(ctx)),
+    read('missed visit', null, () => loadMissedVisit(ctx)),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
@@ -539,6 +644,7 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 
   out.lateAlert = lateAlert;
   out.pastWindow = pastWindow;
+  out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;
   return out;
@@ -558,9 +664,11 @@ function visitStatusSignature(visitLoops) {
   const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
+    // the logged occurrence: a newer miss, or this one followed up, changes it
+    v.missedVisit && `missed:${key(v.missedVisit.logId, v.missedVisit.type, `${v.missedVisit.date ?? ''}@${v.missedVisit.windowStart ?? ''}`)}`,
     v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}:${v.pastWindow.assigned === false ? 'unassigned' : 'assigned'}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, serviceFamilies, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };

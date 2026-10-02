@@ -1041,7 +1041,7 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
       expect(contract(v).forbidden).toEqual([VL]);
     }
     // the current identity: cumulative '_cflv' adds VISIT STATUS & OPEN LOOPS, nothing forbidden
-    for (const v of ['house_voice_v12_real_answers3_cflv', 'house_voice_v12_real_answers3_cflv+bclm', 'house_voice_v12_real_answers3_cflv+c']) {
+    for (const v of ['house_voice_v12_real_answers3_cflv', 'house_voice_v12_real_answers3_cflv+bclm', 'house_voice_v12_real_answers3_cflv+c', 'house_voice_v12_real_answers3_cflvm', 'house_voice_v12_real_answers3_cflvm+bclm']) {
       expect(contract(v).required).toEqual([SLA, RS, CF, LBL, VL]);
       expect(contract(v).forbidden).toEqual([]);
     }
@@ -1050,7 +1050,7 @@ describe('sealed fact contract — historical identities vs the current 2_cf ide
   test('the current identity with every category tag still fits the varchar(40) column', () => {
     expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
     expect('house_voice_v12_real_answers3_cfl+bclm'.length).toBeLessThanOrEqual(40);
-    expect('house_voice_v12_real_answers3_cflv+bclm'.length).toBeLessThanOrEqual(40);
+    expect('house_voice_v12_real_answers3_cflvm+bclm'.length).toBeLessThanOrEqual(40);
   });
 });
 

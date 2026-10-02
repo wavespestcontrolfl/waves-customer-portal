@@ -172,6 +172,9 @@ const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   cf: [COMPANY_FACTS_HEADER],
   cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER],
   cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
+  // MISSED VISIT rides inside the same always-rendered section (a line only when a
+  // miss is open): the same markers as '_cflv'
+  cflvm: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {

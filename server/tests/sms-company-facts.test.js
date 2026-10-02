@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // both cohorts stay distinct: the company-facts token, the re-service token (PR #5336) AND the LIVE ETA bump (PR #5334): "3" supersedes "2"
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflv');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflvm');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflvm');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');

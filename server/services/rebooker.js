@@ -2149,6 +2149,9 @@ class SmartRebooker {
         initiated_by: initiatedBy,
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
+        // the moved occurrence's own scope, frozen at the move (a later edit of the row never rewrites it)
+        occurrence_service_type: service.service_type || null,
+        occurrence_property_id: service.property_id || null,
       });
     });
 

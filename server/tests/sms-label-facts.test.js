@@ -2728,12 +2728,12 @@ describe('prompt rules and hand-off narrowing', () => {
 
   test('prompt version: cumulative _cflv (LABEL FACTS + VISIT STATUS & OPEN LOOPS), prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflv');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflvm');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflvm');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers3_cflv+bclm');
+    expect(all).toBe('house_voice_v12_real_answers3_cflvm+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2765,7 +2765,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers3_cflv');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers3_cflvm');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2871,7 +2871,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflv'); // the live identity carries LABEL FACTS cumulatively
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers3_cflvm'); // the live identity carries LABEL FACTS cumulatively
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }

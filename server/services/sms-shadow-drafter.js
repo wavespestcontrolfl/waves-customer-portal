@@ -152,7 +152,12 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // rules that act on it. Cumulative, inside REAL_ANSWERS_VERSION_FAMILY: '3_cflv' =
 // the re-service fact + LIVE ETA + COMPANY FACTS + LABEL FACTS + VISIT STATUS &
 // OPEN LOOPS. 34 chars, 39 with all four category tags.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cflv`;
+// MISSED VISIT (the follow-up to #5499): '_cflvm' adds the logged-no-show line to
+// that section and its rule. Same rendered sections as '_cflv' (the line appears
+// only when a miss is open, so its absence is a valid frozen state, not a missing
+// section). 35 chars, 40 with all four category tags — exactly
+// PROMPT_VERSION_COLUMN_MAX: the next fact section needs a new scheme, not a letter.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}3_cflvm`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -4311,8 +4316,9 @@ LABEL FACTS (product timing from the label):
   const visitLoopsRules = realAnswersOn
     ? `
 VISIT STATUS & OPEN LOOPS:
-- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
+- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4531,6 +4537,15 @@ function visitLoopPastWindowLine(past) {
   const win = visitLoopText(past.windowDisplay, 40);
   return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with ${past.assigned === false ? 'the office' : 'the tech'}, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
+// A logged customer no-show nobody followed up (visit-loops-facts loadMissedVisit):
+// the service and the day/window that were missed, as frozen when it was logged.
+function visitLoopMissedLine(missed) {
+  if (!missed || typeof missed !== 'object') return null;
+  const type = visitLoopText(missed.type, 60) || 'visit';
+  const date = visitLoopText(formatEtDate(missed.date), 40);
+  const win = visitLoopText(missed.windowDisplay, 40);
+  return `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and not yet rebooked — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology`;
+}
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
 // SMS timing comes only from LABEL FACTS, so a promise text stating one is withheld.
@@ -4574,14 +4589,14 @@ function visitLoopsNeedAnswer(context) {
   const listed = (list) => Array.isArray(list) && list.some((i) => i && typeof i === 'object');
   // a tracking gap is explicitly not confirmed lateness: not a loop
   const delay = v.lateAlert && typeof v.lateAlert === 'object' && v.lateAlert.missingTracking !== true;
-  return Boolean(delay || v.pastWindow) || listed(v.weOwe) || listed(v.customerWaiting);
+  return Boolean(delay || v.pastWindow || v.missedVisit) || listed(v.weOwe) || listed(v.customerWaiting);
 }
 // Deterministic draft check (same loop as validateReserviceOffer): with an open loop
 // listed, an empty reply breaks the "never go silent" rule — it is revised, or stays
 // unconverged, instead of passing as "no reply warranted".
 // Read from the RENDERED facts block (live drafting and the sealed eval's frozen
 // facts alike): one of the lines the rule says must be answered is listed.
-const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
+const MUST_ANSWER_LINE_RE = /^- (?:DELAY FLAGGED|WINDOW PASSED|MISSED VISIT|WE OWE THEM|THEY ARE WAITING ON US FOR)\b/;
 function factsListOpenLoop(factsBlock) {
   const text = String(factsBlock || '');
   const at = text.indexOf(`\n${VISIT_LOOPS_HEADER}\n`);
@@ -4614,6 +4629,7 @@ function renderVisitLoopsSection(visitLoops) {
   const lines = [
     visitLoopLateLine(v.lateAlert),
     visitLoopPastWindowLine(v.pastWindow),
+    visitLoopMissedLine(v.missedVisit),
     // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {
       const since = visitLoopText(formatEtDate(i.since), 40);

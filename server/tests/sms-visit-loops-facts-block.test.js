@@ -26,6 +26,7 @@ const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quar
 const fullLoops = () => ({
   lateAlert: { type: 'tech_late', severity: 'warning', visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
   pastWindow: { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 },
+  missedVisit: { logId: 'rl-1', type: 'Lawn Care', date: '2026-06-08', windowStart: '09:00:00', windowDisplay: '9-11am' },
   weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the wasp nest quote', since: '2026-06-10', source: 'call' }],
   customerWaiting: [{ id: 'cc-2', kind: 'question', description: 'Asked whether sprinklers need to be off', since: '2026-06-09' }],
 });
@@ -49,7 +50,8 @@ describe('renderVisitLoopsSection', () => {
     const loops = fullLoops();
     expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).toContain("say you're checking with the office, quote FOLLOW-UP SLA");
     expect(out).not.toContain('no tech location');
-    expect(out).not.toContain('MISSED VISIT'); // split out of #5499 into its own PR
+    // a logged no-show nobody followed up: the frozen service, the day and the window as promised
+    expect(out).toMatch(/- MISSED VISIT: the Lawn Care visit on [^\n]*Jun[^\n]* \(9-11am\) was missed and not yet rebooked — apologize once, offer the earliest OPEN TIMES slot \(if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\); never point them to a visit weeks out without an apology\n/);
     expect(out).not.toContain('live note');
     expect(out).toContain('- WE OWE THEM: callback — Call back about the wasp nest quote (since Wednesday, Jun 10)\n');
     expect(out).toContain('- THEY ARE WAITING ON US FOR: question — Asked whether sprinklers need to be off (since Tuesday, Jun 9)\n');
@@ -183,10 +185,10 @@ describe('system prompt', () => {
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
     expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
-    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
+    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
     expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
-    expect(on).not.toContain('MISSED VISIT');
+    expect(on).toContain('- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times)');
     for (const banned of ['"Good question"', '"Great question"', '"I hear you"', '"Totally fine"', '"Good news"']) expect(on).toContain(banned);
     expect(on).toContain('at most TWO sentences');
   });
@@ -241,6 +243,8 @@ describe('visitLoopsNeedAnswer', () => {
     expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: false } } })).toBe(true);
     expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: true } } })).toBe(false);
     expect(visitLoopsNeedAnswer({ visitLoops: {} })).toBe(false);
+    // an open logged no-show must be answered (a "thanks" leaves the gratitude lane)
+    expect(visitLoopsNeedAnswer({ visitLoops: { missedVisit: { logId: 'rl-1', type: 'Pest Control' } } })).toBe(true);
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(true);
     delete process.env[GATE];
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(false);
@@ -254,7 +258,7 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
     expect(validateOpenLoopAnswer({ reply: '   ', factsBlock: owed }).ok).toBe(false);
     expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: owed }).ok).toBe(true);
-    for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- THEY ARE WAITING ON US FOR: x']) {
+    for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- MISSED VISIT: x', '- THEY ARE WAITING ON US FOR: x']) {
       expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(false);
     }
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
@@ -287,7 +291,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries cumulative _cflv and fits the column even with all four category tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflvm');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
